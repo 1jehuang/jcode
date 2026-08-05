@@ -350,13 +350,41 @@ fn run(
                     }
                     // A peek must not retarget anything: it is a read of
                     // another session, and the one we are attached to has to
-                    // stay the one a message would land in.
-                    Command::Peek(target) => client.peek_session(&target, None).map(|messages| {
-                        ui.send(HarnessUpdate::Peek {
-                            session_id: target,
-                            transcript: to_transcript(messages),
-                        })
-                    }),
+                    // stay the one a message would land in. It is also
+                    // background decoration for a neighboring column, so it
+                    // must never hold the command queue in front of a user's
+                    // message. A missing archive can take the full request
+                    // timeout; run it independently and leave the live session
+                    // usable while that happens.
+                    Command::Peek(target) => {
+                        let ui = ui.clone();
+                        std::thread::spawn(move || {
+                            // The bridge serves one connection's requests in
+                            // order. A stored-history read can block on another
+                            // process writing that archive, so using a clone of
+                            // the live client would still stall message sends
+                            // and stream events behind the peek. Give previews
+                            // their own connection instead.
+                            let preview = JcodeClient::connect(ConnectOptions {
+                                client_name: concat!(
+                                    "jcode-desktop2-preview/",
+                                    env!("CARGO_PKG_VERSION")
+                                )
+                                .to_string(),
+                                ensure_runtime: false,
+                                ..Default::default()
+                            });
+                            if let Ok(client) = preview
+                                && let Ok(messages) = client.peek_session(&target, None)
+                            {
+                                ui.send(HarnessUpdate::Peek {
+                                    session_id: target,
+                                    transcript: to_transcript(messages),
+                                });
+                            }
+                        });
+                        Ok(())
+                    }
                     // Clearing the current id while the session is created is
                     // deliberate: a message sent into that gap is dropped
                     // rather than landing in the session the user just left.
