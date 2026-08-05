@@ -77,6 +77,9 @@ pub enum Outbound {
     Reply(ServerFrame),
 }
 
+type SessionFileStatus = (bool, String, Option<u64>, Option<u64>);
+type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
+
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
@@ -1735,10 +1738,7 @@ impl BridgeState {
         Ok(matches)
     }
 
-    fn session_file_status(
-        session_id: &str,
-        relative: &str,
-    ) -> Result<(bool, String, Option<u64>, Option<u64>), (ErrorCode, String)> {
+    fn session_file_status(session_id: &str, relative: &str) -> SessionFileStatusResult {
         let path = Self::safe_session_path(session_id, relative)?;
         let Ok(meta) = path.metadata() else {
             return Ok((false, "missing".into(), None, None));
