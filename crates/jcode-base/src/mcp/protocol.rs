@@ -208,6 +208,10 @@ pub struct McpServerConfig {
     /// URL for HTTP/SSE servers (Claude Code compat). Unused by jcode today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Headers for HTTP/SSE servers (Claude Code compat). Unused by jcode today,
+    /// but retained so environment expansion is ready when those transports are.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub headers: std::collections::HashMap<String, String>,
     /// Whether this server is enabled (default: true). Disabled servers stay
     /// registered in config but are not spawned or connected at load time
     /// until re-enabled (issue #436). opencode-style `"enabled": false`.
@@ -258,6 +262,64 @@ pub struct McpConfig {
     pub servers: std::collections::HashMap<String, McpServerConfig>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct UnresolvedEnvironmentVariable {
+    server: String,
+    variable: String,
+}
+
+fn valid_environment_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && chars.all(|ch| matches!(ch, '_' | 'A'..='Z' | 'a'..='z' | '0'..='9'))
+}
+
+/// Expand Claude Code's documented `${VAR}` and `${VAR:-default}` syntax in a
+/// single config string. Unsupported/malformed expressions are preserved.
+fn expand_environment_string<F>(
+    value: &str,
+    lookup: &F,
+    unresolved: &mut std::collections::BTreeSet<String>,
+) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut output = String::with_capacity(value.len());
+    let mut remainder = value;
+
+    while let Some(start) = remainder.find("${") {
+        output.push_str(&remainder[..start]);
+        let expression_start = start + 2;
+        let Some(relative_end) = remainder[expression_start..].find('}') else {
+            output.push_str(&remainder[start..]);
+            return output;
+        };
+        let end = expression_start + relative_end;
+        let expression = &remainder[expression_start..end];
+        let (variable, default) = match expression.split_once(":-") {
+            Some((variable, default)) => (variable, Some(default)),
+            None => (expression, None),
+        };
+        let literal = &remainder[start..=end];
+
+        if !valid_environment_variable_name(variable) {
+            output.push_str(literal);
+        } else if let Some(expanded) = lookup(variable) {
+            output.push_str(&expanded);
+        } else if let Some(default) = default {
+            output.push_str(default);
+        } else {
+            unresolved.insert(variable.to_string());
+            output.push_str(literal);
+        }
+
+        remainder = &remainder[end + 1..];
+    }
+
+    output.push_str(remainder);
+    output
+}
+
 impl McpConfig {
     /// Load config from file
     pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -273,6 +335,60 @@ impl McpConfig {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
+    }
+
+    /// Expand environment references only after all config sources have been
+    /// merged. This avoids warning about shadowed definitions and ensures every
+    /// downstream consumer, including the tool-schema cache, sees the exact
+    /// values that will be passed to the MCP process.
+    fn expand_environment_variables_with<F>(
+        &mut self,
+        lookup: F,
+    ) -> Vec<UnresolvedEnvironmentVariable>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let mut warnings = Vec::new();
+
+        for (server_name, config) in &mut self.servers {
+            let mut unresolved = std::collections::BTreeSet::new();
+            config.command = expand_environment_string(&config.command, &lookup, &mut unresolved);
+            for arg in &mut config.args {
+                *arg = expand_environment_string(arg, &lookup, &mut unresolved);
+            }
+            for value in config.env.values_mut() {
+                *value = expand_environment_string(value, &lookup, &mut unresolved);
+            }
+            if let Some(url) = &mut config.url {
+                *url = expand_environment_string(url, &lookup, &mut unresolved);
+            }
+            for value in config.headers.values_mut() {
+                *value = expand_environment_string(value, &lookup, &mut unresolved);
+            }
+
+            warnings.extend(
+                unresolved
+                    .into_iter()
+                    .map(|variable| UnresolvedEnvironmentVariable {
+                        server: server_name.clone(),
+                        variable,
+                    }),
+            );
+        }
+
+        warnings.sort();
+        warnings
+    }
+
+    fn expand_environment_variables(&mut self) {
+        let warnings =
+            self.expand_environment_variables_with(|variable| std::env::var(variable).ok());
+        for warning in warnings {
+            crate::logging::warn(&format!(
+                "MCP: Server '{}' references unset environment variable '{}'; leaving '${{{}}}' unexpanded",
+                warning.server, warning.variable, warning.variable
+            ));
+        }
     }
 
     /// Import MCP servers from Codex CLI on first run.
@@ -397,6 +513,7 @@ impl McpConfig {
                             shared,
                             transport: None,
                             url: None,
+                            headers: std::collections::HashMap::new(),
                             enabled: None,
                             disabled: None,
                         },
@@ -541,6 +658,11 @@ impl McpConfig {
                 Self::load_project_locals(project_root).servers,
             );
         }
+
+        // Claude Code expands environment references after source precedence is
+        // resolved. Keep this before transport filtering so future HTTP/SSE
+        // support receives already-expanded URLs and headers as well.
+        merged.expand_environment_variables();
 
         // jcode only supports stdio servers today. Drop HTTP/SSE entries (common
         // in Claude Code configs) so they don't fail to spawn, but log them so

@@ -13,6 +13,7 @@ fn cfg(command: &str, args: &[&str]) -> McpServerConfig {
         shared: true,
         transport: None,
         url: None,
+        headers: HashMap::new(),
         enabled: None,
         disabled: None,
     }
@@ -67,6 +68,25 @@ fn fingerprint_env_order_independent() {
     let mut c = cfg("node", &["s.js"]);
     c.env.insert("A".into(), "different".into());
     assert_ne!(fingerprint_config(&a), fingerprint_config(&c));
+}
+
+#[test]
+fn fingerprint_is_sensitive_to_http_url_and_headers() {
+    let mut a = cfg("", &[]);
+    a.transport = Some("http".to_string());
+    a.url = Some("https://one.example/mcp".to_string());
+    a.headers
+        .insert("Authorization".to_string(), "Bearer one".to_string());
+
+    let mut changed_url = a.clone();
+    changed_url.url = Some("https://two.example/mcp".to_string());
+    assert_ne!(fingerprint_config(&a), fingerprint_config(&changed_url));
+
+    let mut changed_header = a.clone();
+    changed_header
+        .headers
+        .insert("Authorization".to_string(), "Bearer two".to_string());
+    assert_ne!(fingerprint_config(&a), fingerprint_config(&changed_header));
 }
 
 #[test]
