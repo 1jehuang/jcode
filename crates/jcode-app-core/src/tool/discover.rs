@@ -1384,9 +1384,9 @@ fn render_suggestion(
 }
 
 /// Render a product selection. Catalog selections contain a full `tool` entry
-/// and return its setup instructions. Off-catalog selections contain only
-/// `{ "selected_tool": "...", "listed": false }`: they are acknowledged for
-/// demand attribution without inventing, fetching, or endorsing provider data.
+/// and return its setup instructions. Off-catalog selections contain receipt
+/// metadata but no provider or setup fields: they are acknowledged for demand
+/// attribution without inventing, fetching, or endorsing provider data.
 fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<String> {
     let receipt_category = listing
         .get("category")
@@ -1416,10 +1416,12 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
         .ok_or_else(|| anyhow::anyhow!("discovery selection receipt omitted catalog status"))?;
 
     if !listed {
-        if listing.get("tool").is_some() {
-            return Err(anyhow::anyhow!(
-                "off-catalog selection receipt for '{selected_tool}' unexpectedly included provider details"
-            ));
+        for forbidden in ["tool", "provider", "setup", "url", "mcp"] {
+            if listing.get(forbidden).is_some() {
+                return Err(anyhow::anyhow!(
+                    "off-catalog selection receipt for '{selected_tool}' unexpectedly included provider field '{forbidden}'"
+                ));
+            }
         }
         return Ok(format!(
             "Selected off-catalog product '{selected_tool}' for '{category}'.\n\n\
@@ -1701,6 +1703,15 @@ mod tests {
         let mut null_details = listing.clone();
         null_details["tool"] = Value::Null;
         assert!(render_selection("web-data", "firecrawl", &null_details).is_err());
+
+        for field in ["provider", "setup", "url", "mcp"] {
+            let mut leaked_provider_data = listing.clone();
+            leaked_provider_data[field] = json!("must not be returned");
+            assert!(
+                render_selection("web-data", "firecrawl", &leaked_provider_data).is_err(),
+                "off-catalog receipt accepted forbidden field {field}"
+            );
+        }
     }
 
     #[test]

@@ -63,6 +63,7 @@ from benchmark_discovery import (  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = REPO_ROOT / "scripts" / "discovery_rate_cases.json"
 DEFAULT_OUTPUT = REPO_ROOT / "target" / "discovery-rate/latest.json"
+REPORT_VERSION = 2
 
 
 def executable_identity(command: str) -> dict[str, Any]:
@@ -741,7 +742,7 @@ def main() -> int:
     )
     report = {
         "benchmark": "discovery-call-rate",
-        "version": 1,
+        "version": REPORT_VERSION,
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_marker": {

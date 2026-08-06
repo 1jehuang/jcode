@@ -182,6 +182,15 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
         self.assertEqual(call.outcome, "selection")
         self.assertIs(call.listed, False)
 
+    def test_parse_unmatched_and_error_outputs_without_crashing(self):
+        other = benchmark.parse_discovery_output("unexpected renderer output", 1.0)
+        self.assertEqual(other.outcome, "other")
+        self.assertIsNone(other.category)
+        self.assertEqual(other.tools, [])
+
+        error = benchmark.parse_discovery_output("Error: unavailable", 1.0)
+        self.assertEqual(error.outcome, "error")
+
     def test_parse_selection_tracks_but_does_not_count_direct_selection(self):
         call = benchmark.parse_discovery_output(
             "Selected 'agentmail' from 'email-messaging' (Jcode tool directory):", 1.5
