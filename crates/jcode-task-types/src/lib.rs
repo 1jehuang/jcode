@@ -372,6 +372,16 @@ semantic_state! {
 }
 
 semantic_state! {
+    /// How completely a goal's explicit requirements and changed public outputs
+    /// are connected to concrete checks and observed results.
+    FeedbackLoopTraceability {
+        Unmapped = "unmapped", legacy: 0..=49, score: 25,
+        Partial = "partial", legacy: 50..=95, score: 75,
+        Complete = "complete", legacy: 96..=100, score: 98,
+    }
+}
+
+semantic_state! {
     /// Evidence state behind a todo: from an unexamined guess to a result
     /// verified end to end.
     ConfidenceState {
@@ -554,6 +564,14 @@ pub struct TodoGoal {
     /// oldest first. Tool-maintained; model-supplied values are ignored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub feedback_loop_coverage_history: Vec<FeedbackLoopCoverage>,
+    /// Whether every explicit requirement and changed public output is mapped to
+    /// a concrete check and its observed result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_loop_traceability: Option<FeedbackLoopTraceability>,
+    /// Every distinct `feedback_loop_traceability` state this goal has carried,
+    /// oldest first. Tool-maintained; model-supplied values are ignored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback_loop_traceability_history: Vec<FeedbackLoopTraceability>,
     /// How far the goal's result actually traveled toward the user's outcome:
     /// from a bare change through integration and workflow validation to a
     /// delivered outcome. Replaces the legacy 0-100 `end_to_end_ownership`
@@ -604,6 +622,7 @@ pub enum TodoGoalField {
     FeedbackLoop,
     FeedbackLoopRelevance,
     FeedbackLoopCoverage,
+    FeedbackLoopTraceability,
     #[serde(alias = "end_to_end_ownership")]
     DeliveryState,
     Autonomy,
