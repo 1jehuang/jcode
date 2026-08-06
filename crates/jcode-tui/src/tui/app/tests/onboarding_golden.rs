@@ -140,6 +140,10 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(text.contains("Telemetry"), "telemetry pill label: {text}");
         assert!(
+            text.contains("Jcode hosted models are 50% off provider API prices."),
+            "hosted-model discount: {text}"
+        );
+        assert!(
             text.contains('\u{25D6}') && text.contains('\u{25D7}'),
             "pill rounded end caps: {text}"
         );

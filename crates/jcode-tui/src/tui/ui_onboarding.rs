@@ -536,6 +536,13 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.extend(import_summary_lines(&prompt));
                     lines.push(Line::from(""));
                     lines.push(import_summary_pills_line(prompt.summary_pill, align));
+                    lines.push(
+                        Line::from(Span::styled(
+                            "Jcode hosted models are 50% off provider API prices.",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
                 }
                 Some(prompt) => {
                     // Choose mode: a short "Import:" label, the Continue pill,
