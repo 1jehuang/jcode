@@ -1513,6 +1513,23 @@ async fn empty_post_tool_response_is_retried_in_shared_helper() {
         .expect("helper must not error");
     assert!(retried);
     assert_eq!(attempts, 1);
+    let recovery = agent
+        .session
+        .messages
+        .last()
+        .expect("recovery instruction must be persisted");
+    assert_eq!(recovery.role, Role::User);
+    assert!(
+        recovery
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .is_some_and(|text| text.starts_with("<system-reminder>")),
+        "synthetic recovery instruction must be hidden from the transcript"
+    );
 
     // A guardrail refusal is deliberate and must not be retried.
     let retried = agent
