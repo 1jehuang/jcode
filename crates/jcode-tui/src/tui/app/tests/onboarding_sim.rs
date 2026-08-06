@@ -202,13 +202,13 @@ fn onboarding_sim_summary_arrows_preview_all_pills() {
         }) => review.summary_pill,
         other => panic!("expected import summary, got {other:?}"),
     };
-    assert_eq!(pill(&app), SummaryPill::Continue);
-    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert_eq!(pill(&app), SummaryPill::Subscription);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert_eq!(pill(&app), SummaryPill::ImportLess);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert_eq!(pill(&app), SummaryPill::Telemetry);
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(pill(&app), SummaryPill::Continue);
     app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
-    assert_eq!(pill(&app), SummaryPill::ImportLess);
+    assert_eq!(pill(&app), SummaryPill::Telemetry);
 }
