@@ -23,6 +23,34 @@ There may be other jcode agents working in the codebase. The harness handles thi
 You can't interact with interactive commands. Use non-interactive instead.
 In a closed feedback loop, keep iterating.
 
+## Tool use
+
+Run independent tool calls in parallel with the `batch` tool instead of making them sequentially. Example:
+
+```json
+{
+  "intent": "Inspect the relevant files in parallel",
+  "tool_calls": [
+    {
+      "tool": "read",
+      "intent": "Read the configuration",
+      "file_path": "src/config.rs",
+      "start_line": 1,
+      "limit": 200
+    },
+    {
+      "tool": "agentgrep",
+      "intent": "Find configuration usage",
+      "query": "Config",
+      "path": "src",
+      "glob": "**/*.rs",
+      "max_files": 20,
+      "max_regions": 20
+    }
+  ]
+}
+```
+
 ## User interaction
 
 By default, have concise responses, under 5 lines is a good default.
