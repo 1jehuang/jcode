@@ -17,6 +17,15 @@ fn test_default_system_prompt_no_claude_code_identity() {
 }
 
 #[test]
+fn default_system_prompt_includes_batch_tool_example() {
+    let prompt = crate::prompt::DEFAULT_SYSTEM_PROMPT;
+    assert!(prompt.contains("Run independent tool calls in parallel with the `batch` tool"));
+    assert!(prompt.contains(r#""tool_calls": ["#));
+    assert!(prompt.contains(r#""tool": "read""#));
+    assert!(prompt.contains(r#""tool": "agentgrep""#));
+}
+
+#[test]
 fn mermaid_prompt_module_follows_capability() {
     let (enabled, _) = build_system_prompt_split_with_capabilities(
         None,
