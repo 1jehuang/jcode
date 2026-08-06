@@ -355,6 +355,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(262_144);
     }
 
+    // --- Meta Muse Spark family: 1 Mi tokens ---
+    if m.contains("muse-spark") {
+        return Some(1_048_576);
+    }
+
     // --- Alibaba GTE-Qwen2 retrieval models: 32K context ---
     if m.contains("gte-qwen") {
         return Some(32_768);

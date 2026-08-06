@@ -47,6 +47,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
+    assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
