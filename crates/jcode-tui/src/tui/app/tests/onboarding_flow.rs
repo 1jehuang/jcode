@@ -240,11 +240,12 @@ fn import_review_collects_checked_logins() {
         ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
     ])
     .unwrap();
-    // The default is the summary screen with Continue preselected.
+    // The default is the summary screen with Jcode subscription preselected.
     assert!(!review.choosing);
-    assert!(review.continue_focused);
+    assert!(!review.continue_focused);
+    assert_eq!(review.summary_pill, crate::tui::app::onboarding_flow::SummaryPill::Subscription);
     assert_eq!(review.total(), 3);
-    // All pre-checked: the default action imports everything.
+    // All candidates remain pre-checked when the user chooses an import action.
     assert_eq!(review.approved_indices(), vec![0, 1, 2]);
     assert_eq!(review.checked_count(), 3);
 
@@ -1407,13 +1408,15 @@ fn import_summary_defaults_to_continue_and_enter_imports_all() {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
-        let review = ImportReview::new(vec![
+        let mut review = ImportReview::new(vec![
             ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
             ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
         ])
         .unwrap();
-        // The summary screen is the default and lands on Continue.
+        // Import tests explicitly select Continue because the product default is
+        // now Jcode subscription.
         assert!(!review.choosing);
+        review.focus_summary_pill(crate::tui::app::onboarding_flow::SummaryPill::Continue);
         assert!(review.continue_focused);
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login {
@@ -1459,11 +1462,12 @@ fn import_continue_reaches_ready_quality_first_openai_model() {
         runtime.block_on(async {
             app.onboarding_flow = None;
             app.begin_onboarding_flow_at_login();
-            let review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
+            let mut review = ImportReview::new(vec![ExternalAuthReviewCandidate::fixture(
                 "OpenAI/Codex",
                 "Codex auth.json",
             )])
             .unwrap();
+            review.focus_summary_pill(crate::tui::app::onboarding_flow::SummaryPill::Continue);
             if let Some(flow) = app.onboarding_flow.as_mut() {
                 flow.phase = OnboardingPhase::Login {
                     import: Some(review),
@@ -1547,9 +1551,8 @@ fn import_summary_choose_pill_opens_checkbox_list() {
                 import: Some(review),
             };
         }
-        // Arrow past the subscription option to the "Import less" pill, then
-        // commit it.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        // Arrow from the default subscription option to the "Import less" pill,
+        // then commit it.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         // Now in choose mode: the checkbox list with the cursor on row 1 and
@@ -1690,9 +1693,7 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
             };
         }
 
-        // Right three times: Continue -> Subscription -> Import less ->
-        // Telemetry settings.
-        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
+        // Right twice: Subscription -> Import less -> Telemetry settings.
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
