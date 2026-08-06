@@ -485,16 +485,14 @@ mod macos {
         // in points from the right screen edge) before the item is realized
         // places it among the system icons; afterwards macOS keeps tracking
         // the user's chosen position under the same key.
-        unsafe {
-            let defaults = NSUserDefaults::standardUserDefaults();
-            let pos_key = NSString::from_str(&format!(
-                "NSStatusItem Preferred Position {STATUS_ITEM_AUTOSAVE}"
-            ));
-            if defaults.objectForKey(&pos_key).is_none() {
-                defaults.setInteger_forKey(550, &pos_key);
-            }
-            status_item.setAutosaveName(Some(&NSString::from_str(STATUS_ITEM_AUTOSAVE)));
+        let defaults = NSUserDefaults::standardUserDefaults();
+        let pos_key = NSString::from_str(&format!(
+            "NSStatusItem Preferred Position {STATUS_ITEM_AUTOSAVE}"
+        ));
+        if defaults.objectForKey(&pos_key).is_none() {
+            defaults.setInteger_forKey(550, &pos_key);
         }
+        status_item.setAutosaveName(Some(&NSString::from_str(STATUS_ITEM_AUTOSAVE)));
 
         // Style the button like a native menu bar extra: a template SF Symbol
         // (auto-adapts to light/dark menu bars and tinting) plus a compact
