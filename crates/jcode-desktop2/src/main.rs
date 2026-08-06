@@ -1588,6 +1588,8 @@ impl App {
                 }
             }
 
+            Action::ToggleModelPicker => self.toggle_model_picker(),
+
             // The palette, on a key. The notice names what it landed on, so
             // the chord is self-documenting the first time it is hit by
             // accident and there is no doubt about which of the three the
