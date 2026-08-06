@@ -51,10 +51,14 @@ impl App {
                     self.commit_model_picker_choice(model);
                 }
             }
-            Key::Character(text) if text.eq_ignore_ascii_case("m") && self.modifiers.control_key() => {
+            Key::Character(text)
+                if text.eq_ignore_ascii_case("m") && self.modifiers.control_key() =>
+            {
                 self.model.model_picker.close();
             }
-            Key::Character(text) if text.eq_ignore_ascii_case("m") && self.modifiers.super_key() => {
+            Key::Character(text)
+                if text.eq_ignore_ascii_case("m") && self.modifiers.super_key() =>
+            {
                 self.model.model_picker.close();
             }
             _ => return true,
