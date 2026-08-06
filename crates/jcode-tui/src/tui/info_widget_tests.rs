@@ -458,7 +458,7 @@ fn lines_text_concat(lines: &[ratatui::text::Line<'_>]) -> String {
 }
 
 #[test]
-fn flat_todo_list_shows_closed_feedback_loop_on_header_in_all_widget_sizes() {
+fn flat_todo_list_shows_feedback_loop_assessments_on_header_in_all_widget_sizes() {
     let data = InfoWidgetData {
         todos: vec![
             todo_item("a", "optimize grep", "in_progress", None),
@@ -467,6 +467,8 @@ fn flat_todo_list_shows_closed_feedback_loop_on_header_in_all_widget_sizes() {
         todo_goals: vec![crate::todo::TodoGoal {
             group: None,
             closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(85)),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
             ..Default::default()
         }],
         ..Default::default()
@@ -476,7 +478,10 @@ fn flat_todo_list_shows_closed_feedback_loop_on_header_in_all_widget_sizes() {
         lines_text_concat(&render_todos_expanded(&data, Rect::new(0, 0, 70, 14))),
         lines_text_concat(&render_todos_compact(&data, Rect::new(0, 0, 70, 3))),
     ] {
-        assert!(text.contains("loop strong"), "loop suffix missing: {text}");
+        assert!(
+            text.contains("loop strong/representative/main_paths"),
+            "loop suffix missing: {text}"
+        );
     }
 }
 

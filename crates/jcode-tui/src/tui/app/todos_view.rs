@@ -547,6 +547,18 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         }
         line.push_str(&format!("- Feedback loop: {}\n", feedback_loop.trim()));
     }
+    if let Some(state) = goal.feedback_loop_relevance {
+        line.push_str(&format!(
+            "- Feedback-loop relevance: **{}**\n",
+            state.as_str()
+        ));
+    }
+    if let Some(state) = goal.feedback_loop_coverage {
+        line.push_str(&format!(
+            "- Feedback-loop coverage: **{}**\n",
+            state.as_str()
+        ));
+    }
     if let Some(state) = goal.delivery_state {
         line.push_str(&format!("- Delivery state: **{}**\n", state.as_str()));
     }
@@ -750,6 +762,8 @@ fn hash_todos_payload(
         goal.group.hash(&mut hasher);
         goal.closed_feedback_loop.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
+        goal.feedback_loop_relevance.hash(&mut hasher);
+        goal.feedback_loop_coverage.hash(&mut hasher);
         goal.delivery_state.hash(&mut hasher);
         goal.difficulty.hash(&mut hasher);
         goal.autonomy.hash(&mut hasher);
@@ -886,6 +900,8 @@ mod tests {
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
                 delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(85)),
                 ..Default::default()
             }],
@@ -911,6 +927,14 @@ mod tests {
         assert!(
             markdown
                 .contains("- Feedback loop: run the frame benchmark and compare p95 frame time"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("- Feedback-loop relevance: **representative**"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("- Feedback-loop coverage: **main_paths**"),
             "{markdown}"
         );
         assert!(

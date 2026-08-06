@@ -98,6 +98,8 @@ pub struct TodoTelemetryUpdate {
     pub completion_confidence: TelemetryScoreSummary,
     pub understands_user_intent: TelemetryScoreSummary,
     pub closed_feedback_loop: TelemetryScoreSummary,
+    pub feedback_loop_relevance: TelemetryScoreSummary,
+    pub feedback_loop_coverage: TelemetryScoreSummary,
     pub end_to_end_ownership: TelemetryScoreSummary,
 }
 
@@ -115,6 +117,8 @@ struct TodoSessionTelemetry {
     completion_confidence: TelemetryScoreSummary,
     understands_user_intent: TelemetryScoreSummary,
     closed_feedback_loop: TelemetryScoreSummary,
+    feedback_loop_relevance: TelemetryScoreSummary,
+    feedback_loop_coverage: TelemetryScoreSummary,
     end_to_end_ownership: TelemetryScoreSummary,
 }
 
@@ -133,6 +137,8 @@ impl TodoSessionTelemetry {
         self.completion_confidence = update.completion_confidence;
         self.understands_user_intent = update.understands_user_intent;
         self.closed_feedback_loop = update.closed_feedback_loop;
+        self.feedback_loop_relevance = update.feedback_loop_relevance;
+        self.feedback_loop_coverage = update.feedback_loop_coverage;
         self.end_to_end_ownership = update.end_to_end_ownership;
     }
 
@@ -2164,6 +2170,10 @@ pub enum TodoGateKind {
     Ownership,
     /// Closed feedback loop was too low; the goal needs a measurable objective.
     ClosedFeedbackLoop,
+    /// Completion checks were too indirect to represent acceptance behavior.
+    FeedbackLoopRelevance,
+    /// Completion checks did not cover enough success and failure paths.
+    FeedbackLoopCoverage,
     /// Plan-level alignment with the user's intention was too low.
     Alignment,
     /// Plan-level understanding of the user's intent was too low.
@@ -2182,7 +2192,9 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         observe_session_concurrency(state);
         let counter = match kind {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
-            TodoGateKind::ClosedFeedbackLoop => &mut state.todo_gate_feedback_loop_count,
+            TodoGateKind::ClosedFeedbackLoop
+            | TodoGateKind::FeedbackLoopRelevance
+            | TodoGateKind::FeedbackLoopCoverage => &mut state.todo_gate_feedback_loop_count,
             TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
             TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
@@ -2192,7 +2204,9 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         if let Some(turn) = state.current_turn.as_mut() {
             let counter = match kind {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
-                TodoGateKind::ClosedFeedbackLoop => &mut turn.todo_gate_feedback_loop_count,
+                TodoGateKind::ClosedFeedbackLoop
+                | TodoGateKind::FeedbackLoopRelevance
+                | TodoGateKind::FeedbackLoopCoverage => &mut turn.todo_gate_feedback_loop_count,
                 TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
                 TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,

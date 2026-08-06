@@ -160,6 +160,18 @@ fn todo_telemetry_update(
                 .iter()
                 .filter_map(|goal| goal.closed_feedback_loop.map(|state| state.legacy_score())),
         ),
+        feedback_loop_relevance: crate::telemetry::TelemetryScoreSummary::from_scores(
+            goals.iter().filter_map(|goal| {
+                goal.feedback_loop_relevance
+                    .map(|state| state.legacy_score())
+            }),
+        ),
+        feedback_loop_coverage: crate::telemetry::TelemetryScoreSummary::from_scores(
+            goals.iter().filter_map(|goal| {
+                goal.feedback_loop_coverage
+                    .map(|state| state.legacy_score())
+            }),
+        ),
         end_to_end_ownership: crate::telemetry::TelemetryScoreSummary::from_scores(
             goals
                 .iter()
@@ -209,6 +221,12 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         goal.closed_feedback_loop_history = previous
             .map(|prev| prev.closed_feedback_loop_history.clone())
             .unwrap_or_default();
+        goal.feedback_loop_relevance_history = previous
+            .map(|prev| prev.feedback_loop_relevance_history.clone())
+            .unwrap_or_default();
+        goal.feedback_loop_coverage_history = previous
+            .map(|prev| prev.feedback_loop_coverage_history.clone())
+            .unwrap_or_default();
         goal.delivery_state_history = previous
             .map(|prev| prev.delivery_state_history.clone())
             .unwrap_or_default();
@@ -222,6 +240,12 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
             }
             if goal.delivery_state.is_none() {
                 goal.delivery_state = prev.delivery_state;
+            }
+            if goal.feedback_loop_relevance.is_none() {
+                goal.feedback_loop_relevance = prev.feedback_loop_relevance;
+            }
+            if goal.feedback_loop_coverage.is_none() {
+                goal.feedback_loop_coverage = prev.feedback_loop_coverage;
             }
             if goal.difficulty.is_none() {
                 goal.difficulty = prev.difficulty;
@@ -242,6 +266,14 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         record_score_observation(
             &mut goal.closed_feedback_loop_history,
             goal.closed_feedback_loop,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_relevance_history,
+            goal.feedback_loop_relevance,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_coverage_history,
+            goal.feedback_loop_coverage,
         );
         record_score_observation(&mut goal.delivery_state_history, goal.delivery_state);
         if let Some(slot) = merged
@@ -295,6 +327,16 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
         != after.and_then(|goal| goal.feedback_loop.as_ref())
     {
         fields.push(TodoGoalField::FeedbackLoop);
+    }
+    if before.and_then(|goal| goal.feedback_loop_relevance)
+        != after.and_then(|goal| goal.feedback_loop_relevance)
+    {
+        fields.push(TodoGoalField::FeedbackLoopRelevance);
+    }
+    if before.and_then(|goal| goal.feedback_loop_coverage)
+        != after.and_then(|goal| goal.feedback_loop_coverage)
+    {
+        fields.push(TodoGoalField::FeedbackLoopCoverage);
     }
     if before.and_then(|goal| goal.delivery_state) != after.and_then(|goal| goal.delivery_state) {
         fields.push(TodoGoalField::DeliveryState);
@@ -460,6 +502,24 @@ fn record_reframe_observations(
                     .map(|state| state.as_str().to_string()),
             });
         }
+        if !crate::todo::feedback_loop_relevance_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopRelevance,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_relevance
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
+        if !crate::todo::feedback_loop_coverage_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopCoverage,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_coverage
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
     }
     (observations, immediate)
 }
@@ -583,6 +643,8 @@ fn normalize_todo_input(mut input: Value) -> Value {
                     "hill_climbability",
                     "end_to_end_ownership",
                     "delivery_state",
+                    "feedback_loop_relevance",
+                    "feedback_loop_coverage",
                     "difficulty",
                     "autonomy",
                 ] {
@@ -688,7 +750,7 @@ impl Tool for TodoTool {
                     "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
                     "items": {
                         "type": "object",
-                        "required": ["closed_feedback_loop", "feedback_loop"],
+                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage"],
                         "properties": {
                             "group": {
                                 "type": "string",
@@ -702,6 +764,16 @@ impl Tool for TodoTool {
                             "feedback_loop": {
                                 "type": "string",
                                 "description": "Requirement-to-check process: an explicit observation or check for each requirement of this goal."
+                            },
+                            "feedback_loop_relevance": {
+                                "type": "string",
+                                "enum": ["indirect", "representative", "acceptance_aligned"],
+                                "description": "How directly the checks represent observable acceptance behavior through public interfaces rather than an internal proxy."
+                            },
+                            "feedback_loop_coverage": {
+                                "type": "string",
+                                "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
+                                "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -757,6 +829,12 @@ impl Tool for TodoTool {
                         }
                         GateObservationKind::ClosedFeedbackLoop => {
                             crate::telemetry::TodoGateKind::ClosedFeedbackLoop
+                        }
+                        GateObservationKind::FeedbackLoopRelevance => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopRelevance
+                        }
+                        GateObservationKind::FeedbackLoopCoverage => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopCoverage
                         }
                     };
                     crate::telemetry::record_todo_gate(kind);
@@ -892,6 +970,8 @@ mod tests {
         assert!(goal_props.contains_key("group"));
         assert!(goal_props.contains_key("closed_feedback_loop"));
         assert!(goal_props.contains_key("feedback_loop"));
+        assert!(goal_props.contains_key("feedback_loop_relevance"));
+        assert!(goal_props.contains_key("feedback_loop_coverage"));
         assert!(goal_props.contains_key("delivery_state"));
         assert!(goal_props.contains_key("difficulty"));
         assert!(goal_props.contains_key("autonomy"));
@@ -902,7 +982,7 @@ mod tests {
         assert!(!goal_props.contains_key("user_intention"));
         assert!(!goal_props.contains_key("alignment_score"));
         assert!(!goal_props.contains_key("objective"));
-        assert_eq!(goal_props.len(), 8);
+        assert_eq!(goal_props.len(), 10);
 
         let goal_required = props["goals"]["items"]["required"]
             .as_array()
@@ -913,6 +993,16 @@ mod tests {
                 .any(|value| value == "closed_feedback_loop")
         );
         assert!(goal_required.iter().any(|value| value == "feedback_loop"));
+        assert!(
+            goal_required
+                .iter()
+                .any(|value| value == "feedback_loop_relevance")
+        );
+        assert!(
+            goal_required
+                .iter()
+                .any(|value| value == "feedback_loop_coverage")
+        );
 
         let alignment_description = plan_props["understands_user_intent"]
             .get("description")
@@ -1000,6 +1090,18 @@ mod tests {
             assert!(
                 !model_visible_schema.contains(disclosure),
                 "model-visible todo schema disclosed calibration wording: {disclosure}"
+            );
+        }
+        for required_guidance in [
+            "public interfaces",
+            "integration boundaries",
+            "edge cases",
+            "packaging",
+            "likely failure modes",
+        ] {
+            assert!(
+                model_visible_schema.contains(required_guidance),
+                "todo schema omitted generic validation guidance: {required_guidance}"
             );
         }
         for domain_hint in [
@@ -1173,6 +1275,8 @@ mod tests {
         TodoGoal {
             group: group.map(str::to_string),
             closed_feedback_loop: Some(state),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
             ..Default::default()
         }
     }
@@ -1216,12 +1320,20 @@ mod tests {
             TodoGoal {
                 group: Some("build".to_string()),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
                 delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
                 ..Default::default()
             },
             TodoGoal {
                 group: Some("verify".to_string()),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
+                feedback_loop_relevance: Some(
+                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
+                ),
+                feedback_loop_coverage: Some(
+                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
+                ),
                 delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
                 ..Default::default()
             },
@@ -1247,6 +1359,10 @@ mod tests {
         assert_eq!(update.understands_user_intent.min, Some(80));
         assert_eq!(update.closed_feedback_loop.min, Some(88));
         assert_eq!(update.closed_feedback_loop.mean, Some(88.0));
+        assert_eq!(update.feedback_loop_relevance.min, Some(75));
+        assert_eq!(update.feedback_loop_relevance.count, 2);
+        assert_eq!(update.feedback_loop_coverage.min, Some(75));
+        assert_eq!(update.feedback_loop_coverage.count, 2);
         assert_eq!(update.end_to_end_ownership.min, Some(98));
         assert_eq!(update.end_to_end_ownership.mean, Some(98.0));
     }
@@ -1607,6 +1723,8 @@ mod tests {
                         "group": "speed",
                         "closed_feedback_loop": 80,
                         "feedback_loop": "run ./grade and read the score",
+                        "feedback_loop_relevance": "indirect",
+                        "feedback_loop_coverage": "narrow",
                     }],
                 }),
                 test_ctx(session),
@@ -1632,7 +1750,17 @@ mod tests {
 
         // The points were recorded for the turn-end digest instead.
         let observations = crate::todo::load_gate_observations(session).expect("observations");
-        assert_eq!(observations.len(), 2);
+        assert_eq!(observations.len(), 4);
+        assert!(
+            observations.iter().any(|observation| {
+                observation.kind == GateObservationKind::FeedbackLoopRelevance
+            })
+        );
+        assert!(
+            observations.iter().any(|observation| {
+                observation.kind == GateObservationKind::FeedbackLoopCoverage
+            })
+        );
 
         // Histories are accumulating, which is what the digest reasons over.
         let plan = load_plan(session).expect("plan");
@@ -1644,6 +1772,14 @@ mod tests {
         assert_eq!(
             goals[0].closed_feedback_loop_history,
             vec![crate::todo::FeedbackLoopState::Strong]
+        );
+        assert_eq!(
+            goals[0].feedback_loop_relevance_history,
+            vec![crate::todo::FeedbackLoopRelevance::Indirect]
+        );
+        assert_eq!(
+            goals[0].feedback_loop_coverage_history,
+            vec![crate::todo::FeedbackLoopCoverage::Narrow]
         );
 
         // Second write at a higher score: still silent, history grows, and the
@@ -1710,6 +1846,8 @@ mod tests {
                         "group": "release",
                         "closed_feedback_loop": 100,
                         "feedback_loop": "run the end-to-end release check",
+                        "feedback_loop_relevance": "indirect",
+                        "feedback_loop_coverage": "narrow",
                         "end_to_end_ownership": 95,
                     }],
                 }),
@@ -1721,9 +1859,19 @@ mod tests {
         let saved = load_todos(session).expect("completed todo should be persisted");
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].status, "completed");
+        let saved_goals = load_goals(session).expect("goal should be persisted");
+        let saved_goal = &saved_goals[0];
         assert_eq!(
-            load_goals(session).expect("goal should be persisted")[0].delivery_state,
+            saved_goal.delivery_state,
             Some(crate::todo::DeliveryState::WorkflowValidated)
+        );
+        assert_eq!(
+            saved_goal.feedback_loop_relevance,
+            Some(crate::todo::FeedbackLoopRelevance::Indirect)
+        );
+        assert_eq!(
+            saved_goal.feedback_loop_coverage,
+            Some(crate::todo::FeedbackLoopCoverage::Narrow)
         );
         assert!(
             !output
@@ -1745,12 +1893,16 @@ mod tests {
             group: Some("search".to_string()),
             closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
             feedback_loop: Some("Run one benchmark".to_string()),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Indirect),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::Narrow),
             delivery_state: None,
             ..Default::default()
         };
         let after = TodoGoal {
             closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
             feedback_loop: Some("Run five benchmarks and compare p50".to_string()),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
             ..before.clone()
         };
 
@@ -1764,6 +1916,8 @@ mod tests {
             vec![
                 TodoGoalField::ClosedFeedbackLoop,
                 TodoGoalField::FeedbackLoop,
+                TodoGoalField::FeedbackLoopRelevance,
+                TodoGoalField::FeedbackLoopCoverage,
             ]
         );
     }
@@ -2026,10 +2180,13 @@ mod tests {
 
         let stored_goals = merge_goals(
             &[],
-            Some(vec![goal(
-                Some("perf"),
-                crate::todo::FeedbackLoopState::Usable,
-            )]),
+            Some(vec![TodoGoal {
+                group: Some("perf".to_string()),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Usable),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Indirect),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::Narrow),
+                ..Default::default()
+            }]),
         );
         assert_eq!(
             stored_goals[0].closed_feedback_loop_history,
@@ -2037,16 +2194,43 @@ mod tests {
         );
         let merged_goals = merge_goals(
             &stored_goals,
-            Some(vec![goal(
-                Some("perf"),
-                crate::todo::FeedbackLoopState::Strong,
-            )]),
+            Some(vec![TodoGoal {
+                group: Some("perf".to_string()),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Strong),
+                feedback_loop_relevance: Some(
+                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
+                ),
+                feedback_loop_relevance_history: vec![
+                    crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
+                ],
+                feedback_loop_coverage: Some(
+                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
+                ),
+                feedback_loop_coverage_history: vec![
+                    crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
+                ],
+                ..Default::default()
+            }]),
         );
         assert_eq!(
             merged_goals[0].closed_feedback_loop_history,
             vec![
                 crate::todo::FeedbackLoopState::Usable,
                 crate::todo::FeedbackLoopState::Strong
+            ]
+        );
+        assert_eq!(
+            merged_goals[0].feedback_loop_relevance_history,
+            vec![
+                crate::todo::FeedbackLoopRelevance::Indirect,
+                crate::todo::FeedbackLoopRelevance::AcceptanceAligned,
+            ]
+        );
+        assert_eq!(
+            merged_goals[0].feedback_loop_coverage_history,
+            vec![
+                crate::todo::FeedbackLoopCoverage::Narrow,
+                crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths,
             ]
         );
     }
@@ -2061,6 +2245,8 @@ mod tests {
                 group: Some("perf".to_string()),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
                 feedback_loop: Some("cargo bench".to_string()),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
                 delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
                 ..Default::default()
             }]),
@@ -2077,6 +2263,14 @@ mod tests {
             Some(crate::todo::FeedbackLoopState::Closed)
         );
         assert_eq!(merged[0].feedback_loop.as_deref(), Some("cargo bench"));
+        assert_eq!(
+            merged[0].feedback_loop_relevance,
+            Some(crate::todo::FeedbackLoopRelevance::Representative)
+        );
+        assert_eq!(
+            merged[0].feedback_loop_coverage,
+            Some(crate::todo::FeedbackLoopCoverage::MainPaths)
+        );
         assert_eq!(
             merged[0].delivery_state,
             Some(crate::todo::DeliveryState::OutcomeDelivered)

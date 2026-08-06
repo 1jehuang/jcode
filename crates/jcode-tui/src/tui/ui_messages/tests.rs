@@ -563,6 +563,8 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         group: Some("todo rendering".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(95)),
         feedback_loop: Some("Inspect a debug frame".to_string()),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
         delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(90)),
         ..Default::default()
     }];
@@ -581,10 +583,14 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("Closed feedback loop strong · Delivery workflow_validated"),
-        "{plain}"
-    );
+    for assessment in [
+        "Closed feedback loop strong",
+        "Relevance representative",
+        "Coverage main_paths",
+        "Delivery workflow_validated",
+    ] {
+        assert!(plain.contains(assessment), "{plain}");
+    }
     // Plan-level intent renders once, above the groups.
     assert!(plain.contains("Understands user intent clear"), "{plain}");
     assert!(
@@ -860,6 +866,8 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         group: Some("todo rendering".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(90)),
         feedback_loop: Some("Inspect one frame".to_string()),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Indirect),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::Narrow),
         ..Default::default()
     };
     let after = crate::todo::TodoGoal {
@@ -867,6 +875,8 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         feedback_loop: Some(
             "Render before and after fixtures and assert unchanged fields are absent".to_string(),
         ),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
         ..before.clone()
     };
     let updates = vec![crate::todo::TodoGoalChange {
@@ -875,6 +885,8 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         fields: vec![
             crate::todo::TodoGoalField::ClosedFeedbackLoop,
             crate::todo::TodoGoalField::FeedbackLoop,
+            crate::todo::TodoGoalField::FeedbackLoopRelevance,
+            crate::todo::TodoGoalField::FeedbackLoopCoverage,
         ],
     }];
     let content = format!(
@@ -908,6 +920,14 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
     assert!(plain.contains("todo rendering  updated"), "{plain}");
     assert!(
         plain.contains("Closed feedback loop strong → closed"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("Feedback-loop relevance indirect → representative"),
+        "{plain}"
+    );
+    assert!(
+        plain.contains("Feedback-loop coverage narrow → main_paths"),
         "{plain}"
     );
     assert!(!plain.contains("Feedback ·"), "{plain}");
@@ -951,7 +971,11 @@ fn render_goal_update_size_is_bounded_when_narrative_evidence_is_long() {
     };
 
     let lines = render_todo_goal_updates(&[update], 95);
-    let plain = lines.iter().map(extract_line_text).collect::<Vec<_>>().join("\n");
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
 
     assert_eq!(lines.len(), 5, "narrative text must not add rows:\n{plain}");
     assert!(!plain.contains("Feedback"), "{plain}");

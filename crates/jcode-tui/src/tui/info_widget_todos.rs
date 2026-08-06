@@ -135,25 +135,57 @@ fn loop_style(state: crate::todo::FeedbackLoopState) -> Style {
     Style::default().fg(color)
 }
 
-/// Append a " · hill N%" suffix describing a goal's closed feedback loop.
+/// Append a compact suffix describing a goal's feedback-loop assessments.
 fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::TodoGoal) {
-    let Some(state) = goal.closed_feedback_loop else {
+    if goal.closed_feedback_loop.is_none()
+        && goal.feedback_loop_relevance.is_none()
+        && goal.feedback_loop_coverage.is_none()
+    {
         return;
-    };
+    }
     spans.push(Span::styled(" · ", Style::default().fg(rgb(80, 80, 90))));
     spans.push(Span::styled(
         "loop ",
         Style::default().fg(rgb(140, 140, 150)),
     ));
-    spans.push(Span::styled(state.as_str().to_string(), loop_style(state)));
+    let mut separator = false;
+    if let Some(state) = goal.closed_feedback_loop {
+        spans.push(Span::styled(state.as_str().to_string(), loop_style(state)));
+        separator = true;
+    }
+    for value in [
+        goal.feedback_loop_relevance.map(|state| state.as_str()),
+        goal.feedback_loop_coverage.map(|state| state.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if separator {
+            spans.push(Span::styled("/", Style::default().fg(rgb(80, 80, 90))));
+        }
+        spans.push(Span::styled(
+            value.to_string(),
+            Style::default().fg(rgb(140, 140, 150)),
+        ));
+        separator = true;
+    }
 }
 
 /// Display width of the suffix `push_goal_loop_suffix` would render for this
 /// goal (0 when it renders nothing), so header truncation can reserve room.
 fn goal_loop_suffix_width(goal: &crate::todo::TodoGoal) -> u16 {
-    match goal.closed_feedback_loop {
-        Some(state) => 3 + "loop ".len() as u16 + state.as_str().len() as u16,
-        None => 0,
+    let states = [
+        goal.closed_feedback_loop.map(|state| state.as_str()),
+        goal.feedback_loop_relevance.map(|state| state.as_str()),
+        goal.feedback_loop_coverage.map(|state| state.as_str()),
+    ];
+    let values: Vec<&str> = states.into_iter().flatten().collect();
+    if values.is_empty() {
+        0
+    } else {
+        3 + "loop ".len() as u16
+            + values.iter().map(|value| value.len() as u16).sum::<u16>()
+            + values.len().saturating_sub(1) as u16
     }
 }
 

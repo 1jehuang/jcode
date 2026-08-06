@@ -1216,6 +1216,12 @@ fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'stat
     if let Some(state) = goal.closed_feedback_loop {
         states.push(("Closed feedback loop", state.as_str().to_string()));
     }
+    if let Some(state) = goal.feedback_loop_relevance {
+        states.push(("Relevance", state.as_str().to_string()));
+    }
+    if let Some(state) = goal.feedback_loop_coverage {
+        states.push(("Coverage", state.as_str().to_string()));
+    }
     if let Some(state) = goal.delivery_state {
         states.push(("Delivery", state.as_str().to_string()));
     }
@@ -1461,11 +1467,19 @@ fn push_todo_goal_details(
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
         let score_count = usize::from(goal.closed_feedback_loop.is_some())
+            + usize::from(goal.feedback_loop_relevance.is_some())
+            + usize::from(goal.feedback_loop_coverage.is_some())
             + usize::from(goal.delivery_state.is_some());
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
             let mut states: Vec<(&str, String)> = Vec::new();
             if let Some(state) = goal.closed_feedback_loop {
                 states.push(("Closed feedback loop", state.as_str().to_string()));
+            }
+            if let Some(state) = goal.feedback_loop_relevance {
+                states.push(("Relevance", state.as_str().to_string()));
+            }
+            if let Some(state) = goal.feedback_loop_coverage {
+                states.push(("Coverage", state.as_str().to_string()));
             }
             if let Some(state) = goal.delivery_state {
                 states.push(("Delivery", state.as_str().to_string()));
@@ -1622,6 +1636,38 @@ fn render_todo_goal_updates(
                         .after
                         .as_ref()
                         .and_then(|goal| goal.closed_feedback_loop)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::FeedbackLoopRelevance => push_todo_score_update(
+                    &mut lines,
+                    "Feedback-loop relevance",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_relevance)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_relevance)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::FeedbackLoopCoverage => push_todo_score_update(
+                    &mut lines,
+                    "Feedback-loop coverage",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_coverage)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_coverage)
                         .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
