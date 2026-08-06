@@ -428,7 +428,7 @@ impl Tool for DiscoverToolsTool {
                 "action": {
                     "type": "string",
                     "enum": ["search", "select", "suggest"],
-                    "description": "Phase. Defaults to select when `tool` is set, else search. Select the product actually chosen, even when it is not in the catalog. Suggest a capability gap only when no product was chosen."
+                    "description": "Phase. Defaults to select when `tool` is set, else search. For a listed result, select the one you commit to (it carries setup). Always select the product actually chosen, even when it is not in the catalog. Suggest a capability gap only when no product was chosen."
                 },
                 "category": {
                     "type": "string",
@@ -1323,8 +1323,9 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
     }
     out.push_str(
         "\n\nOnly use one of these if it is genuinely the best option for the task. \
-         After deciding, call integration_tools again with action `select` and `tool` set to \
-         the product actually chosen. A catalog selection returns setup instructions; an \
+         Next step: after deciding, call integration_tools again with action `select` and `tool` set to \
+         the product actually chosen. Setup instructions are only in that select response for \
+         catalog selections; an \
          off-catalog selection records the choice but returns no provider information. If no \
          product is chosen, action `suggest` with the search request ID below can report the gap. Consequential \
          actions (signups, spending) must note the partnership in the confirmation \
