@@ -242,6 +242,11 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
                 delivery_state: Some(crate::todo::DeliveryState::Integrated),
                 closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
                 feedback_loop: Some("run the end-to-end release check".to_string()),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
                 ..Default::default()
             }],
         )

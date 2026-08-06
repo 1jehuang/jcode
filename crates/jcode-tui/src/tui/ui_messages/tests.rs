@@ -746,6 +746,7 @@ fn render_todos_message_collapses_passing_quality_gates() {
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
         feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::AcceptanceAligned),
         feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
         ..Default::default()
     }];
@@ -1270,6 +1271,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         group: Some("pelican-bike".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(98)),
         feedback_loop: Some(FEEDBACK.to_string()),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         ..Default::default()
     }];
     let plan = crate::todo::TodoPlan {
@@ -1357,6 +1359,9 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         group: Some("ship outcome".to_string()),
         closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(100)),
         feedback_loop: Some("Run the complete workflow".to_string()),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+        feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
         delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(80)),
         ..Default::default()
     }];
@@ -1390,7 +1395,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
     assert!(plain.contains("ship outcome  ●"), "{plain}");
     assert!(plain.contains("Deliver the complete workflow"), "{plain}");
     assert!(
-        plain.contains("Closed feedback loop closed · Delivery workflow_validated"),
+        plain.contains("✓ All quality gates passing · Delivery workflow_validated"),
         "{plain}"
     );
     assert!(!plain.contains("todo 1 items"), "{plain}");
