@@ -1,0 +1,18 @@
+{
+  "version": "0.70.0",
+  "date": "2026-08-06",
+  "title": "Terminal-aware forks and an inline model picker",
+  "highlights": [
+    "Forked sessions now follow your active terminal environment, opening Ghostty tabs, tmux or Zellij panes, GNU Screen windows, and appropriate platform terminals",
+    "The desktop model picker now opens as an animated inline transcript chooser with keyboard navigation"
+  ],
+  "improvements": [
+    "Client-scoped hooks can run multiple commands while preserving the requesting terminal context",
+    "Tool-heavy turns receive clearer guidance to batch independent operations"
+  ],
+  "fixes": [
+    "Ghostty forks fall back to a new window when macOS tab automation is unavailable instead of silently disappearing",
+    "Synthetic provider-recovery instructions no longer appear as user prompts in transcripts",
+    "Todo follow-up checks now use more targeted and neutral prompts"
+  ]
+}
