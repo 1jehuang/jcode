@@ -105,10 +105,9 @@ pub(super) async fn handle_notify_session(
     };
 
     let ran_immediately = if target_has_client {
-        super::live_turn::run_live_turn_if_idle(
+        super::live_turn::run_live_system_turn_if_idle(
             &session_id,
             &message,
-            None,
             ctx.sessions,
             super::live_turn::LiveTurnSwarmContext::new(
                 ctx.swarm_members,
@@ -992,6 +991,7 @@ pub(super) async fn handle_resume_all_sessions(
             Arc::clone(&agent),
             String::new(),
             Some(reminder),
+            None,
             Some("resuming interrupted session".to_string()),
             super::live_turn::LiveTurnSwarmContext::new(
                 swarm_members,

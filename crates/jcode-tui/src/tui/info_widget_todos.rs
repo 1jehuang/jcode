@@ -140,6 +140,7 @@ fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::Tod
     if goal.closed_feedback_loop.is_none()
         && goal.feedback_loop_relevance.is_none()
         && goal.feedback_loop_coverage.is_none()
+        && goal.feedback_loop_traceability.is_none()
     {
         return;
     }
@@ -156,6 +157,7 @@ fn push_goal_loop_suffix(spans: &mut Vec<Span<'static>>, goal: &crate::todo::Tod
     for value in [
         goal.feedback_loop_relevance.map(|state| state.as_str()),
         goal.feedback_loop_coverage.map(|state| state.as_str()),
+        goal.feedback_loop_traceability.map(|state| state.as_str()),
     ]
     .into_iter()
     .flatten()
@@ -178,6 +180,7 @@ fn goal_loop_suffix_width(goal: &crate::todo::TodoGoal) -> u16 {
         goal.closed_feedback_loop.map(|state| state.as_str()),
         goal.feedback_loop_relevance.map(|state| state.as_str()),
         goal.feedback_loop_coverage.map(|state| state.as_str()),
+        goal.feedback_loop_traceability.map(|state| state.as_str()),
     ];
     let values: Vec<&str> = states.into_iter().flatten().collect();
     if values.is_empty() {

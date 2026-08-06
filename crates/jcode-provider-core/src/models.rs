@@ -35,8 +35,13 @@ pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 /// account"). Keep them in their own list so the OAuth-scoped Codex catalog
 /// can never hide them from the picker and so route building can mark them
 /// API-key-only.
-pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] =
-    &["gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro", "gpt-5-pro"];
+pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] = &[
+    "gpt-5.6-pro",
+    "gpt-5.5-pro",
+    "gpt-5.4-pro",
+    "gpt-5.2-pro",
+    "gpt-5-pro",
+];
 
 /// True when `model` is a GPT Pro model that only works with an OpenAI
 /// platform API key (never ChatGPT/Codex OAuth).
@@ -53,10 +58,14 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
+    "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
     // the same upstream slug.
     CHATGPT_WEB_MODEL,
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5-pro",
     "gpt-5.5",
     "gpt-5.4",
@@ -80,6 +89,27 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     "gpt-5-nano",
     "gpt-5",
 ];
+
+#[cfg(test)]
+mod gpt_5_6_catalog_tests {
+    use super::*;
+
+    #[test]
+    fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-pro",
+            "gpt-5.6-pro[web]",
+            "gpt-5.6",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+        ] {
+            assert!(ALL_OPENAI_MODELS.contains(&model), "missing {model}");
+        }
+        assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
+        assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+    }
+}
 
 /// Default context window size when model-specific data isn't known.
 pub const DEFAULT_CONTEXT_LIMIT: usize = 200_000;
@@ -353,6 +383,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);
+    }
+
+    // --- Meta Muse Spark family: 1 Mi tokens ---
+    if m.contains("muse-spark") {
+        return Some(1_048_576);
     }
 
     // --- Alibaba GTE-Qwen2 retrieval models: 32K context ---

@@ -28,7 +28,14 @@ python scripts/test_benchmark_discovery_rate.py
 ```
 
 Reports land in `target/discovery-rate/latest.json`; use `--output` to keep
-named baselines.
+named baselines. Every non-list report fingerprints the exact executable before
+starting any trial. `config.executable` records the original command, resolved
+path, `--version` output, embedded commit, SHA-256, and size. The runner pins the
+resolved path for every trial so a symlink update cannot make later trials use a
+different binary than the one named by the artifact.
+This provenance contract is report schema version 2. Historical version 1
+artifacts predate executable fingerprinting and must not be used as evidence for
+which binary produced a result.
 
 ## The suite
 

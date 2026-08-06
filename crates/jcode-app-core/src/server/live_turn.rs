@@ -95,6 +95,7 @@ pub(super) async fn spawn_tracked_live_turn(
     agent: Arc<Mutex<Agent>>,
     message: String,
     system_reminder: Option<String>,
+    display_role: Option<crate::session::StoredDisplayRole>,
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) {
@@ -117,14 +118,27 @@ pub(super) async fn spawn_tracked_live_turn(
             let agent_guard = agent.lock().await;
             agent_guard.message_count()
         };
-        let result = process_message_streaming_mpsc(
-            Arc::clone(&agent),
-            &message,
-            vec![],
-            system_reminder,
-            event_tx.clone(),
-        )
-        .await;
+        let result = if let Some(display_role) = display_role {
+            let mut agent = agent.lock().await;
+            agent
+                .run_once_streaming_mpsc_with_display_role(
+                    &message,
+                    vec![],
+                    system_reminder,
+                    event_tx.clone(),
+                    Some(display_role),
+                )
+                .await
+        } else {
+            process_message_streaming_mpsc(
+                Arc::clone(&agent),
+                &message,
+                vec![],
+                system_reminder,
+                event_tx.clone(),
+            )
+            .await
+        };
         match result {
             Ok(()) => {
                 let completion_report = {
@@ -189,6 +203,30 @@ pub(super) async fn run_live_turn_if_idle(
         agent,
         message.to_string(),
         system_reminder,
+        None,
+        detail,
+        swarm,
+    )
+    .await;
+    true
+}
+
+pub(super) async fn run_live_system_turn_if_idle(
+    session_id: &str,
+    message: &str,
+    sessions: &SessionAgents,
+    swarm: LiveTurnSwarmContext,
+) -> bool {
+    let Some(agent) = idle_live_agent(session_id, sessions, &swarm.members).await else {
+        return false;
+    };
+    let detail = Some(truncate_detail(message, 120)).filter(|detail| !detail.is_empty());
+    spawn_tracked_live_turn(
+        session_id,
+        agent,
+        message.to_string(),
+        None,
+        Some(crate::session::StoredDisplayRole::System),
         detail,
         swarm,
     )

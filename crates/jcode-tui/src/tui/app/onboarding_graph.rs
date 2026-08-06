@@ -21,6 +21,11 @@
 //! authored edges to prove the description stays faithful. That gives the
 //! anti-drift guarantee without a risky rewrite of the running flow.
 
+// Most of this descriptive graph is exercised by the exhaustive tests below.
+// The live flow only needs the node vocabulary, so production builds naturally
+// leave the invariant-checking helpers unused.
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A node in the onboarding graph.

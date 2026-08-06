@@ -189,7 +189,7 @@ fn onboarding_sim_includes_telemetry_settings_screen() {
 }
 
 #[test]
-fn onboarding_sim_summary_arrows_preview_the_three_pills() {
+fn onboarding_sim_summary_arrows_preview_all_pills() {
     use crate::tui::app::onboarding_flow::SummaryPill;
     let mut app = create_test_app();
     app.start_onboarding_simulator();
@@ -202,11 +202,13 @@ fn onboarding_sim_summary_arrows_preview_the_three_pills() {
         }) => review.summary_pill,
         other => panic!("expected import summary, got {other:?}"),
     };
-    assert_eq!(pill(&app), SummaryPill::Continue);
+    assert_eq!(pill(&app), SummaryPill::Subscription);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert_eq!(pill(&app), SummaryPill::ImportLess);
     app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
     assert_eq!(pill(&app), SummaryPill::Telemetry);
+    app.handle_key(KeyCode::Right, KeyModifiers::NONE).unwrap();
+    assert_eq!(pill(&app), SummaryPill::Continue);
     app.handle_key(KeyCode::Left, KeyModifiers::NONE).unwrap();
-    assert_eq!(pill(&app), SummaryPill::ImportLess);
+    assert_eq!(pill(&app), SummaryPill::Telemetry);
 }
