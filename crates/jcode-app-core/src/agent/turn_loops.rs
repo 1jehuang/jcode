@@ -13,6 +13,15 @@ impl Agent {
     /// task half-done. The counter is per turn-loop, so a genuinely finished
     /// agent still exits promptly.
     pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
+    const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
+
+    fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
+        if tool_count == 1 && !used_batch {
+            current.saturating_add(1)
+        } else {
+            0
+        }
+    }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
@@ -32,6 +41,8 @@ impl Agent {
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
         let mut fable_guardrail_reconsiderations = 0u32;
+        let mut sequential_single_tool_rounds = 0u32;
+        let mut batch_nudge_pending = false;
 
         loop {
             // Do not start another provider request once a cancel has been
@@ -97,6 +108,13 @@ impl Agent {
                 ));
                 let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
                 messages_with_memory.push(memory_msg);
+            }
+            if batch_nudge_pending && tools.iter().any(|tool| tool.name == "batch") {
+                messages_with_memory.push(Message::user(
+                    "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>",
+                ));
+                batch_nudge_pending = false;
+                sequential_single_tool_rounds = 0;
             }
 
             logging::info(&format!(
@@ -877,6 +895,16 @@ impl Agent {
                 logging::info("Provider handles tools internally - executing native tools locally");
             }
 
+            let used_batch = tool_calls.iter().any(|tc| tc.name == "batch");
+            sequential_single_tool_rounds = Self::update_sequential_tool_rounds(
+                sequential_single_tool_rounds,
+                tool_calls.len(),
+                used_batch,
+            );
+            if sequential_single_tool_rounds >= Self::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE {
+                batch_nudge_pending = true;
+            }
+
             // Execute tools and add results
             let mut tool_results_dirty = false;
             for tc in tool_calls {
@@ -1196,5 +1224,22 @@ mod tests {
         let messages = vec![user_text("hello")];
 
         assert!(!Agent::messages_end_with_tool_result(&messages));
+    }
+
+    #[test]
+    fn sequential_tool_rounds_trigger_after_three_single_calls() {
+        let mut rounds = 0;
+        for _ in 0..3 {
+            rounds = Agent::update_sequential_tool_rounds(rounds, 1, false);
+        }
+
+        assert_eq!(rounds, Agent::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE);
+    }
+
+    #[test]
+    fn parallel_or_batch_calls_reset_sequential_tool_rounds() {
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 2, false), 0);
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 1, true), 0);
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 0, false), 0);
     }
 }
