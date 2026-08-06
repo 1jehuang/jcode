@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
 /// it is intentionally private so the model reassesses from evidence rather
 /// than targeting a timer or evaluator boundary.
-pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop quality, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
+pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop relevance and coverage, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
 
 /// Private policy. Do not include this duration in model-facing schemas or
 /// continuation text.
@@ -20,9 +20,9 @@ struct TodoReviewState {
 }
 
 pub use jcode_task_types::{
-    Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopState, IntentUnderstanding,
-    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
-    TodoPlanField,
+    Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
+    FeedbackLoopRelevance, FeedbackLoopState, IntentUnderstanding, IterationMaturity, TodoGoal,
+    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
 };
 
 /// Whether the plan's intent understanding is solid enough to work against.
@@ -33,6 +33,37 @@ pub fn intent_understanding_passes(state: Option<IntentUnderstanding>) -> bool {
 /// Whether a goal's feedback loop reports back on the requirements by itself.
 pub fn feedback_loop_passes(state: Option<FeedbackLoopState>) -> bool {
     state.is_some_and(|state| state >= FeedbackLoopState::Closed)
+}
+
+/// Minimum directness expected from a completion check. More involved goals
+/// need checks aligned with acceptance behavior rather than a representative
+/// proxy alone.
+pub fn required_feedback_loop_relevance(difficulty: Option<Difficulty>) -> FeedbackLoopRelevance {
+    if difficulty.is_some_and(|difficulty| difficulty >= Difficulty::Involved) {
+        FeedbackLoopRelevance::AcceptanceAligned
+    } else {
+        FeedbackLoopRelevance::Representative
+    }
+}
+
+/// Minimum breadth expected from a completion check. More involved goals must
+/// include edge cases and integration boundaries as well as their main paths.
+pub fn required_feedback_loop_coverage(difficulty: Option<Difficulty>) -> FeedbackLoopCoverage {
+    if difficulty.is_some_and(|difficulty| difficulty >= Difficulty::Involved) {
+        FeedbackLoopCoverage::EdgeAndIntegrationPaths
+    } else {
+        FeedbackLoopCoverage::MainPaths
+    }
+}
+
+pub fn feedback_loop_relevance_passes(goal: &TodoGoal) -> bool {
+    goal.feedback_loop_relevance
+        .is_some_and(|state| state >= required_feedback_loop_relevance(goal.difficulty))
+}
+
+pub fn feedback_loop_coverage_passes(goal: &TodoGoal) -> bool {
+    goal.feedback_loop_coverage
+        .is_some_and(|state| state >= required_feedback_loop_coverage(goal.difficulty))
 }
 
 /// Whether a completed todo carries enough evidence behind its completion.
@@ -47,7 +78,8 @@ pub fn required_delivery_state(_difficulty: Option<Difficulty>) -> DeliveryState
     DeliveryState::WorkflowValidated
 }
 
-/// Whether a goal's recorded delivery clears its difficulty-calibrated bar.
+/// Whether a completed goal's delivery and validation clear their
+/// difficulty-calibrated bars.
 pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
     let delivery_passes = goal
         .delivery_state
@@ -69,7 +101,12 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
         .stopping_evidence
         .as_deref()
         .is_some_and(|evidence| !evidence.trim().is_empty());
-    delivery_passes && autonomy_passes && iteration_passes && stopping_evidence_passes
+    delivery_passes
+        && autonomy_passes
+        && iteration_passes
+        && stopping_evidence_passes
+        && feedback_loop_relevance_passes(goal)
+        && feedback_loop_coverage_passes(goal)
 }
 
 /// Pre-plan-intent-rewrite alignment continuation. Kept only so persisted
@@ -144,6 +181,18 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
                 label
             ));
         }
+        if !feedback_loop_relevance_passes(goal) {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": validate the result through its public interfaces and acceptance behavior, including its integration boundaries.",
+                label
+            ));
+        }
+        if !feedback_loop_coverage_passes(goal) {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": exercise the main workflows, edge cases, packaging, and likely failure modes.",
+                label
+            ));
+        }
         if matches!(
             goal.iteration_maturity,
             Some(
@@ -193,6 +242,8 @@ pub const SEVERE_INTENT_MISUNDERSTANDING: IntentUnderstanding = IntentUnderstand
 pub enum GateObservationKind {
     IntentUnderstanding,
     ClosedFeedbackLoop,
+    FeedbackLoopRelevance,
+    FeedbackLoopCoverage,
 }
 
 /// A point during the turn that would previously have interrupted the model
@@ -245,6 +296,14 @@ fn observation_score_later_cleared(
                 .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
                 .and_then(|goal| goal.closed_feedback_loop),
         ),
+        GateObservationKind::FeedbackLoopRelevance => goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
+            .is_some_and(feedback_loop_relevance_passes),
+        GateObservationKind::FeedbackLoopCoverage => goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
+            .is_some_and(feedback_loop_coverage_passes),
     }
 }
 
@@ -308,6 +367,46 @@ pub fn build_gate_digest(
                     .unwrap_or_default();
                 format!(
                     "the goal{} was worked on before its feedback loop was closed, so the loop you ended up with never ran over that earlier work. Run it over the whole result now and report what it actually reported back.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopRelevance, false) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the public interfaces and integration boundaries, and report the behavior a user or downstream system would observe.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopRelevance, true) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the representative checks{} were identified only after earlier work was done. Run them over the whole result now, including public interfaces and integration boundaries.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopCoverage, false) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the checks{} covered too narrow a path. Exercise the main workflows, edge cases, packaging, integration paths, and likely failure modes that could invalidate the result.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopCoverage, true) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the broader checks{} were identified only after earlier work was done. Run them over the whole result now, including edge cases, packaging, integration paths, and likely failure modes.",
                     label
                 )
             }
@@ -911,6 +1010,40 @@ mod tests {
     }
 
     #[test]
+    fn digest_directs_weak_relevance_and_coverage_to_real_failure_surfaces() {
+        let observations = vec![
+            GateObservation {
+                kind: GateObservationKind::FeedbackLoopRelevance,
+                group: Some("release".to_string()),
+                state: Some("indirect".to_string()),
+            },
+            GateObservation {
+                kind: GateObservationKind::FeedbackLoopCoverage,
+                group: Some("release".to_string()),
+                state: Some("narrow".to_string()),
+            },
+        ];
+        let digest = build_gate_digest(&observations, &TodoPlan::default(), &[])
+            .expect("weak feedback-loop dimensions should be surfaced");
+
+        for guidance in [
+            "public interfaces",
+            "integration boundaries",
+            "main workflows",
+            "edge cases",
+            "packaging",
+            "likely failure modes",
+        ] {
+            assert!(
+                digest.contains(guidance),
+                "digest omitted {guidance}: {digest}"
+            );
+        }
+        assert!(!digest.to_ascii_lowercase().contains("threshold"));
+        assert!(!digest.contains("representative+main_paths"));
+    }
+
+    #[test]
     fn digest_reports_a_point_that_never_resolved() {
         let observations = vec![intent_observation(Some(IntentUnderstanding::Partial))];
         let unresolved = TodoPlan {
@@ -1387,6 +1520,8 @@ mod tests {
             delivery_state: delivery,
             autonomy: Some(Autonomy::NecessaryFollowthrough),
             iteration_maturity: Some(IterationMaturity::OutcomeReached),
+            feedback_loop_relevance: Some(FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(FeedbackLoopCoverage::MainPaths),
             ..Default::default()
         }
     }
@@ -1417,8 +1552,8 @@ mod tests {
         ));
     }
 
-    /// Difficulty never raises the delivery bar by itself. Operational outcome
-    /// delivery comes from the request, not from how hard implementation was.
+    /// Difficulty never raises the delivery-state bar by itself. Operational
+    /// outcome delivery comes from the request, not implementation difficulty.
     #[test]
     fn difficulty_is_descriptive_and_never_raises_the_delivery_bar() {
         let previous = vec![todo("work", "in_progress", Some("ship"))];
@@ -1426,6 +1561,8 @@ mod tests {
 
         let mut hard = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
         hard.difficulty = Some(Difficulty::Hard);
+        hard.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
+        hard.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
         assert!(newly_completed_groups_have_sufficient_delivery(
             &previous,
             &completed,
@@ -1461,11 +1598,37 @@ mod tests {
     }
 
     #[test]
+    fn feedback_loop_completion_bar_scales_at_involved_difficulty() {
+        let mut ordinary = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+        assert!(delivery_state_passes(&ordinary));
+        ordinary.feedback_loop_relevance = Some(FeedbackLoopRelevance::Indirect);
+        assert!(!delivery_state_passes(&ordinary));
+        ordinary.feedback_loop_relevance = Some(FeedbackLoopRelevance::Representative);
+        ordinary.feedback_loop_coverage = Some(FeedbackLoopCoverage::Narrow);
+        assert!(!delivery_state_passes(&ordinary));
+
+        let mut involved = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+        involved.difficulty = Some(Difficulty::Involved);
+        assert!(!delivery_state_passes(&involved));
+        involved.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
+        involved.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
+        assert!(delivery_state_passes(&involved));
+
+        involved.feedback_loop_relevance = None;
+        assert!(!delivery_state_passes(&involved));
+        involved.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
+        involved.feedback_loop_coverage = None;
+        assert!(!delivery_state_passes(&involved));
+    }
+
+    #[test]
     fn research_completion_requires_stopping_evidence() {
         let previous = vec![todo("work", "in_progress", Some("ship"))];
         let completed = vec![todo("work", "completed", Some("ship"))];
         let mut goal = delivery_goal(Some("ship"), Some(DeliveryState::WorkflowValidated));
         goal.difficulty = Some(Difficulty::Research);
+        goal.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
+        goal.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
         goal.iteration_maturity = Some(IterationMaturity::PlateauConfirmed);
 
         assert!(!newly_completed_groups_have_sufficient_delivery(
