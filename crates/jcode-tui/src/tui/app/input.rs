@@ -1513,7 +1513,14 @@ impl App {
         if self.todo_gate_digest_delivered {
             return false;
         }
-        let session_id = self.session_id().to_string();
+        // In a remote client `self.session` is the local wrapper session, while
+        // todo tools execute against the remote session. Reading the wrapper's
+        // files makes every persisted remote assessment appear to be missing.
+        let session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or_else(|| self.session_id())
+            .to_string();
         let observations = crate::todo::load_gate_observations(&session_id).unwrap_or_default();
         if observations.is_empty() {
             return false;
@@ -1552,8 +1559,13 @@ impl App {
         }
 
         let todos = super::commands::poke_todos(self);
+        let todo_session_id = self
+            .remote_session_id
+            .as_deref()
+            .unwrap_or(&self.session.id)
+            .to_string();
         if !todos.is_empty()
-            && crate::todo::take_long_session_review_if_due(&self.session.id).unwrap_or(false)
+            && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
             self.push_display_message(DisplayMessage::system(
                 "🔍 Rechecking the plan and assessments after extended work...",
@@ -1591,7 +1603,7 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
-            let goals = crate::todo::load_goals(&self.session.id).unwrap_or_default();
+            let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =

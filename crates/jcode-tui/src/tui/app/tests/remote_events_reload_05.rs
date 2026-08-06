@@ -258,6 +258,47 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
 }
 
 #[test]
+fn remote_ownership_gate_reads_the_remote_goal_assessment() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.is_remote = true;
+        let remote_session_id = format!("remote-ownership-{}", std::process::id());
+        app.remote_session_id = Some(remote_session_id.clone());
+
+        crate::todo::save_todos(
+            &remote_session_id,
+            &[crate::todo::TodoItem {
+                id: "todo-1".to_string(),
+                content: "Ship the complete workflow".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                group: Some("release".to_string()),
+                confidence: Some(crate::todo::ConfidenceState::Verified),
+                completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+                confidence_history: vec![crate::todo::ConfidenceState::Verified],
+                ..Default::default()
+            }],
+        )
+        .expect("save remote completed todo");
+        crate::todo::save_goals(
+            &remote_session_id,
+            &[crate::todo::TodoGoal {
+                group: Some("release".to_string()),
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                ..Default::default()
+            }],
+        )
+        .expect("save remote goal assessment");
+
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages.is_empty());
+    });
+}
+
+#[test]
 fn test_save_input_for_reload_removes_stale_file_when_state_is_empty() {
     let mut app = create_test_app();
     let session_id = format!("test-391-stale-{}", std::process::id());
