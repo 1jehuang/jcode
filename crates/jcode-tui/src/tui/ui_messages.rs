@@ -3595,7 +3595,7 @@ fn render_discovery_card(
                 .input
                 .get("tool")
                 .and_then(|value| value.as_str())
-                .unwrap_or("selected tool");
+                .unwrap_or("tool");
             push_compact_discovery_header(
                 &mut content,
                 vec![

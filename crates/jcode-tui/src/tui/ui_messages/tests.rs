@@ -2377,6 +2377,26 @@ fn render_tool_message_shows_selected_discovery_setup() {
 }
 
 #[test]
+fn render_tool_message_does_not_duplicate_selected_when_tool_is_missing() {
+    let msg = discovery_message(
+        "Selection recorded.",
+        serde_json::json!({
+            "action": "select",
+            "category": "web-search",
+            "query": "find current public estimates"
+        }),
+    );
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plain.contains("selected tool"), "{plain}");
+    assert!(!plain.contains("selected selected tool"), "{plain}");
+}
+
+#[test]
 fn render_tool_message_marks_off_catalog_selection_without_fake_details() {
     let msg = discovery_message(
         "Selected off-catalog product 'firecrawl' for 'web-data'.\n\nSelection recorded as demand data. Jcode does not list or partner with this product, so no provider information, recommendation, or setup instructions are provided.",
