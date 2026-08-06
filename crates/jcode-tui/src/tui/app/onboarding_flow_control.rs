@@ -550,6 +550,9 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
+        // Set when the user chooses the hosted Jcode subscription instead of
+        // importing one of the detected third-party logins.
+        let mut start_subscription = false;
         // Set when the user committed a telemetry level, so we persist it
         // outside the review borrow.
         let mut telemetry_choice = None;
@@ -599,6 +602,7 @@ impl App {
                     KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
                     KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
                         SummaryPill::Continue => finished = true,
+                        SummaryPill::Subscription => start_subscription = true,
                         SummaryPill::ImportLess => review.enter_choose_mode(),
                         SummaryPill::Telemetry => review.open_telemetry(),
                     },
@@ -629,6 +633,15 @@ impl App {
             level.persist();
             self.onboarding_telemetry_choice_made = true;
             self.set_status_notice(level.status_label().to_string());
+            return true;
+        }
+        if start_subscription {
+            self.onboarding_import_error = None;
+            if let Some(provider) = crate::provider_catalog::resolve_login_provider("jcode") {
+                self.start_login_provider(provider);
+            } else {
+                self.set_status_notice("Jcode subscription login is unavailable".to_string());
+            }
             return true;
         }
         if finished {

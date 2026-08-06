@@ -149,11 +149,13 @@ pub(crate) struct ImportReview {
     pub(crate) shown_at: Instant,
 }
 
-/// The three actions on the import summary screen, left to right.
+/// The actions on the import summary screen, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SummaryPill {
     /// Import every detected login and move on (default).
     Continue,
+    /// Skip importing and sign in with a Jcode subscription instead.
+    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.
@@ -161,8 +163,9 @@ pub(crate) enum SummaryPill {
 }
 
 impl SummaryPill {
-    const ORDER: [SummaryPill; 3] = [
+    const ORDER: [SummaryPill; 4] = [
         SummaryPill::Continue,
+        SummaryPill::Subscription,
         SummaryPill::ImportLess,
         SummaryPill::Telemetry,
     ];

@@ -135,16 +135,24 @@ fn continue_pill_line(focused: bool, align: Alignment) -> Line<'static> {
     Line::from(lozenge_pill_spans("Continue", focused)).alignment(align)
 }
 
-/// The summary-screen action row: "Continue" (imports everything, preselected)
-/// next to "Import less" (opens the per-login checkbox list) and "Telemetry
-/// settings" (opens the telemetry sub-page).
+/// The summary-screen action row. A new user can import the logins we found or
+/// use a Jcode subscription, with secondary controls for a selective import and
+/// telemetry settings.
 fn import_summary_pills_line(
     focused: crate::tui::ImportSummaryPill,
     align: Alignment,
 ) -> Line<'static> {
     use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans("Continue", focused == Pill::Continue));
+    spans.extend(lozenge_pill_spans(
+        "Import",
+        focused == Pill::Continue,
+    ));
+    spans.push(Span::raw("   "));
+    spans.extend(lozenge_pill_spans(
+        "Use Jcode subscription",
+        focused == Pill::Subscription,
+    ));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
         "Import less",
@@ -152,7 +160,7 @@ fn import_summary_pills_line(
     ));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
-        "Telemetry settings",
+        "Telemetry",
         focused == Pill::Telemetry,
     ));
     Line::from(spans).alignment(align)
@@ -521,7 +529,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.push(
                         Line::from(Span::styled(
                             format!(
-                                "We found {found} existing login{}:",
+                                "Choose how to get started. We found {found} existing login{}:",
                                 if found == 1 { "" } else { "s" }
                             ),
                             Style::default()
