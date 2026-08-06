@@ -86,7 +86,19 @@ fn is_internal_system_reminder_message(message: &StoredMessage) -> bool {
 }
 
 fn is_visible_conversation_message(message: &StoredMessage) -> bool {
-    message.display_role.is_none() && !is_internal_system_reminder_message(message)
+    message.display_role.is_none()
+        && !is_internal_system_reminder_message(message)
+        && !is_scheduled_task_message(message)
+}
+
+/// Recognize scheduler prompts persisted before they received an explicit
+/// system display role. This keeps old sessions from treating them as user
+/// prompts after resume.
+pub fn is_scheduled_task_message(message: &StoredMessage) -> bool {
+    message.role == Role::User
+        && message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text, .. } if text.trim_start().starts_with("[Scheduled task]\n"))
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
