@@ -42,6 +42,20 @@ class ExecutableIdentityTests(unittest.TestCase):
             )
             self.assertEqual(len(content.encode()), identity["size_bytes"])
 
+    def test_extracts_base_commit_from_dirty_build_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "dirty-jcode"
+            executable.write_text(
+                "#!/bin/sh\necho 'jcode v0.70.29-dev (bd64f8f82-dirty-d7c46d086c9f)'\n",
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
+
+            identity = rate.executable_identity(str(executable))
+
+            self.assertEqual("bd64f8f82", identity["commit"])
+            self.assertIn("-dirty-d7c46d086c9f", identity["version"])
+
     def test_rejects_missing_executable(self) -> None:
         with self.assertRaises(rate.BenchmarkError):
             rate.executable_identity("/definitely/missing/jcode")
