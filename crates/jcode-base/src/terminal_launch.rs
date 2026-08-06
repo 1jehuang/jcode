@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 pub use jcode_terminal_launch::{
     SpawnAttempt, TerminalCommand, apply_client_terminal_env, build_hook_spawn_command,
     detected_resume_terminal, expand_home, parse_hook_command, resume_terminal_candidates,
@@ -58,7 +58,26 @@ pub fn try_spawn_via_configured_hook(command: &TerminalCommand, cwd: &Path) -> b
 
 fn spawn_via_hook(hook: &str, command: &TerminalCommand, cwd: &Path) -> Result<()> {
     let mut cmd = build_hook_spawn_command(hook, command, cwd)?;
-    crate::platform::spawn_detached(&mut cmd)?;
+    let mut child = cmd.spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                bail!("hook exited with {status}");
+            }
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Long-running hooks may intentionally own their terminal process.
+            // Reap them asynchronously while treating survival past the startup
+            // window as successful launch admission.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     crate::logging::info(&format!(
         "Spawn hook '{hook}' launched terminal spawn (kind={:?} session={:?})",
         command.kind, command.session_id
@@ -115,5 +134,27 @@ mod tests {
             recorded, "swarm-agent|ses_hooked|swarm-7|/usr/local/bin/jcode --resume ses_hooked",
             "hook should receive metadata env and the jcode command as argv"
         );
+    }
+
+    #[test]
+    fn spawn_via_hook_reports_immediate_nonzero_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let hook_path = temp.path().join("reject-outside-tmux.sh");
+        std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("write hook");
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod hook");
+
+        let command = TerminalCommand::new(
+            "/usr/local/bin/jcode",
+            vec!["--resume".to_string(), "ses_fallback".to_string()],
+        )
+        .kind("swarm-agent")
+        .session_id("ses_fallback");
+
+        let error = spawn_via_hook(&hook_path.to_string_lossy(), &command, temp.path())
+            .expect_err("non-zero hook exit must trigger built-in/headless fallback");
+        assert!(error.to_string().contains("hook exited with"));
     }
 }
