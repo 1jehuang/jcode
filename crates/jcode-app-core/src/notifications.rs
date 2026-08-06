@@ -452,7 +452,7 @@ pub fn send_macos_turn_notification(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (title, subtitle, body, sound);
-        return false;
+        false
     }
 
     #[cfg(target_os = "macos")]
