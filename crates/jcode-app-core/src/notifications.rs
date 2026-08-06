@@ -284,6 +284,39 @@ pub fn send_desktop_notification(title: &str, body: &str) {
     send_desktop_notification_rich(title, None, body, None);
 }
 
+/// Bundle identifier of the terminal app hosting this jcode process, if it can
+/// be identified. Notifications posted via `tell application id "..."` are
+/// attributed to that app, so clicking the banner activates the terminal
+/// window with the session instead of Script Editor.
+#[cfg(target_os = "macos")]
+fn macos_host_terminal_bundle_id() -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if let Some(explicit) = std::env::var("__CFBundleIdentifier")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty() && v != "com.apple.Terminal.osascript")
+            {
+                return Some(explicit);
+            }
+            let terminal = jcode_base::terminal_launch::detected_resume_terminal()?;
+            let bundle = match terminal.as_str() {
+                "handterm" => "com.jcode.handterm",
+                "ghostty" => "com.mitchellh.ghostty",
+                "kitty" => "net.kovidgoyal.kitty",
+                "wezterm" => "com.github.wez.wezterm",
+                "alacritty" => "org.alacritty",
+                "iterm2" => "com.googlecode.iterm2",
+                "terminal" => "com.apple.Terminal",
+                _ => return None,
+            };
+            Some(bundle.to_string())
+        })
+        .clone()
+}
+
 /// Send a local desktop notification with optional macOS subtitle and sound.
 ///
 /// `subtitle` renders as a second bold line on macOS (ignored elsewhere).
@@ -320,6 +353,16 @@ pub fn send_desktop_notification_rich(
         }
         if let Some(sound) = sound.filter(|s| !s.trim().is_empty()) {
             script.push_str(&format!(" sound name \"{}\"", applescript_escape(sound)));
+        }
+        // Attribute the notification to the host terminal app so clicking the
+        // banner activates that terminal (where the jcode session lives)
+        // instead of Script Editor, which owns bare `osascript` notifications.
+        if let Some(bundle_id) = macos_host_terminal_bundle_id() {
+            script = format!(
+                "tell application id \"{}\" to {}",
+                applescript_escape(&bundle_id),
+                script
+            );
         }
         let _ = std::process::Command::new("osascript")
             .arg("-e")

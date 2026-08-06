@@ -321,11 +321,24 @@ fn send_desktop_notification(title: &str, body: &str) {
         fn escape(value: &str) -> String {
             value.replace('\\', "\\\\").replace('"', "\\\"")
         }
-        let script = format!(
+        let mut script = format!(
             "display notification \"{}\" with title \"{}\"",
             escape(body),
             escape(title)
         );
+        // Attribute to the host terminal app so clicking the banner activates
+        // the terminal rather than Script Editor.
+        if let Some(bundle_id) = std::env::var("__CFBundleIdentifier")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "com.apple.Terminal.osascript")
+        {
+            script = format!(
+                "tell application id \"{}\" to {}",
+                escape(&bundle_id),
+                script
+            );
+        }
         let _ = std::process::Command::new("osascript")
             .args(["-e", &script])
             .stdin(std::process::Stdio::null())
