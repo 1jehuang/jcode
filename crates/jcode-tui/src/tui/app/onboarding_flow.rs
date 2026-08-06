@@ -152,9 +152,9 @@ pub(crate) struct ImportReview {
 /// The actions on the import summary screen, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SummaryPill {
-    /// Import every detected login and move on (default).
+    /// Import every detected login and move on.
     Continue,
-    /// Skip importing and sign in with a Jcode subscription instead.
+    /// Skip importing and sign in with a Jcode subscription instead (default).
     Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
@@ -188,7 +188,7 @@ impl SummaryPill {
 
 impl ImportReview {
     /// Create a review for the given candidates with every login pre-checked,
-    /// starting on the summary screen with "Continue" preselected.
+    /// starting on the summary screen with the Jcode subscription preselected.
     /// Returns `None` if there are no candidates.
     pub(crate) fn new(
         candidates: Vec<crate::external_auth::ExternalAuthReviewCandidate>,
@@ -201,9 +201,9 @@ impl ImportReview {
             candidates,
             checked,
             cursor: 0,
-            continue_focused: true,
+            continue_focused: false,
             choosing: false,
-            summary_pill: SummaryPill::Continue,
+            summary_pill: SummaryPill::Subscription,
             telemetry: None,
             shown_at: Instant::now(),
         })

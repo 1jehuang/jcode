@@ -1394,9 +1394,10 @@ fn tier8_metrics() -> Tier8Metrics {
         let mut app = create_test_app();
         app.onboarding_flow = None;
         app.begin_onboarding_flow_at_login();
-        let review =
+        let mut review =
             ImportReview::new(vec![ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json")])
                 .unwrap();
+        review.enter_choose_mode();
         if let Some(flow) = app.onboarding_flow.as_mut() {
             flow.phase = OnboardingPhase::Login { import: Some(review) };
         }
