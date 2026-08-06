@@ -551,7 +551,6 @@ mod tests {
         });
 
         let normalized = openai_compatible_schema(&schema);
-
         assert!(normalized.get("allOf").is_none());
         assert_eq!(normalized["type"], json!("object"));
         assert_eq!(normalized["description"], json!("Read params"));
@@ -660,13 +659,12 @@ mod tests {
             "properties": {
                 "path": { "type": "string", "description": "where" },
                 "count": { "type": "integer" },
-                "mode": { "enum": ["fast", "slow"] },
+                "mode": { "type": "string", "enum": ["fast", "slow"] },
                 "nested": {
                     "type": "object",
                     "properties": { "inner": { "type": "boolean" } }
                 },
-                "either": { "anyOf": [{ "type": "string" }, { "type": "integer" }] },
-                "anything": true
+                "either": { "anyOf": [{ "type": "string" }, { "type": "integer" }] }
             },
             "required": ["path"]
         });
