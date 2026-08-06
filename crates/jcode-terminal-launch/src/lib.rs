@@ -158,8 +158,10 @@ pub fn apply_client_terminal_env(cmd: &mut Command, env: &[(String, String)]) {
         cmd.env_remove(format!("JCODE_CLIENT_{key}"));
     }
     for (key, value) in env {
-        cmd.env(key, value);
-        cmd.env(format!("JCODE_CLIENT_{key}"), value);
+        if CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()) {
+            cmd.env(key, value);
+            cmd.env(format!("JCODE_CLIENT_{key}"), value);
+        }
     }
 }
 
@@ -848,7 +850,10 @@ mod tests {
         command.env("TMUX_PANE", "stale-tmux");
         apply_client_terminal_env(
             &mut command,
-            &[("HERDR_PANE_ID".to_string(), "client-pane".to_string())],
+            &[
+                ("HERDR_PANE_ID".to_string(), "client-pane".to_string()),
+                ("UNTRUSTED_CLIENT_VAR".to_string(), "ignored".to_string()),
+            ],
         );
         let env = command
             .get_envs()
@@ -865,6 +870,8 @@ mod tests {
             Some("client-pane")
         );
         assert_eq!(env["TMUX_PANE"], None);
+        assert!(!env.contains_key("UNTRUSTED_CLIENT_VAR"));
+        assert!(!env.contains_key("JCODE_CLIENT_UNTRUSTED_CLIENT_VAR"));
     }
 
     #[test]

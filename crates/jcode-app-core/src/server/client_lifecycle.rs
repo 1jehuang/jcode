@@ -537,7 +537,7 @@ pub(super) async fn handle_client(
                 last_seen: connected_at,
                 is_processing: false,
                 current_tool_name: None,
-                terminal_env: Vec::new(),
+                terminal_env: active_terminal_env.clone(),
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -1420,21 +1420,18 @@ pub(super) async fn handle_client(
                     });
                     continue;
                 }
+                // Every Subscribe carries an authoritative snapshot. An empty
+                // snapshot must clear terminal vars inherited by the daemon
+                // rather than retaining a prior pane's values.
+                active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
-                        // Record the client's terminal env so spawn/focus hooks
-                        // target the client's terminal, not the server's stale
-                        // startup env (#405). Only overwrite when the client sent
-                        // something, so reconnects without env don't clobber it.
-                        if !terminal_env.is_empty() {
-                            info.terminal_env = terminal_env.clone();
-                        }
+                        info.terminal_env = active_terminal_env.clone();
                     }
                 }
-                active_terminal_env = terminal_env.clone();
                 if let Some(target_session_id) = target_session_id {
                     if crate::session::session_exists(&target_session_id) {
                         let pre_resume_session_id = client_session_id.clone();

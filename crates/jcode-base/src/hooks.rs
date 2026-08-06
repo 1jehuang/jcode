@@ -24,6 +24,9 @@
 use std::path::PathBuf;
 
 tokio::task_local! {
+    /// Terminal identity for the client whose request is currently executing.
+    /// Task-local storage keeps concurrent clients isolated without mutating
+    /// the daemon's process-wide environment.
     static CLIENT_TERMINAL_ENV: Vec<(String, String)>;
 }
 
@@ -471,6 +474,60 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pre_tool_gate_runs_every_configured_command_and_preserves_first_block() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first_marker = temp.path().join("first-ran.txt");
+        let final_marker = temp.path().join("final-ran.txt");
+        let allow = write_executable_script(
+            temp.path(),
+            "first-allow.sh",
+            &format!(
+                "#!/bin/sh\nprintf ran > {}\nexit 0\n",
+                crate::terminal_launch::sh_escape(&first_marker.to_string_lossy())
+            ),
+        );
+        let block = write_executable_script(
+            temp.path(),
+            "second-block.sh",
+            "#!/bin/sh\necho 'blocked by second policy' >&2\nexit 2\n",
+        );
+        let final_allow = write_executable_script(
+            temp.path(),
+            "third-allow.sh",
+            &format!(
+                "#!/bin/sh\nprintf ran > {}\nexit 0\n",
+                crate::terminal_launch::sh_escape(&final_marker.to_string_lossy())
+            ),
+        );
+        let commands = serde_json::to_string(&vec![
+            allow.to_string_lossy().into_owned(),
+            block.to_string_lossy().into_owned(),
+            final_allow.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize hook command array");
+        let _env = gate_test_config(&commands, 5000);
+
+        let decision = run_pre_tool_gate("ses_multi", None, "bash", "{}").await;
+
+        assert_eq!(
+            decision,
+            GateDecision::Block {
+                reason: "blocked by second policy".to_string()
+            }
+        );
+        assert_eq!(
+            std::fs::read_to_string(first_marker).expect("first policy should execute"),
+            "ran"
+        );
+        assert_eq!(
+            std::fs::read_to_string(final_marker).expect("later policies should still execute"),
+            "ran"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pre_tool_gate_fails_open_on_timeout_and_odd_exits() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -634,5 +691,61 @@ mod tests {
         );
         assert_eq!(left.as_deref(), Some("pane-left"));
         assert_eq!(right.as_deref(), Some("pane-right"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_process_replaces_daemon_terminal_env_with_client_snapshot() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let script = write_executable_script(
+            temp.path(),
+            "env.sh",
+            "#!/bin/sh\nprintf '%s|%s|%s|%s' \"$TMUX_PANE\" \"$HERDR_PANE_ID\" \"$JCODE_CLIENT_TMUX_PANE\" \"$JCODE_CLIENT_HERDR_PANE_ID\"\n",
+        );
+        let previous_tmux = std::env::var_os("TMUX_PANE");
+        let previous_herdr = std::env::var_os("HERDR_PANE_ID");
+        crate::env::set_var("TMUX_PANE", "daemon-pane");
+        crate::env::set_var("HERDR_PANE_ID", "daemon-herdr");
+
+        let run_for_pane = |tmux: &'static str, herdr: &'static str| {
+            let script = script.clone();
+            with_client_terminal_env(
+                vec![
+                    ("TMUX_PANE".to_string(), tmux.to_string()),
+                    ("HERDR_PANE_ID".to_string(), herdr.to_string()),
+                ],
+                async move {
+                    tokio::task::yield_now().await;
+                    build_hook_process(&script.to_string_lossy(), &HookEvent::new("turn_start"))
+                        .expect("hook command")
+                        .output()
+                        .expect("run hook")
+                },
+            )
+        };
+        let (first_output, second_output) = tokio::join!(
+            run_for_pane("client-pane-a", "herdr-pane-a"),
+            run_for_pane("client-pane-b", "herdr-pane-b")
+        );
+
+        match previous_tmux {
+            Some(value) => crate::env::set_var("TMUX_PANE", value),
+            None => crate::env::remove_var("TMUX_PANE"),
+        }
+        match previous_herdr {
+            Some(value) => crate::env::set_var("HERDR_PANE_ID", value),
+            None => crate::env::remove_var("HERDR_PANE_ID"),
+        }
+        assert!(first_output.status.success());
+        assert!(second_output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&first_output.stdout),
+            "client-pane-a|herdr-pane-a|client-pane-a|herdr-pane-a"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&second_output.stdout),
+            "client-pane-b|herdr-pane-b|client-pane-b|herdr-pane-b"
+        );
     }
 }

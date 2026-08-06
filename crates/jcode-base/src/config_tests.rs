@@ -255,13 +255,33 @@ fn hooks_config_defaults_and_parses_from_toml() {
     );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 1500);
 
-    let cfg: Config =
-        toml::from_str("[hooks]\nsession_start = [\"notify-user\", \"notify-herdr\"]\n")
-            .expect("hook arrays should parse");
+    let cfg: Config = toml::from_str(
+        "[hooks]\nturn_end = [\"notify-one --direct\", \"notify-two 'quoted arg'\"]\npre_tool = [\"policy-a\", \"policy-b\"]\n",
+    )
+    .expect("hook arrays should parse");
     assert_eq!(
-        cfg.hooks.session_start.unwrap().iter().collect::<Vec<_>>(),
-        vec!["notify-user", "notify-herdr"]
+        cfg.hooks
+            .turn_end
+            .as_ref()
+            .expect("turn_end commands")
+            .iter()
+            .collect::<Vec<_>>(),
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
     );
+    assert_eq!(
+        cfg.hooks
+            .pre_tool
+            .as_ref()
+            .expect("pre_tool commands")
+            .iter()
+            .collect::<Vec<_>>(),
+        vec!["policy-a", "policy-b"]
+    );
+
+    let serialized = toml::to_string(&cfg).expect("hook command arrays should serialize");
+    let round_trip: Config = toml::from_str(&serialized).expect("serialized hooks should parse");
+    assert_eq!(round_trip.hooks.turn_end, cfg.hooks.turn_end);
+    assert_eq!(round_trip.hooks.pre_tool, cfg.hooks.pre_tool);
 }
 
 #[test]
@@ -287,12 +307,15 @@ fn test_env_override_lifecycle_hooks() {
     cfg.apply_env_overrides();
     assert_eq!(cfg.hooks.turn_end, None);
 
-    crate::env::set_var("JCODE_HOOK_TURN_END", "[\"first\", \"second\"]");
+    crate::env::set_var(
+        "JCODE_HOOK_TURN_END",
+        r#"["notify-one --direct", "notify-two 'quoted arg'"]"#,
+    );
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
     assert_eq!(
         cfg.hooks.turn_end.unwrap().iter().collect::<Vec<_>>(),
-        vec!["first", "second"]
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
     );
 
     restore_env_var("JCODE_HOOK_TURN_END", prev_turn_end);
