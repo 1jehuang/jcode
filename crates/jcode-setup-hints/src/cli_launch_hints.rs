@@ -328,14 +328,16 @@ fn send_desktop_notification(title: &str, body: &str) {
         );
         // Attribute to the host terminal app so clicking the banner activates
         // the terminal rather than Script Editor.
-        if let Some(bundle_id) = std::env::var("__CFBundleIdentifier")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty() && v != "com.apple.Terminal.osascript")
+        let launching_bundle_id = std::env::var_os("__CFBundleIdentifier");
+        if let Some(bundle_id) = launching_bundle_id
+            .as_deref()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && *v != "com.apple.Terminal.osascript")
         {
             script = format!(
                 "tell application id \"{}\" to {}",
-                escape(&bundle_id),
+                escape(bundle_id),
                 script
             );
         }

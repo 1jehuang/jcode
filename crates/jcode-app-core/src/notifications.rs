@@ -284,6 +284,72 @@ pub fn send_desktop_notification(title: &str, body: &str) {
     send_desktop_notification_rich(title, None, body, None);
 }
 
+/// Escape a string for embedding in an AppleScript double-quoted literal.
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Build the AppleScript that posts a Notification Center banner.
+///
+/// When `bundle_id` is set the `display notification` is wrapped in a
+/// `tell application id` block so macOS attributes the banner to that app.
+/// Clicking the banner then activates the terminal hosting the jcode session
+/// instead of Script Editor, which owns bare `osascript` notifications.
+#[cfg(target_os = "macos")]
+fn build_macos_notification_script(
+    title: &str,
+    subtitle: Option<&str>,
+    body: &str,
+    sound: Option<&str>,
+    bundle_id: Option<&str>,
+) -> String {
+    let mut script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(body),
+        applescript_escape(title)
+    );
+    if let Some(subtitle) = subtitle.filter(|s| !s.trim().is_empty()) {
+        script.push_str(&format!(" subtitle \"{}\"", applescript_escape(subtitle)));
+    }
+    if let Some(sound) = sound.filter(|s| !s.trim().is_empty()) {
+        script.push_str(&format!(" sound name \"{}\"", applescript_escape(sound)));
+    }
+    match bundle_id.filter(|id| !id.trim().is_empty()) {
+        Some(bundle_id) => format!(
+            "tell application id \"{}\" to {}",
+            applescript_escape(bundle_id),
+            script
+        ),
+        None => script,
+    }
+}
+
+/// Map a terminal key from the terminal detector to its macOS bundle id.
+#[cfg(target_os = "macos")]
+fn macos_terminal_bundle_id(terminal: &str) -> Option<&'static str> {
+    Some(match terminal {
+        "handterm" => "com.jcode.handterm",
+        "ghostty" => "com.mitchellh.ghostty",
+        "kitty" => "net.kovidgoyal.kitty",
+        "wezterm" => "com.github.wez.wezterm",
+        "alacritty" => "org.alacritty",
+        "iterm2" => "com.googlecode.iterm2",
+        "terminal" => "com.apple.Terminal",
+        _ => return None,
+    })
+}
+
 /// Bundle identifier of the terminal app hosting this jcode process, if it can
 /// be identified. Notifications posted via `tell application id "..."` are
 /// attributed to that app, so clicking the banner activates the terminal
@@ -294,27 +360,35 @@ fn macos_host_terminal_bundle_id() -> Option<String> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            if let Some(explicit) = std::env::var("__CFBundleIdentifier")
-                .ok()
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty() && v != "com.apple.Terminal.osascript")
-            {
-                return Some(explicit);
-            }
-            let terminal = jcode_base::terminal_launch::detected_resume_terminal()?;
-            let bundle = match terminal.as_str() {
-                "handterm" => "com.jcode.handterm",
-                "ghostty" => "com.mitchellh.ghostty",
-                "kitty" => "net.kovidgoyal.kitty",
-                "wezterm" => "com.github.wez.wezterm",
-                "alacritty" => "org.alacritty",
-                "iterm2" => "com.googlecode.iterm2",
-                "terminal" => "com.apple.Terminal",
-                _ => return None,
-            };
-            Some(bundle.to_string())
+            let launching = std::env::var_os("__CFBundleIdentifier");
+            resolve_macos_host_terminal_bundle_id(
+                launching.as_deref().and_then(std::ffi::OsStr::to_str),
+                jcode_base::terminal_launch::detected_resume_terminal().as_deref(),
+            )
         })
         .clone()
+}
+
+/// Resolve the host terminal bundle id from the launching app's bundle id
+/// (`__CFBundleIdentifier`, exported by every GUI-launched process) with the
+/// terminal detector as the fallback. Split out from env access so it is
+/// directly unit-testable.
+#[cfg(target_os = "macos")]
+fn resolve_macos_host_terminal_bundle_id(
+    launching_bundle_id: Option<&str>,
+    detected_terminal: Option<&str>,
+) -> Option<String> {
+    // `osascript` run from a plain shell reports Script Editor's helper id,
+    // which is exactly the attribution we are trying to avoid.
+    if let Some(explicit) = launching_bundle_id
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "com.apple.Terminal.osascript")
+    {
+        return Some(explicit.to_string());
+    }
+    detected_terminal
+        .and_then(macos_terminal_bundle_id)
+        .map(str::to_string)
 }
 
 /// Send a local desktop notification with optional macOS subtitle and sound.
@@ -330,40 +404,13 @@ pub fn send_desktop_notification_rich(
 ) {
     #[cfg(target_os = "macos")]
     {
-        fn applescript_escape(s: &str) -> String {
-            let mut out = String::with_capacity(s.len());
-            for ch in s.chars() {
-                match ch {
-                    '\\' => out.push_str("\\\\"),
-                    '"' => out.push_str("\\\""),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => {}
-                    _ => out.push(ch),
-                }
-            }
-            out
-        }
-        let mut script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            applescript_escape(body),
-            applescript_escape(title)
+        let script = build_macos_notification_script(
+            title,
+            subtitle,
+            body,
+            sound,
+            macos_host_terminal_bundle_id().as_deref(),
         );
-        if let Some(subtitle) = subtitle.filter(|s| !s.trim().is_empty()) {
-            script.push_str(&format!(" subtitle \"{}\"", applescript_escape(subtitle)));
-        }
-        if let Some(sound) = sound.filter(|s| !s.trim().is_empty()) {
-            script.push_str(&format!(" sound name \"{}\"", applescript_escape(sound)));
-        }
-        // Attribute the notification to the host terminal app so clicking the
-        // banner activates that terminal (where the jcode session lives)
-        // instead of Script Editor, which owns bare `osascript` notifications.
-        if let Some(bundle_id) = macos_host_terminal_bundle_id() {
-            script = format!(
-                "tell application id \"{}\" to {}",
-                applescript_escape(&bundle_id),
-                script
-            );
-        }
         let _ = std::process::Command::new("osascript")
             .arg("-e")
             .arg(script)
@@ -600,6 +647,146 @@ fn format_cycle_body_detailed(transcript: &AmbientTranscript) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bare `display notification` is attributed to Script Editor, so
+    /// clicking the banner opens Script Editor instead of the user's session.
+    /// Every macOS notification must be wrapped in `tell application id`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_notification_script_is_attributed_to_host_terminal() {
+        let script = build_macos_notification_script(
+            "jcode: done",
+            Some("my-session"),
+            "turn complete",
+            Some("Glass"),
+            Some("com.mitchellh.ghostty"),
+        );
+        assert_eq!(
+            script,
+            "tell application id \"com.mitchellh.ghostty\" to \
+             display notification \"turn complete\" with title \"jcode: done\" \
+             subtitle \"my-session\" sound name \"Glass\""
+        );
+    }
+
+    /// Without a resolvable terminal we must still post the notification,
+    /// just unattributed, rather than emitting a broken `tell` block.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_notification_script_without_bundle_id_is_unwrapped() {
+        let script = build_macos_notification_script("t", None, "b", None, None);
+        assert_eq!(script, "display notification \"b\" with title \"t\"");
+        let blank = build_macos_notification_script("t", None, "b", None, Some("  "));
+        assert_eq!(blank, "display notification \"b\" with title \"t\"");
+    }
+
+    /// Quotes/backslashes in session names or assistant text must not be able
+    /// to break out of the AppleScript string literal.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_notification_script_escapes_injection_attempts() {
+        let script = build_macos_notification_script(
+            "ti\"tle",
+            None,
+            "bo\\dy\" & (do shell script \"boom\")",
+            None,
+            Some("com.apple.Terminal"),
+        );
+        assert!(script.starts_with("tell application id \"com.apple.Terminal\" to "));
+        assert!(script.contains("\\\"tle"));
+        assert!(script.contains("bo\\\\dy\\\""));
+        // The real invariant: only the six literal delimiters (bundle id,
+        // body, title) survive as unescaped quotes, so hostile text cannot
+        // terminate a string and append its own AppleScript.
+        let delimiters = script
+            .replace("\\\\", "")
+            .replace("\\\"", "")
+            .matches('"')
+            .count();
+        assert_eq!(delimiters, 6, "unbalanced quotes in script: {script}");
+    }
+
+    /// End-to-end guard: the generated script must actually compile as
+    /// AppleScript, proving the `tell` wrapper and escaping are well formed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_notification_script_compiles_as_applescript() {
+        let script = build_macos_notification_script(
+            "ti\"tle",
+            Some("sub\\title"),
+            "bo\"dy & (do shell script \"boom\")",
+            Some("Glass"),
+            Some("com.apple.Terminal"),
+        );
+        // `osacompile` parses without executing, so no notification is posted.
+        let output = std::process::Command::new("osacompile")
+            .args(["-o", "/dev/null", "-e", &script])
+            .output();
+        let Ok(output) = output else {
+            return; // osacompile unavailable; nothing to assert.
+        };
+        assert!(
+            output.status.success(),
+            "script failed to compile: {script}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The launching app's bundle id wins, since it names the exact terminal
+    /// that started this process.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_terminal_bundle_id_prefers_launching_app() {
+        assert_eq!(
+            resolve_macos_host_terminal_bundle_id(Some("com.mitchellh.ghostty"), Some("terminal")),
+            Some("com.mitchellh.ghostty".to_string())
+        );
+    }
+
+    /// `osascript` launched from a shell reports Script Editor's helper id.
+    /// Trusting it would reintroduce the Script Editor bug, so it is ignored
+    /// in favor of terminal detection.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_terminal_bundle_id_ignores_script_editor_helper() {
+        assert_eq!(
+            resolve_macos_host_terminal_bundle_id(
+                Some("com.apple.Terminal.osascript"),
+                Some("ghostty")
+            ),
+            Some("com.mitchellh.ghostty".to_string())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_terminal_bundle_id_falls_back_to_detected_terminal() {
+        for (terminal, expected) in [
+            ("ghostty", "com.mitchellh.ghostty"),
+            ("kitty", "net.kovidgoyal.kitty"),
+            ("wezterm", "com.github.wez.wezterm"),
+            ("alacritty", "org.alacritty"),
+            ("iterm2", "com.googlecode.iterm2"),
+            ("terminal", "com.apple.Terminal"),
+            ("handterm", "com.jcode.handterm"),
+        ] {
+            assert_eq!(
+                resolve_macos_host_terminal_bundle_id(None, Some(terminal)),
+                Some(expected.to_string()),
+                "terminal {terminal} should map to {expected}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_terminal_bundle_id_is_none_when_unknown() {
+        assert_eq!(
+            resolve_macos_host_terminal_bundle_id(Some(""), Some("some-unknown-term")),
+            None
+        );
+        assert_eq!(resolve_macos_host_terminal_bundle_id(None, None), None);
+    }
 
     #[test]
     fn test_format_cycle_body_safe() {
