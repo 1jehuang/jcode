@@ -439,7 +439,16 @@ pub fn position_at_in_frame(
     let region = (frame.body_bottom - frame.body_top).max(1.0);
     let scroll = model.view_scroll();
     let laid = laid_for(painter, model, frame);
-    let view = Viewport::new(laid, region, scroll);
+    let mut view = Viewport::new(laid, region, scroll);
+    let menu_height = frame.model_menu(model.model_picker.visual_rows()).height();
+    for placed in &mut view.visible {
+        placed.top += model.model_picker.transcript_shift(
+            region,
+            menu_height,
+            placed.top,
+            placed.message.height,
+        );
+    }
     position_at(
         &view,
         x - (frame.left + crate::transcript::USER_PAD_X),
@@ -460,7 +469,16 @@ pub fn selection_at_in_frame(
     let region = (frame.body_bottom - frame.body_top).max(1.0);
     let scroll = model.view_scroll();
     let laid = laid_for(painter, model, frame);
-    let view = Viewport::new(laid, region, scroll);
+    let mut view = Viewport::new(laid, region, scroll);
+    let menu_height = frame.model_menu(model.model_picker.visual_rows()).height();
+    for placed in &mut view.visible {
+        placed.top += model.model_picker.transcript_shift(
+            region,
+            menu_height,
+            placed.top,
+            placed.message.height,
+        );
+    }
     selection_at(
         &view,
         x - (frame.left + crate::transcript::USER_PAD_X),
