@@ -265,7 +265,10 @@ impl Agent {
         self.add_message(
             Role::User,
             vec![ContentBlock::Text {
-                text: "The previous provider response was empty after tool results. Please provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.".to_string(),
+                // Keep this as a user-role message for provider compatibility,
+                // but mark it as internal so transcript renderers never present
+                // the synthetic recovery instruction as a prompt from the user.
+                text: "<system-reminder>The previous provider response was empty after tool results. Provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.</system-reminder>".to_string(),
                 cache_control: None,
             }],
         );
