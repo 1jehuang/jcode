@@ -1329,10 +1329,11 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         compact.contains(&without_whitespace(OBJECTIVE)),
         "batched todo plan intention was truncated:\n{rendered}"
     );
-    assert!(
-        compact.contains(&without_whitespace(FEEDBACK)),
-        "batched todo feedback loop was truncated:\n{rendered}"
-    );
+    // Compact transcript cards show the goal's quality assessments rather than
+    // repeating its potentially long feedback-loop prose. The full prose remains
+    // available in the serialized todo payload and the todos side panel.
+    assert!(rendered.contains("Relevance missing · Coverage missing"));
+    assert!(!compact.contains(&without_whitespace(FEEDBACK)));
     let goal_details = rendered
         .split_once("pelican-bike")
         .map(|(_, details)| details)
