@@ -148,6 +148,9 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -293,6 +296,9 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -484,6 +490,9 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -652,6 +661,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
@@ -674,6 +686,9 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )

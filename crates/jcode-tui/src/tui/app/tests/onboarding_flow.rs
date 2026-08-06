@@ -1547,7 +1547,9 @@ fn import_summary_choose_pill_opens_checkbox_list() {
                 import: Some(review),
             };
         }
-        // Arrow to the "Import less" pill, then commit it.
+        // Arrow past the subscription option to the "Import less" pill, then
+        // commit it.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
         // Now in choose mode: the checkbox list with the cursor on row 1 and
@@ -1688,7 +1690,9 @@ fn telemetry_pill_opens_settings_page_and_commits_choice() {
             };
         }
 
-        // Right twice: Continue -> Import less -> Telemetry settings.
+        // Right three times: Continue -> Subscription -> Import less ->
+        // Telemetry settings.
+        assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Right));
         assert!(app.handle_onboarding_continue_prompt_key(KeyCode::Enter));
