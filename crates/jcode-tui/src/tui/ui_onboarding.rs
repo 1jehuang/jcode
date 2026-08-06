@@ -144,10 +144,7 @@ fn import_summary_pills_line(
 ) -> Line<'static> {
     use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans(
-        "Import",
-        focused == Pill::Continue,
-    ));
+    spans.extend(lozenge_pill_spans("Import", focused == Pill::Continue));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
         "Use Jcode subscription",
@@ -159,10 +156,7 @@ fn import_summary_pills_line(
         focused == Pill::ImportLess,
     ));
     spans.push(Span::raw("   "));
-    spans.extend(lozenge_pill_spans(
-        "Telemetry",
-        focused == Pill::Telemetry,
-    ));
+    spans.extend(lozenge_pill_spans("Telemetry", focused == Pill::Telemetry));
     Line::from(spans).alignment(align)
 }
 
