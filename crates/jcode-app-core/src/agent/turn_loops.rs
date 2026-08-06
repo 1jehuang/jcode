@@ -14,6 +14,7 @@ impl Agent {
     /// agent still exits promptly.
     pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
     const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
+    const BATCH_NUDGE: &str = "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>";
 
     fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
         if tool_count == 1 && !used_batch {
@@ -21,6 +22,10 @@ impl Agent {
         } else {
             0
         }
+    }
+
+    fn should_inject_batch_nudge(pending: bool, batch_available: bool) -> bool {
+        pending && batch_available
     }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
@@ -109,10 +114,11 @@ impl Agent {
                 let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
                 messages_with_memory.push(memory_msg);
             }
-            if batch_nudge_pending && tools.iter().any(|tool| tool.name == "batch") {
-                messages_with_memory.push(Message::user(
-                    "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>",
-                ));
+            if Self::should_inject_batch_nudge(
+                batch_nudge_pending,
+                tools.iter().any(|tool| tool.name == "batch"),
+            ) {
+                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
                 batch_nudge_pending = false;
                 sequential_single_tool_rounds = 0;
             }
@@ -1241,5 +1247,14 @@ mod tests {
         assert_eq!(Agent::update_sequential_tool_rounds(2, 2, false), 0);
         assert_eq!(Agent::update_sequential_tool_rounds(2, 1, true), 0);
         assert_eq!(Agent::update_sequential_tool_rounds(2, 0, false), 0);
+    }
+
+    #[test]
+    fn pending_nudge_is_injected_only_when_batch_is_available() {
+        assert!(Agent::should_inject_batch_nudge(true, true));
+        assert!(!Agent::should_inject_batch_nudge(false, true));
+        assert!(!Agent::should_inject_batch_nudge(true, false));
+        assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
+        assert!(Agent::BATCH_NUDGE.contains("result is required"));
     }
 }
