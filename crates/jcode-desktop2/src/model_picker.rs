@@ -69,7 +69,11 @@ impl Picker {
         t * t * (3.0 - 2.0 * t)
     }
     pub fn is_animating(&self) -> bool {
-        if self.open { self.phase < PHASE_MAX } else { self.phase > 0 }
+        if self.open {
+            self.phase < PHASE_MAX
+        } else {
+            self.phase > 0
+        }
     }
     pub fn advance(&mut self, dt: f32) -> bool {
         let step = (dt / REVEAL_SECONDS * f32::from(PHASE_MAX)).max(1.0) as u16;
@@ -246,7 +250,9 @@ impl Picker {
     }
     pub fn move_hover(&mut self, delta: isize) {
         let rows = self.visual_rows();
-        if rows == 0 { return; }
+        if rows == 0 {
+            return;
+        }
         let current = self.hover.unwrap_or(0) as isize;
         self.hover = Some((current + delta).rem_euclid(rows as isize) as usize);
     }

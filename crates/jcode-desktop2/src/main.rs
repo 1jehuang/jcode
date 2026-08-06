@@ -1347,7 +1347,15 @@ impl App {
                 .is_animating()
                 .then(|| now + WORKSPACE_FRAME);
             return [
-                overview, model_picker, bounce, workspace, spinner, stream, smooth, boot, progress,
+                overview,
+                model_picker,
+                bounce,
+                workspace,
+                spinner,
+                stream,
+                smooth,
+                boot,
+                progress,
                 attachment,
             ]
             .into_iter()
@@ -1391,8 +1399,19 @@ impl App {
             .is_animating()
             .then(|| now + WORKSPACE_FRAME);
         [
-            caret, donut, spinner, stream, smooth, overview, model_picker, workspace, bounce, boot,
-            ack, progress, attachment,
+            caret,
+            donut,
+            spinner,
+            stream,
+            smooth,
+            overview,
+            model_picker,
+            workspace,
+            bounce,
+            boot,
+            ack,
+            progress,
+            attachment,
         ]
         .into_iter()
         .flatten()

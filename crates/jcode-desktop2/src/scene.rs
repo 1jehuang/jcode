@@ -540,7 +540,12 @@ fn draw_model_picker(
     let menu = frame.model_menu(rows);
     let phase = model.model_picker.phase();
     let centre = (menu.y0 + menu.y1) / 2.0;
-    let reveal = Rect::new(menu.x0, centre - menu.height() * phase / 2.0, menu.x1, centre + menu.height() * phase / 2.0);
+    let reveal = Rect::new(
+        menu.x0,
+        centre - menu.height() * phase / 2.0,
+        menu.x1,
+        centre + menu.height() * phase / 2.0,
+    );
     scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &reveal);
     scene.fill(
         vello::peniko::Fill::NonZero,
