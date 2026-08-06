@@ -767,8 +767,8 @@ impl Tool for TodoTool {
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
-                                "enum": ["indirect", "representative", "acceptance_aligned"],
-                                "description": "How directly the checks represent observable acceptance behavior through public interfaces rather than an internal proxy."
+                                "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
+                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
@@ -983,6 +983,27 @@ mod tests {
         assert!(!goal_props.contains_key("alignment_score"));
         assert!(!goal_props.contains_key("objective"));
         assert_eq!(goal_props.len(), 10);
+        assert_eq!(
+            goal_props["feedback_loop_relevance"]["enum"],
+            json!([
+                "indirect",
+                "synthetic",
+                "representative",
+                "acceptance_blocked",
+                "acceptance_aligned"
+            ])
+        );
+        let relevance_description = goal_props["feedback_loop_relevance"]["description"]
+            .as_str()
+            .expect("feedback-loop relevance should explain every state");
+        for required_concept in [
+            "custom harnesses",
+            "real public interfaces",
+            "external constraint",
+            "Substitute-only validation is never acceptance_aligned",
+        ] {
+            assert!(relevance_description.contains(required_concept));
+        }
 
         let goal_required = props["goals"]["items"]["required"]
             .as_array()

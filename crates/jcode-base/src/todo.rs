@@ -376,7 +376,7 @@ pub fn build_gate_digest(
                     .map(|group| format!(" for \"{}\"", group))
                     .unwrap_or_default();
                 format!(
-                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the public interfaces and integration boundaries, and report the behavior a user or downstream system would observe.",
+                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the real project's public interfaces, integration boundaries, or end-user acceptance path and report the observed behavior. A custom harness, stub, mock, copied source, or synthetic fixture is useful evidence but cannot replace that path; if the real path is externally blocked, record that constraint honestly.",
                     label
                 )
             }
@@ -949,6 +949,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn substitute_and_blocked_checks_do_not_pass_involved_acceptance_gate() {
+        let goal = |relevance| TodoGoal {
+            difficulty: Some(Difficulty::Involved),
+            feedback_loop_relevance: Some(relevance),
+            ..Default::default()
+        };
+
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::Synthetic
+        )));
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::Representative
+        )));
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::AcceptanceBlocked
+        )));
+        assert!(feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::AcceptanceAligned
+        )));
+    }
+
     /// A score that climbed only after work was underway still gets raised, and
     /// is described as the coverage gap it is. Suppressing it would let an agent
     /// clear the gate by writing a good assessment at the end, after the work it
@@ -1029,6 +1051,8 @@ mod tests {
         for guidance in [
             "public interfaces",
             "integration boundaries",
+            "custom harness",
+            "externally blocked",
             "main workflows",
             "edge cases",
             "packaging",
