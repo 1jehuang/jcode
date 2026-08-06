@@ -583,14 +583,11 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    for assessment in [
-        "Closed feedback loop strong",
-        "Relevance representative",
-        "Coverage main_paths",
-        "Delivery workflow_validated",
-    ] {
+    for assessment in ["Closed feedback loop strong", "Delivery workflow_validated"] {
         assert!(plain.contains(assessment), "{plain}");
     }
+    assert!(!plain.contains("Relevance representative"), "{plain}");
+    assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Plan-level intent renders once, above the groups.
     assert!(plain.contains("Understands user intent clear"), "{plain}");
     assert!(
@@ -671,8 +668,15 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
     assert!(
-        wide.len() > narrow.len(),
-        "wide={wide:?}\nnarrow={narrow:?}"
+        wide.iter()
+            .any(|line| line.contains("narrow terminal window")),
+        "wide={wide:?}"
+    );
+    assert!(
+        !narrow
+            .iter()
+            .any(|line| line.contains("narrow terminal window")),
+        "narrow={narrow:?}"
     );
 }
 
@@ -718,7 +722,56 @@ fn render_todos_message_uses_readable_semantic_colors() {
     assert_eq!(color_for("● "), Some(asap_color()));
     assert_eq!(color_for(" (high)"), None);
     assert_eq!(color_for(" · plausible"), Some(todo_confidence_color()));
+    assert_eq!(color_for("strong"), Some(todo_warning_color()));
+    assert_eq!(color_for("missing"), Some(todo_failure_color()));
     assert_ne!(todo_meta_color(), dim_color());
+}
+
+#[test]
+fn render_todos_message_collapses_passing_quality_gates() {
+    let todos = vec![crate::todo::TodoItem {
+        id: "1".to_string(),
+        content: "Verify the result".to_string(),
+        status: "completed".to_string(),
+        priority: "high".to_string(),
+        group: Some("quality".to_string()),
+        confidence: None,
+        completion_confidence: Some(crate::todo::ConfidenceState::Validated),
+        confidence_history: Vec::new(),
+        blocked_by: Vec::new(),
+        assigned_to: None,
+    }];
+    let goals = vec![crate::todo::TodoGoal {
+        group: Some("quality".to_string()),
+        closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
+        feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::AcceptanceAligned),
+        feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::EdgeAndIntegrationPaths),
+        delivery_state: Some(crate::todo::DeliveryState::OutcomeDelivered),
+        ..Default::default()
+    }];
+    let msg =
+        DisplayMessage::todos(serde_json::json!({ "todos": todos, "goals": goals }).to_string());
+    let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("✓ All quality gates passing"), "{plain}");
+    assert!(plain.contains("Delivery outcome_delivered"), "{plain}");
+    assert!(!plain.contains("Closed feedback loop closed"), "{plain}");
+    assert!(!plain.contains("Relevance acceptance_aligned"), "{plain}");
+    assert!(
+        !plain.contains("Coverage edge_and_integration_paths"),
+        "{plain}"
+    );
+    let passing = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "✓ All quality gates passing")
+        .and_then(|span| span.style.fg);
+    assert_eq!(passing, Some(todo_score_color()));
 }
 
 #[test]
@@ -832,10 +885,10 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
 
     assert!(!plain.contains("Todos"), "{plain}");
     assert!(plain.contains("todo rendering  ●"), "{plain}");
-    assert!(
-        plain.contains("Closed feedback loop strong · Delivery workflow_validated"),
-        "{plain}"
-    );
+    assert!(plain.contains("Closed feedback loop strong"), "{plain}");
+    assert!(plain.contains("Relevance missing"), "{plain}");
+    assert!(plain.contains("Coverage missing"), "{plain}");
+    assert!(plain.contains("Delivery workflow_validated"), "{plain}");
     assert!(
         plain.contains("● Render the todo result · plausible"),
         "{plain}"
