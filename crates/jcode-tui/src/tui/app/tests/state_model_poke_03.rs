@@ -2486,6 +2486,11 @@ fn test_finish_turn_auto_poke_queues_confidence_summary_when_todos_done() {
                 delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
                 autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
                 iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::Closed),
+                feedback_loop: Some("verify completed work".to_string()),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
                 ..Default::default()
             }],
         )
