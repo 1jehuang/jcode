@@ -64,6 +64,7 @@ pub const ALL_OPENAI_MODELS: &[&str] = &[
     // the same upstream slug.
     CHATGPT_WEB_MODEL,
     "gpt-5.6",
+    "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.5-pro",
     "gpt-5.5",
@@ -100,6 +101,7 @@ mod gpt_5_6_catalog_tests {
             "gpt-5.6-pro",
             "gpt-5.6-pro[web]",
             "gpt-5.6",
+            "gpt-5.6-terra",
             "gpt-5.6-luna",
         ] {
             assert!(ALL_OPENAI_MODELS.contains(&model), "missing {model}");
