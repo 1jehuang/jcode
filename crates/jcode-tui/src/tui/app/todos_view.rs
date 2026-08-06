@@ -559,6 +559,12 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
             state.as_str()
         ));
     }
+    if let Some(state) = goal.feedback_loop_traceability {
+        line.push_str(&format!(
+            "- Feedback-loop traceability: **{}**\n",
+            state.as_str()
+        ));
+    }
     if let Some(state) = goal.delivery_state {
         line.push_str(&format!("- Delivery state: **{}**\n", state.as_str()));
     }
@@ -764,6 +770,7 @@ fn hash_todos_payload(
         goal.feedback_loop.hash(&mut hasher);
         goal.feedback_loop_relevance.hash(&mut hasher);
         goal.feedback_loop_coverage.hash(&mut hasher);
+        goal.feedback_loop_traceability.hash(&mut hasher);
         goal.delivery_state.hash(&mut hasher);
         goal.difficulty.hash(&mut hasher);
         goal.autonomy.hash(&mut hasher);

@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use chrono::Utc;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use super::journal::{PersistVectorMode, SessionJournalEntry, metadata_requires_snapshot};
@@ -129,6 +129,52 @@ fn replay_journal_lines(
 }
 
 impl Session {
+    fn pre_wipe_backup_path(path: &Path, timestamp: i64) -> PathBuf {
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        path.with_file_name(format!("{file_name}.pre-wipe-{timestamp}.bak"))
+    }
+
+    /// Preserve the last durable transcript before an empty in-memory session
+    /// can replace it. This is deliberately best-effort: the hard rejection in
+    /// `checkpoint_snapshot` is what prevents data loss, while these copies make
+    /// recovery possible if another caller ever bypasses that invariant.
+    fn guard_snapshot_shrink(&self, snapshot_path: &Path, journal_path: &Path) {
+        const MIN_TRANSCRIPT_SNAPSHOT_BYTES: u64 = 4 * 1024;
+
+        if !self.messages.is_empty()
+            || file_len_or_zero(snapshot_path) <= MIN_TRANSCRIPT_SNAPSHOT_BYTES
+        {
+            return;
+        }
+
+        let timestamp = Utc::now().timestamp_millis();
+        let snapshot_backup = Self::pre_wipe_backup_path(snapshot_path, timestamp);
+        let journal_backup = Self::pre_wipe_backup_path(journal_path, timestamp);
+        let mut backup_errors = Vec::new();
+
+        if let Err(err) = std::fs::copy(snapshot_path, &snapshot_backup) {
+            backup_errors.push(format!("snapshot {}: {err}", snapshot_backup.display()));
+        }
+        if journal_path.exists()
+            && let Err(err) = std::fs::copy(journal_path, &journal_backup)
+        {
+            backup_errors.push(format!("journal {}: {err}", journal_backup.display()));
+        }
+
+        let fields = vec![
+            ("phase", "pre_wipe_backup".to_string()),
+            ("session_id", self.id.clone()),
+            ("snapshot_path", snapshot_path.display().to_string()),
+            ("snapshot_backup", snapshot_backup.display().to_string()),
+            ("journal_backup", journal_backup.display().to_string()),
+            ("errors", backup_errors.join("; ")),
+        ];
+        crate::logging::event_warn("SESSION_PERSISTENCE", fields);
+    }
+
     fn apply_journal_entry(&mut self, entry: SessionJournalEntry) {
         self.apply_journal_meta(entry.meta);
         self.messages.extend(entry.append_messages);
@@ -140,6 +186,17 @@ impl Session {
     }
 
     fn checkpoint_snapshot(&mut self, snapshot_path: &Path, journal_path: &Path) -> Result<()> {
+        let destructive_empty_checkpoint = self.messages.is_empty()
+            && self.persist_state.messages_len > 0
+            && snapshot_path.exists();
+        if destructive_empty_checkpoint {
+            self.guard_snapshot_shrink(snapshot_path, journal_path);
+            bail!(
+                "refusing to replace non-empty persisted transcript for session {} with an empty checkpoint",
+                self.id
+            );
+        }
+        self.guard_snapshot_shrink(snapshot_path, journal_path);
         storage::write_json_fast(snapshot_path, self)?;
         if journal_path.exists() {
             let _ = std::fs::remove_file(journal_path);
@@ -503,5 +560,101 @@ impl Session {
             crate::logging::event_info("SESSION_PERSISTENCE", fields);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{ContentBlock, Role};
+
+    fn pre_wipe_backups(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.to_string_lossy().contains(".pre-wipe-"))
+            .collect()
+    }
+
+    #[test]
+    fn empty_checkpoint_preserves_and_refuses_to_wipe_large_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("session_guard.json");
+        let journal_path = dir.path().join("session_guard.jsonl");
+        let original_snapshot = vec![b'x'; 5 * 1024];
+        let original_journal = b"durable journal tail\n";
+        std::fs::write(&snapshot_path, &original_snapshot).unwrap();
+        std::fs::write(&journal_path, original_journal).unwrap();
+
+        let mut session = Session::create_with_id("session_guard".into(), None, None);
+        session.persist_state.snapshot_exists = true;
+        session.persist_state.messages_len = 686;
+
+        let error = session
+            .checkpoint_snapshot(&snapshot_path, &journal_path)
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"));
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), original_snapshot);
+        assert_eq!(std::fs::read(&journal_path).unwrap(), original_journal);
+
+        let backups = pre_wipe_backups(dir.path());
+        assert_eq!(backups.len(), 2);
+        assert!(backups.iter().any(|path| {
+            path.to_string_lossy().contains(".json.pre-wipe-")
+                && std::fs::read(path).unwrap() == original_snapshot
+        }));
+        assert!(backups.iter().any(|path| {
+            path.to_string_lossy().contains(".jsonl.pre-wipe-")
+                && std::fs::read(path).unwrap() == original_journal
+        }));
+    }
+
+    #[test]
+    fn non_empty_shrink_checkpoint_remains_allowed_without_pre_wipe_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("session_compacted.json");
+        let journal_path = dir.path().join("session_compacted.jsonl");
+        std::fs::write(&snapshot_path, vec![b'x'; 5 * 1024]).unwrap();
+        std::fs::write(&journal_path, b"old journal\n").unwrap();
+
+        let mut session = Session::create_with_id("session_compacted".into(), None, None);
+        session.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "retained compacted message".into(),
+                cache_control: None,
+            }],
+        );
+        session.persist_state.snapshot_exists = true;
+        session.persist_state.messages_len = 2;
+
+        session
+            .checkpoint_snapshot(&snapshot_path, &journal_path)
+            .unwrap();
+        assert!(!journal_path.exists());
+        assert!(pre_wipe_backups(dir.path()).is_empty());
+        let restored: Session = storage::read_json(&snapshot_path).unwrap();
+        assert_eq!(restored.messages.len(), 1);
+    }
+
+    #[test]
+    fn small_empty_snapshot_is_rejected_without_creating_noise_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("session_small.json");
+        let journal_path = dir.path().join("session_small.jsonl");
+        let original = b"small metadata stub";
+        std::fs::write(&snapshot_path, original).unwrap();
+
+        let mut session = Session::create_with_id("session_small".into(), None, None);
+        session.persist_state.snapshot_exists = true;
+        session.persist_state.messages_len = 1;
+
+        assert!(
+            session
+                .checkpoint_snapshot(&snapshot_path, &journal_path)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&snapshot_path).unwrap(), original);
+        assert!(pre_wipe_backups(dir.path()).is_empty());
     }
 }
