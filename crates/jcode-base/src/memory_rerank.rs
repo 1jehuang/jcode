@@ -17,11 +17,11 @@
 //! memory agent (depends only on `Sidecar` + `MemoryEntry`).
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::memory_types::MemoryEntry;
-use crate::sidecar::Sidecar;
+use crate::sidecar::{Sidecar, SidecarErrorKind};
 
 /// System prompt instructing the model to rank candidates by usefulness.
 pub const LLM_RERANK_SYSTEM: &str = "You re-rank stored MEMORIES by how useful each would be to surface to an AI coding agent for the CURRENT request. \
@@ -30,8 +30,9 @@ Off-topic, generic, or keyword-only matches rank low. \
 Reply with ONLY a JSON array of candidate numbers, best first, e.g. [3,1,7]. Include only clearly useful candidates; omit ones that are not relevant. No prose.";
 
 const TRANSIENT_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
-const AUTH_FAILURE_BACKOFF: Duration = Duration::from_secs(5 * 60);
 static FAILURE_BACKOFF_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
+static REPORTED_PERMANENT_FAILURES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 fn failure_backoff_active() -> bool {
     let Ok(mut guard) = FAILURE_BACKOFF_UNTIL.lock() else {
@@ -47,26 +48,29 @@ fn failure_backoff_active() -> bool {
     }
 }
 
-fn record_failure_backoff(error: &anyhow::Error) {
-    let error = error.to_string().to_ascii_lowercase();
-    let permanent_auth_failure = error.contains("401")
-        || error.contains("unauthorized")
-        || error.contains("authentication_error")
-        || error.contains("invalid authentication credentials")
-        || error.contains("invalid_grant");
-    let duration = if permanent_auth_failure {
-        AUTH_FAILURE_BACKOFF
-    } else {
-        TRANSIENT_FAILURE_BACKOFF
-    };
+fn record_failure_backoff() {
     if let Ok(mut guard) = FAILURE_BACKOFF_UNTIL.lock() {
-        let candidate = Instant::now() + duration;
+        let candidate = Instant::now() + TRANSIENT_FAILURE_BACKOFF;
         if match *guard {
             Some(existing) => existing < candidate,
             None => true,
         } {
             *guard = Some(candidate);
         }
+    }
+}
+
+fn report_permanent_failure_once(error: &anyhow::Error) {
+    let message = error.to_string();
+    let should_report = REPORTED_PERMANENT_FAILURES
+        .lock()
+        .map(|mut reported| reported.insert(message.clone()))
+        .unwrap_or(true);
+    if should_report {
+        crate::logging::event_error(
+            "Memory consensus judge permanently misconfigured; fix credentials or the configured memory model",
+            [("error", message)],
+        );
     }
 }
 
@@ -292,14 +296,19 @@ pub async fn rerank_candidates_consensus_attributed(
             match sidecar.complete(LLM_RERANK_SYSTEM, &prompt).await {
                 Ok(resp) => extract_ranking(&resp, n), // Some([]) = nothing relevant
                 Err(e) => {
-                    record_failure_backoff(&e);
-                    crate::logging::event_rate_limited(
-                        crate::logging::LogLevel::Warn,
-                        "memory_consensus_judge_failed",
-                        Duration::from_secs(60),
-                        "Memory consensus judge failed; circuit breaker armed",
-                        vec![("error", e.to_string())],
-                    );
+                    match crate::sidecar::classify_error(&e) {
+                        SidecarErrorKind::Transient => {
+                            record_failure_backoff();
+                            crate::logging::event_rate_limited(
+                                crate::logging::LogLevel::Warn,
+                                "memory_consensus_judge_failed",
+                                Duration::from_secs(60),
+                                "Memory consensus judge transiently failed; circuit breaker armed",
+                                vec![("error", e.to_string())],
+                            );
+                        }
+                        SidecarErrorKind::Permanent => report_permanent_failure_once(&e),
+                    }
                     None // transport error = no vote
                 }
             }
@@ -607,14 +616,24 @@ mod tests {
     }
 
     #[test]
-    fn judge_failure_backoff_arms_and_auth_invalidation_clears_it() {
+    fn transient_judge_failure_backoff_arms_and_auth_invalidation_clears_it() {
         clear_failure_backoff();
         assert!(!failure_backoff_active());
-        record_failure_backoff(&anyhow::anyhow!(
-            "Claude API error (401 Unauthorized): invalid authentication credentials"
-        ));
+        record_failure_backoff();
         assert!(failure_backoff_active());
         clear_failure_backoff();
+        assert!(!failure_backoff_active());
+    }
+
+    #[test]
+    fn permanent_judge_failure_does_not_arm_backoff() {
+        clear_failure_backoff();
+        let error = anyhow::anyhow!("Claude API error (404 Not Found): not_found_error");
+        assert_eq!(
+            crate::sidecar::classify_error(&error),
+            SidecarErrorKind::Permanent
+        );
+        report_permanent_failure_once(&error);
         assert!(!failure_backoff_active());
     }
 }
