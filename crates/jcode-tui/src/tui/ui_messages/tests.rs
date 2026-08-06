@@ -1223,7 +1223,11 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
     );
     let compact_revised = without_whitespace(&revised);
     assert!(revised.contains("pelican-bike-animation"), "{revised}");
-    assert!(revised.contains("Closed feedback loop closed"), "{revised}");
+    assert!(
+        revised.contains("Relevance missing · Coverage missing · Traceability missing"),
+        "{revised}"
+    );
+    assert!(!revised.contains("Closed feedback loop closed"));
     assert!(!compact_revised.contains(&without_whitespace(REVISED_FEEDBACK)));
     assert!(revised.contains("● Implement"), "{revised}");
 }
