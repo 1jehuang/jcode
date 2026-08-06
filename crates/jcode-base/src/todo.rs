@@ -89,14 +89,12 @@ pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback 
 /// synthetic gate message rather than a user turn.
 const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-climbability is not high enough. First, improve the goal's objective and feedback loop so progress can be measured across iterations. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
 
-/// Model-facing continuation for the private end-to-end ownership check. Names
-/// the assessment category without disclosing the score or threshold.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] The recorded delivery state, autonomy, iteration maturity, or stopping evidence for this completed goal is not sufficient to finish. Do not reply conversationally or wait for the user. Take ownership of the full user outcome, validate the complete workflow and consequential adjacent necessary follow-through, and continue exercising the feedback loop while gains or material hypotheses remain. Reassess the goal honestly from concrete evidence, then call the todo tool again with an updated `delivery_state`, `autonomy`, and `iteration_maturity`, plus any required `stopping_evidence`.";
+/// Model-facing continuation for the private end-to-end ownership check. It
+/// asks for more work without revealing that an evaluator triggered it.
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Continue the work below. Keep the todo up to date; do not reply or wait for the user.";
 
-/// Build an ownership continuation that identifies every failing goal and field.
-/// The generic prefix remains stable for persisted-message classification, while
-/// the appended diagnostics let the model deliberately satisfy the gate instead
-/// of guessing which of several assessments was rejected.
+/// Build an ownership continuation that directs work toward each affected goal
+/// without exposing fields, scores, thresholds, or pass/fail language.
 pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[TodoGoal]) -> String {
     let mut groups: Vec<Option<String>> = Vec::new();
     for todo in todos {
@@ -114,7 +112,7 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
             .find(|goal| normalized_group(goal.group.as_deref()) == group)
         else {
             message.push_str(&format!(
-                "\n- Goal \"{}\": no goal assessment was recorded. Record delivery_state, autonomy, and iteration_maturity.",
+                "\n- Goal \"{}\": clarify the goal and track the work.",
                 label
             ));
             continue;
@@ -124,7 +122,7 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
             .is_some_and(|state| state >= required_delivery_state(goal.difficulty))
         {
             message.push_str(&format!(
-                "\n- Goal \"{}\": delivery_state must be workflow_validated or outcome_delivered.",
+                "\n- Goal \"{}\": carry the work through the complete workflow.",
                 label
             ));
         }
@@ -133,7 +131,7 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
             .is_some_and(|state| state >= Autonomy::NecessaryFollowthrough)
         {
             message.push_str(&format!(
-                "\n- Goal \"{}\": autonomy must be necessary_followthrough or higher.",
+                "\n- Goal \"{}\": take ownership of the necessary follow-through.",
                 label
             ));
         }
@@ -142,7 +140,7 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
             .is_some_and(IterationMaturity::permits_completion)
         {
             message.push_str(&format!(
-                "\n- Goal \"{}\": iteration_maturity must state a terminal basis for stopping, such as outcome_reached, constraints_exhausted, plateau_confirmed, or budget_exhausted.",
+                "\n- Goal \"{}\": keep iterating and test the remaining hypotheses.",
                 label
             ));
         }
@@ -159,7 +157,7 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
             .is_some_and(|evidence| !evidence.trim().is_empty())
         {
             message.push_str(&format!(
-                "\n- Goal \"{}\": stopping_evidence is required for the selected iteration_maturity; name the attempts, constraint, or budget that justifies stopping.",
+                "\n- Goal \"{}\": gather more evidence about whether the work should stop.",
                 label
             ));
         }
@@ -171,14 +169,12 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
 /// persisted transcripts still classify it as a synthetic gate message.
 const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your end-to-end ownership is not high enough to finish this goal.";
 
-/// Model-facing continuation for private completion-confidence checks. Names
-/// the assessment category without disclosing scores, items, or thresholds.
-pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your completion confidence is missing or not high enough. Do not reply conversationally or wait for the user. Instead: Validate the completed result more thoroughly with concrete evidence, address any remaining issues, then call the todo tool again with updated completion_confidence values that reflect the validation you performed.";
+/// Model-facing continuation for private completion-confidence checks.
+pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Do more validation on the work below. Keep the todo up to date; do not reply or wait for the user.";
 
-/// Model-facing continuation for a completed todo whose confidence rose too
-/// sharply at the end. It names the behavior without disclosing the numeric
-/// cutoff, individual todo, or recorded scores.
-pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated todo completion gate - not a user message] Your completion confidence rose too sharply to count as independently validated. Do not reply conversationally or wait for the user. Instead: recheck the completed result using concrete evidence, address any issues you find, then call the todo tool again with completion_confidence values that reflect the validation you performed.";
+/// Model-facing continuation requesting an independent recheck without saying
+/// why the private evaluator selected it.
+pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Independently recheck the work below. Keep the todo up to date; do not reply or wait for the user.";
 
 /// A completed todo is considered spike-finished when its final recorded
 /// confidence step jumps this many levels or more (e.g. speculative straight
@@ -492,10 +488,8 @@ fn append_named_todos(message: &mut String, lead: &str, todos: &[&TodoItem]) {
     message.push('.');
 }
 
-/// Completion-gate continuation naming exactly which completed todos failed the
-/// check, so the model re-validates those items instead of guessing which part
-/// of its work was doubted. Scores and thresholds stay private; only the reason
-/// category per todo is disclosed.
+/// Follow-up naming exactly which completed todos need more validation, without
+/// exposing evaluator language, scores, thresholds, or the internal reason.
 pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String {
     let completed: Vec<&TodoItem> = todos
         .iter()
@@ -516,22 +510,17 @@ pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String 
         .collect();
 
     let mut message = String::from(TODO_COMPLETION_CONTINUATION_MESSAGE);
-    if missing.is_empty() && weak.is_empty() {
-        message.push_str(
-            "\n- Taken together the completed work is not validated strongly enough yet: re-verify the finished todos with concrete evidence.",
-        );
-        return message;
-    }
-    append_named_todos(
-        &mut message,
-        "No completion_confidence was recorded for:",
-        &missing,
-    );
-    append_named_todos(
-        &mut message,
-        "The recorded completion_confidence is not strong enough for:",
-        &weak,
-    );
+    let needs_validation: Vec<&TodoItem> = completed
+        .iter()
+        .copied()
+        .filter(|todo| missing.contains(todo) || weak.contains(todo))
+        .collect();
+    let targets = if needs_validation.is_empty() {
+        &completed
+    } else {
+        &needs_validation
+    };
+    append_named_todos(&mut message, "Validate further:", targets);
     message
 }
 
@@ -540,7 +529,7 @@ pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String 
 pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> String {
     let spiked = spike_completed_todos(todos);
     let mut message = String::from(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE);
-    append_named_todos(&mut message, "Recheck the confidence jump on:", &spiked);
+    append_named_todos(&mut message, "Recheck:", &spiked);
     message
 }
 
@@ -1127,20 +1116,17 @@ mod tests {
                 TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
                 "understanding of the user's intent",
             ),
-            (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "delivery state"),
-            (
-                TODO_COMPLETION_CONTINUATION_MESSAGE,
-                "completion confidence",
-            ),
+            (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "continue the work"),
+            (TODO_COMPLETION_CONTINUATION_MESSAGE, "more validation"),
             (
                 TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
-                "completion confidence",
+                "independently recheck",
             ),
         ] {
             let lower = message.to_ascii_lowercase();
             assert!(lower.contains(category));
             assert!(!message.chars().any(|ch| ch.is_ascii_digit()));
-            for disclosure in ["threshold", "percent", "below", "quality gate"] {
+            for disclosure in ["threshold", "percent", "quality gate"] {
                 assert!(
                     !lower.contains(disclosure),
                     "category-only continuation disclosed {disclosure}: {message}"
@@ -1168,12 +1154,19 @@ mod tests {
             TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("what the user actually wants")
         );
         assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Do not ask the user"));
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("full user outcome"));
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("complete workflow"));
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("necessary follow-through"));
-        assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("Validate the completed result"));
-        assert!(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.contains("concrete evidence"));
-        assert!(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.contains("rose too sharply"));
+        for message in [
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE,
+            TODO_COMPLETION_CONTINUATION_MESSAGE,
+            TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
+        ] {
+            let lower = message.to_ascii_lowercase();
+            for evaluator_term in ["gate", "flagged", "failed", "threshold", "confidence"] {
+                assert!(
+                    !lower.contains(evaluator_term),
+                    "disclosed {evaluator_term}: {message}"
+                );
+            }
+        }
     }
 
     /// The model must be told which items it should recheck, otherwise the
@@ -1204,7 +1197,8 @@ mod tests {
         // the fallback still tells the model what to do.
         let average_only = build_todo_completion_continuation_message(&[strong]);
         assert!(average_only.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE));
-        assert!(average_only.contains("re-verify the finished todos"));
+        assert!(average_only.contains("Validate further:"));
+        assert!(average_only.contains("rename the module"));
     }
 
     #[test]
@@ -1598,8 +1592,7 @@ mod tests {
     /// that the todo write which triggered the check was discarded.
     #[test]
     fn ownership_message_names_the_field_that_must_be_raised() {
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("iteration maturity"));
-        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("autonomy"));
+        assert!(TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("Continue the work below"));
         for private_calibration in [
             "necessary_followthrough",
             "outcome_reached",
@@ -1609,7 +1602,7 @@ mod tests {
             assert!(!TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains(private_calibration));
         }
         assert!(
-            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("call the todo tool again"),
+            TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("Keep the todo up to date"),
             "the ownership nudge must say how to update the assessment"
         );
         assert!(
@@ -1617,9 +1610,7 @@ mod tests {
                 && !TODO_OWNERSHIP_CONTINUATION_MESSAGE.contains("unchanged"),
             "the turn-finish nudge must not claim the already-saved write was discarded"
         );
-        // Every gate message that requires a specific field should name it, so
-        // this property is asserted for the sibling gates too.
-        assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("completion_confidence"));
+        assert!(TODO_COMPLETION_CONTINUATION_MESSAGE.contains("more validation"));
     }
 
     #[test]
@@ -1632,12 +1623,15 @@ mod tests {
 
         let message = build_todo_ownership_continuation_message(&todos, &[goal]);
         assert!(message.contains("Goal \"ship\""));
-        assert!(message.contains("delivery_state must be workflow_validated"));
-        assert!(message.contains("autonomy must be necessary_followthrough"));
-        assert!(message.contains("stopping_evidence is required"));
+        assert!(message.contains("complete workflow"));
+        assert!(message.contains("ownership of the necessary follow-through"));
+        assert!(message.contains("evidence about whether the work should stop"));
+        assert!(!message.contains("workflow_validated"));
+        assert!(!message.contains("necessary_followthrough"));
+        assert!(!message.contains("outcome_reached"));
         // PlateauConfirmed is terminal, so it must not also be diagnosed as an
         // iteration_maturity failure. Its missing evidence is the exact defect.
-        assert!(!message.contains("iteration_maturity must state a terminal basis"));
+        assert!(!message.contains("remaining hypotheses"));
         assert!(is_auto_poke_message(&message));
     }
 
@@ -1645,7 +1639,7 @@ mod tests {
     fn ownership_continuation_reports_missing_goal_assessment() {
         let todos = vec![todo("work", "completed", Some("ship"))];
         let message = build_todo_ownership_continuation_message(&todos, &[]);
-        assert!(message.contains("Goal \"ship\": no goal assessment was recorded"));
+        assert!(message.contains("Goal \"ship\": clarify the goal and track the work"));
     }
 
     #[test]
