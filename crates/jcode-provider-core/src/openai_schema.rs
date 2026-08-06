@@ -117,10 +117,10 @@ pub fn schema_supports_strict(schema: &Value) -> bool {
         // `description`) is valid JSON Schema, but strict normalization turns it
         // into an untyped `anyOf` branch that makes OpenAI reject the entire tool
         // catalog. Fall back to non-strict instead. See issue #713.
-        if let Some(Value::Object(props)) = map.get("properties") {
-            if props.values().any(|prop| !schema_has_type_info(prop)) {
-                return false;
-            }
+        if let Some(Value::Object(props)) = map.get("properties")
+            && props.values().any(|prop| !schema_has_type_info(prop))
+        {
+            return false;
         }
 
         map.values().all(schema_supports_strict)
