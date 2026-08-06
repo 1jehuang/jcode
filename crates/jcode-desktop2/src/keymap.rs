@@ -154,6 +154,11 @@ pub enum Action {
     /// app puts preferences on, so it needs no discovering.
     ToggleSettings,
 
+    /// Ctrl+M: open or shut the model catalog. The caption beside the composer
+    /// advertises this chord so switching models becomes a learned keyboard
+    /// action rather than a pointer-only control.
+    ToggleModelPicker,
+
     /// Ctrl+Shift+R: cycle how much of the model's thinking the transcript
     /// keeps (`current` -> `full` -> `off`). A view choice, so it is a
     /// keypress rather than a config edit and a restart.
@@ -918,6 +923,7 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     // conversation rather than replacing it, so the session
                     // you are in stays legible while you pick another.
                     'r' => Some(Action::ToggleResume),
+                    'm' => Some(Action::ToggleModelPicker),
                     'd' => Some(Action::InterruptOrQuit),
                     _ => None,
                 };

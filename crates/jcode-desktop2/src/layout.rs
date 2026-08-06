@@ -450,7 +450,10 @@ impl Frame {
 
     /// The active model caption's visible button and pointer hit target.
     pub fn model_button(&self) -> vello::kurbo::Rect {
-        let width = (self.column() / 3.0)
+        // The active route can already be long, and the control also teaches
+        // its Ctrl+M shortcut. Give both enough room to remain a single quiet
+        // line rather than letting Parley wrap the hint below the button.
+        let width = (self.column() / 2.0)
             .max(MODEL_BUTTON_MIN_WIDTH)
             .min(self.column());
         vello::kurbo::Rect::new(

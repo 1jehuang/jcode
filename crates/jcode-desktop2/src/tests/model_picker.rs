@@ -1,6 +1,7 @@
 //! The model caption button, SDK catalog handoff, and menu selection behavior.
 
 use crate::{App, ModelId, harness};
+use crate::keymap::Action;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 fn app() -> (
@@ -44,6 +45,17 @@ fn clicking_the_active_caption_requests_sdk_models_and_opens_the_menu() {
         commands.try_recv(),
         Ok(harness::Command::ListModels)
     ));
+}
+
+#[test]
+fn model_picker_action_requests_sdk_models_and_toggles_the_menu() {
+    let (mut app, _, commands) = app();
+    assert!(app.apply(Action::ToggleModelPicker, None));
+    assert!(app.model.model_picker.is_open());
+    assert!(matches!(commands.try_recv(), Ok(harness::Command::ListModels)));
+
+    assert!(app.apply(Action::ToggleModelPicker, None));
+    assert!(!app.model.model_picker.is_open());
 }
 
 #[test]

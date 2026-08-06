@@ -554,9 +554,10 @@ fn draw_model_picker(
     let baseline = button.y0 + (button.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
     let left = button.x0 + layout::MODEL_MENU_TEXT_PAD;
     let chevron_space = 12.0;
+    let caption = format!("{caption}   CTRL M");
     text.draw_paragraph_scaled(
         scene,
-        caption,
+        &caption,
         (left, baseline),
         (button.width() - layout::MODEL_MENU_TEXT_PAD * 2.0 - chevron_space).max(1.0) as f32,
         ParagraphStyle {

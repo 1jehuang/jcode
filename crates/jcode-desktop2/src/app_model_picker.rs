@@ -11,6 +11,33 @@ impl App {
             .is_some()
     }
 
+    /// Toggle the catalog from either the caption or its advertised Ctrl+M
+    /// chord. Keeping this in one path makes pointer and keyboard behavior
+    /// identical, including connection errors and the single-menu rule.
+    pub(crate) fn toggle_model_picker(&mut self) {
+        if self.model.model_picker.is_open() {
+            self.model.model_picker.close();
+            self.request_redraw();
+            return;
+        }
+        if !self.has_model_caption() {
+            return;
+        }
+        let Some((_, outgoing)) = self.harness.as_ref() else {
+            self.model.set_notice("not connected: cannot list models");
+            self.request_redraw();
+            return;
+        };
+        if outgoing.send(harness::Command::ListModels).is_err() {
+            self.model.set_notice("not connected: cannot list models");
+            self.request_redraw();
+            return;
+        }
+        self.model.panel.close();
+        self.model.model_picker.open_loading();
+        self.request_redraw();
+    }
+
     /// Let the caption or its open menu consume a press before the composer and
     /// transcript see it. Like the settings panel, dismiss clicks are consumed
     /// so closing a menu cannot also move the caret underneath it.
@@ -18,8 +45,7 @@ impl App {
         let on_button = self.has_model_caption() && self.frame.hits_model_button(x, y);
         if self.model.model_picker.is_open() {
             if on_button {
-                self.model.model_picker.close();
-                self.request_redraw();
+                self.toggle_model_picker();
                 return true;
             }
             let rows = self.model.model_picker.visual_rows();
@@ -45,21 +71,7 @@ impl App {
         if !on_button {
             return false;
         }
-        let Some((_, outgoing)) = self.harness.as_ref() else {
-            self.model.set_notice("not connected: cannot list models");
-            self.request_redraw();
-            return true;
-        };
-        if outgoing.send(harness::Command::ListModels).is_err() {
-            self.model.set_notice("not connected: cannot list models");
-            self.request_redraw();
-            return true;
-        }
-        // The two menus cannot overlap. This is the same single-menu rule as a
-        // native menu bar and makes the next click unambiguous.
-        self.model.panel.close();
-        self.model.model_picker.open_loading();
-        self.request_redraw();
+        self.toggle_model_picker();
         true
     }
 

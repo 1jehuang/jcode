@@ -25,6 +25,18 @@ fn ch(c: char) -> Key {
 }
 
 #[test]
+fn ctrl_m_resolves_to_the_model_picker() {
+    assert_eq!(
+        keymap::resolve(&ch('m'), ModifiersState::CONTROL),
+        Some(Action::ToggleModelPicker)
+    );
+    assert_eq!(
+        keymap::resolve(&ch('m'), ModifiersState::SUPER),
+        Some(Action::ToggleModelPicker)
+    );
+}
+
+#[test]
 fn escape_clears_the_input_instead_of_quitting() {
     // The starter quit the app on Escape, silently losing typed work.
     let mut app = app_with("a draft message");
