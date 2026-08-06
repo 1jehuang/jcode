@@ -58,16 +58,16 @@ fn listing_has_no_tool_entry(listing: &Value) -> bool {
     }
 }
 
-/// Error shown when a select names something outside the catalog. It tells the
-/// agent the two legitimate recoveries: pick a listed entry, or record the gap.
-fn off_catalog_select_error(category: &str, tool_name: &str) -> anyhow::Error {
+/// Error shown when the server cannot return a valid receipt for a selection.
+/// Off-catalog choices are legitimate, but they still must be recorded before
+/// the agent can claim that Discovery observed the choice.
+fn selection_receipt_error(category: &str, tool_name: &str) -> anyhow::Error {
     anyhow::anyhow!(
-        "'{tool_name}' is not in the Jcode catalog for '{category}'. Only entries returned by \
-         action `browse` can be selected; this name did not come from a listing. Either select \
-         one of the listed entries, or, if none fits, call action `suggest` with \
-         `suggestion_kind: known_product`, `product_name: {tool_name}`, and the \
-         `prior_request_id` from your browse so maintainers see the gap. Do not install or \
-         configure '{tool_name}' from memory as if Discovery had vetted it."
+        "Discovery could not record the selection of '{tool_name}' for '{category}' because the \
+         server returned no valid selection receipt. Retry action `select` with the same product, \
+         including off-catalog products. Until a receipt is returned, do not claim the choice was \
+         recorded or treat '{tool_name}' as vetted, and do not invent setup instructions from \
+         memory."
     )
 }
 
@@ -690,11 +690,9 @@ impl Tool for DiscoverToolsTool {
             let fetched = match fetch_listing(&discovery_request, Some(&tool_name)).await {
                 Ok(result) => result,
                 Err(err) => {
-                    // A 404 on select means the agent committed to a name the
-                    // catalog does not carry (usually a product it recalled
-                    // from training, not one it saw in browse). That is a
-                    // distinct behavior from a broken endpoint, so it gets its
-                    // own outcome and its own recovery instruction.
+                    // Older endpoints returned 404 for an off-catalog choice.
+                    // Current endpoints return a structured receipt instead,
+                    // so a 404 now means the choice was not recorded.
                     if err.http_status == Some(404) {
                         record_discovery_telemetry(
                             &request_id,
@@ -711,7 +709,7 @@ impl Tool for DiscoverToolsTool {
                             query_present,
                             reason_present,
                         );
-                        return Err(off_catalog_select_error(&category, &tool_name));
+                        return Err(selection_receipt_error(&category, &tool_name));
                     }
                     record_discovery_telemetry(
                         &request_id,
@@ -731,8 +729,8 @@ impl Tool for DiscoverToolsTool {
                     return Err(err.into());
                 }
             };
-            // Endpoints may also answer 200 with an empty entry. Same meaning:
-            // the selected name is not in the catalog.
+            // Older endpoints may answer 200 with an empty entry. It is not a
+            // valid receipt, so the agent must not claim the choice was recorded.
             if listing_has_no_tool_entry(&fetched.listing) {
                 record_discovery_telemetry(
                     &request_id,
@@ -749,7 +747,7 @@ impl Tool for DiscoverToolsTool {
                     query_present,
                     reason_present,
                 );
-                return Err(off_catalog_select_error(&category, &tool_name));
+                return Err(selection_receipt_error(&category, &tool_name));
             }
             let rendered = match render_selection(&category, &tool_name, &fetched.listing) {
                 Ok(rendered) => rendered,
@@ -1390,16 +1388,37 @@ fn render_suggestion(
 /// `{ "selected_tool": "...", "listed": false }`: they are acknowledged for
 /// demand attribution without inventing, fetching, or endorsing provider data.
 fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<String> {
-    let Some(tool) = listing.get("tool") else {
-        let selected_tool = listing
-            .get("selected_tool")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if listing.get("listed").and_then(Value::as_bool) != Some(false)
-            || !selected_tool.eq_ignore_ascii_case(tool_name)
-        {
+    let receipt_category = listing
+        .get("category")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("discovery selection receipt omitted its category"))?;
+    if !receipt_category.eq_ignore_ascii_case(category) {
+        return Err(anyhow::anyhow!(
+            "discovery selection receipt category '{receipt_category}' did not match requested category '{category}'"
+        ));
+    }
+    let selected_tool = listing
+        .get("selected_tool")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("discovery selection receipt omitted the selected product")
+        })?;
+    if !selected_tool.eq_ignore_ascii_case(tool_name) {
+        return Err(anyhow::anyhow!(
+            "discovery selection receipt named '{selected_tool}', not requested product '{tool_name}'"
+        ));
+    }
+    let listed = listing
+        .get("listed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow::anyhow!("discovery selection receipt omitted catalog status"))?;
+
+    if !listed {
+        if listing.get("tool").is_some() {
             return Err(anyhow::anyhow!(
-                "discovery returned no selection receipt for '{tool_name}'"
+                "off-catalog selection receipt for '{selected_tool}' unexpectedly included provider details"
             ));
         }
         return Ok(format!(
@@ -1408,11 +1427,31 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
              product, so no provider information, recommendation, or setup instructions \
              are provided. Continue using only information independently available to you."
         ));
-    };
+    }
+
+    let tool = listing
+        .get("tool")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow::anyhow!("catalog selection receipt contained no provider details")
+        })?;
     let name = tool
         .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or(tool_name);
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("catalog selection receipt omitted the provider name"))?;
+    if !name.eq_ignore_ascii_case(tool_name) || !name.eq_ignore_ascii_case(selected_tool) {
+        return Err(anyhow::anyhow!(
+            "catalog provider name '{name}' did not match selected product '{selected_tool}'"
+        ));
+    }
+    let setup = tool
+        .get("setup")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("catalog selection receipt for '{name}' omitted setup instructions")
+        })?;
     let blurb = tool.get("blurb").and_then(|v| v.as_str()).unwrap_or("");
     let mut out = format!(
         "Selected '{name}' from '{category}' (Jcode tool directory; the choice must be based only \
@@ -1422,9 +1461,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
     if let Some(url) = tool.get("url").and_then(|v| v.as_str()) {
         out.push_str(&format!(" ({url})"));
     }
-    if let Some(setup) = tool.get("setup").and_then(|v| v.as_str()) {
-        out.push_str(&format!("\n\nSetup: {setup}"));
-    }
+    out.push_str(&format!("\n\nSetup: {setup}"));
     out.push_str(
         "\n\nConsequential actions (signups, spending) must note the partnership in \
          the confirmation shown to the user.",
@@ -1570,6 +1607,9 @@ mod tests {
     #[test]
     fn render_selection_includes_setup_and_disclosure() {
         let listing = json!({
+            "category": "payments",
+            "selected_tool": "agentcard",
+            "listed": true,
             "tool": {
                 "name": "agentcard",
                 "blurb": "virtual cards",
@@ -1586,6 +1626,56 @@ mod tests {
     }
 
     #[test]
+    fn selection_receipt_must_match_the_request_and_catalog_contract() {
+        let valid = json!({
+            "category": "payments",
+            "selected_tool": "agentcard",
+            "listed": true,
+            "tool": {
+                "name": "agentcard",
+                "blurb": "virtual cards",
+                "url": "https://a.example",
+                "setup": "npm install -g agentcard"
+            }
+        });
+
+        let mut wrong_category = valid.clone();
+        wrong_category["category"] = json!("web-data");
+        assert!(render_selection("payments", "agentcard", &wrong_category).is_err());
+
+        let mut wrong_selected_tool = valid.clone();
+        wrong_selected_tool["selected_tool"] = json!("other");
+        assert!(render_selection("payments", "agentcard", &wrong_selected_tool).is_err());
+
+        let mut wrong_provider_name = valid.clone();
+        wrong_provider_name["tool"]["name"] = json!("other");
+        assert!(render_selection("payments", "agentcard", &wrong_provider_name).is_err());
+
+        let mut missing_status = valid.clone();
+        missing_status.as_object_mut().unwrap().remove("listed");
+        assert!(render_selection("payments", "agentcard", &missing_status).is_err());
+
+        let mut non_object_tool = valid.clone();
+        non_object_tool["tool"] = json!("agentcard");
+        assert!(render_selection("payments", "agentcard", &non_object_tool).is_err());
+
+        let mut missing_setup = valid.clone();
+        missing_setup["tool"]
+            .as_object_mut()
+            .unwrap()
+            .remove("setup");
+        assert!(render_selection("payments", "agentcard", &missing_setup).is_err());
+
+        let mut empty_setup = valid.clone();
+        empty_setup["tool"]["setup"] = json!("  ");
+        assert!(render_selection("payments", "agentcard", &empty_setup).is_err());
+
+        let mut contradictory_off_catalog = valid.clone();
+        contradictory_off_catalog["listed"] = json!(false);
+        assert!(render_selection("payments", "agentcard", &contradictory_off_catalog).is_err());
+    }
+
+    #[test]
     fn render_off_catalog_selection_is_receipt_only() {
         let listing = json!({
             "category": "web-data",
@@ -1599,6 +1689,18 @@ mod tests {
         assert!(out.contains("no provider information, recommendation, or setup instructions"));
         assert!(!out.contains("http"));
         assert!(render_selection("web-data", "other", &listing).is_err());
+
+        let mut wrong_category = listing.clone();
+        wrong_category["category"] = json!("payments");
+        assert!(render_selection("web-data", "firecrawl", &wrong_category).is_err());
+
+        let mut contradictory_details = listing.clone();
+        contradictory_details["tool"] = json!({"name": "firecrawl", "setup": "unexpected"});
+        assert!(render_selection("web-data", "firecrawl", &contradictory_details).is_err());
+
+        let mut null_details = listing.clone();
+        null_details["tool"] = Value::Null;
+        assert!(render_selection("web-data", "firecrawl", &null_details).is_err());
     }
 
     #[test]
@@ -1618,6 +1720,9 @@ mod tests {
     #[test]
     fn agentmail_selection_preserves_signup_attribution_and_mcp_provenance() {
         let listing = json!({
+            "category": "email-messaging",
+            "selected_tool": "agentmail",
+            "listed": true,
             "tool": {
                 "name": "agentmail",
                 "blurb": "programmable email inboxes and messaging APIs for AI agents",
@@ -1668,15 +1773,14 @@ mod tests {
     }
 
     #[test]
-    fn off_catalog_error_names_both_recoveries() {
-        let message = off_catalog_select_error("payments", "stripe").to_string();
-        assert!(message.contains("not in the Jcode catalog"));
+    fn missing_selection_receipt_preserves_off_catalog_semantics() {
+        let message = selection_receipt_error("payments", "stripe").to_string();
+        assert!(message.contains("could not record"));
         assert!(message.contains("stripe"));
-        assert!(message.contains("action `suggest`"));
-        assert!(message.contains("known_product"));
-        assert!(message.contains("prior_request_id"));
-        // Must not tempt the agent into setting it up from memory.
-        assert!(message.contains("Do not install"));
+        assert!(message.contains("action `select`"));
+        assert!(message.contains("including off-catalog products"));
+        assert!(message.contains("do not claim the choice was recorded"));
+        assert!(message.contains("do not invent setup instructions"));
     }
 
     #[test]
