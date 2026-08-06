@@ -274,8 +274,6 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         outcome = "empty"
     elif selection or off_catalog_selection:
         outcome = "selection"
-    elif off_catalog:
-        outcome = "off-catalog-select"
     elif output.startswith("Error:"):
         outcome = "error"
     else:

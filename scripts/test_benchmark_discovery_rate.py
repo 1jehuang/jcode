@@ -22,6 +22,9 @@ import benchmark_discovery_rate as rate  # noqa: E402
 
 
 class ExecutableIdentityTests(unittest.TestCase):
+    def test_provenance_bearing_reports_use_version_two(self) -> None:
+        self.assertEqual(2, rate.REPORT_VERSION)
+
     def test_records_exact_path_version_commit_and_checksum(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "fake-jcode"
