@@ -46,7 +46,13 @@ pub struct Picker {
     stage: Stage,
     provider: Option<String>,
     connection: Option<String>,
+    /// Reveal progress in thousandths. The panel remains visible while this
+    /// runs back to zero, so closing lets the transcript settle together.
+    phase: u16,
 }
+
+const PHASE_MAX: u16 = 1000;
+pub const REVEAL_SECONDS: f32 = 0.18;
 
 impl Picker {
     pub fn is_open(&self) -> bool {
@@ -54,6 +60,46 @@ impl Picker {
     }
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+    pub fn is_visible(&self) -> bool {
+        self.open || self.phase > 0
+    }
+    pub fn phase(&self) -> f64 {
+        let t = f64::from(self.phase) / f64::from(PHASE_MAX);
+        t * t * (3.0 - 2.0 * t)
+    }
+    pub fn is_animating(&self) -> bool {
+        if self.open { self.phase < PHASE_MAX } else { self.phase > 0 }
+    }
+    pub fn advance(&mut self, dt: f32) -> bool {
+        let step = (dt / REVEAL_SECONDS * f32::from(PHASE_MAX)).max(1.0) as u16;
+        let before = self.phase;
+        self.phase = if self.open {
+            self.phase.saturating_add(step).min(PHASE_MAX)
+        } else {
+            self.phase.saturating_sub(step)
+        };
+        before != self.phase
+    }
+    /// Vertical displacement for a transcript item in region coordinates.
+    /// Rendering and selection both call this so animated ink never drifts away
+    /// from its pointer geometry.
+    pub fn transcript_shift(
+        &self,
+        region_height: f64,
+        menu_height: f64,
+        item_top: f64,
+        item_height: f64,
+    ) -> f64 {
+        if !self.is_visible() {
+            return 0.0;
+        }
+        let amount = (menu_height / 2.0 + crate::layout::MODEL_MENU_GAP) * self.phase();
+        if item_top + item_height / 2.0 < region_height / 2.0 {
+            -amount
+        } else {
+            amount
+        }
     }
     pub fn stage(&self) -> Stage {
         self.stage
@@ -71,20 +117,19 @@ impl Picker {
         self.stage = Stage::Provider;
         self.provider = None;
         self.connection = None;
-        self.hover = None;
+        self.hover = Some(0);
     }
 
     pub fn close(&mut self) {
         self.open = false;
         self.loading = false;
-        self.hover = None;
     }
 
     pub fn set_models(&mut self, models: Vec<String>, current: Option<String>) {
         self.models = models;
         self.current = current;
         self.loading = false;
-        self.hover = None;
+        self.hover = Some(0);
     }
 
     pub fn models(&self) -> &[String] {
@@ -199,6 +244,15 @@ impl Picker {
         self.hover = row;
         true
     }
+    pub fn move_hover(&mut self, delta: isize) {
+        let rows = self.visual_rows();
+        if rows == 0 { return; }
+        let current = self.hover.unwrap_or(0) as isize;
+        self.hover = Some((current + delta).rem_euclid(rows as isize) as usize);
+    }
+    pub fn choose_hovered(&mut self) -> Option<String> {
+        self.choose_row(self.hover.unwrap_or(0))
+    }
     pub fn button_hover(&self) -> bool {
         self.button_hover
     }
@@ -245,5 +299,18 @@ mod tests {
         picker.close();
         picker.set_models(vec!["gpt-5.6".into()], Some("gpt-5.6".into()));
         assert!(!picker.is_open());
+    }
+
+    #[test]
+    fn reveal_reverses_smoothly_when_closed_mid_animation() {
+        let mut picker = Picker::default();
+        picker.open_loading();
+        assert!(picker.advance(REVEAL_SECONDS / 2.0));
+        let halfway = picker.phase();
+        assert!(halfway > 0.0 && halfway < 1.0);
+        picker.close();
+        assert!(picker.is_visible());
+        assert!(picker.advance(REVEAL_SECONDS));
+        assert!(!picker.is_visible());
     }
 }

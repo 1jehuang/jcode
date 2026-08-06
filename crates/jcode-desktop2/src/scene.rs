@@ -522,83 +522,37 @@ fn draw_settings_panel(
     }
 }
 
-/// Draw the active model caption as a quiet button and, when open, the catalog
-/// returned by the SDK. The menu follows the settings panel's visual grammar so
-/// both pieces of desktop chrome feel like one app.
+/// Draw the catalog as a temporary object in the middle of the transcript.
+/// Its reveal is clipped from the centre while the transcript parts around it,
+/// so it reads as space being made rather than a menu covering conversation.
 fn draw_model_picker(
     scene: &mut Scene,
     text: &mut text::TextSystem,
     model: &Model,
     frame: &layout::Frame,
-    caption: &str,
     scale: f64,
 ) {
     let theme = &model.theme;
-    let button = frame.model_button();
-    if model.model_picker.button_hover() || model.model_picker.is_open() {
-        scene.fill(
-            vello::peniko::Fill::NonZero,
-            Affine::scale(scale),
-            theme.wash,
-            None,
-            &button,
-        );
-    }
-    scene.stroke(
-        &vello::kurbo::Stroke::new(frame.hairline()),
-        Affine::scale(scale),
-        theme.rule,
-        None,
-        &RoundedRect::from_rect(button, layout::MODEL_MENU_RADIUS / 2.0),
-    );
-    let baseline = button.y0 + (button.height() - f64::from(layout::CAPTION_SIZE) * 1.4) / 2.0;
-    let left = button.x0 + layout::MODEL_MENU_TEXT_PAD;
-    let chevron_space = 12.0;
-    let caption = format!("{caption}   CTRL M");
-    text.draw_paragraph_scaled(
-        scene,
-        &caption,
-        (left, baseline),
-        (button.width() - layout::MODEL_MENU_TEXT_PAD * 2.0 - chevron_space).max(1.0) as f32,
-        ParagraphStyle {
-            font_size: layout::CAPTION_SIZE,
-            color: theme.faint,
-            letter_spacing_em: 0.1,
-            align: text::Align::End,
-            ..Default::default()
-        },
-        scale,
-    );
-    let cx = button.x1 - layout::MODEL_MENU_TEXT_PAD + 1.0;
-    let cy = (button.y0 + button.y1) / 2.0;
-    let mut chevron = BezPath::new();
-    chevron.move_to((cx - 3.0, cy - 1.5));
-    chevron.line_to((cx, cy + 1.5));
-    chevron.line_to((cx + 3.0, cy - 1.5));
-    scene.stroke(
-        &vello::kurbo::Stroke::new(frame.hairline()),
-        Affine::scale(scale),
-        theme.faint,
-        None,
-        &chevron,
-    );
-
-    if !model.model_picker.is_open() {
+    if !model.model_picker.is_visible() {
         return;
     }
     let rows = model.model_picker.visual_rows();
     let menu = frame.model_menu(rows);
+    let phase = model.model_picker.phase();
+    let centre = (menu.y0 + menu.y1) / 2.0;
+    let reveal = Rect::new(menu.x0, centre - menu.height() * phase / 2.0, menu.x1, centre + menu.height() * phase / 2.0);
+    scene.push_clip_layer(vello::peniko::Fill::NonZero, Affine::scale(scale), &reveal);
     scene.fill(
         vello::peniko::Fill::NonZero,
         Affine::scale(scale),
-        theme.field,
+        theme.background,
         None,
         &RoundedRect::from_rect(menu, layout::MODEL_MENU_RADIUS),
     );
     scene.stroke(
         &vello::kurbo::Stroke::new(layout::COMPOSER_BORDER),
         Affine::scale(scale),
-        theme.field_border,
+        theme.rule,
         None,
         &RoundedRect::from_rect(menu, layout::MODEL_MENU_RADIUS),
     );
@@ -648,6 +602,7 @@ fn draw_model_picker(
             );
         }
     }
+    scene.pop_layer();
 }
 
 /// Body paragraph style for transcript prose. One definition, so measuring in
@@ -800,7 +755,16 @@ fn draw_transcript(
 
     let now = std::time::Instant::now();
     for placed in &view.visible {
-        let message_top = frame.body_top + placed.top;
+        let mut message_top = frame.body_top + placed.top;
+        if model.model_picker.is_visible() {
+            let menu = frame.model_menu(model.model_picker.visual_rows());
+            message_top += model.model_picker.transcript_shift(
+                region_height,
+                menu.height(),
+                placed.top,
+                placed.message.height,
+            );
+        }
         let is_user = placed.message.role == Role::User;
         // The acknowledgement nod. Applied to the card *and* its text, so the
         // message moves as one object; it decays to zero, so nothing here can
@@ -1601,6 +1565,9 @@ pub fn build_scene(
         scene.pop_layer();
         draw_scrollbar(scene, text, transcript_cache, model, &frame, scale);
     }
+    if model.model_picker.is_visible() {
+        draw_model_picker(scene, text, model, &frame, scale);
+    }
 
     // Prompt line inside the well: a real input box. The caret is drawn at
     // the measured width of the text before the cursor, so it sits between
@@ -1773,48 +1740,8 @@ pub fn build_scene(
     // decides how wide it may be. Status and build alerts live here instead of
     // a masthead, so the top of the page stays clear while a failure to attach
     // is still visible.
-    // Elided to a third of the column: a route-prefixed model id can be long,
-    // and it must never crowd out the footnote, which is the actionable half.
-    let model_caption = model.model.as_ref().and_then(|id| id.caption()).map(|id| {
-        let route = model
-            .model_picker
-            .current()
-            .map(crate::model_picker::Route::parse);
-        let provider = route
-            .as_ref()
-            .map(|route| route.provider)
-            .or_else(|| model.model.as_ref().and_then(|id| id.provider.as_deref()));
-        let connection = route.as_ref().map(|route| route.connection).or_else(|| {
-            provider.and_then(|provider| {
-                provider
-                    .strip_suffix("-oauth")
-                    .map(|_| "OAuth")
-                    .or_else(|| provider.strip_suffix("-api").map(|_| "API"))
-            })
-        });
-        let provider_label = provider.map(|provider| {
-            provider
-                .strip_suffix("-oauth")
-                .or_else(|| provider.strip_suffix("-api"))
-                .unwrap_or(provider)
-        });
-        let details = match (provider_label, connection) {
-            (Some(provider), Some(connection)) => format!("{id} · {provider} · {connection}"),
-            (Some(provider), None) => format!("{id} · {provider}"),
-            _ => id,
-        };
-        let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72) / 2.0) as usize;
-        elide(&details, chars.max(18))
-    });
     let footnote = model.footnote().map(|line| {
         let chars = (frame.column() / (f64::from(layout::CAPTION_SIZE) * 0.72)) as usize;
-        // Halve the budget when the model caption shares the row, so the two
-        // captions cannot overlap in the middle.
-        let chars = if model_caption.is_some() {
-            chars / 2
-        } else {
-            chars
-        };
         elide(&line, chars.max(12))
     });
     if let Some(footnote) = footnote {
@@ -1831,14 +1758,6 @@ pub fn build_scene(
             },
             scale,
         );
-    }
-
-    // Which model is answering, as a caption on the trailing end of the
-    // footnote row. Right-aligned so it reads as metadata about the session
-    // rather than as another message to the user, and drawn after the footnote
-    // so a long notice is the thing that gets elided, not this.
-    if let Some(caption) = model_caption.as_deref() {
-        draw_model_picker(scene, text, model, &frame, caption, scale);
     }
 
     // The settings panel sits over the page, under the overview: it is a

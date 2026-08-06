@@ -293,6 +293,9 @@ impl App {
         if self.model.resume.is_open() {
             return self.resume_keydown(logical_key, typed);
         }
+        if self.model.model_picker.is_open() {
+            return self.model_picker_keydown(logical_key);
+        }
         if self.model.overview.is_open() {
             return self.overview_keydown(logical_key, typed);
         }

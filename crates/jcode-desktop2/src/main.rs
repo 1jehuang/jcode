@@ -1094,7 +1094,6 @@ impl App {
         }
         let wanted = if self.frame.hits_gear(x, y)
             || self.frame.hits_sessions(x, y)
-            || (self.has_model_caption() && self.frame.hits_model_button(x, y))
             || (self.model.model_picker.is_open()
                 && self
                     .frame
@@ -1297,6 +1296,11 @@ impl App {
             .overview
             .is_animating()
             .then(|| now + OVERVIEW_FRAME);
+        let model_picker = self
+            .model
+            .model_picker
+            .is_animating()
+            .then(|| now + OVERVIEW_FRAME);
         // A held Super release waiting out the remapper bounce needs a frame to
         // resolve on, or a gesture ended by letting go with nothing else moving
         // on screen would sit open until the next unrelated event.
@@ -1343,7 +1347,8 @@ impl App {
                 .is_animating()
                 .then(|| now + WORKSPACE_FRAME);
             return [
-                overview, bounce, workspace, spinner, stream, smooth, boot, progress, attachment,
+                overview, model_picker, bounce, workspace, spinner, stream, smooth, boot, progress,
+                attachment,
             ]
             .into_iter()
             .flatten()
@@ -1386,8 +1391,8 @@ impl App {
             .is_animating()
             .then(|| now + WORKSPACE_FRAME);
         [
-            caret, donut, spinner, stream, smooth, overview, workspace, bounce, boot, ack,
-            progress, attachment,
+            caret, donut, spinner, stream, smooth, overview, model_picker, workspace, bounce, boot,
+            ack, progress, attachment,
         ]
         .into_iter()
         .flatten()
@@ -2080,6 +2085,7 @@ impl ApplicationHandler for App {
                 }
                 self.settle_super_release(std::time::Instant::now());
                 self.tick_overview(std::time::Instant::now());
+                self.tick_model_picker(OVERVIEW_FRAME.as_secs_f32());
                 self.tick_workspace(std::time::Instant::now());
                 self.animate_donut();
                 self.model.boot.advance(std::time::Instant::now());

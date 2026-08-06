@@ -30,15 +30,14 @@ fn centre(rect: vello::kurbo::Rect) -> (f64, f64) {
     (rect.x0 + rect.width() / 2.0, rect.y0 + rect.height() / 2.0)
 }
 
-fn click_model_button(app: &mut App) {
-    let point = centre(app.frame.model_button());
-    click(app, point);
+fn open_model_picker(app: &mut App) {
+    assert!(app.apply(Action::ToggleModelPicker, None));
 }
 
 #[test]
-fn clicking_the_active_caption_requests_sdk_models_and_opens_the_menu() {
+fn ctrl_m_requests_sdk_models_and_opens_the_inline_picker() {
     let (mut app, _, commands) = app();
-    click_model_button(&mut app);
+    open_model_picker(&mut app);
     assert!(app.model.model_picker.is_open());
     assert!(app.model.model_picker.is_loading());
     assert!(matches!(
@@ -59,9 +58,18 @@ fn model_picker_action_requests_sdk_models_and_toggles_the_menu() {
 }
 
 #[test]
+fn ctrl_m_can_open_before_the_current_model_caption_arrives() {
+    let (mut app, _, commands) = app();
+    app.model.model = None;
+    assert!(app.apply(Action::ToggleModelPicker, None));
+    assert!(app.model.model_picker.is_open());
+    assert!(matches!(commands.try_recv(), Ok(harness::Command::ListModels)));
+}
+
+#[test]
 fn sdk_results_populate_the_open_menu_and_a_row_uses_set_model() {
     let (mut app, updates, commands) = app();
-    click_model_button(&mut app);
+    open_model_picker(&mut app);
     let _ = commands.try_recv();
     updates
         .send(harness::HarnessUpdate::Models {
@@ -115,7 +123,7 @@ fn dismissing_the_menu_does_not_move_the_composer_caret() {
     let (mut app, _, commands) = app();
     app.model.editor.insert_str("keep the caret here");
     let cursor = app.model.editor.cursor();
-    click_model_button(&mut app);
+    open_model_picker(&mut app);
     let _ = commands.try_recv();
     let composer = (app.frame.left + 4.0, app.frame.composer_top + 4.0);
     click(&mut app, composer);
@@ -126,9 +134,9 @@ fn dismissing_the_menu_does_not_move_the_composer_caret() {
 #[test]
 fn catalog_updates_do_not_reopen_a_menu_dismissed_while_loading() {
     let (mut app, updates, commands) = app();
-    click_model_button(&mut app);
+    open_model_picker(&mut app);
     let _ = commands.try_recv();
-    click_model_button(&mut app);
+    open_model_picker(&mut app);
     updates
         .send(harness::HarnessUpdate::Models {
             models: vec!["gpt-5.6".into()],

@@ -926,8 +926,19 @@ fn model_picker() -> Model {
         Some("openai-oauth:gpt-5.6".into()),
     );
     picker.set_hover(Some(1));
+    picker.advance(1.0);
     Model {
         model_picker: picker,
+        transcript: conversation(vec![
+            (
+                "Can you make the model chooser feel native to the conversation?".into(),
+                "Yes. I’ll open it inside the transcript and let the surrounding messages make room for it.".into(),
+            ),
+            (
+                "Keep it calm and keyboard-first.".into(),
+                "The picker will open with Ctrl+M, move with the arrow keys, and close without disturbing your draft.".into(),
+            ),
+        ]),
         ..attached_empty()
     }
 }

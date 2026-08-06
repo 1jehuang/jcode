@@ -126,7 +126,6 @@ pub const PANEL_TEXT_PAD: f64 = 10.0;
 
 /// Model picker anchored to the active-model caption below the composer. It
 /// opens upward so the ordinary bottom margin never clips the catalog.
-pub const MODEL_BUTTON_MIN_WIDTH: f64 = 150.0;
 pub const MODEL_MENU_WIDTH: f64 = 320.0;
 pub const MODEL_MENU_ROW_HEIGHT: f64 = 26.0;
 pub const MODEL_MENU_PAD: f64 = 6.0;
@@ -448,36 +447,16 @@ impl Frame {
         1 + (extra / COMPOSER_LINE_HEIGHT).round() as usize
     }
 
-    /// The active model caption's visible button and pointer hit target.
-    pub fn model_button(&self) -> vello::kurbo::Rect {
-        // The active route can already be long, and the control also teaches
-        // its Ctrl+M shortcut. Give both enough room to remain a single quiet
-        // line rather than letting Parley wrap the hint below the button.
-        let width = (self.column() / 2.0)
-            .max(MODEL_BUTTON_MIN_WIDTH)
-            .min(self.column());
-        vello::kurbo::Rect::new(
-            self.right - width,
-            self.footnote_top,
-            self.right,
-            self.footnote_bottom,
-        )
-    }
-
-    pub fn hits_model_button(&self, x: f64, y: f64) -> bool {
-        self.model_button().contains(vello::kurbo::Point::new(x, y))
-    }
-
-    /// The model catalog floats above the composer, trailing-edge aligned with
-    /// the caption that opened it. Like the settings panel it overlays content
-    /// rather than shifting the page.
+    /// The model catalog occupies a centered band inside the transcript. The
+    /// renderer parts messages around this rect, making the chooser feel like a
+    /// temporary transcript object rather than chrome hanging from the composer.
     pub fn model_menu(&self, rows: usize) -> vello::kurbo::Rect {
         let rows = rows.max(1);
         let height = rows as f64 * MODEL_MENU_ROW_HEIGHT + MODEL_MENU_PAD * 2.0;
-        let x1 = self.right;
-        let x0 = (x1 - MODEL_MENU_WIDTH).max(0.0);
-        let y1 = (self.composer_top - MODEL_MENU_GAP).max(height);
-        vello::kurbo::Rect::new(x0, y1 - height, x1, y1)
+        let width = MODEL_MENU_WIDTH.min(self.column());
+        let x0 = self.left + (self.column() - width) / 2.0;
+        let centre = (self.body_top + self.body_bottom) / 2.0;
+        vello::kurbo::Rect::new(x0, centre - height / 2.0, x0 + width, centre + height / 2.0)
     }
 
     pub fn model_menu_row(&self, rows: usize, index: usize) -> vello::kurbo::Rect {
@@ -1453,27 +1432,12 @@ mod tests {
     }
 
     #[test]
-    fn model_caption_button_is_the_trailing_footnote_target() {
-        sweep(|frame| {
-            let button = frame.model_button();
-            assert_eq!(button.x1, frame.right);
-            assert_eq!(button.y0, frame.footnote_top);
-            assert_eq!(button.y1, frame.footnote_bottom);
-            assert!(frame.hits_model_button(
-                button.x0 + button.width() / 2.0,
-                button.y0 + button.height() / 2.0
-            ));
-            assert!(!frame.hits_model_button(frame.left, frame.body_top));
-        });
-    }
-
-    #[test]
-    fn model_menu_rows_round_trip_and_stay_above_the_composer() {
+    fn model_menu_rows_round_trip_and_are_centered_in_the_transcript() {
         let frame = Frame::new((1100, 720), 1.0);
         let rows = 4;
         let menu = frame.model_menu(rows);
-        assert!(menu.y1 <= frame.composer_top);
-        assert_eq!(menu.x1, frame.right);
+        assert!((menu.center().x - (frame.left + frame.right) / 2.0).abs() < 0.01);
+        assert!((menu.center().y - (frame.body_top + frame.body_bottom) / 2.0).abs() < 0.01);
         for index in 0..rows {
             let row = frame.model_menu_row(rows, index);
             assert_eq!(
