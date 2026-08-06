@@ -97,7 +97,7 @@ def executable_identity(command: str) -> dict[str, Any]:
     except (OSError, subprocess.SubprocessError) as error:
         raise BenchmarkError(f"Could not identify Jcode executable {resolved}: {error}") from error
     version = version_result.stdout.strip()
-    commit_match = re.search(r"\(([0-9a-f]{7,40})(?:[, )])", version, re.IGNORECASE)
+    commit_match = re.search(r"\(([0-9a-f]{7,40})(?=[, )-])", version, re.IGNORECASE)
     return {
         "argument": command,
         "path": str(resolved),
