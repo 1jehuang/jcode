@@ -1,0 +1,27 @@
+{
+  "version": "0.69.0",
+  "date": "2026-08-06",
+  "title": "ACP controls and smoother hosted access",
+  "highlights": [
+    "ACP clients can now select models and reasoning effort, receive token usage, and update session configuration",
+    "Hosted subscriptions now use metered billing with a simpler onboarding experience",
+    "macOS turn notifications now use a dedicated broker for more reliable delivery and session focus"
+  ],
+  "improvements": [
+    "You can replace jcode's base system prompt with .jcode/system-prompt.md",
+    "Composer Up and Down navigation now follows visually wrapped rows",
+    "Keybinding changes take effect on the next keystroke without restarting",
+    "Config file edits now explain what changed and whether a restart is required",
+    "Client-scoped hooks can now run multiple commands",
+    "Ctrl+L now provides a true terminal-style clear while preserving scrollback"
+  ],
+  "fixes": [
+    "Explicitly resumed TUI sessions now replay their history",
+    "Text-only provider requests no longer include unsupported image content",
+    "Duplicate tool results can no longer wedge a session",
+    "Gemini and Antigravity credentials no longer appear expired when refresh succeeds",
+    "Todo auto-poke cycles avoid repeated unchanged prompts and resume correctly",
+    "Model and provider pickers no longer show duplicate compatibility or discovery labels",
+    "OpenAI-compatible MCP tools accept untyped object properties without breaking the tool catalog"
+  ]
+}
