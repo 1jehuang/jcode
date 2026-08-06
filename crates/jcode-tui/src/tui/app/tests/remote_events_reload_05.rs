@@ -255,7 +255,7 @@ fn low_ownership_is_gated_after_the_completed_todo_was_saved() {
         assert!(app.schedule_auto_poke_followup_if_needed());
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
-        assert!(app.queued_messages[0].contains("delivery_state"));
+        assert!(app.queued_messages[0].contains("complete workflow"));
 
         let saved = crate::todo::load_todos(&app.session.id).expect("load saved todo");
         assert_eq!(saved[0].status, "completed");
