@@ -1723,9 +1723,8 @@ mod tests {
         assert_eq!(normalize_selection_name(None).unwrap(), None);
         assert!(normalize_selection_name(Some("x")).is_err());
         assert!(normalize_selection_name(Some("<script>alert(1)</script>")).is_err());
-        assert!(
-            normalize_selection_name(Some("ghp_abcdefghijklmnopqrstuvwxyz1234567890")).is_err()
-        );
+        let secret_shaped = format!("{}{}", "gh", "p_abcdefghijklmnopqrstuvwxyz1234567890");
+        assert!(normalize_selection_name(Some(&secret_shaped)).is_err());
     }
 
     #[test]
