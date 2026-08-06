@@ -349,6 +349,29 @@ function readDaemonPidSync(jcodeHome: string, runtimeDir: string): number | unde
   return undefined;
 }
 
+/** Wait briefly for a newly started daemon to publish its registry entry. */
+async function waitForDaemonPid(
+  jcodeHome: string,
+  runtimeDir: string,
+  timeoutMs = 2000,
+): Promise<number | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const pid = readDaemonPidSync(jcodeHome, runtimeDir);
+    if (pid !== undefined) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+export async function waitForDaemonPidForTest(
+  jcodeHome: string,
+  runtimeDir: string,
+  timeoutMs?: number,
+): Promise<number | undefined> {
+  return waitForDaemonPid(jcodeHome, runtimeDir, timeoutMs);
+}
+
 /**
  * Stop an instance's daemon and wait for it to actually be gone.
  *
@@ -363,7 +386,10 @@ async function stopInstanceDaemon(
   jcodeHome: string,
   runtimeDir: string,
 ): Promise<void> {
-  const pid = readDaemonPidSync(jcodeHome, runtimeDir);
+  // The API socket can become connectable just before the daemon writes its
+  // servers.json entry. close() may therefore run during this small startup
+  // window, so do not silently give up after a single registry read.
+  const pid = await waitForDaemonPid(jcodeHome, runtimeDir);
   if (pid === undefined) return;
 
   const signal = (sig: NodeJS.Signals) => {
