@@ -536,10 +536,8 @@ impl App {
     /// Returns true if the key was consumed.
     ///
     /// The screen has two modes:
-    ///   * Summary (default): a read-only list of everything we detected, with
-    ///     two pills below it. "Continue" (preselected) imports everything;
-    ///     "Choose what to import" switches to the checkbox list. Arrows/Tab
-    ///     move between the pills, Enter/Space commit the focused pill.
+    ///   * Summary: detected logins plus Continue, Subscription, Import less,
+    ///     and Telemetry pills. Arrows/Tab move; Enter/Space commits.
     ///   * Choose (checkbox list): per-login Yes/No rows.
     ///     - Up / Down / k / j -> move the cursor between logins
     ///     - Left / h / y -> choose "Yes" (import) for the highlighted login
@@ -579,9 +577,8 @@ impl App {
                     _ => return false,
                 }
             } else if !review.choosing {
-                // Summary mode: three pills, "Continue" (preselected),
-                // "Import less", and "Telemetry settings". Left/Right (and
-                // Tab) move between them; Enter/Space commit the focused one.
+                // Summary: Continue, Subscription, Import less, and Telemetry pills.
+                // Arrows/Tab move; Enter/Space commits the focused one.
                 match code {
                     KeyCode::Left
                     | KeyCode::Up
