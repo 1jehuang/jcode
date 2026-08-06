@@ -9,6 +9,29 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
+const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instead of making them sequentially. Example:
+{
+  "intent": "Inspect the relevant files in parallel",
+  "tool_calls": [
+    {
+      "tool": "read",
+      "intent": "Read the configuration",
+      "file_path": "src/config.rs",
+      "start_line": 1,
+      "limit": 200
+    },
+    {
+      "tool": "agentgrep",
+      "intent": "Find configuration usage",
+      "query": "Config",
+      "path": "src",
+      "glob": "**/*.rs",
+      "max_files": 20,
+      "max_regions": 20
+    }
+  ]
+}"#;
+
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
         "type": "object",
@@ -185,7 +208,7 @@ impl Tool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Run tools in parallel."
+        BATCH_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {
