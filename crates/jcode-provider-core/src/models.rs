@@ -35,8 +35,13 @@ pub const CHATGPT_WEB_MODEL: &str = "gpt-5.6-pro[web]";
 /// account"). Keep them in their own list so the OAuth-scoped Codex catalog
 /// can never hide them from the picker and so route building can mark them
 /// API-key-only.
-pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] =
-    &["gpt-5.6-pro", "gpt-5.5-pro", "gpt-5.4-pro", "gpt-5.2-pro", "gpt-5-pro"];
+pub const OPENAI_API_ONLY_PRO_MODELS: &[&str] = &[
+    "gpt-5.6-pro",
+    "gpt-5.5-pro",
+    "gpt-5.4-pro",
+    "gpt-5.2-pro",
+    "gpt-5-pro",
+];
 
 /// True when `model` is a GPT Pro model that only works with an OpenAI
 /// platform API key (never ChatGPT/Codex OAuth).
