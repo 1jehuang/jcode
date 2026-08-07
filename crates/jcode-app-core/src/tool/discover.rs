@@ -1532,6 +1532,7 @@ mod tests {
         assert!(out.contains("agentcard"));
         assert!(out.contains("virtual payment cards"));
         assert!(out.contains("Jcode integration directory"));
+        assert!(!out.to_ascii_lowercase().contains("partner"));
         assert!(out.contains("recommendations must be based only on fit"));
     }
 
@@ -1623,6 +1624,7 @@ mod tests {
         assert!(out.contains("Selected 'agentcard'"));
         assert!(out.contains("Setup: npm install -g agentcard"));
         assert!(out.contains("Jcode integration directory"));
+        assert!(!out.to_ascii_lowercase().contains("partner"));
         assert!(out.contains("the choice must be based only on fit"));
         assert!(render_selection("payments", "ghost", &json!({})).is_err());
     }
@@ -1802,6 +1804,7 @@ mod tests {
         assert!(description.contains("use that tool directly"));
         assert!(description.contains("integrated with this agent"));
         assert!(description.contains("setup and use seamless"));
+        assert!(!description.to_ascii_lowercase().contains("partner"));
         assert!(description.contains("including an off-catalog product"));
         assert!(
             description.len() < 500,
@@ -1995,6 +1998,7 @@ mod tests {
         assert!(out.contains("Product: Stripe sandbox MCP"));
         assert!(out.contains("Suggestions are not sent to integration providers"));
         assert!(out.contains("does not mean the tool has integrated with Jcode"));
+        assert!(!out.to_ascii_lowercase().contains("partner"));
     }
 
     #[test]
