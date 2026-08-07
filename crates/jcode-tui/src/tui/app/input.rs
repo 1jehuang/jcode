@@ -1226,6 +1226,11 @@ pub(super) fn is_prompt_recall_modifier(modifiers: KeyModifiers) -> bool {
     )
 }
 
+pub(super) fn is_alternate_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER | KeyModifiers::META)
+}
+
 pub(super) fn handle_prompt_history_navigation(
     app: &mut App,
     code: KeyCode,
@@ -2951,10 +2956,9 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing
-        if code == KeyCode::Enter
-            && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        {
+        // Ctrl+Enter / Cmd+Enter: does opposite of queue_mode during processing.
+        // Terminals may encode Command as either Super or Meta.
+        if is_alternate_enter(code, modifiers) {
             handle_alternate_enter(self);
             return Ok(());
         }
