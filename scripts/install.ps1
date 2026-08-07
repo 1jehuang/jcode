@@ -1091,7 +1091,8 @@ Copy-Item -Path $DestBin -Destination $StableBin -Force
 Set-Content -Path (Join-Path $BuildsDir "stable-version") -Value $VersionNum
 Install-JcodeLauncher -SourcePath $StableBin -LauncherPath $LauncherPath | Out-Null
 } finally {
-    Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    Get-Item -LiteralPath $TempDir -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Gracefully reload any running background server onto the freshly installed
