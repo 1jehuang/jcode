@@ -49,6 +49,7 @@ include!("tests/keybinding_hot_reload.rs");
 include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
 include!("tests/issue_699_ctrl_d_delete.rs");
+include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
