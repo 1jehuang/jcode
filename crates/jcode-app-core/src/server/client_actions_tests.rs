@@ -461,6 +461,7 @@ async fn notify_session_runs_scheduled_task_immediately_for_idle_live_session() 
     let guard = agent.lock().await;
     assert!(guard.messages().iter().any(|message| {
         message.role == Role::User
+            && message.display_role == Some(crate::session::StoredDisplayRole::System)
             && message
                 .content_preview()
                 .contains("[Scheduled task] Task: Follow up")

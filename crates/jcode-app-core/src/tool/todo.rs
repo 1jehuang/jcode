@@ -227,6 +227,9 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         goal.feedback_loop_coverage_history = previous
             .map(|prev| prev.feedback_loop_coverage_history.clone())
             .unwrap_or_default();
+        goal.feedback_loop_traceability_history = previous
+            .map(|prev| prev.feedback_loop_traceability_history.clone())
+            .unwrap_or_default();
         goal.delivery_state_history = previous
             .map(|prev| prev.delivery_state_history.clone())
             .unwrap_or_default();
@@ -246,6 +249,9 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
             }
             if goal.feedback_loop_coverage.is_none() {
                 goal.feedback_loop_coverage = prev.feedback_loop_coverage;
+            }
+            if goal.feedback_loop_traceability.is_none() {
+                goal.feedback_loop_traceability = prev.feedback_loop_traceability;
             }
             if goal.difficulty.is_none() {
                 goal.difficulty = prev.difficulty;
@@ -274,6 +280,10 @@ fn merge_goals(stored: &[TodoGoal], incoming: Option<Vec<TodoGoal>>) -> Vec<Todo
         record_score_observation(
             &mut goal.feedback_loop_coverage_history,
             goal.feedback_loop_coverage,
+        );
+        record_score_observation(
+            &mut goal.feedback_loop_traceability_history,
+            goal.feedback_loop_traceability,
         );
         record_score_observation(&mut goal.delivery_state_history, goal.delivery_state);
         if let Some(slot) = merged
@@ -337,6 +347,11 @@ fn changed_goal_fields(before: Option<&TodoGoal>, after: Option<&TodoGoal>) -> V
         != after.and_then(|goal| goal.feedback_loop_coverage)
     {
         fields.push(TodoGoalField::FeedbackLoopCoverage);
+    }
+    if before.and_then(|goal| goal.feedback_loop_traceability)
+        != after.and_then(|goal| goal.feedback_loop_traceability)
+    {
+        fields.push(TodoGoalField::FeedbackLoopTraceability);
     }
     if before.and_then(|goal| goal.delivery_state) != after.and_then(|goal| goal.delivery_state) {
         fields.push(TodoGoalField::DeliveryState);
@@ -520,6 +535,15 @@ fn record_reframe_observations(
                     .map(|state| state.as_str().to_string()),
             });
         }
+        if !crate::todo::feedback_loop_traceability_passes(goal) {
+            observations.push(GateObservation {
+                kind: GateObservationKind::FeedbackLoopTraceability,
+                group: goal.group.clone(),
+                state: goal
+                    .feedback_loop_traceability
+                    .map(|state| state.as_str().to_string()),
+            });
+        }
     }
     (observations, immediate)
 }
@@ -645,6 +669,7 @@ fn normalize_todo_input(mut input: Value) -> Value {
                     "delivery_state",
                     "feedback_loop_relevance",
                     "feedback_loop_coverage",
+                    "feedback_loop_traceability",
                     "difficulty",
                     "autonomy",
                 ] {
@@ -750,7 +775,7 @@ impl Tool for TodoTool {
                     "description": "Goal-level assessments, one per todo group (null = ungrouped). Omitted groups are retained.",
                     "items": {
                         "type": "object",
-                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage"],
+                        "required": ["closed_feedback_loop", "feedback_loop", "feedback_loop_relevance", "feedback_loop_coverage", "feedback_loop_traceability"],
                         "properties": {
                             "group": {
                                 "type": "string",
@@ -767,13 +792,18 @@ impl Tool for TodoTool {
                             },
                             "feedback_loop_relevance": {
                                 "type": "string",
-                                "enum": ["indirect", "representative", "acceptance_aligned"],
-                                "description": "How directly the checks represent observable acceptance behavior through public interfaces rather than an internal proxy."
+                                "enum": ["indirect", "synthetic", "representative", "acceptance_blocked", "acceptance_aligned"],
+                                "description": "How directly checks represent observable acceptance behavior. indirect = inspection or an internal proxy; synthetic = custom harnesses, stubs, mocks, copied sources, or synthetic fixtures; representative = real public interfaces but not the complete acceptance workflow; acceptance_blocked = the real acceptance workflow was attempted but an external constraint prevented a result; acceptance_aligned = the real project build, integration test, or end-user workflow passed. Substitute-only validation is never acceptance_aligned."
                             },
                             "feedback_loop_coverage": {
                                 "type": "string",
                                 "enum": ["narrow", "main_paths", "edge_and_integration_paths"],
                                 "description": "How broadly the checks exercise main workflows, integration boundaries, edge cases, packaging, and likely failure modes."
+                            },
+                            "feedback_loop_traceability": {
+                                "type": "string",
+                                "enum": ["unmapped", "partial", "complete"],
+                                "description": "How completely requirements map to evidence. unmapped = requirements are not tied to checks; partial = only some explicit requirements or changed public outputs have concrete checks and observed results; complete = every explicit requirement and changed public output has a concrete check and observed result. Aggregate test counts alone do not establish complete traceability."
                             },
                             "delivery_state": {
                                 "type": "string",
@@ -835,6 +865,9 @@ impl Tool for TodoTool {
                         }
                         GateObservationKind::FeedbackLoopCoverage => {
                             crate::telemetry::TodoGateKind::FeedbackLoopCoverage
+                        }
+                        GateObservationKind::FeedbackLoopTraceability => {
+                            crate::telemetry::TodoGateKind::FeedbackLoopTraceability
                         }
                     };
                     crate::telemetry::record_todo_gate(kind);
@@ -972,6 +1005,7 @@ mod tests {
         assert!(goal_props.contains_key("feedback_loop"));
         assert!(goal_props.contains_key("feedback_loop_relevance"));
         assert!(goal_props.contains_key("feedback_loop_coverage"));
+        assert!(goal_props.contains_key("feedback_loop_traceability"));
         assert!(goal_props.contains_key("delivery_state"));
         assert!(goal_props.contains_key("difficulty"));
         assert!(goal_props.contains_key("autonomy"));
@@ -982,7 +1016,28 @@ mod tests {
         assert!(!goal_props.contains_key("user_intention"));
         assert!(!goal_props.contains_key("alignment_score"));
         assert!(!goal_props.contains_key("objective"));
-        assert_eq!(goal_props.len(), 10);
+        assert_eq!(goal_props.len(), 11);
+        assert_eq!(
+            goal_props["feedback_loop_relevance"]["enum"],
+            json!([
+                "indirect",
+                "synthetic",
+                "representative",
+                "acceptance_blocked",
+                "acceptance_aligned"
+            ])
+        );
+        let relevance_description = goal_props["feedback_loop_relevance"]["description"]
+            .as_str()
+            .expect("feedback-loop relevance should explain every state");
+        for required_concept in [
+            "custom harnesses",
+            "real public interfaces",
+            "external constraint",
+            "Substitute-only validation is never acceptance_aligned",
+        ] {
+            assert!(relevance_description.contains(required_concept));
+        }
 
         let goal_required = props["goals"]["items"]["required"]
             .as_array()
@@ -1002,6 +1057,11 @@ mod tests {
             goal_required
                 .iter()
                 .any(|value| value == "feedback_loop_coverage")
+        );
+        assert!(
+            goal_required
+                .iter()
+                .any(|value| value == "feedback_loop_traceability")
         );
 
         let alignment_description = plan_props["understands_user_intent"]
@@ -1277,6 +1337,7 @@ mod tests {
             closed_feedback_loop: Some(state),
             feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
             feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+            feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
             ..Default::default()
         }
     }
@@ -1750,7 +1811,7 @@ mod tests {
 
         // The points were recorded for the turn-end digest instead.
         let observations = crate::todo::load_gate_observations(session).expect("observations");
-        assert_eq!(observations.len(), 4);
+        assert_eq!(observations.len(), 5);
         assert!(
             observations.iter().any(|observation| {
                 observation.kind == GateObservationKind::FeedbackLoopRelevance
@@ -1761,6 +1822,9 @@ mod tests {
                 observation.kind == GateObservationKind::FeedbackLoopCoverage
             })
         );
+        assert!(observations.iter().any(|observation| {
+            observation.kind == GateObservationKind::FeedbackLoopTraceability
+        }));
 
         // Histories are accumulating, which is what the digest reasons over.
         let plan = load_plan(session).expect("plan");

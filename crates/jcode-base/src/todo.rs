@@ -21,8 +21,9 @@ struct TodoReviewState {
 
 pub use jcode_task_types::{
     Autonomy, ConfidenceState, DeliveryState, Difficulty, FeedbackLoopCoverage,
-    FeedbackLoopRelevance, FeedbackLoopState, IntentUnderstanding, IterationMaturity, TodoGoal,
-    TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange, TodoPlanField,
+    FeedbackLoopRelevance, FeedbackLoopState, FeedbackLoopTraceability, IntentUnderstanding,
+    IterationMaturity, TodoGoal, TodoGoalChange, TodoGoalField, TodoItem, TodoPlan, TodoPlanChange,
+    TodoPlanField,
 };
 
 /// Whether the plan's intent understanding is solid enough to work against.
@@ -66,6 +67,21 @@ pub fn feedback_loop_coverage_passes(goal: &TodoGoal) -> bool {
         .is_some_and(|state| state >= required_feedback_loop_coverage(goal.difficulty))
 }
 
+pub fn required_feedback_loop_traceability(
+    difficulty: Option<Difficulty>,
+) -> FeedbackLoopTraceability {
+    if difficulty.is_some_and(|difficulty| difficulty >= Difficulty::Involved) {
+        FeedbackLoopTraceability::Complete
+    } else {
+        FeedbackLoopTraceability::Partial
+    }
+}
+
+pub fn feedback_loop_traceability_passes(goal: &TodoGoal) -> bool {
+    goal.feedback_loop_traceability
+        .is_some_and(|state| state >= required_feedback_loop_traceability(goal.difficulty))
+}
+
 /// Whether a completed todo carries enough evidence behind its completion.
 pub fn completion_confidence_passes(state: Option<ConfidenceState>) -> bool {
     state.is_some_and(|state| state >= ConfidenceState::Validated)
@@ -107,6 +123,7 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
         && stopping_evidence_passes
         && feedback_loop_relevance_passes(goal)
         && feedback_loop_coverage_passes(goal)
+        && feedback_loop_traceability_passes(goal)
 }
 
 /// Pre-plan-intent-rewrite alignment continuation. Kept only so persisted
@@ -193,6 +210,12 @@ pub fn build_todo_ownership_continuation_message(todos: &[TodoItem], goals: &[To
                 label
             ));
         }
+        if !feedback_loop_traceability_passes(goal) {
+            message.push_str(&format!(
+                "\n- Goal \"{}\": map every explicit requirement and changed public output to a concrete check and report its observed result.",
+                label
+            ));
+        }
         if matches!(
             goal.iteration_maturity,
             Some(
@@ -244,6 +267,7 @@ pub enum GateObservationKind {
     ClosedFeedbackLoop,
     FeedbackLoopRelevance,
     FeedbackLoopCoverage,
+    FeedbackLoopTraceability,
 }
 
 /// A point during the turn that would previously have interrupted the model
@@ -304,6 +328,10 @@ fn observation_score_later_cleared(
             .iter()
             .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
             .is_some_and(feedback_loop_coverage_passes),
+        GateObservationKind::FeedbackLoopTraceability => goals
+            .iter()
+            .find(|goal| normalized_group(goal.group.as_deref()) == observation.group)
+            .is_some_and(feedback_loop_traceability_passes),
     }
 }
 
@@ -376,7 +404,7 @@ pub fn build_gate_digest(
                     .map(|group| format!(" for \"{}\"", group))
                     .unwrap_or_default();
                 format!(
-                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the public interfaces and integration boundaries, and report the behavior a user or downstream system would observe.",
+                    "the checks{} did not directly represent how the result will be used or accepted. Exercise the real project's public interfaces, integration boundaries, or end-user acceptance path and report the observed behavior. A custom harness, stub, mock, copied source, or synthetic fixture is useful evidence but cannot replace that path; if the real path is externally blocked, record that constraint honestly.",
                     label
                 )
             }
@@ -407,6 +435,26 @@ pub fn build_gate_digest(
                     .unwrap_or_default();
                 format!(
                     "the broader checks{} were identified only after earlier work was done. Run them over the whole result now, including edge cases, packaging, integration paths, and likely failure modes.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopTraceability, false) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "the checks{} were not traced to every explicit requirement and changed public output. Map each one to a concrete check and report the observed result; aggregate test counts do not establish this mapping.",
+                    label
+                )
+            }
+            (GateObservationKind::FeedbackLoopTraceability, true) => {
+                let label = group
+                    .as_deref()
+                    .map(|group| format!(" for \"{}\"", group))
+                    .unwrap_or_default();
+                format!(
+                    "complete requirement-to-check traceability{} was identified only after earlier work was done. Run every mapped check over the whole result now and report what each requirement and changed public output actually did.",
                     label
                 )
             }
@@ -949,6 +997,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn substitute_and_blocked_checks_do_not_pass_involved_acceptance_gate() {
+        let goal = |relevance| TodoGoal {
+            difficulty: Some(Difficulty::Involved),
+            feedback_loop_relevance: Some(relevance),
+            ..Default::default()
+        };
+
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::Synthetic
+        )));
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::Representative
+        )));
+        assert!(!feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::AcceptanceBlocked
+        )));
+        assert!(feedback_loop_relevance_passes(&goal(
+            FeedbackLoopRelevance::AcceptanceAligned
+        )));
+    }
+
     /// A score that climbed only after work was underway still gets raised, and
     /// is described as the coverage gap it is. Suppressing it would let an agent
     /// clear the gate by writing a good assessment at the end, after the work it
@@ -1029,6 +1099,8 @@ mod tests {
         for guidance in [
             "public interfaces",
             "integration boundaries",
+            "custom harness",
+            "externally blocked",
             "main workflows",
             "edge cases",
             "packaging",
@@ -1522,6 +1594,7 @@ mod tests {
             iteration_maturity: Some(IterationMaturity::OutcomeReached),
             feedback_loop_relevance: Some(FeedbackLoopRelevance::Representative),
             feedback_loop_coverage: Some(FeedbackLoopCoverage::MainPaths),
+            feedback_loop_traceability: Some(FeedbackLoopTraceability::Complete),
             ..Default::default()
         }
     }
@@ -1619,6 +1692,23 @@ mod tests {
         involved.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
         involved.feedback_loop_coverage = None;
         assert!(!delivery_state_passes(&involved));
+    }
+
+    #[test]
+    fn feedback_loop_traceability_scales_at_involved_difficulty() {
+        let mut goal = delivery_goal(None, Some(DeliveryState::WorkflowValidated));
+        goal.feedback_loop_traceability = Some(FeedbackLoopTraceability::Partial);
+        assert!(delivery_state_passes(&goal));
+
+        goal.difficulty = Some(Difficulty::Involved);
+        goal.feedback_loop_relevance = Some(FeedbackLoopRelevance::AcceptanceAligned);
+        goal.feedback_loop_coverage = Some(FeedbackLoopCoverage::EdgeAndIntegrationPaths);
+        assert!(!delivery_state_passes(&goal));
+
+        goal.feedback_loop_traceability = Some(FeedbackLoopTraceability::Complete);
+        assert!(delivery_state_passes(&goal));
+        goal.feedback_loop_traceability = None;
+        assert!(!delivery_state_passes(&goal));
     }
 
     #[test]

@@ -2174,6 +2174,8 @@ pub enum TodoGateKind {
     FeedbackLoopRelevance,
     /// Completion checks did not cover enough success and failure paths.
     FeedbackLoopCoverage,
+    /// Requirements or changed outputs were not mapped to observed checks.
+    FeedbackLoopTraceability,
     /// Plan-level alignment with the user's intention was too low.
     Alignment,
     /// Plan-level understanding of the user's intent was too low.
@@ -2194,7 +2196,8 @@ pub fn record_todo_gate(kind: TodoGateKind) {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
             TodoGateKind::ClosedFeedbackLoop
             | TodoGateKind::FeedbackLoopRelevance
-            | TodoGateKind::FeedbackLoopCoverage => &mut state.todo_gate_feedback_loop_count,
+            | TodoGateKind::FeedbackLoopCoverage
+            | TodoGateKind::FeedbackLoopTraceability => &mut state.todo_gate_feedback_loop_count,
             TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
             TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
@@ -2206,7 +2209,8 @@ pub fn record_todo_gate(kind: TodoGateKind) {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
                 TodoGateKind::ClosedFeedbackLoop
                 | TodoGateKind::FeedbackLoopRelevance
-                | TodoGateKind::FeedbackLoopCoverage => &mut turn.todo_gate_feedback_loop_count,
+                | TodoGateKind::FeedbackLoopCoverage
+                | TodoGateKind::FeedbackLoopTraceability => &mut turn.todo_gate_feedback_loop_count,
                 TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
                 TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,

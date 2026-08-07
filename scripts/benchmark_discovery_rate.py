@@ -25,10 +25,12 @@ its own, and it kills each attempt as soon as the case is decided.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -61,6 +63,49 @@ from benchmark_discovery import (  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = REPO_ROOT / "scripts" / "discovery_rate_cases.json"
 DEFAULT_OUTPUT = REPO_ROOT / "target" / "discovery-rate/latest.json"
+REPORT_VERSION = 2
+
+
+def executable_identity(command: str) -> dict[str, Any]:
+    """Resolve and fingerprint the exact Jcode binary used by this run."""
+    candidate = Path(command).expanduser()
+    resolved: Path | None = None
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as error:
+            raise BenchmarkError(f"Jcode executable does not exist: {command}: {error}") from error
+    else:
+        found = shutil.which(command)
+        if found:
+            resolved = Path(found).resolve()
+    if resolved is None or not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise BenchmarkError(f"Jcode executable is not runnable: {command}")
+
+    digest = hashlib.sha256()
+    with resolved.open("rb") as binary:
+        for chunk in iter(lambda: binary.read(1024 * 1024), b""):
+            digest.update(chunk)
+    try:
+        version_result = subprocess.run(
+            [str(resolved), "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise BenchmarkError(f"Could not identify Jcode executable {resolved}: {error}") from error
+    version = version_result.stdout.strip()
+    commit_match = re.search(r"\(([0-9a-f]{7,40})(?=[, )-])", version, re.IGNORECASE)
+    return {
+        "argument": command,
+        "path": str(resolved),
+        "version": version,
+        "commit": commit_match.group(1) if commit_match else None,
+        "sha256": digest.hexdigest(),
+        "size_bytes": resolved.stat().st_size,
+    }
 
 # A trial that never reached the model (auth expiry, provider outage, crash)
 # says nothing about triggering behavior. Such trials are marked invalid and
@@ -643,6 +688,11 @@ def main() -> int:
         print(f"\n{len(cases)} cases")
         return 0
 
+    executable = executable_identity(args.jcode)
+    # Pin the resolved binary path so a symlink update during the run cannot
+    # make the recorded identity differ from later trials.
+    args.jcode = executable["path"]
+
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="jcode-discovery-rate-") as temp_dir:
         root = Path(temp_dir)
@@ -692,7 +742,7 @@ def main() -> int:
     )
     report = {
         "benchmark": "discovery-call-rate",
-        "version": 1,
+        "version": REPORT_VERSION,
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_marker": {
@@ -701,6 +751,7 @@ def main() -> int:
             "telemetry_field": "benchmark_run=true",
         },
         "config": {
+            "executable": executable,
             "model": args.model,
             "provider": args.provider,
             "trials": args.trials,

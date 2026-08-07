@@ -507,7 +507,9 @@ pub async fn run_live_openai_compatible_tool_smoke(
         ],
         "stream": false
     });
-    set_output_token_cap(&mut body, &resolved, 256);
+    // Reasoning models can consume hundreds of hidden tokens before emitting a
+    // tool call. Leave enough room to test the tool path rather than truncation.
+    set_output_token_cap(&mut body, &resolved, 1_024);
     if !resolved.api_base.contains("fptcloud.com") {
         body["tool_choice"] = serde_json::json!("auto");
     }
