@@ -1391,7 +1391,7 @@ impl NativeProviderKind {
             },
             Self::Jcode => NativeProviderSpec {
                 provider_id: "jcode",
-                label: "Jcode Hosted Models",
+                label: "Jcode Subscription",
                 // The transport is OpenAI-compatible internally, but the public
                 // route identity is the managed Jcode subscription. Model
                 // switches use a bare model id so they stay on that runtime.
