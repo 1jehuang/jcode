@@ -134,15 +134,18 @@ fn onboarding_golden_walks_every_phase() {
         // The primary actions explicitly offer import or a Jcode subscription.
         assert!(text.contains("Import"), "import pill label: {text}");
         assert!(
-            text.contains("Jcode subscription (50% off)"),
+            text.contains("Jcode subscription"),
             "subscription pill label: {text}"
         );
         assert!(text.contains("Import less"), "import-less pill: {text}");
         assert!(text.contains("Telemetry"), "telemetry pill label: {text}");
-        assert_eq!(
-            text.matches("50% off").count(),
-            1,
-            "discount belongs in the subscription pill only: {text}"
+        assert!(
+            text.contains("$10 → $20 inference, $20 → $40; then provider API prices"),
+            "subscription allowance and overage pricing: {text}"
+        );
+        assert!(
+            text.contains("Scales through Solo"),
+            "offer should apply through the Solo plan: {text}"
         );
         assert!(
             text.contains('\u{25D6}') && text.contains('\u{25D7}'),
@@ -206,7 +209,7 @@ fn onboarding_golden_walks_every_phase() {
         assert!(text.contains("Cursor"), "single login row: {text}");
         assert!(text.contains("Import"), "import pill: {text}");
         assert!(
-            text.contains("Jcode subscription (50% off)"),
+            text.contains("Jcode subscription"),
             "subscription pill: {text}"
         );
     }
