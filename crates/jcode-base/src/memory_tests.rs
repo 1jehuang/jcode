@@ -912,6 +912,41 @@ The bug is in the mouse delta calc.";
 }
 
 #[test]
+fn focused_query_excludes_multiline_tool_errors_but_keeps_later_user_prose() {
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "This command was not run.\nUNIQUE_MULTILINE_ERROR_PAYLOAD\nThe target cannot be confirmed.\nThe operation is irreversible."
+                    .to_string(),
+                is_error: Some(true),
+            },
+            ContentBlock::Text {
+                text: "Keep the token rotation behavior unchanged.".to_string(),
+                cache_control: None,
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let focused = format_focused_query_for_relevance(&messages);
+
+    assert!(!focused.contains("This command was not run"), "{focused}");
+    assert!(
+        !focused.contains("UNIQUE_MULTILINE_ERROR_PAYLOAD"),
+        "arbitrary error payload leaked: {focused}"
+    );
+    assert!(!focused.contains("cannot be confirmed"), "{focused}");
+    assert!(!focused.contains("irreversible"), "{focused}");
+    assert!(
+        focused.contains("Keep the token rotation behavior unchanged."),
+        "subsequent user prose was lost: {focused}"
+    );
+}
+
+#[test]
 fn focus_query_text_falls_back_when_all_stripped() {
     let raw = "<system-reminder>\nonly boilerplate\n</system-reminder>\n[Tool: read]";
     let focused = super::focus_query_text(raw);

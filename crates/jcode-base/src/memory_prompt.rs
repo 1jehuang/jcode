@@ -26,10 +26,13 @@ fn format_content_block_for_relevance(block: &crate::message::ContentBlock) -> O
             content, is_error, ..
         } => {
             if is_error.unwrap_or(false) {
-                Some(format!(
-                    "[Tool error: {}]",
-                    truncate_chars(content.trim(), MEMORY_CONTEXT_MAX_BLOCK_CHARS / 4)
-                ))
+                // Keep the serialized block on one physical line. The focused-query
+                // filter drops tool blocks by their leading marker, so preserving
+                // payload newlines would let every line after the first escape as
+                // apparent conversation prose.
+                let content = truncate_chars(content.trim(), MEMORY_CONTEXT_MAX_BLOCK_CHARS / 4);
+                let content = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                Some(format!("[Tool error: {}]", content))
             } else {
                 None
             }
