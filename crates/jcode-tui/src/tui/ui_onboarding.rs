@@ -147,7 +147,7 @@ fn import_summary_pills_line(
     spans.extend(lozenge_pill_spans("Import", focused == Pill::Continue));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
-        "Jcode subscription (50% off)",
+        "Jcode subscription",
         focused == Pill::Subscription,
     ));
     spans.push(Span::raw("   "));
@@ -536,6 +536,13 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.extend(import_summary_lines(&prompt));
                     lines.push(Line::from(""));
                     lines.push(import_summary_pills_line(prompt.summary_pill, align));
+                    lines.push(
+                        Line::from(Span::styled(
+                            "$10 → $20 inference, $20 → $40; then provider API prices. Scales through Solo.",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
                 }
                 Some(prompt) => {
                     // Choose mode: a short "Import:" label, the Continue pill,

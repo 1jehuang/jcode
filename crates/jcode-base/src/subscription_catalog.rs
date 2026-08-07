@@ -45,13 +45,18 @@ impl JcodeTier {
     }
 
     pub fn usable_budget_usd(self) -> f64 {
-        match self {
-            Self::Plus => 18.00,
-            Self::Pro => 40.00,
-            Self::Max => 225.00,
-            Self::Ultra => 500.00,
-            Self::Flagship => 3000.00,
-        }
+        f64::from(self.retail_price_usd()) * 2.0
+    }
+
+    /// Provider-price inference included with the monthly plan. The included
+    /// portion is billed at 50%, so every subscription dollar buys two dollars
+    /// of inference. Usage after this allowance is billed at provider API price.
+    pub fn included_inference_usd(self) -> f64 {
+        self.usable_budget_usd()
+    }
+
+    pub fn overage_api_price_multiplier(self) -> f64 {
+        1.0
     }
 
     pub fn display_name(self) -> &'static str {
@@ -633,11 +638,11 @@ mod tests {
     #[test]
     fn tier_pricing_matches_launched_plans() {
         let expected = [
-            (JcodeTier::Plus, "plus", "Plus", 10, 18.00),
+            (JcodeTier::Plus, "plus", "Plus", 10, 20.00),
             (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
-            (JcodeTier::Max, "max", "Max", 100, 225.00),
-            (JcodeTier::Ultra, "ultra", "Ultra", 200, 500.00),
-            (JcodeTier::Flagship, "flagship", "Solo", 1000, 3000.00),
+            (JcodeTier::Max, "max", "Max", 100, 200.00),
+            (JcodeTier::Ultra, "ultra", "Ultra", 200, 400.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 2000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));
@@ -646,6 +651,8 @@ mod tests {
             assert_eq!(tier.display_name(), display_name);
             assert_eq!(tier.retail_price_usd(), retail_price);
             assert_eq!(tier.usable_budget_usd(), usable_budget);
+            assert_eq!(tier.included_inference_usd(), usable_budget);
+            assert_eq!(tier.overage_api_price_multiplier(), 1.0);
         }
     }
 
