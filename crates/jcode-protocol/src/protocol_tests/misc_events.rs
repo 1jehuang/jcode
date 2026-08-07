@@ -248,7 +248,7 @@ fn test_jcode_subscription_set_route_is_wire_safe() -> Result<()> {
             model: "gpt-5.5".to_string(),
             runtime_key: jcode_provider_core::RuntimeKey::JcodeSubscription,
             api_method: "jcode-subscription".to_string(),
-            provider_label: "Jcode Hosted Models".to_string(),
+            provider_label: "Jcode Subscription".to_string(),
             detail: "jcode subscription routing · managed server-side".to_string(),
         },
     };

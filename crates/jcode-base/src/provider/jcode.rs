@@ -320,7 +320,7 @@ mod tests {
 
         runtime.block_on(async {
             let provider = JcodeProvider::new();
-            assert_eq!(provider.name(), "Jcode Hosted Models");
+            assert_eq!(provider.name(), "Jcode Subscription");
             let model = provider.model();
             assert!(
                 crate::subscription_catalog::is_curated_model(&model),
@@ -388,7 +388,7 @@ mod tests {
             expected_models
         );
         assert!(plus_routes.iter().all(|route| {
-            route.provider == "Jcode Hosted Models"
+            route.provider == "Jcode Subscription"
                 && route.api_method == "jcode-subscription"
                 && route.available
         }));
@@ -407,7 +407,7 @@ mod tests {
             jcode_provider_core::RuntimeKey::JcodeSubscription
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
-        assert_eq!(route_selection.provider_label, "Jcode Hosted Models");
+        assert_eq!(route_selection.provider_label, "Jcode Subscription");
         assert_eq!(flagship_routes.len(), 20);
         assert!(
             flagship_routes
