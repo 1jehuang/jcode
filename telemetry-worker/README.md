@@ -41,12 +41,14 @@ Events are dual-written to two stores with different jobs:
 
 ### D1 size self-defense
 
-D1 hard-caps databases at 500 MB on the free plan; at the cap every insert
-500s and telemetry silently stops (June 2026: ~3 days lost). Defenses, in
-order:
+D1 hard-caps databases at 10 GB on Workers Paid (500 MB on Free). The first
+5 GB of account-wide paid storage is included. The worker therefore uses a
+4.5 GB soft limit, leaving room for other databases and for pruning to catch
+up before the 10 GB hard cap. At the old free-plan cap every insert failed and
+telemetry silently stopped (June 2026: ~3 days lost). Defenses, in order:
 
 - The worker observes `meta.size_after` on every D1 write. Past the soft
-  limit (`D1_SOFT_LIMIT_BYTES`, just above the file's high-water mark) it
+  budget limit (`D1_SOFT_LIMIT_BYTES`) it
   triggers an **emergency prune** (halved retention windows, rate-limited to
   one per 10 minutes per isolate) instead of waiting for the nightly cron.
 - If an insert fails with a SQLITE_FULL-class error, the emergency prune runs

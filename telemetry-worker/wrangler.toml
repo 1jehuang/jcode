@@ -10,9 +10,9 @@ routes = [
   { pattern = "telemetry.jcode.sh", custom_domain = true }
 ]
 
-# Nightly retention prune (see RETENTION_DAYS in src/worker.js). D1 hard-caps
-# databases at 500 MB; without pruning, inserts eventually fail with 500s and
-# telemetry silently stops being recorded.
+# Nightly retention prune (see RETENTION_DAYS in src/worker.js). Workers Paid
+# hard-caps each D1 database at 10 GB; pruning keeps durable raw history inside
+# the worker's lower storage-budget guardrail.
 [triggers]
 crons = ["17 4 * * *"]
 
