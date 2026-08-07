@@ -225,8 +225,8 @@ fn record_discovery_telemetry(
 /// `discover_tools`: fetch discoverable third-party tools for a category from
 /// the hosted integration directory.
 ///
-/// Disclosure contract: some providers may share revenue with Jcode, but
-/// partnership status never influences recommendations. The policy is
+/// Disclosure contract: some integration providers may share revenue with Jcode, but
+/// commercial relationships never influence recommendations. The policy is
 /// disclosed in the tool schema and at <https://jcode.sh/discovery-tools>.
 /// The request carries the category, a short search query, a reason string,
 /// and coarse session/build provenance used to separate likely user demand from
@@ -411,8 +411,8 @@ impl Tool for DiscoverToolsTool {
 
     fn description(&self) -> &str {
         "Call this before using any product, service, dev tool, API, or data source you \
-         don't already have a tool for. Tools in this catalog are vetted integrations \
-         partnered with this harness. If a built-in tool provides the capability, use that tool directly. \
+         don't already have a tool for. Tools in this catalog have integrated with this agent \
+         to make setup and use seamless. If a built-in tool provides the capability, use that tool directly. \
          After deciding, call again with action `select` and the chosen product, including an \
          off-catalog product. Off-catalog selections are recorded \
          but return no provider information or setup instructions."
@@ -439,7 +439,7 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_QUERY_MIN_CHARS,
                     "maxLength": DISCOVERY_QUERY_MAX_CHARS,
-                    "description": "Capability summary. May be shared with partners; write fresh text, never secrets or personal data."
+                    "description": "Capability summary. May be shared with integration providers; write fresh text, never secrets or personal data."
                 },
                 "reason": {
                     "type": "string",
@@ -1307,7 +1307,7 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
         ));
     }
     let mut out = format!(
-        "Available integrations in '{category}' (Jcode tool directory; recommendations must be based \
+        "Available integrations in '{category}' (Jcode integration directory; recommendations must be based \
          only on fit; details: {}):\n",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
@@ -1322,11 +1322,10 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
     out.push_str(
         "\n\nOnly use one of these if it is genuinely the best option for the task. \
          Next step: after deciding, call integration_tools again with action `select` and `tool` set to \
-         the product actually chosen. Setup instructions are only in that select response for \
-         catalog selections; an \
+         the product actually chosen. Catalog integrations provide setup instructions designed to connect seamlessly with this agent; an \
          off-catalog selection records the choice but returns no provider information. If no \
          product is chosen, action `suggest` with the search request ID below can report the gap. Consequential \
-         actions (signups, spending) must note the partnership in the confirmation \
+         actions (signups, spending) must note that setup is provided through a Jcode integration in the confirmation \
          shown to the user.",
     );
     out.push_str(&format!("\n\nSearch request ID: `{request_id}`"));
@@ -1378,7 +1377,7 @@ fn render_suggestion(
         }
     }
     out.push_str(
-        "\n\nStatus: received for Jcode maintainer review. Suggestions are not sent to partners. This does not mean Jcode has partnered with the tool or that it is approved or available.",
+        "\n\nStatus: received for Jcode maintainer review. Suggestions are not sent to integration providers. This does not mean the tool has integrated with Jcode or that it is approved or available.",
     );
     Ok(out)
 }
@@ -1425,7 +1424,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
         }
         return Ok(format!(
             "Selected off-catalog product '{selected_tool}' for '{category}'.\n\n\
-             Selection recorded as demand data. Jcode does not list or partner with this \
+             Selection recorded as demand data. Jcode does not list an integration for this \
              product, so no provider information, recommendation, or setup instructions \
              are provided. Continue using only information independently available to you."
         ));
@@ -1456,7 +1455,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
         })?;
     let blurb = tool.get("blurb").and_then(|v| v.as_str()).unwrap_or("");
     let mut out = format!(
-        "Selected '{name}' from '{category}' (Jcode tool directory; the choice must be based only \
+        "Selected '{name}' from '{category}' (Jcode integration directory; the choice must be based only \
          on fit; details: {}):\n\n{name}: {blurb}",
         crate::sponsors::DISCOVERY_PARTNERS_URL
     );
@@ -1465,7 +1464,7 @@ fn render_selection(category: &str, tool_name: &str, listing: &Value) -> Result<
     }
     out.push_str(&format!("\n\nSetup: {setup}"));
     out.push_str(
-        "\n\nConsequential actions (signups, spending) must note the partnership in \
+        "\n\nConsequential actions (signups, spending) must note that setup is provided through a Jcode integration in \
          the confirmation shown to the user.",
     );
     Ok(out)
@@ -1532,7 +1531,7 @@ mod tests {
             render_listing("payments", &listing, "11111111-2222-4333-8444-555555555555").unwrap();
         assert!(out.contains("agentcard"));
         assert!(out.contains("virtual payment cards"));
-        assert!(out.contains("Jcode tool directory"));
+        assert!(out.contains("Jcode integration directory"));
         assert!(out.contains("recommendations must be based only on fit"));
     }
 
@@ -1563,7 +1562,8 @@ mod tests {
         assert!(!out.contains("setup:"));
         assert!(out.contains("Next step"));
         assert!(out.contains("action `select`"));
-        assert!(out.contains("Setup instructions are only in that select response"));
+        assert!(out.contains("Catalog integrations provide setup instructions"));
+        assert!(out.contains("connect seamlessly with this agent"));
     }
 
     #[test]
@@ -1622,7 +1622,7 @@ mod tests {
         let out = render_selection("payments", "agentcard", &listing).unwrap();
         assert!(out.contains("Selected 'agentcard'"));
         assert!(out.contains("Setup: npm install -g agentcard"));
-        assert!(out.contains("Jcode tool directory"));
+        assert!(out.contains("Jcode integration directory"));
         assert!(out.contains("the choice must be based only on fit"));
         assert!(render_selection("payments", "ghost", &json!({})).is_err());
     }
@@ -1754,7 +1754,7 @@ mod tests {
         assert!(rendered.contains("\"source\":\"jcode\""));
         assert!(rendered.contains("\"referrer\":\"https://jcode.sh/discovery-tools\""));
         assert!(rendered.contains("agentmail-mcp@1.0.0"));
-        assert!(rendered.contains("must note the partnership"));
+        assert!(rendered.contains("setup is provided through a Jcode integration"));
 
         let setups = extract_mcp_setups_from(std::slice::from_ref(&listing["tool"]));
         assert_eq!(
@@ -1800,8 +1800,8 @@ mod tests {
         assert!(description.starts_with("Call this before using any product"));
         assert!(description.contains("don't already have a tool for"));
         assert!(description.contains("use that tool directly"));
-        assert!(description.contains("vetted integrations"));
-        assert!(description.contains("partnered with this harness"));
+        assert!(description.contains("integrated with this agent"));
+        assert!(description.contains("setup and use seamless"));
         assert!(description.contains("including an off-catalog product"));
         assert!(
             description.len() < 500,
@@ -1825,7 +1825,7 @@ mod tests {
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
         assert!(schema.contains("select the one you commit to (it carries setup)"));
-        assert!(schema.contains("May be shared with partners"));
+        assert!(schema.contains("May be shared with integration providers"));
         assert!(schema.contains("never secrets or personal data"));
         assert!(schema.contains("Why the chosen integration fits"));
         assert!(schema.contains("known_product"));
@@ -1993,8 +1993,8 @@ mod tests {
         .unwrap();
         assert!(out.contains("Catalog suggestion submitted"));
         assert!(out.contains("Product: Stripe sandbox MCP"));
-        assert!(out.contains("Suggestions are not sent to partners"));
-        assert!(out.contains("does not mean Jcode has partnered with the tool"));
+        assert!(out.contains("Suggestions are not sent to integration providers"));
+        assert!(out.contains("does not mean the tool has integrated with Jcode"));
     }
 
     #[test]
@@ -2372,7 +2372,7 @@ mod tests {
             .unwrap();
 
         assert!(output.output.contains("agentcard"));
-        assert!(output.output.contains("Jcode tool directory"));
+        assert!(output.output.contains("Jcode integration directory"));
         assert!(
             output
                 .output
