@@ -771,10 +771,7 @@ async fn handle_remote_key_internal(
         }
     }
 
-    if code == KeyCode::Enter
-        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        && !app.input.trim().starts_with('/')
-    {
+    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
