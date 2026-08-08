@@ -18,6 +18,11 @@ struct PairingView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
+                // Above the fold on every device, including a 4.7" iPhone:
+                // with no server the app is otherwise an unusable form, and a
+                // reviewer who does not scroll would never find the demo.
+                demoLink
+
                 if let errorMessage {
                     ErrorBanner(message: errorMessage) {
                         self.errorMessage = nil
@@ -90,39 +95,6 @@ struct PairingView: View {
                     .font(.footnote)
                     .foregroundStyle(Theme.textTertiary)
 
-                // No server yet? The app would otherwise be an unusable form.
-                // Demo mode runs a scripted session entirely on-device so the
-                // whole interface can be explored before pairing anything.
-                VStack(alignment: .leading, spacing: 8) {
-                    Divider().overlay(Theme.border)
-                    Button {
-                        model.startDemo()
-                    } label: {
-                        Label("Try the offline demo", systemImage: "play.circle")
-                            .font(.subheadline.weight(.medium))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Theme.surface)
-                            .foregroundStyle(Theme.mint)
-                            .clipShape(
-                                RoundedRectangle(
-                                    cornerRadius: Theme.Radius.medium, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(
-                                    cornerRadius: Theme.Radius.medium, style: .continuous
-                                )
-                                .stroke(Theme.border, lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(PressableButtonStyle(scale: 0.98))
-                    .accessibilityLabel("Try the offline demo")
-                    .accessibilityHint("Explores the app with a scripted session, no server needed")
-                    Text("No server required. Runs entirely on this device.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textTertiary)
-                }
-                .padding(.top, 4)
             }
             .padding(16)
             .readableColumn()
@@ -142,6 +114,36 @@ struct PairingView: View {
                 }
             }
         }
+    }
+
+    /// Compact entry into offline demo mode.
+    private var demoLink: some View {
+        Button {
+            model.startDemo()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "play.circle")
+                    .font(Theme.icon(15, weight: .medium))
+                    .accessibilityHidden(true)
+                Text("No server yet? Try the offline demo")
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.leading)
+            }
+            .foregroundStyle(Theme.mint)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(Theme.surface)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .stroke(Theme.border, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableButtonStyle(scale: 0.98))
+        .accessibilityLabel("Try the offline demo")
+        .accessibilityHint("Explores the app with a scripted session; no server needed")
     }
 
     private var header: some View {

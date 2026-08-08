@@ -23,6 +23,19 @@ icon_opaque() {
     [ -n "$icon" ] && sips -g hasAlpha "$icon" | grep -q "hasAlpha: no"
 }
 
+# The demo entry must render before the pairing form: on a 4.7" iPhone
+# anything after it is below the fold, and a reviewer may never scroll.
+demo_above_fold() {
+    python3 -c '
+import sys
+src = open("Sources/JCodeMobile/Views/PairingView.swift").read()
+body = src.split("var body: some View", 1)[1]
+demo = body.find("demoLink")
+form = body.find("field(\"Host\"")
+sys.exit(0 if 0 <= demo < form else 1)
+'
+}
+
 plist_has() { # plist_has <key>
     /usr/libexec/PlistBuddy -c "Print :$1" Sources/JCodeMobile/Info.plist
 }
@@ -58,6 +71,8 @@ echo "== reviewer can use the app without a server =="
 check "demo transport exists" test -f Sources/JCodeKit/DemoTransport.swift
 check "demo entry point on the pairing screen" \
     grep -q "startDemo()" Sources/JCodeMobile/Views/PairingView.swift
+check "demo entry is above the fold (rendered before the pairing form)" \
+    demo_above_fold
 check "demo mode is disclosed in the UI" \
     grep -q "Demo mode" Sources/JCodeMobile/Views/ConnectionBanner.swift
 check "demo mode has an exit to pairing" \
