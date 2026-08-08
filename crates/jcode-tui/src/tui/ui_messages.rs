@@ -2562,7 +2562,6 @@ pub(crate) fn render_background_task_message(
         return render_system_message(msg, width, diff_mode);
     };
 
-    let centered = markdown::center_code_blocks();
     let task_label = crate::message::background_task_display_label(
         &parsed.tool_name,
         parsed.display_name.as_deref(),
@@ -2571,110 +2570,31 @@ pub(crate) fn render_background_task_message(
     if is_swarm {
         return render_compact_swarm_background_completion(&parsed, width);
     }
-    let (title, border_color, status_color, preview_color) = if parsed.status.starts_with('✓') {
-        (
-            if is_swarm {
-                format!("🐝 {} completed · {}", task_label, parsed.task_id)
-            } else {
-                format!("✓ bg {} completed · {}", task_label, parsed.task_id)
-            },
-            rgb(100, 180, 100),
-            rgb(120, 210, 140),
-            rgb(214, 240, 220),
-        )
+    let (icon, state, state_color) = if parsed.status.starts_with('✓') {
+        ("✓", "completed", rgb(120, 210, 140))
     } else if parsed.status.starts_with('✗') {
-        (
-            if is_swarm {
-                format!("🐝 {} failed · {}", task_label, parsed.task_id)
-            } else {
-                format!("✗ bg {} failed · {}", task_label, parsed.task_id)
-            },
-            rgb(220, 100, 100),
-            rgb(255, 150, 150),
-            rgb(255, 225, 225),
-        )
+        ("×", "failed", rgb(255, 150, 150))
     } else {
-        (
-            if is_swarm {
-                format!("🐝 {} running · {}", task_label, parsed.task_id)
-            } else {
-                format!("◌ bg {} running · {}", task_label, parsed.task_id)
-            },
-            rgb(255, 193, 94),
-            rgb(255, 214, 120),
-            rgb(255, 241, 214),
-        )
+        ("⏳", "running", rgb(255, 214, 120))
     };
-
-    let border_style = Style::default().fg(border_color);
-    let label_style = Style::default().fg(dim_color());
-    let status_style = Style::default().fg(status_color).bold();
-    let preview_style = Style::default().fg(preview_color);
-
-    let max_box_width = if centered {
-        (width.saturating_sub(4) as usize).min(120)
-    } else {
-        (width.saturating_sub(2) as usize).min(96)
-    }
-    .max(16);
-    let inner_width = max_box_width.saturating_sub(4).max(1);
-
-    let mut box_content: Vec<Line<'static>> = vec![Line::from(vec![
-        Span::styled(parsed.exit_label.clone(), status_style),
-        Span::styled(" · ", label_style),
-        Span::styled(parsed.duration.clone(), label_style),
-    ])];
-
-    if let Some(failure_summary) = parsed
+    let detail = parsed
         .failure_summary
         .as_deref()
         .filter(|summary| !summary.is_empty())
-    {
-        let failure_summary = strip_ansi_escape_sequences(failure_summary);
-        box_content.push(Line::from(""));
-        box_content.push(Line::from(Span::styled("Failure", label_style)));
-        for chunk in split_by_display_width(&failure_summary, inner_width) {
-            box_content.push(Line::from(Span::styled(chunk, status_style)));
-        }
-    }
-
-    box_content.push(Line::from(""));
-
-    match parsed.preview.as_deref() {
-        Some(preview) => {
-            let preview = strip_ansi_escape_sequences(preview);
-            let preview_lines: Vec<&str> = preview.lines().collect();
-            let shown_lines = preview_lines.len().min(4);
-            for line in preview_lines.iter().take(shown_lines) {
-                if line.is_empty() {
-                    box_content.push(Line::from(""));
-                    continue;
-                }
-                for chunk in split_by_display_width(line, inner_width) {
-                    box_content.push(Line::from(Span::styled(chunk, preview_style)));
-                }
-            }
-            if preview_lines.len() > shown_lines {
-                let remaining = preview_lines.len() - shown_lines;
-                box_content.push(Line::from(Span::styled(
-                    format!(
-                        "… +{} more line{}",
-                        remaining,
-                        if remaining == 1 { "" } else { "s" }
-                    ),
-                    label_style,
-                )));
-            }
-        }
-        None => {
-            box_content.push(Line::from(Span::styled("No output captured.", label_style)));
-        }
-    }
-
-    let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
+        .map(strip_ansi_escape_sequences)
+        .unwrap_or_else(|| parsed.duration.clone());
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &Line::from(vec![
+            Span::styled(task_label, Style::default().fg(rgb(255, 241, 214)).bold()),
+            Span::raw(" "),
+            Span::styled(icon, Style::default().fg(state_color)),
+            Span::styled(
+                format!(" · {state} · {detail} · background"),
+                Style::default().fg(dim_color()),
+            ),
+        ]),
+        width.max(1) as usize,
+    )];
     lines
 }
 
@@ -2750,9 +2670,6 @@ fn render_compact_swarm_operation_line(text: &str, width: u16, color: Color) -> 
         ]),
         width.max(1) as usize,
     )];
-    if markdown::center_code_blocks() {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
     lines
 }
 
@@ -2770,106 +2687,46 @@ fn progress_summary_without_leading_percent(summary: &str) -> &str {
     summary.trim()
 }
 
-fn render_compact_progress_line(
-    progress: &ParsedBackgroundTaskProgressNotification,
-    inner_width: usize,
-    filled_style: Style,
-    empty_style: Style,
-    label_style: Style,
-    text_style: Style,
-) -> Line<'static> {
-    let Some(percent) = progress.percent else {
-        return super::truncate_line_with_ellipsis_to_width(
-            &Line::from(Span::styled(progress.summary.clone(), text_style)),
-            inner_width,
-        );
-    };
-
-    let percent = percent.clamp(0.0, 100.0);
-    let label = format!("{:>3}%", percent.round() as u32);
-    let separator = " · ";
-    let summary = progress_summary_without_leading_percent(&progress.summary);
-    let fixed_width = 1 + label.width() + separator.width();
-    let bar_width = if inner_width >= 56 {
-        18
-    } else if inner_width >= 40 {
-        14
-    } else if inner_width >= 28 {
-        10
-    } else {
-        6
-    }
-    .min(inner_width.saturating_sub(fixed_width).max(1));
-    let filled = ((percent / 100.0) * bar_width as f32).round() as usize;
-    let filled = filled.min(bar_width);
-    let empty = bar_width.saturating_sub(filled);
-
-    let line = Line::from(vec![
-        Span::styled("█".repeat(filled), filled_style),
-        Span::styled("░".repeat(empty), empty_style),
-        Span::styled(" ", label_style),
-        Span::styled(label, label_style),
-        Span::styled(separator, label_style),
-        Span::styled(summary.to_string(), text_style),
-    ]);
-
-    super::truncate_line_with_ellipsis_to_width(&line, inner_width)
-}
-
 fn render_background_task_progress_message(
     progress: &ParsedBackgroundTaskProgressNotification,
     width: u16,
 ) -> Vec<Line<'static>> {
-    let centered = markdown::center_code_blocks();
-    let border_color = rgb(255, 193, 94);
-    let border_style = Style::default().fg(border_color);
     let label_style = Style::default().fg(dim_color());
     let text_style = Style::default().fg(rgb(255, 241, 214));
     let filled_style = Style::default().fg(rgb(255, 214, 120));
     let empty_style = Style::default().fg(rgb(94, 82, 62));
-
-    let max_box_width = if centered {
-        (width.saturating_sub(4) as usize).min(120)
-    } else {
-        (width.saturating_sub(2) as usize).min(96)
-    }
-    .max(16);
-    let inner_width = max_box_width.saturating_sub(4).max(1);
     let task_label = crate::message::background_task_display_label(
         &progress.tool_name,
         progress.display_name.as_deref(),
     );
     let is_model_refresh =
         progress.task_id == "refresh-model-list" && progress.tool_name == "catalog";
-    let title = if is_model_refresh {
-        format!("◌ model refresh · {}", task_label)
-    } else if progress.tool_name == "swarm" {
-        format!("🐝 {} · {}", task_label, progress.task_id)
+    let percent = progress.percent.unwrap_or(0.0).clamp(0.0, 100.0);
+    let filled = (((percent / 100.0) * 7.0).round() as usize).min(7);
+    let detail = progress_summary_without_leading_percent(&progress.summary);
+    let label = if is_model_refresh {
+        "Model refresh".to_string()
     } else {
-        format!("◌ bg {} · {}", task_label, progress.task_id)
+        task_label
     };
-
-    let mut box_content = vec![render_compact_progress_line(
-        progress,
-        inner_width,
-        filled_style,
-        empty_style,
-        label_style,
-        text_style,
-    )];
-    if !is_model_refresh {
-        let hint = format!(
-            "Latest status: bg action=\"status\" task_id=\"{}\"",
-            progress.task_id
-        );
-        box_content.push(super::truncate_line_with_ellipsis_to_width(
-            &Line::from(Span::styled(hint, label_style)),
-            inner_width,
-        ));
+    let mut spans = vec![
+        Span::styled(label, text_style.bold()),
+        Span::raw(" "),
+        Span::styled("⏳", filled_style),
+        Span::raw(" "),
+        Span::styled("▪".repeat(filled), filled_style),
+        Span::styled("▫".repeat(7 - filled), empty_style),
+        Span::styled(format!(" {}%", percent.round() as u32), label_style),
+    ];
+    if !detail.is_empty() {
+        spans.push(Span::styled(format!(" · {detail}"), label_style));
     }
-
-    let mut lines = render_rounded_box(&title, box_content, max_box_width, border_style);
-    if centered {
+    spans.push(Span::styled(" · background", label_style));
+    let mut lines = vec![super::truncate_line_with_ellipsis_to_width(
+        &Line::from(spans),
+        width.max(1) as usize,
+    )];
+    if markdown::center_code_blocks() {
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     lines

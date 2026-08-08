@@ -278,7 +278,7 @@ fn render_system_message_uses_width_stable_titles_on_kitty() {
 }
 
 #[test]
-fn render_background_task_message_uses_box_and_truncates_preview_lines() {
+fn render_background_task_message_is_a_borderless_one_line_completion() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 7.1s · exit 0\n\n```text\nline 1\nline 2\nline 3\nline 4\nline 5\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
@@ -295,18 +295,18 @@ fn render_background_task_message_uses_box_and_truncates_preview_lines() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("✓ bg bash completed · bg123"));
-    assert!(plain.contains("exit 0 · 7.1s"));
-    assert!(plain.contains("line 1"));
-    assert!(plain.contains("… +1 more line"));
-    assert!(!plain.contains("task bg123 · bash"));
-    assert!(!plain.contains("Preview"));
+    crate::tui::markdown::set_center_code_blocks(false);
+    assert_eq!(plain.lines().count(), 1);
+    assert_eq!(plain.trim_start(), "bash ✓ · completed · 7.1s · background");
+    assert!(!plain.contains('╭'));
+    assert!(!plain.contains('│'));
+    assert!(!plain.contains("line 1"));
     assert!(!plain.contains("Full output"));
-    assert!(!plain.contains("bg action=\"output\" task_id=\"bg123\""));
+    assert!(!plain.contains("bg123"));
 }
 
 #[test]
-fn render_background_task_message_strips_ansi_from_existing_preview() {
+fn render_background_task_message_omits_preview_and_ansi() {
     let msg = DisplayMessage::background_task(
         "**Background task** `bg123` · `bash` · ✓ completed · 0.1s · exit 0\n\n```text\n\u{1b}[32m✓\u{1b}[39m passes \u{1b}[2m12ms\u{1b}[22m\n```\n\n_Full output:_ `bg action=\"output\" task_id=\"bg123\"`",
     );
@@ -317,10 +317,8 @@ fn render_background_task_message_strips_ansi_from_existing_preview() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(
-        plain.contains("✓ passes 12ms"),
-        "rendered preview:\n{plain}"
-    );
+    assert_eq!(plain.trim_start(), "bash ✓ · completed · 0.1s · background");
+    assert!(!plain.contains("passes"));
     assert!(!plain.contains('\u{1b}'));
     assert!(!plain.contains("[32m"));
     assert!(!plain.contains("[2m"));
@@ -385,7 +383,7 @@ fn render_background_task_progress_message_uses_swarm_flavor_for_swarm_tool() {
 }
 
 #[test]
-fn render_background_task_progress_message_uses_box_with_progress_bar() {
+fn render_background_task_progress_message_uses_borderless_segmented_row() {
     let msg = DisplayMessage::background_task(
         "**Background task progress** `bg123` · `bash`\n\n[#####-------] 42% · Running tests (reported)",
     );
@@ -397,20 +395,13 @@ fn render_background_task_progress_message_uses_box_with_progress_bar() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("◌ bg bash · bg123"));
-    assert!(plain.contains("█"));
-    assert!(plain.contains("░"));
-    assert!(plain.contains("42%"));
+    assert_eq!(lines.len(), 1);
+    assert!(plain.trim_start().starts_with("bash ⏳ ▪▪▪▫▫▫▫ 42%"), "{plain}");
     assert!(plain.contains("Running tests"));
-    assert!(plain.contains("Latest status: bg action=\"status\" task_id=\"bg123\""));
-    assert_eq!(
-        plain.matches('│').count(),
-        4,
-        "expected compact progress row plus status hint:\n{plain}"
-    );
-    assert!(!plain.contains("Latest update"));
-    assert!(!plain.contains("Source: reported"));
-    assert!(!plain.contains("**Background task progress**"));
+    assert!(plain.ends_with("· background"));
+    assert!(!plain.contains('╭'));
+    assert!(!plain.contains('│'));
+    assert!(!plain.contains("bg123"));
 }
 
 #[test]
@@ -1402,7 +1393,8 @@ fn render_background_task_messages_prefer_display_name() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-    assert!(completion_plain.contains("✓ bg Run integration tests completed · bg123"));
+    assert!(completion_plain.contains("Run integration tests ✓ · completed"));
+    assert!(completion_plain.ends_with("· background"));
 
     let progress = DisplayMessage::background_task(
         "**Background task progress** `bg123` · `Run integration tests` (`bash`)\n\n[#####-------] 42% · Running tests (reported)",
@@ -1413,7 +1405,8 @@ fn render_background_task_messages_prefer_display_name() {
             .map(extract_line_text)
             .collect::<Vec<_>>()
             .join("\n");
-    assert!(progress_plain.contains("◌ bg Run integration tests · bg123"));
+    assert!(progress_plain.contains("Run integration tests ⏳"));
+    assert!(progress_plain.ends_with("· background"));
 }
 
 #[test]
