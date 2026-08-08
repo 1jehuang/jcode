@@ -103,6 +103,49 @@ struct SessionUiState {
     reasoning_effort: Option<String>,
 }
 
+#[derive(Default)]
+struct PromptUsage {
+    input: u64,
+    output: u64,
+    cached_read: u64,
+    cache_write: u64,
+}
+
+impl PromptUsage {
+    fn add(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read_input: Option<u64>,
+        cache_creation_input: Option<u64>,
+    ) {
+        self.input = self.input.saturating_add(input);
+        self.output = self.output.saturating_add(output);
+        self.cached_read = self
+            .cached_read
+            .saturating_add(cache_read_input.unwrap_or_default());
+        self.cache_write = self
+            .cache_write
+            .saturating_add(cache_creation_input.unwrap_or_default());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.input == 0 && self.output == 0 && self.cached_read == 0 && self.cache_write == 0
+    }
+
+    fn as_json(&self) -> Value {
+        json!({
+            "inputTokens": self.input,
+            "outputTokens": self.output,
+            // Provider input counters generally include cached reads. The total
+            // disambiguates inclusive counters for hosts that normalize costs.
+            "totalTokens": self.input.saturating_add(self.output),
+            "cachedReadTokens": self.cached_read,
+            "cacheWriteTokens": self.cache_write,
+        })
+    }
+}
+
 impl SessionUiState {
     fn from_history_fields(
         provider_name: Option<String>,
@@ -263,6 +306,17 @@ impl AcpRuntime {
             "session/cancel" => self.handle_session_cancel(message).await?,
             "session/close" => self.handle_session_close(message).await?,
             "session/set_config_option" => self.handle_set_config_option(message).await?,
+            // Compatibility with hosts that implemented the pre-configOptions
+            // model-switching convention.
+            "session/set_model" => {
+                let mut message = message;
+                if let Some(params) = message.params.as_object_mut() {
+                    let model = params.remove("modelId").unwrap_or(Value::Null);
+                    params.insert("configId".to_string(), json!(CONFIG_ID_MODEL));
+                    params.insert("value".to_string(), model);
+                }
+                self.handle_set_config_option(message).await?
+            }
             _ if method.starts_with('_') => {
                 if let Some(id) = message.id {
                     self.write_error_value(
@@ -309,7 +363,10 @@ impl AcpRuntime {
         match self.create_new_session(cwd).await {
             Ok(session) => {
                 let session_id = session.session_id.clone();
-                let config_options = session_config_options(&*session.ui_state.lock().await);
+                let (config_options, models) = {
+                    let state = session.ui_state.lock().await;
+                    (session_config_options(&state), legacy_models(&state))
+                };
                 self.sessions
                     .lock()
                     .await
@@ -319,6 +376,11 @@ impl AcpRuntime {
                     && let Some(object) = result.as_object_mut()
                 {
                     object.insert("configOptions".to_string(), Value::Array(config_options));
+                }
+                if let Some(models) = models
+                    && let Some(object) = result.as_object_mut()
+                {
+                    object.insert("models".to_string(), models);
                 }
                 self.write_result(id, result).await?;
             }
@@ -804,6 +866,8 @@ impl AcpRuntime {
 
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
         let mut stop_reason = "end_turn".to_string();
+        let mut usage = PromptUsage::default();
+        let mut model_id = session.ui_state.lock().await.model.clone();
         loop {
             let event = match session.read_event().await {
                 Ok(event) => event,
@@ -830,10 +894,11 @@ impl AcpRuntime {
                 }
                 ServerEvent::TokenUsage {
                     input,
-                    output: _,
+                    output,
                     cache_read_input,
                     cache_creation_input,
                 } => {
+                    usage.add(input, output, cache_read_input, cache_creation_input);
                     let (provider_name, context_limit) = {
                         let state = session.ui_state.lock().await;
                         (
@@ -871,6 +936,7 @@ impl AcpRuntime {
                     if error.is_none() {
                         let config_options = {
                             let mut state = session.ui_state.lock().await;
+                            model_id = Some(model.clone());
                             state.model = Some(model);
                             if provider_name.is_some() {
                                 state.provider_name = provider_name;
@@ -908,8 +974,16 @@ impl AcpRuntime {
         }
 
         cleanup_prompt_state(&session).await;
-        self.write_result(rpc_id, json!({ "stopReason": stop_reason }))
-            .await?;
+        let mut result = json!({ "stopReason": stop_reason });
+        if let Some(object) = result.as_object_mut() {
+            if !usage.is_empty() {
+                object.insert("usage".to_string(), usage.as_json());
+            }
+            if let Some(model_id) = model_id {
+                object.insert("_meta".to_string(), json!({ "modelId": model_id }));
+            }
+        }
+        self.write_result(rpc_id, result).await?;
         Ok(())
     }
 
@@ -1069,6 +1143,21 @@ fn session_config_options(state: &SessionUiState) -> Vec<Value> {
     }
 
     options
+}
+
+fn legacy_models(state: &SessionUiState) -> Option<Value> {
+    let current = state.model.as_deref()?;
+    let mut models = state.available_models.clone();
+    if !models.iter().any(|candidate| candidate == current) {
+        models.insert(0, current.to_string());
+    }
+    Some(json!({
+        "availableModels": models
+            .into_iter()
+            .map(|model| json!({ "modelId": model, "name": model }))
+            .collect::<Vec<_>>(),
+        "currentModelId": current,
+    }))
 }
 
 async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
@@ -1334,7 +1423,7 @@ fn ensure_no_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> 
         None | Some(Value::Null) => Ok(()),
         Some(Value::Array(items)) if items.is_empty() => Ok(()),
         Some(_) => Err(
-            "ACP mcpServers are not supported yet; configure MCP servers in Jcode config.toml"
+            "ACP mcpServers are not supported yet; configure MCP servers in ~/.jcode/mcp.json, .jcode/mcp.json, or .mcp.json"
                 .to_string(),
         ),
     }
@@ -1552,7 +1641,9 @@ mod tests {
     #[test]
     fn non_empty_mcp_servers_rejected_until_session_scoped_mcp_is_supported() {
         let params = json!({"mcpServers": [{"name": "fs"}]});
-        assert!(ensure_no_acp_mcp_servers(&params).is_err());
+        let error = ensure_no_acp_mcp_servers(&params).unwrap_err();
+        assert!(error.contains("~/.jcode/mcp.json"));
+        assert!(!error.contains("config.toml"));
         let params = json!({"mcpServers": []});
         assert!(ensure_no_acp_mcp_servers(&params).is_ok());
     }
@@ -1636,6 +1727,45 @@ mod tests {
         assert_eq!(
             state.context_limit(),
             crate::provider::DEFAULT_CONTEXT_LIMIT as u64
+        );
+    }
+
+    #[test]
+    fn prompt_usage_aggregates_and_reports_inclusive_total() {
+        let mut usage = PromptUsage::default();
+        usage.add(100, 7, Some(40), Some(3));
+        usage.add(50, 5, Some(10), None);
+
+        assert_eq!(
+            usage.as_json(),
+            json!({
+                "inputTokens": 150,
+                "outputTokens": 12,
+                "totalTokens": 162,
+                "cachedReadTokens": 50,
+                "cacheWriteTokens": 3,
+            })
+        );
+        assert!(!usage.is_empty());
+        assert!(PromptUsage::default().is_empty());
+    }
+
+    #[test]
+    fn legacy_model_catalog_includes_current_model() {
+        let state = SessionUiState {
+            model: Some("provider:new".to_string()),
+            available_models: vec!["provider:old".to_string()],
+            ..SessionUiState::default()
+        };
+        assert_eq!(
+            legacy_models(&state),
+            Some(json!({
+                "availableModels": [
+                    { "modelId": "provider:new", "name": "provider:new" },
+                    { "modelId": "provider:old", "name": "provider:old" }
+                ],
+                "currentModelId": "provider:new"
+            }))
         );
     }
 }

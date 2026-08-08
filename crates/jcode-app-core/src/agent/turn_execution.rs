@@ -475,7 +475,9 @@ impl Agent {
         let allowed = self.allowed_tools.as_ref();
         registry_names.iter().any(|name| {
             name.starts_with("mcp__")
-                && allowed.map(|set| set.contains(name)).unwrap_or(true)
+                && allowed
+                    .map(|set| crate::tool::Registry::is_allowed(set, name))
+                    .unwrap_or(true)
                 && !self.disabled_tools.contains(name)
                 && !locked.iter().any(|t| &t.name == name)
         })
@@ -577,7 +579,7 @@ impl Agent {
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
         if let Some(allowed) = self.allowed_tools.as_ref()
-            && !allowed.contains(name)
+            && !crate::tool::Registry::is_allowed(allowed, name)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }

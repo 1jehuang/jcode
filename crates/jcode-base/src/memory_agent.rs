@@ -516,6 +516,11 @@ impl MemoryAgent {
         // for listwise LLM reranking. Benchmarking showed the cross-encoder/LLM
         // reranker only works with this focused query, not the full noisy window.
         let focused_query = memory::format_focused_query_for_relevance(&messages);
+        let retrieval_query = if focused_query.trim().is_empty() {
+            context.as_str()
+        } else {
+            focused_query.as_str()
+        };
 
         let context_signature = relevance_context_signature(&context);
         {
@@ -544,7 +549,7 @@ impl MemoryAgent {
         // Step 1: Embed current context (via the active embedding backend:
         // local MiniLM by default, or the remote OpenAI backend when configured).
         let start = Instant::now();
-        let context_for_embedding = context.clone();
+        let context_for_embedding = retrieval_query.to_string();
         let context_embedding = match tokio::task::spawn_blocking(move || {
             crate::embedding_backend::embed_query_active(&context_for_embedding)
         })
@@ -655,7 +660,7 @@ impl MemoryAgent {
         // 0.5 cosine floor surfaced essentially nothing on real session windows;
         // hybrid recovers recall and lets the sidecar/rerank do the filtering.
         let candidates = memory_manager.find_similar_hybrid(
-            &context,
+            retrieval_query,
             &context_embedding,
             memory::EMBEDDING_MAX_HITS,
         )?;

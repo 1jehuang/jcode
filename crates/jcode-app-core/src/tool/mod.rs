@@ -142,6 +142,12 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    /// A configured `mcp` grant includes the dynamically named tools registered
+    /// by MCP servers. Those names are not known when profiles are resolved.
+    pub(crate) fn is_allowed(allowed: &HashSet<String>, name: &str) -> bool {
+        allowed.contains(name) || (name.starts_with("mcp__") && allowed.contains("mcp"))
+    }
+
     fn shared_skills_registry() -> Arc<RwLock<SkillRegistry>> {
         SkillRegistry::shared_registry()
     }
@@ -352,7 +358,11 @@ impl Registry {
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
-            .filter(|(name, _)| allowed_tools.map(|set| set.contains(*name)).unwrap_or(true))
+            .filter(|(name, _)| {
+                allowed_tools
+                    .map(|set| Self::is_allowed(set, name))
+                    .unwrap_or(true)
+            })
             .map(|(name, tool)| {
                 let mut def = tool.to_definition();
                 // Use registry key as the tool name (important for MCP tools where
@@ -626,7 +636,7 @@ impl Registry {
         let resolved_name = Self::resolve_tool_name(name);
         if let Some(policy) = session_tool_policy(&ctx.session_id) {
             if let Some(allowed) = policy.allowed_tools.as_ref()
-                && !allowed.contains(resolved_name)
+                && !Self::is_allowed(allowed, resolved_name)
             {
                 return Err(anyhow::anyhow!("Tool '{}' is not allowed", resolved_name));
             }
@@ -1224,6 +1234,23 @@ fn levenshtein(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[b.len()]
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_grant_allows_dynamic_server_tools_only() {
+        let allowed = HashSet::from(["mcp".to_string(), "read".to_string()]);
+        assert!(Registry::is_allowed(&allowed, "mcp"));
+        assert!(Registry::is_allowed(
+            &allowed,
+            "mcp__codebase_memory__search"
+        ));
+        assert!(Registry::is_allowed(&allowed, "read"));
+        assert!(!Registry::is_allowed(&allowed, "bash"));
+    }
 }
 
 #[cfg(test)]

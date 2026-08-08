@@ -235,6 +235,10 @@ pub struct Agent {
     system_prompt_override: Option<String>,
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
+    /// Last context refresh sent to the memory sidecar. Tool-driven hosts often
+    /// reveal the real task after the initial user prompt, so continuations may
+    /// refresh memory while this timestamp prevents per-tool embedding churn.
+    memory_last_context_update: std::sync::Mutex<Option<std::time::Instant>>,
     /// One-step undo snapshot captured before the most recent rewind.
     rewind_undo_snapshot: Option<RewindUndoSnapshot>,
     /// Channel for tools to request stdin input from the user
@@ -297,6 +301,7 @@ impl Agent {
             mcp_late_register_resolved: false,
             system_prompt_override: None,
             memory_enabled: crate::config::config().features.memory,
+            memory_last_context_update: std::sync::Mutex::new(None),
             rewind_undo_snapshot: None,
             stdin_request_tx: None,
             provider_runtime_state: ProviderRuntimeState::observed(initial_provider_model),
@@ -564,6 +569,9 @@ impl Agent {
         self.graceful_shutdown.reset();
         self.cache_tracker.reset();
         self.last_usage = TokenUsage::default();
+        if let Ok(last) = self.memory_last_context_update.get_mut() {
+            *last = None;
+        }
         self.locked_tools = None;
         self.mcp_late_register_resolved = false;
         self.rewind_undo_snapshot = None;

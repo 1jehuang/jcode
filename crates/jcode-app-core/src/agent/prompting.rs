@@ -29,22 +29,31 @@ impl Agent {
         let session_id = &self.session.id;
 
         let fresh_user_turn = crate::message::ends_with_fresh_user_turn(&messages);
-        let pending = if fresh_user_turn {
-            crate::memory::take_pending_memory(session_id)
-        } else {
-            None
-        };
+        // A relevance result can complete during a tool continuation. Consume
+        // it at the next provider request rather than waiting for another user
+        // message, which may never arrive in one-prompt ACP task runners.
+        let pending = crate::memory::take_pending_memory(session_id);
 
         // Use the persistent memory-agent pipeline as the single source of truth.
         // Running both this and the legacy MemoryManager background retrieval path
         // can prepare overlapping pending prompts for the same turn, which makes
         // memory injection feel overly aggressive.
-        // Relevance results are consumed only at the start of a fresh user turn.
-        // Enqueuing again after every tool result runs the local embedding model
-        // for each provider continuation without creating an additional injection
-        // opportunity. One update per user turn keeps memory current while avoiding
-        // redundant 512-token inference during tool-heavy agent loops.
-        if fresh_user_turn {
+        const TOOL_CONTINUATION_REFRESH: std::time::Duration = std::time::Duration::from_secs(20);
+        let now = std::time::Instant::now();
+        let should_update = if fresh_user_turn {
+            true
+        } else {
+            self.memory_last_context_update
+                .lock()
+                .map(|last| {
+                    last.is_none_or(|last| now.duration_since(last) >= TOOL_CONTINUATION_REFRESH)
+                })
+                .unwrap_or(false)
+        };
+        if should_update {
+            if let Ok(mut last) = self.memory_last_context_update.lock() {
+                *last = Some(now);
+            }
             crate::memory_agent::update_context_sync_with_dir(
                 session_id,
                 messages,
