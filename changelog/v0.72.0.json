@@ -1,0 +1,15 @@
+{
+  "version": "0.72.0",
+  "date": "2026-08-08",
+  "highlights": [
+    "ACP clients now receive richer protocol support and can use the full expected tool surface",
+    "The desktop app now offers a visible new-session action and consistent hover feedback"
+  ],
+  "improvements": [
+    "Cloud relay and session settings now use neutral names while continuing to accept legacy configuration keys"
+  ],
+  "fixes": [
+    "Pinned todos stay visible at the top of the TUI without duplicate transcript cards",
+    "Desktop sessions connect more reliably when startup is slow"
+  ]
+}
