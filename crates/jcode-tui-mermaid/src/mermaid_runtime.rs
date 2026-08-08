@@ -155,7 +155,14 @@ pub(super) fn infer_protocol_from_env(
     }
 
     if term_program.contains("iterm") || term.contains("iterm") || lc_terminal.contains("iterm") {
-        return Some(ProtocolType::Iterm2);
+        // Real iTerm2 renders jcode's inline images incorrectly (corrupted
+        // scrollback / broken layout), so treat it as having no usable image
+        // protocol and fall back to Mermaid source text. Set
+        // JCODE_ITERM2_IMAGES=1 to opt back in.
+        if iterm2_images_opt_in() {
+            return Some(ProtocolType::Iterm2);
+        }
+        return None;
     }
 
     if term.contains("sixel") {
@@ -163,6 +170,36 @@ pub(super) fn infer_protocol_from_env(
     }
 
     None
+}
+
+/// True when we are running in real iTerm2 (not WezTerm, which also speaks the
+/// iTerm2 protocol correctly) and the user has not opted image output back in.
+pub(super) fn real_iterm2_without_opt_in() -> bool {
+    let term_program = std::env::var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let lc_terminal = std::env::var("LC_TERMINAL")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if term_program.contains("wezterm") || lc_terminal.contains("wezterm") {
+        return false;
+    }
+    let is_iterm = term_program.contains("iterm")
+        || lc_terminal.contains("iterm")
+        || std::env::var("TERM")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .contains("iterm");
+    is_iterm && !iterm2_images_opt_in()
+}
+
+/// Whether the user explicitly opted iTerm2 image output back in.
+pub(super) fn iterm2_images_opt_in() -> bool {
+    std::env::var("JCODE_ITERM2_IMAGES")
+        .ok()
+        .as_deref()
+        .and_then(parse_env_bool)
+        .unwrap_or(false)
 }
 
 fn query_font_size() -> (u16, u16) {
@@ -223,7 +260,13 @@ fn probe_picker() -> Picker {
     let mut picker = fast_picker();
     match Picker::from_query_stdio() {
         Ok(probed) => {
-            let protocol = probed.protocol_type();
+            let mut protocol = probed.protocol_type();
+            if protocol == ProtocolType::Iterm2 && real_iterm2_without_opt_in() {
+                crate::log_info(
+                    "Probe reported iTerm2 images, but iTerm2 image output is disabled;                      falling back to halfblocks",
+                );
+                protocol = ProtocolType::Halfblocks;
+            }
             crate::log_info(&format!(
                 "Mermaid picker stdio probe detected protocol: {:?}",
                 protocol
@@ -434,7 +477,75 @@ pub fn register_external_image(path: &Path, width: u32, height: u32) -> u64 {
             },
         );
     }
+    remember_external_image_path(hash, path);
     hash
+}
+
+/// Bound for the external-image path registry. Entries are just a hash and a
+/// path, so this stays far below the memory cost of the render cache itself
+/// while covering every rendered formula in a long transcript.
+const EXTERNAL_IMAGE_PATHS_MAX: usize = 8192;
+
+/// Paths of externally rendered images (LaTeX formulas, `read` of an image
+/// file) keyed by their render-cache hash.
+///
+/// `RENDER_CACHE` is an LRU bounded at `RENDER_CACHE_MAX` entries and it is the
+/// only thing that knows where an external image lives on disk. Inline pasted
+/// images and mermaid diagrams can both be recovered after eviction (staged
+/// payload / `{hash}_inline.*` / `{hash}_w*.png` filenames), but an external
+/// image's cache file is named by content, not by hash, so an evicted entry
+/// used to be unrecoverable: the placeholder rows stayed reserved and the
+/// formula silently disappeared for the rest of the session. This side table
+/// keeps the hash -> path mapping alive so eviction is recoverable.
+type ExternalImagePaths = (HashMap<u64, PathBuf>, VecDeque<u64>);
+
+static EXTERNAL_IMAGE_PATHS: LazyLock<Mutex<ExternalImagePaths>> =
+    LazyLock::new(|| Mutex::new((HashMap::new(), VecDeque::new())));
+
+fn remember_external_image_path(hash: u64, path: &Path) {
+    let Ok(mut registry) = EXTERNAL_IMAGE_PATHS.lock() else {
+        return;
+    };
+    let (paths, order) = &mut *registry;
+    if paths.insert(hash, path.to_path_buf()).is_none() {
+        order.push_back(hash);
+    }
+    while order.len() > EXTERNAL_IMAGE_PATHS_MAX {
+        if let Some(oldest) = order.pop_front() {
+            paths.remove(&oldest);
+        }
+    }
+}
+
+/// Re-register an external image evicted from the render cache, using the
+/// remembered on-disk path. Returns `(hash, width, height)` when the file still
+/// exists and decodes.
+pub fn rediscover_external_image(hash: u64) -> Option<(u64, u32, u32)> {
+    let path = EXTERNAL_IMAGE_PATHS
+        .lock()
+        .ok()
+        .and_then(|registry| registry.0.get(&hash).cloned())?;
+    if !path.exists() {
+        return None;
+    }
+    let image = image::open(&path).ok()?;
+    let (width, height) = image.dimensions();
+    if let Ok(mut source) = SOURCE_CACHE.lock() {
+        source.insert(hash, path.clone(), image);
+    }
+    if let Ok(mut cache) = RENDER_CACHE.lock() {
+        cache.insert(
+            hash,
+            RenderProfile::default(),
+            CachedDiagram {
+                path,
+                width,
+                height,
+            },
+        );
+        return Some((hash, width, height));
+    }
+    None
 }
 
 pub fn register_inline_image(media_type: &str, data_b64: &str) -> Option<(u64, u32, u32)> {
@@ -509,6 +620,70 @@ pub fn get_font_size() -> Option<(u16, u16)> {
 mod tests {
     use super::*;
 
+    /// An external image (LaTeX formula PNG, `read` of an image file) must be
+    /// recoverable after the bounded render cache evicts it. Before this, the
+    /// hash -> path mapping lived only in that LRU, so a math-heavy transcript
+    /// silently lost its rendered formulas: the placeholder rows stayed
+    /// reserved and nothing could ever repaint them.
+    #[test]
+    fn evicted_external_image_is_rediscovered_from_its_remembered_path() {
+        use image::{ImageBuffer, Rgba};
+
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-external-image-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create fixture dir");
+        let path = dir.join("formula.png");
+        ImageBuffer::from_pixel(9, 4, Rgba([120u8, 160, 255, 255]))
+            .save(&path)
+            .expect("write fixture png");
+
+        let hash = register_external_image(&path, 9, 4);
+        assert!(
+            get_cached_png(hash).is_some(),
+            "registration should populate the render cache"
+        );
+
+        // Simulate LRU eviction of the render-cache entry.
+        {
+            let mut cache = RENDER_CACHE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache
+                .entries
+                .retain(|(entry_hash, _), _| *entry_hash != hash);
+            cache.order.retain(|(entry_hash, _)| *entry_hash != hash);
+        }
+        assert!(
+            !inline_image_is_materialized(hash),
+            "eviction should leave the image unmaterialized"
+        );
+
+        assert_eq!(rediscover_external_image(hash), Some((hash, 9, 4)));
+        assert!(
+            inline_image_is_materialized(hash),
+            "rediscovery must restore the render-cache entry"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A deleted cache file must fail cleanly instead of resurrecting a
+    /// dangling entry that would draw nothing.
+    #[test]
+    fn rediscovery_fails_when_the_external_image_file_is_gone() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-missing-external-image-{}-{:?}.png",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_file(&path);
+        let hash = register_external_image(&path, 5, 5);
+        assert_eq!(rediscover_external_image(hash), None);
+    }
+
     #[test]
     fn infer_protocol_detects_kitty_family() {
         assert_eq!(
@@ -532,9 +707,10 @@ mod tests {
 
     #[test]
     fn infer_protocol_detects_iterm_and_sixel() {
+        // Real iTerm2 breaks on inline images, so it reports no protocol.
         assert_eq!(
             infer_protocol_from_env(None, Some("iTerm.app"), None, None),
-            Some(ProtocolType::Iterm2)
+            None
         );
         assert_eq!(
             infer_protocol_from_env(None, Some("WezTerm"), None, None),

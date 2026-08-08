@@ -662,8 +662,14 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
             }
             app.resume_streaming_tps();
-            let ops = app.stream_buffer.push_reasoning(&text);
-            app.apply_stream_ops(ops);
+            // The server always streams reasoning; whether to *render* it is
+            // this client's choice (mirroring the local-turn path, which gates
+            // on the same config). Hidden reasoning still drives the status
+            // line and stall-guard activity above.
+            if crate::config::config().display.reasoning_enabled() {
+                let ops = app.stream_buffer.push_reasoning(&text);
+                app.apply_stream_ops(ops);
+            }
             app.last_stream_activity = Some(Instant::now());
             eager_stream_redraw
         }
@@ -1359,7 +1365,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {
                 if app.schedule_pending_remote_retry_with_limit(
-                    "⚠ Remote request failed with a likely non-retryable error.",
+                    "⚠ The request failed in a way a retry probably won't fix. Trying once more anyway.",
                     2,
                 ) {
                     return false;
@@ -1652,6 +1658,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 if prev_session_id.is_some() {
                     app.queued_messages.clear();
                     app.interleave_message = None;
+                    app.interleave_images.clear();
                     app.clear_pending_soft_interrupt_tracking();
                 }
                 app.remote_total_tokens = None;
@@ -1670,7 +1677,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_models,
                 available_model_routes,
             );
-            app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
             app.session.autoreview_enabled = autoreview_enabled;
@@ -1710,7 +1717,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.remote_side_pane_images = images;
                 app.invalidate_side_pane_images_signature();
             }
-            app.persist_remote_model_catalog_cache();
+            if catalog_outcome.catalog_changed {
+                app.persist_remote_model_catalog_cache();
+            }
             app.remote_skills = skills;
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;
@@ -2265,6 +2274,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 available_models,
                 available_model_routes,
             );
+            let mut explicit_refresh_summary_shown = false;
             if let Some((before_models, before_routes)) =
                 app.pending_remote_model_refresh_snapshot.take()
             {
@@ -2281,13 +2291,22 @@ pub(in crate::tui::app) fn handle_server_event(
                     "Model list refreshed: +{} models, +{} routes, ~{} changed",
                     summary.models_added, summary.routes_added, summary.routes_changed
                 ));
+                explicit_refresh_summary_shown = true;
             }
-            let provider_meta_changed =
-                app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            let outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
+            if !outcome.catalog_changed {
+                // Exact duplicate of the catalog we already hold. Shared-server
+                // bus chatter rebroadcasts this frequently; skip the cache
+                // rewrite, picker refresh, and full-frame redraw so idle
+                // catalog noise cannot stall the input line. An explicit
+                // user-requested refresh still repaints so its summary message
+                // appears immediately.
+                return explicit_refresh_summary_shown;
+            }
             app.remote_model_catalog_generation =
                 app.remote_model_catalog_generation.saturating_add(1);
             app.persist_remote_model_catalog_cache();
-            if provider_meta_changed {
+            if outcome.provider_meta_changed {
                 app.update_terminal_title();
             }
             // A picker opened before the catalog landed is showing placeholder

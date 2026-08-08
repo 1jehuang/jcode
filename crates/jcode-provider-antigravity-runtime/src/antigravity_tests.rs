@@ -477,9 +477,11 @@ fn strip_numeric_schema_bounds_drops_array_and_string_and_object_bounds() {
 }
 
 #[test]
-fn antigravity_compatible_schema_passes_gemini_through_unchanged() {
-    // Gemini is the native backend path; it accepts everything jcode emits, so
-    // the schema must be byte-identical (combiners and numeric bounds intact).
+fn antigravity_gemini_uses_the_same_dialect_as_the_native_gemini_provider() {
+    // Antigravity's Gemini route reaches the same `generateContent` validator
+    // as the native Gemini provider, so it must apply the identical dialect.
+    // Historically it applied a laxer one and inherited every Gemini schema
+    // outage a release late (#754), which is what the shared dialect prevents.
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -489,15 +491,42 @@ fn antigravity_compatible_schema_passes_gemini_through_unchanged() {
                     { "items": { "type": "string" }, "type": "array" }
                 ]
             },
-            "tool_calls": { "type": "array", "minItems": 1, "maxItems": 10 }
+            "tool_calls": { "type": "array", "minItems": 1, "maxItems": 10 },
+            "data": {
+                "type": "object",
+                "propertyNames": { "type": "string" },
+                "additionalProperties": { "type": "string" }
+            }
         }
     });
 
+    let out = antigravity_compatible_schema(&schema, "gemini-3-flash");
+
+    // Byte-identical to what the native Gemini provider would send.
     assert_eq!(
-        antigravity_compatible_schema(&schema, "gemini-3-flash"),
-        schema,
-        "Gemini path must not rewrite the schema"
+        out,
+        jcode_provider_gemini::gemini_compatible_schema(&schema),
+        "the two Gemini routes must not drift apart"
     );
+
+    // Both keywords Gemini rejects are gone, at depth.
+    assert!(out["properties"]["data"].get("propertyNames").is_none());
+    assert!(
+        out["properties"]["data"]
+            .get("additionalProperties")
+            .is_none()
+    );
+
+    // Everything load-bearing survives: combiner branches, types, bounds.
+    assert_eq!(
+        out["properties"]["status_filter"],
+        schema["properties"]["status_filter"]
+    );
+    assert_eq!(
+        out["properties"]["tool_calls"],
+        schema["properties"]["tool_calls"]
+    );
+    assert_eq!(out["properties"]["data"]["type"], "object");
 }
 
 #[test]
@@ -612,4 +641,33 @@ fn is_retryable_empty_turn_ignores_normal_and_productive_turns() {
     }))
     .expect("decode empty stop response");
     assert!(!is_retryable_empty_turn(&empty_stop));
+}
+
+/// End-to-end guard for the turn-2 HTTP 404: `--provider antigravity` gives the
+/// agent this runtime directly, and session restore calls `set_model` with the
+/// routing spec `antigravity:<model>`. The id we store is the id we put on the
+/// wire, so it must be the bare model name.
+#[test]
+fn set_model_stores_bare_id_for_prefixed_session_restore_spec() {
+    let provider = AntigravityProvider::new();
+
+    provider
+        .set_model("antigravity:gemini-3-flash")
+        .expect("prefixed session-restore spec must be accepted");
+    assert_eq!(
+        provider.model(),
+        "gemini-3-flash",
+        "the wire model id must never carry the antigravity: routing prefix"
+    );
+
+    provider
+        .set_model("gemini-3-flash")
+        .expect("bare id must still be accepted");
+    assert_eq!(provider.model(), "gemini-3-flash");
+
+    assert!(
+        provider.set_model("antigravity:").is_err(),
+        "a prefix with no model must be rejected, not stored as an empty model"
+    );
+    assert!(provider.set_model("   ").is_err());
 }

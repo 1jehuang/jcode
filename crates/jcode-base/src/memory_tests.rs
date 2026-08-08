@@ -445,6 +445,56 @@ fn graph_based_memory_operations() {
     });
 }
 
+/// #729: test mode short-circuits `project_memory_path()` before the project
+/// directory is consulted, so a manager in test mode cannot see real
+/// project memory no matter what working directory it is given.
+///
+/// Swarm-spawned workers were forced into this mode unconditionally, which is
+/// why they could never read what the session that spawned them remembered.
+/// This pins the behavior so the severity of enabling test mode on a
+/// production path stays visible.
+#[test]
+fn test_mode_ignores_the_project_dir_and_cannot_see_real_project_memory() {
+    with_temp_home(|_home| {
+        let project_dir = "/tmp/jcode-729-real-project";
+
+        let real = MemoryManager::new().with_project_dir(project_dir);
+        real.remember_project(MemoryEntry::new(
+            MemoryCategory::Fact,
+            "written by the spawning session",
+        ))
+        .expect("remember real project memory");
+
+        // Same directory, but test mode: the write above is invisible.
+        let isolated = MemoryManager::new_test().with_project_dir(project_dir);
+        assert!(isolated.is_test_mode());
+        let seen: Vec<String> = isolated
+            .load_project_graph()
+            .expect("load isolated graph")
+            .all_memories()
+            .map(|entry| entry.content.clone())
+            .collect();
+        assert!(
+            !seen.iter().any(|c| c.contains("spawning session")),
+            "test mode unexpectedly saw real project memory: {seen:?}"
+        );
+
+        // And a non-test manager on the same dir does see it, proving the
+        // isolation above comes from test mode rather than a bad path.
+        let reader = MemoryManager::new().with_project_dir(project_dir);
+        let visible: Vec<String> = reader
+            .load_project_graph()
+            .expect("load real graph")
+            .all_memories()
+            .map(|entry| entry.content.clone())
+            .collect();
+        assert!(
+            visible.iter().any(|c| c.contains("spawning session")),
+            "real project memory should be visible without test mode: {visible:?}"
+        );
+    });
+}
+
 #[test]
 fn project_memories_are_isolated_by_explicit_project_dir() {
     with_temp_home(|_home| {
@@ -858,6 +908,41 @@ The bug is in the mouse delta calc.";
     assert!(
         focused.starts_with("how do I fix the scroll bug in navigation.rs"),
         "should lead with latest user message: {focused}"
+    );
+}
+
+#[test]
+fn focused_query_excludes_multiline_tool_errors_but_keeps_later_user_prose() {
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "tool-1".to_string(),
+                content: "This command was not run.\nUNIQUE_MULTILINE_ERROR_PAYLOAD\nThe target cannot be confirmed.\nThe operation is irreversible."
+                    .to_string(),
+                is_error: Some(true),
+            },
+            ContentBlock::Text {
+                text: "Keep the token rotation behavior unchanged.".to_string(),
+                cache_control: None,
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+
+    let focused = format_focused_query_for_relevance(&messages);
+
+    assert!(!focused.contains("This command was not run"), "{focused}");
+    assert!(
+        !focused.contains("UNIQUE_MULTILINE_ERROR_PAYLOAD"),
+        "arbitrary error payload leaked: {focused}"
+    );
+    assert!(!focused.contains("cannot be confirmed"), "{focused}");
+    assert!(!focused.contains("irreversible"), "{focused}");
+    assert!(
+        focused.contains("Keep the token rotation behavior unchanged."),
+        "subsequent user prose was lost: {focused}"
     );
 }
 

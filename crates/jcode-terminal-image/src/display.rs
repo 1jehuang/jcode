@@ -53,7 +53,7 @@ impl ImageProtocol {
                 return Self::Kitty;
             }
             if term_program == "iTerm.app" {
-                return Self::ITerm2;
+                return iterm2_protocol();
             }
             // WezTerm supports Sixel
             if term_program == "WezTerm" {
@@ -65,7 +65,7 @@ impl ImageProtocol {
         if let Ok(lc_terminal) = std::env::var("LC_TERMINAL")
             && lc_terminal == "iTerm2"
         {
-            return Self::ITerm2;
+            return iterm2_protocol();
         }
 
         // Check for Sixel-capable terminals
@@ -110,6 +110,45 @@ impl ImageProtocol {
     /// Check if image display is supported
     pub fn is_supported(&self) -> bool {
         *self != Self::None
+    }
+}
+
+/// Terminal multiplexer escape wrapping, mirroring ratatui-image's
+/// `Parser::escape_tmux`. tmux swallows unknown OSC/APC sequences unless they
+/// are wrapped in its passthrough form with doubled escapes, which silently
+/// drops image payloads (or leaks them as garbage text) inside tmux.
+fn escape_tmux(is_tmux: bool) -> (&'static str, &'static str, &'static str) {
+    if is_tmux {
+        ("\x1bPtmux;", "\x1b\x1b", "\x1b\\")
+    } else {
+        ("", "\x1b", "")
+    }
+}
+
+fn in_tmux() -> bool {
+    std::env::var("TMUX").is_ok_and(|v| !v.trim().is_empty())
+        || std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux"))
+}
+
+/// iTerm2's inline-image protocol corrupts jcode's TUI output in real iTerm2,
+/// so image display is disabled there unless the user opts back in with
+/// `JCODE_ITERM2_IMAGES=1`.
+fn iterm2_images_enabled() -> bool {
+    matches!(
+        std::env::var("JCODE_ITERM2_IMAGES")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn iterm2_protocol() -> ImageProtocol {
+    if iterm2_images_enabled() {
+        ImageProtocol::ITerm2
+    } else {
+        ImageProtocol::None
     }
 }
 
@@ -347,7 +386,7 @@ fn display_iterm2(
     img_width: u32,
     img_height: u32,
 ) -> io::Result<bool> {
-    let (cols, _rows) =
+    let (cols, rows) =
         calculate_display_size(img_width, img_height, params.max_cols, params.max_rows);
 
     // Encode image data as base64
@@ -359,24 +398,40 @@ fn display_iterm2(
         .unwrap_or_else(|| "image".to_string());
     let filename_b64 = BASE64.encode(filename.as_bytes());
 
+    let payload = iterm2_payload(&filename_b64, data.len(), cols, rows, &encoded, in_tmux());
+
     let mut stdout = io::stdout().lock();
-
-    // iTerm2 inline image protocol:
-    // \x1b]1337;File=name=<base64name>;size=<size>;inline=1;width=<cols>:<base64data>\x07
-    write!(
-        stdout,
-        "\x1b]1337;File=name={};size={};inline=1;width={}:{}\x07",
-        filename_b64,
-        data.len(),
-        cols,
-        encoded
-    )?;
-
+    stdout.write_all(payload.as_bytes())?;
     // Newline after image
     writeln!(stdout)?;
     stdout.flush()?;
 
     Ok(true)
+}
+
+/// Build the iTerm2 inline-image escape sequence.
+///
+/// iTerm2 inline image protocol:
+/// `ESC ]1337;File=name=<b64>;size=<n>;inline=1;width=<cols>;height=<rows>;preserveAspectRatio=1:<b64data> BEL`
+///
+/// Both `width` and `height` must be given in cells. With only `width`, iTerm2
+/// derives the row count from the image's pixel aspect ratio, so it consumes a
+/// different number of rows than we reserved and the surrounding output gets
+/// pushed around or overwritten. Inside tmux the whole sequence also needs
+/// passthrough wrapping, or tmux drops it.
+fn iterm2_payload(
+    filename_b64: &str,
+    byte_len: usize,
+    cols: u16,
+    rows: u16,
+    encoded: &str,
+    is_tmux: bool,
+) -> String {
+    let (start, escape, end) = escape_tmux(is_tmux);
+    format!(
+        "{start}{escape}]1337;File=name={filename_b64};size={byte_len};inline=1;\
+         width={cols};height={rows};preserveAspectRatio=1:{encoded}\x07{end}"
+    )
 }
 
 /// Display image using Sixel graphics protocol
@@ -455,6 +510,32 @@ mod tests {
         assert!(can_display_to_stdout(ImageProtocol::ITerm2, true));
         assert!(can_display_to_stdout(ImageProtocol::Sixel, true));
         assert!(!can_display_to_stdout(ImageProtocol::None, true));
+    }
+
+    #[test]
+    fn iterm2_payload_sets_both_cell_dimensions() {
+        let payload = iterm2_payload("bmFtZQ==", 1234, 40, 12, "QUJD", false);
+        assert!(payload.starts_with("\x1b]1337;File="), "{payload}");
+        assert!(payload.contains("size=1234"), "{payload}");
+        // Height in cells must be explicit so iTerm2 does not reflow rows.
+        assert!(payload.contains("width=40;height=12"), "{payload}");
+        assert!(payload.contains("preserveAspectRatio=1"), "{payload}");
+        assert!(payload.ends_with("QUJD\x07"), "{payload}");
+    }
+
+    #[test]
+    fn iterm2_payload_uses_tmux_passthrough_inside_tmux() {
+        let payload = iterm2_payload("bmFtZQ==", 1, 4, 2, "QQ==", true);
+        assert!(payload.starts_with("\x1bPtmux;\x1b\x1b]1337;"), "{payload}");
+        assert!(payload.ends_with("\x07\x1b\\"), "{payload}");
+    }
+
+    #[test]
+    fn iterm2_images_are_disabled_unless_opted_in() {
+        // Default (no opt-in env var in test process): iTerm2 is treated as
+        // having no usable image protocol.
+        assert_eq!(iterm2_protocol(), ImageProtocol::None);
+        assert!(!iterm2_images_enabled());
     }
 
     #[test]

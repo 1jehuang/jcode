@@ -95,8 +95,20 @@ impl Agent {
         let trace = trace_enabled();
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
+        let mut empty_post_tool_continuations = 0u32;
+        let mut fable_guardrail_reconsiderations = 0u32;
 
         loop {
+            // Never open a new provider request after a cancel. Several paths
+            // `continue` this loop (compaction retry, incomplete/stranded
+            // continuation, empty-response recovery, soft-interrupt injection),
+            // and without this check an Esc that landed during a stream could
+            // be followed by another full request, which looks to the user like
+            // the interrupt was ignored (issue #732, regression of #428).
+            if self.is_graceful_shutdown() {
+                logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
             let repaired = self.repair_missing_tool_outputs();
             if repaired > 0 {
                 logging::warn(&format!(
@@ -203,6 +215,7 @@ impl Agent {
                 .message_timestamps
                 .then(|| Message::with_timestamps(&messages_with_memory));
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
+            let prompt_has_recent_tool_result = Self::messages_end_with_tool_result(send_messages);
             let provider = Arc::clone(&self.provider);
             // Capture the model id the request was issued with. A provider may
             // transparently switch models mid-request (e.g. Anthropic's retired
@@ -469,10 +482,12 @@ impl Agent {
                         }
                     }
                     StreamEvent::ThinkingDelta(thinking_text) => {
-                        // Only send thinking content if enabled in config
-                        if crate::config::config().display.show_thinking
-                            && !thinking_text.is_empty()
-                        {
+                        // Always stream reasoning to clients. Whether to *render*
+                        // it is a per-client presentation choice (the TUI keys off
+                        // `display.reasoning_display`, the desktops off their own
+                        // mode); gating it here would let one shared daemon config
+                        // decide what every attached client is allowed to see.
+                        if !thinking_text.is_empty() {
                             reasoning_open = true;
                             let _ = event_tx.send(ServerEvent::ReasoningDelta {
                                 text: thinking_text.clone(),
@@ -480,13 +495,10 @@ impl Agent {
                         } else if hidden_activity_last.elapsed()
                             >= std::time::Duration::from_secs(5)
                         {
-                            // Hidden reasoning is real provider activity, but it
-                            // emits nothing over the client socket, so a long
-                            // silent thinking phase looks identical to a dead
-                            // connection and the client stall guard cancels a
-                            // healthy stream (issue #451). Send a throttled
-                            // non-rendered keepalive so clients track provider
-                            // activity, not just displayable events.
+                            // An empty delta carries provider activity but no
+                            // event, so a long silent thinking phase would look
+                            // identical to a dead connection and the client stall
+                            // guard would cancel a healthy stream (issue #451).
                             hidden_activity_last = Instant::now();
                             send_stream_keepalive_mpsc(&event_tx);
                         }
@@ -1132,6 +1144,29 @@ impl Agent {
             // Injecting before tool_results would break the API requirement that
             // tool_use must be immediately followed by tool_result.
             if tool_calls.is_empty() {
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && self.maybe_reconsider_fable_guardrail(
+                        stop_reason.as_deref(),
+                        &mut fable_guardrail_reconsiderations,
+                    )?
+                {
+                    continue;
+                }
+                // Retry transient empty responses (dropped/empty upstream
+                // streams) before surfacing anything, matching the
+                // non-streaming loop's recovery behavior (issue #672).
+                if saw_message_end
+                    && !self.is_graceful_shutdown()
+                    && self.maybe_continue_empty_post_tool_response(
+                        text_content.trim().is_empty(),
+                        prompt_has_recent_tool_result,
+                        stop_reason.as_deref(),
+                        &mut empty_post_tool_continuations,
+                    )?
+                {
+                    continue;
+                }
                 match self.handle_streaming_no_tool_calls(
                     stop_reason.as_deref(),
                     &mut incomplete_continuations,
@@ -1152,7 +1187,8 @@ impl Agent {
                             )
                         {
                             logging::warn(&format!(
-                                "PROVIDER_GUARDRAIL: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
+                                "{}: turn ended with no visible output (stop_reason={:?}, reasoning_chars={})",
+                                Self::empty_turn_log_event(stop_reason.as_deref()),
                                 stop_reason,
                                 reasoning_content.len()
                             ));

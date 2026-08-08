@@ -146,6 +146,25 @@ pub fn snapshot_client_terminal_env() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Replace inherited terminal identity with an authoritative client snapshot.
+///
+/// Removing every known key first is important for a shared server: an empty
+/// client snapshot must not leak the pane that happened to start the server.
+/// Aliases let integrations explicitly distinguish client values from other
+/// process environment while native names preserve existing hook behavior.
+pub fn apply_client_terminal_env(cmd: &mut Command, env: &[(String, String)]) {
+    for key in CLIENT_TERMINAL_ENV_VARS {
+        cmd.env_remove(key);
+        cmd.env_remove(format!("JCODE_CLIENT_{key}"));
+    }
+    for (key, value) in env {
+        if CLIENT_TERMINAL_ENV_VARS.contains(&key.as_str()) {
+            cmd.env(key, value);
+            cmd.env(format!("JCODE_CLIENT_{key}"), value);
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnAttempt {
     pub terminal: String,
@@ -200,6 +219,12 @@ fn detected_resume_terminal_with_client_env(
     client_terminal_env: &[(String, String)],
 ) -> Option<String> {
     let is_set = |key| terminal_env_value(client_terminal_env, key).is_some();
+    // Herdr is a terminal multiplexer, so headed sessions should remain in the
+    // workspace that requested them instead of escaping into the underlying
+    // emulator. Prefer it even when the pane also advertises kitty/wezterm.
+    if is_set("HERDR_ENV") && is_set("HERDR_PANE_ID") {
+        return Some("herdr".to_string());
+    }
     if is_set("HANDTERM_SESSION") || is_set("HANDTERM_PID") {
         return Some("handterm".to_string());
     }
@@ -207,6 +232,12 @@ fn detected_resume_terminal_with_client_env(
         .is_some_and(|value| value.eq_ignore_ascii_case("handterm"))
     {
         return Some("handterm".to_string());
+    }
+    if is_set("ZELLIJ") && (is_set("ZELLIJ_PANE_ID") || is_set("ZELLIJ_SESSION_NAME")) {
+        return Some("zellij".to_string());
+    }
+    if is_set("STY") {
+        return Some("screen".to_string());
     }
     if is_set("KITTY_PID") {
         return Some("kitty".to_string());
@@ -217,19 +248,25 @@ fn detected_resume_terminal_with_client_env(
     if is_set("ALACRITTY_WINDOW_ID") {
         return Some("alacritty".to_string());
     }
+    if is_set("GHOSTTY_RESOURCES_DIR") || is_set("GHOSTTY_BIN_DIR") {
+        return Some("ghostty".to_string());
+    }
+
+    let term_program = terminal_env_value(client_terminal_env, "TERM_PROGRAM")
+        .map(|value| value.to_ascii_lowercase());
+    if let Some(term) = match term_program.as_deref() {
+        Some("ghostty") => Some("ghostty"),
+        Some("kitty") => Some("kitty"),
+        Some("wezterm") => Some("wezterm"),
+        Some("alacritty") => Some("alacritty"),
+        _ => None,
+    } {
+        return Some(term.to_string());
+    }
 
     #[cfg(target_os = "macos")]
     {
-        if is_set("GHOSTTY_RESOURCES_DIR") || is_set("GHOSTTY_BIN_DIR") {
-            return Some("ghostty".to_string());
-        }
-        let term_program = terminal_env_value(client_terminal_env, "TERM_PROGRAM")
-            .map(|value| value.to_ascii_lowercase());
         return match term_program.as_deref() {
-            Some("ghostty") => Some("ghostty".to_string()),
-            Some("kitty") => Some("kitty".to_string()),
-            Some("wezterm") => Some("wezterm".to_string()),
-            Some("alacritty") => Some("alacritty".to_string()),
             Some("iterm.app") | Some("iterm2") => Some("iterm2".to_string()),
             Some("apple_terminal") | Some("terminal") => Some("terminal".to_string()),
             _ => None,
@@ -338,7 +375,13 @@ fn resume_terminal_candidates_with_client_env(
     // A tmux client already owns the user's terminal layout. Prefer a pane in
     // that exact client over opening another emulator window. Explicit
     // JCODE_TERMINAL and configured spawn hooks still take precedence.
-    if terminal_env_value(client_terminal_env, "TMUX").is_some()
+    let in_herdr = terminal_env_value(client_terminal_env, "HERDR_ENV").is_some()
+        && terminal_env_value(client_terminal_env, "HERDR_PANE_ID").is_some();
+    let in_inner_multiplexer = in_herdr
+        || terminal_env_value(client_terminal_env, "ZELLIJ").is_some()
+        || terminal_env_value(client_terminal_env, "STY").is_some();
+    if !in_inner_multiplexer
+        && terminal_env_value(client_terminal_env, "TMUX").is_some()
         && terminal_env_value(client_terminal_env, "TMUX_PANE").is_some()
     {
         push_unique_terminal(&mut candidates, "tmux");
@@ -360,6 +403,7 @@ fn resume_terminal_candidates_with_client_env(
     {
         for term in [
             "handterm",
+            "ghostty",
             "kitty",
             "wezterm",
             "alacritty",
@@ -615,6 +659,35 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
 
     match term {
         #[cfg(unix)]
+        "herdr" => {
+            // `pane split` deliberately creates a shell and returns its pane id;
+            // `pane run` is the atomic, bracketed-paste-aware way to start a
+            // command in that shell. Keep the small composition here rather
+            // than requiring every user to configure an equivalent spawn hook.
+            let herdr = terminal_env_value(&command.client_terminal_env, "HERDR_BIN_PATH")
+                .unwrap_or_else(|| "herdr".to_string());
+            let shell = shell_command(&command_parts(command));
+            let script = concat!(
+                "set -eu; ",
+                "response=\"$(\"$1\" pane split --current --direction right --cwd \"$2\" --focus)\"; ",
+                "pane_id=\"$(printf '%s\\n' \"$response\" | sed -n '",
+                "s/.*\\\"pane_id\\\"[[:space:]]*:[[:space:]]*\\\"\\([^\\\"]*\\)\\\".*/\\1/p' | head -n 1)\"; ",
+                "test -n \"$pane_id\"; ",
+                "exec \"$1\" pane run \"$pane_id\" \"$3\""
+            );
+            cmd = Command::new("sh");
+            cmd.current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .args(["-c", script, "jcode-herdr-spawn", &herdr])
+                .arg(cwd)
+                .arg(shell);
+            if command.fresh_spawn {
+                cmd.env("JCODE_FRESH_SPAWN", "1");
+            }
+        }
+        #[cfg(unix)]
         "tmux" => {
             cmd.args(["split-window", "-h"]);
             if let Some(pane) = terminal_env_value(&command.client_terminal_env, "TMUX_PANE") {
@@ -626,23 +699,59 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
                 .args(&command.args);
         }
         #[cfg(unix)]
+        "zellij" => {
+            cmd.args(["action", "new-pane", "--direction", "right", "--cwd"])
+                .arg(cwd)
+                .arg("--")
+                .arg(&command.program)
+                .args(&command.args);
+        }
+        #[cfg(unix)]
+        "screen" => {
+            let inner = format!(
+                "cd {} && exec {}",
+                sh_escape(&cwd.to_string_lossy()),
+                shell_command(&command_parts(command))
+            );
+            if let Some(sty) = terminal_env_value(&command.client_terminal_env, "STY") {
+                cmd.args(["-S", &sty]);
+            }
+            cmd.args(["-X", "screen", "sh", "-lc"]).arg(inner);
+        }
+        #[cfg(unix)]
         "handterm" => {
             let shell = shell_command(&command_parts(command));
             cmd.args(["--backend", "gpu", "--exec", &shell]);
         }
         #[cfg(target_os = "macos")]
         "ghostty" => {
-            let shell = shell_command(&command_parts(command));
-            cmd = Command::new("open");
+            // Ghostty 1.3+ exposes a native AppleScript API. Use it instead of
+            // `open -na`, which always creates a separate app instance/window
+            // and therefore made `/fork` ignore Ghostty's tabbed workflow.
+            // Run AppleScript synchronously inside a detached helper so errors
+            // (Ghostty <1.3, disabled AppleScript, denied Automation access)
+            // can fall back to the older, universally supported new-window
+            // launch. Spawning `osascript` directly reports success before the
+            // script runs and would silently lose the fork on those versions.
+            cmd = Command::new("sh");
             cmd.current_dir(cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .args(["-na", "Ghostty", "--args", "-e", "/bin/bash", "-lc"])
-                .arg(shell);
-            if command.fresh_spawn {
-                cmd.env("JCODE_FRESH_SPAWN", "1");
-            }
+                .args([
+                    "-c",
+                    macos_ghostty_spawn_wrapper(),
+                    "jcode-ghostty-spawn",
+                    &macos_ghostty_applescript(command, cwd),
+                    &macos_terminal_inner_script(command, cwd),
+                ]);
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        "ghostty" => {
+            cmd.arg(format!("--working-directory={}", cwd.to_string_lossy()))
+                .arg("-e")
+                .arg(&command.program)
+                .args(&command.args);
         }
         "kitty" => {
             cmd.args(["--title", title, "-e"])
@@ -766,6 +875,48 @@ fn macos_terminal_inner_script(command: &TerminalCommand, cwd: &Path) -> String 
     )
 }
 
+/// Build the AppleScript used to create a Ghostty tab on macOS.
+///
+/// A running Ghostty window is expected for session forks, but the no-window
+/// branch also makes Ghostty a safe configured/default launcher. The command is
+/// wrapped in a login shell because Ghostty's surface `command` is an executable
+/// command line, while our inner script contains `cd`, `exec`, and env setup.
+#[cfg(any(target_os = "macos", test))]
+fn macos_ghostty_applescript(command: &TerminalCommand, cwd: &Path) -> String {
+    let inner = macos_terminal_inner_script(command, cwd);
+    let launch = format!("/bin/bash -lc {}", sh_escape(&inner));
+    let escaped_launch = launch.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped_cwd = cwd
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+
+    format!(
+        "tell application \"Ghostty\"\n\
+         \x20   set cfg to new surface configuration\n\
+         \x20   set initial working directory of cfg to \"{escaped_cwd}\"\n\
+         \x20   set command of cfg to \"{escaped_launch}\"\n\
+         \x20   if (count of windows) > 0 then\n\
+         \x20       set createdTab to new tab in front window with configuration cfg\n\
+         \x20       select tab createdTab\n\
+         \x20   else\n\
+         \x20       new window with configuration cfg\n\
+         \x20   end if\n\
+         \x20   activate\n\
+         end tell"
+    )
+}
+
+/// Shell wrapper for the macOS Ghostty launch. Positional arguments keep both
+/// AppleScript and shell commands opaque, including quotes and spaces.
+#[cfg(any(target_os = "macos", test))]
+fn macos_ghostty_spawn_wrapper() -> &'static str {
+    concat!(
+        "if osascript -e \"$1\"; then exit 0; fi; ",
+        "exec open -na Ghostty --args -e /bin/bash -lc \"$2\""
+    )
+}
+
 /// Build the full AppleScript passed to `osascript -e` for Apple Terminal.
 #[cfg(any(target_os = "macos", test))]
 fn macos_terminal_applescript(command: &TerminalCommand, cwd: &Path) -> String {
@@ -777,11 +928,45 @@ fn macos_terminal_applescript(command: &TerminalCommand, cwd: &Path) -> String {
 }
 
 #[cfg(test)]
+#[path = "windows_portable_tests.rs"]
+mod windows_portable_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn client_terminal_env_replaces_inherited_identity_and_exports_aliases() {
+        let mut command = Command::new("hook");
+        command.env("HERDR_PANE_ID", "stale-pane");
+        command.env("TMUX_PANE", "stale-tmux");
+        apply_client_terminal_env(
+            &mut command,
+            &[
+                ("HERDR_PANE_ID".to_string(), "client-pane".to_string()),
+                ("UNTRUSTED_CLIENT_VAR".to_string(), "ignored".to_string()),
+            ],
+        );
+        let env = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(env["HERDR_PANE_ID"].as_deref(), Some("client-pane"));
+        assert_eq!(
+            env["JCODE_CLIENT_HERDR_PANE_ID"].as_deref(),
+            Some("client-pane")
+        );
+        assert_eq!(env["TMUX_PANE"], None);
+        assert!(!env.contains_key("UNTRUSTED_CLIENT_VAR"));
+        assert!(!env.contains_key("JCODE_CLIENT_UNTRUSTED_CLIENT_VAR"));
+    }
 
     #[test]
     fn spawn_metadata_env_reexports_client_terminal_env_with_native_and_client_keys() {
@@ -887,6 +1072,42 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn inner_multiplexers_are_preferred_over_outer_tmux() {
+        for (marker, value, expected) in [
+            ("ZELLIJ", "0", "zellij"),
+            ("STY", "1234.pts-1.host", "screen"),
+        ] {
+            let client_env = vec![
+                (marker.to_string(), value.to_string()),
+                ("ZELLIJ_PANE_ID".to_string(), "7".to_string()),
+                ("TMUX".to_string(), "/tmp/tmux,1,0".to_string()),
+                ("TMUX_PANE".to_string(), "%2".to_string()),
+            ];
+            let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+            assert_eq!(candidates.first().map(String::as_str), Some(expected));
+            assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn term_program_detects_supported_emulators_cross_platform() {
+        for (value, expected) in [
+            ("ghostty", "ghostty"),
+            ("kitty", "kitty"),
+            ("WezTerm", "wezterm"),
+            ("Alacritty", "alacritty"),
+        ] {
+            let env = vec![("TERM_PROGRAM".to_string(), value.to_string())];
+            assert_eq!(
+                detected_resume_terminal_with_client_env(&env).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn explicit_terminal_override_stays_ahead_of_tmux() {
         let client_env = vec![
             (
@@ -923,6 +1144,22 @@ mod tests {
 
         let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
         assert_eq!(candidates.first().map(String::as_str), Some("kitty"));
+        assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn herdr_context_is_preferred_over_outer_emulator_and_tmux() {
+        let client_env = vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w2:p7".to_string()),
+            ("KITTY_PID".to_string(), "1234".to_string()),
+            ("TMUX".to_string(), "/tmp/tmux,1,0".to_string()),
+            ("TMUX_PANE".to_string(), "%3".to_string()),
+        ];
+
+        let candidates = resume_terminal_candidates_with_client_env(&client_env, None);
+        assert_eq!(candidates.first().map(String::as_str), Some("herdr"));
         assert!(!candidates.iter().any(|candidate| candidate == "tmux"));
     }
 
@@ -1004,6 +1241,174 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn zellij_spawn_opens_right_pane_with_resume_command() {
+        let command = TerminalCommand::new(
+            "/opt/jcode",
+            vec!["--resume".to_string(), "ses-zellij".to_string()],
+        );
+        let cmd = build_spawn_command("zellij", &command, Path::new("/work/tree")).unwrap();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "action",
+                "new-pane",
+                "--direction",
+                "right",
+                "--cwd",
+                "/work/tree",
+                "--",
+                "/opt/jcode",
+                "--resume",
+                "ses-zellij",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn screen_spawn_opens_window_in_requesting_session() {
+        let command = TerminalCommand::new(
+            "/opt/Jcode App/jcode",
+            vec!["--resume".to_string(), "ses screen".to_string()],
+        )
+        .client_terminal_env(vec![("STY".to_string(), "1234.pts-1.host".to_string())]);
+        let cmd = build_spawn_command("screen", &command, Path::new("/work/a b")).unwrap();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            &args[..6],
+            ["-S", "1234.pts-1.host", "-X", "screen", "sh", "-lc"]
+        );
+        assert_eq!(
+            args[6],
+            "cd '/work/a b' && exec '/opt/Jcode App/jcode' '--resume' 'ses screen'"
+        );
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn linux_ghostty_spawn_preserves_cwd_and_resume_command() {
+        let command = TerminalCommand::new(
+            "/opt/jcode",
+            vec!["--resume".to_string(), "ses-ghostty".to_string()],
+        );
+        let cmd = build_spawn_command("ghostty", &command, Path::new("/work/tree")).unwrap();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--working-directory=/work/tree",
+                "-e",
+                "/opt/jcode",
+                "--resume",
+                "ses-ghostty",
+            ]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn herdr_spawn_splits_calling_pane_and_runs_resume_command() {
+        let command = TerminalCommand::new(
+            "/usr/local/bin/jcode",
+            vec!["--resume".to_string(), "ses herdr".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w2:p7".to_string()),
+            (
+                "HERDR_BIN_PATH".to_string(),
+                "/opt/herdr/bin/herdr".to_string(),
+            ),
+        ]);
+
+        let cmd = build_spawn_command("herdr", &command, Path::new("/work/a b"))
+            .expect("herdr spawn command should build");
+        assert_eq!(cmd.get_program().to_string_lossy(), "sh");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("pane split --current --direction right"));
+        assert!(args[1].contains("pane run \"$pane_id\""));
+        assert_eq!(args[2], "jcode-herdr-spawn");
+        assert_eq!(args[3], "/opt/herdr/bin/herdr");
+        assert_eq!(args[4], "/work/a b");
+        assert_eq!(args[5], "'/usr/local/bin/jcode' '--resume' 'ses herdr'");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn herdr_spawn_adapter_executes_split_then_run_with_quoted_values() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-herdr-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temporary Herdr fixture");
+        let herdr = dir.join("fake herdr");
+        let log = dir.join("calls.log");
+        let cwd = dir.join("work a b");
+        std::fs::create_dir_all(&cwd).expect("temporary Herdr working directory");
+        std::fs::write(
+            &herdr,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = pane ] && [ \"$2\" = split ]; then\n  printf '%s\\n' '{{\"result\":{{\"pane\":{{\"pane_id\":\"w9:p12\"}}}}}}'\nfi\n",
+                log.display()
+            ),
+        )
+        .expect("write fake Herdr");
+        let mut permissions = std::fs::metadata(&herdr).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&herdr, permissions).unwrap();
+
+        let command = TerminalCommand::new(
+            "/opt/Jcode App/jcode",
+            vec!["--resume".to_string(), "session with spaces".to_string()],
+        )
+        .client_terminal_env(vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            ("HERDR_PANE_ID".to_string(), "w1:p1".to_string()),
+            ("HERDR_BIN_PATH".to_string(), herdr.display().to_string()),
+        ]);
+        let mut process =
+            build_spawn_command("herdr", &command, &cwd).expect("build Herdr adapter");
+        assert!(process.status().expect("run Herdr adapter").success());
+
+        let calls = std::fs::read_to_string(log).expect("read fake Herdr calls");
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0],
+            format!(
+                "pane split --current --direction right --cwd {} --focus",
+                cwd.display()
+            )
+        );
+        assert_eq!(
+            lines[1],
+            "pane run w9:p12 '/opt/Jcode App/jcode' '--resume' 'session with spaces'"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn shell_command_quotes_arguments() {
         let shell = shell_command(&["jcode".to_string(), "it's ok".to_string()]);
         #[cfg(unix)]
@@ -1079,6 +1484,77 @@ mod tests {
         // The shell's single quotes survive; AppleScript only escapes \\ and ".
         assert!(!applescript.contains("exec \\\""));
         assert!(applescript.contains("'/usr/local/bin/jcode'"));
+    }
+
+    #[test]
+    fn macos_ghostty_applescript_creates_tab_and_runs_resume_command() {
+        let command = TerminalCommand::new(
+            "/Applications/jcode's build/jcode",
+            vec!["--resume".to_string(), "session ghost".to_string()],
+        );
+
+        let applescript = macos_ghostty_applescript(&command, Path::new("/Users/test/work tree"));
+
+        assert!(applescript.contains("tell application \"Ghostty\""));
+        assert!(applescript.contains("new tab in front window with configuration cfg"));
+        assert!(applescript.contains("select tab createdTab"));
+        assert!(applescript.contains("new window with configuration cfg"));
+        assert!(
+            applescript
+                .contains("set initial working directory of cfg to \"/Users/test/work tree\"")
+        );
+        assert!(applescript.contains("set command of cfg to \"/bin/bash -lc"));
+        assert!(applescript.contains("--resume"));
+        assert!(applescript.contains("session ghost"));
+        assert!(applescript.contains("jcode'"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn macos_ghostty_wrapper_falls_back_when_applescript_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "jcode-ghostty-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("open.log");
+        for (name, body) in [
+            ("osascript", "#!/bin/sh\nexit 1\n".to_string()),
+            (
+                "open",
+                format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+            ),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        let status = Command::new("/bin/sh")
+            .args([
+                "-c",
+                macos_ghostty_spawn_wrapper(),
+                "jcode-ghostty-test",
+                "invalid applescript",
+                "cd '/work tree' && exec '/opt/jcode' '--resume' 'ses ghost'",
+            ])
+            .env("PATH", &dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "-na\nGhostty\n--args\n-e\n/bin/bash\n-lc\ncd '/work tree' && exec '/opt/jcode' '--resume' 'ses ghost'\n"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // Reproduction for issue #203 part 3: when no terminal emulator can be

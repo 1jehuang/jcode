@@ -1,4 +1,4 @@
-//! Subscription nudge: two tasteful, rate-limited prompts to subscribe.
+//! Hosted-model nudge: two tasteful, rate-limited prompts to try metered access.
 //!
 //! Surfaces (never a blocking screen):
 //!   - Trigger A (value prop): the provider just rate-limited the user. The
@@ -12,7 +12,7 @@
 //!   - Never while onboarding is active, never for users who already hold
 //!     jcode account credentials, never in replay/test runtimes.
 //!
-//! `/subscribe` renders the full pitch and points at `/login jcode`.
+//! `/subscribe` remains a compatibility alias for the hosted-model pitch.
 
 use super::{App, AppRuntimeMode, DisplayMessage};
 use std::path::PathBuf;
@@ -26,9 +26,9 @@ const LONG_TASK_MIN_ELAPSED: Duration = Duration::from_secs(60 * 60);
 
 /// Copy appended to the rate-limit system message (trigger A).
 pub(super) const RATE_LIMIT_NUDGE_LINE: &str =
-    "Get more tokens with a jcode subscription: /subscribe";
+    "Avoid provider rate limits with Jcode hosted models: /hosted";
 /// Status-line tail shared by trigger B.
-const SUPPORT_NUDGE_NOTICE: &str = "Support jcode: /subscribe";
+const SUPPORT_NUDGE_NOTICE: &str = "Try Jcode hosted models: /hosted";
 
 /// Why a nudge fired. Used to build the message and recorded in the state file
 /// so we can tune trigger mix later.
@@ -106,8 +106,9 @@ fn long_task_todos_qualify(todos: &[crate::todo::TodoItem]) -> bool {
     }
     todos.iter().all(|todo| {
         todo.status == "completed"
-            && todo.completion_confidence.or(todo.confidence).unwrap_or(0)
-                >= crate::todo::QUALITY_GATE_THRESHOLD
+            && crate::todo::completion_confidence_passes(
+                todo.completion_confidence.or(todo.confidence),
+            )
     })
 }
 
@@ -134,13 +135,13 @@ fn long_task_message(elapsed: Duration) -> String {
     )
 }
 
-/// The full `/subscribe` pitch. Reuses the live curated catalog so the plans
-/// and models never drift from `/subscription`.
+/// The full hosted-model pitch. Reuses the live curated catalog so models
+/// never drift from the account status surface.
 pub(super) fn subscribe_pitch_markdown() -> String {
-    let mut message = String::from("Subscribe to jcode\n\n");
-    message.push_str("One subscription, more tokens, zero API keys:\n\n");
-    message
-        .push_str("  - Get more tokens: a monthly inference budget on curated frontier models\n");
+    let mut message = String::from("Jcode hosted models\n\n");
+    message.push_str("No subscription. Set a monthly spending limit and pay only for usage:\n\n");
+    message.push_str("  - You control the monthly limit and can change it from your account\n");
+    message.push_str("  - Usage milestones send warnings without slowing your requests\n");
     let model_names: Vec<&str> = crate::subscription_catalog::curated_models()
         .iter()
         .map(|model| model.display_name)
@@ -151,22 +152,15 @@ pub(super) fn subscribe_pitch_markdown() -> String {
             model_names.join(", ")
         ));
     }
-    message.push_str("  - No key management: sign in once in the browser, jcode routes the rest\n");
+    message.push_str("  - Sign in once: Jcode saves the hosted API key and routes the rest\n");
     message.push_str("  - Automatic failover routing when a provider has a bad day\n");
-    message.push_str("  - Funds jcode development - jcode is open source\n");
+    message
+        .push_str("  - Billing starts at $20 of usage, then uses progressively larger tranches\n");
+    message.push_str("  - Any remaining usage is billed at your limit or at month end\n");
+    message.push_str("  - Funds Jcode development while the software stays open source\n");
 
-    message.push_str("\nPlans\n\n");
-    for tier in crate::subscription_catalog::JcodeTier::ALL.iter().copied() {
-        message.push_str(&format!(
-            "  - {} - ${}/mo, about ${:.2} usable inference budget\n",
-            tier.display_name(),
-            tier.retail_price_usd(),
-            tier.usable_budget_usd()
-        ));
-    }
-
-    message.push_str("\nStart: /login jcode (browser approval, no keys in the terminal)\n");
-    message.push_str("Details anytime: /subscription");
+    message.push_str("\nStart: /login jcode (browser approval, no key pasted into the terminal)\n");
+    message.push_str("Usage anytime: /usage");
     message
 }
 
@@ -257,96 +251,7 @@ impl App {
     /// Render the `/subscribe` pitch into the transcript.
     pub(super) fn show_subscribe_pitch(&mut self) {
         self.push_display_message(DisplayMessage::system(subscribe_pitch_markdown()));
-        self.set_status_notice("Subscribe: /login jcode to start");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn todo(status: &str, completion_confidence: Option<u8>) -> crate::todo::TodoItem {
-        crate::todo::TodoItem {
-            content: "task".to_string(),
-            status: status.to_string(),
-            priority: "high".to_string(),
-            id: "t1".to_string(),
-            completion_confidence,
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn weekly_gate_blocks_within_a_week_and_allows_after() {
-        let week = NUDGE_INTERVAL.as_secs();
-        assert!(weekly_gate_allows(0, week));
-        assert!(weekly_gate_allows(1_000, 1_000 + week));
-        assert!(!weekly_gate_allows(1_000, 1_000 + week - 1));
-        // Fresh state (never shown) allows immediately.
-        assert!(weekly_gate_allows(0, 0 + week));
-        assert!(weekly_gate_allows(0, u64::MAX));
-    }
-
-    #[test]
-    fn long_task_qualification_requires_all_completed_and_gated_confidence() {
-        let gate = crate::todo::QUALITY_GATE_THRESHOLD;
-        // Empty list never qualifies.
-        assert!(!long_task_todos_qualify(&[]));
-        // Incomplete item disqualifies.
-        assert!(!long_task_todos_qualify(&[
-            todo("completed", Some(gate)),
-            todo("in_progress", Some(gate)),
-        ]));
-        // Low completion confidence disqualifies ("quality gate failed").
-        assert!(!long_task_todos_qualify(&[todo(
-            "completed",
-            Some(gate.saturating_sub(1))
-        )]));
-        // Missing confidence disqualifies.
-        assert!(!long_task_todos_qualify(&[todo("completed", None)]));
-        // All completed at/above the gate qualifies.
-        assert!(long_task_todos_qualify(&[
-            todo("completed", Some(gate)),
-            todo("completed", Some(100)),
-        ]));
-    }
-
-    #[test]
-    fn long_task_message_reads_support_wording_with_elapsed() {
-        let message = long_task_message(Duration::from_secs(60 * 83));
-        assert_eq!(
-            message,
-            "✦ jcode just worked 1h 23m for you. Support jcode: /subscribe"
-        );
-        assert!(long_task_message(Duration::from_secs(3600)).contains("worked 1h for you"));
-        assert!(long_task_message(Duration::from_secs(59 * 60)).contains("worked 59m for you"));
-    }
-
-    #[test]
-    fn rate_limit_copy_leads_with_the_token_value_prop() {
-        assert!(RATE_LIMIT_NUDGE_LINE.starts_with("Get more tokens"));
-        assert!(RATE_LIMIT_NUDGE_LINE.contains("/subscribe"));
-    }
-
-    #[test]
-    fn pitch_lists_reasons_plans_and_next_step() {
-        let pitch = subscribe_pitch_markdown();
-        assert!(pitch.contains("Get more tokens"));
-        assert!(pitch.contains("open source"));
-        assert!(pitch.contains("/login jcode"));
-        assert!(pitch.contains("/subscription"));
-        // Every launched tier appears with its retail price.
-        for tier in crate::subscription_catalog::JcodeTier::ALL.iter().copied() {
-            assert!(pitch.contains(tier.display_name()));
-            assert!(pitch.contains(&format!("${}/mo", tier.retail_price_usd())));
-        }
-    }
-
-    #[test]
-    fn elapsed_formatting_covers_minute_and_hour_shapes() {
-        assert_eq!(format_elapsed(Duration::from_secs(60 * 61)), "1h 1m");
-        assert_eq!(format_elapsed(Duration::from_secs(7200)), "2h");
-        assert_eq!(format_elapsed(Duration::from_secs(60 * 45)), "45m");
+        self.set_status_notice("Hosted models: /login jcode to start");
     }
 }
 
@@ -362,5 +267,102 @@ impl App {
             line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
         }
         line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn todo(
+        status: &str,
+        completion_confidence: Option<crate::todo::ConfidenceState>,
+    ) -> crate::todo::TodoItem {
+        crate::todo::TodoItem {
+            content: "task".to_string(),
+            status: status.to_string(),
+            priority: "high".to_string(),
+            id: "t1".to_string(),
+            completion_confidence,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn weekly_gate_blocks_within_a_week_and_allows_after() {
+        let week = NUDGE_INTERVAL.as_secs();
+        // Fresh state (never shown, last_shown 0) allows immediately.
+        assert!(weekly_gate_allows(0, week));
+        assert!(weekly_gate_allows(0, u64::MAX));
+        assert!(weekly_gate_allows(1_000, 1_000 + week));
+        assert!(!weekly_gate_allows(1_000, 1_000 + week - 1));
+        // `now` before `last_shown` must saturate rather than wrap into
+        // "a week has passed" (clock skew / restored backup).
+        assert!(!weekly_gate_allows(1_000, 0));
+    }
+
+    #[test]
+    fn long_task_qualification_requires_all_completed_and_gated_confidence() {
+        let gate = crate::todo::ConfidenceState::Validated;
+        // Empty list never qualifies.
+        assert!(!long_task_todos_qualify(&[]));
+        // Incomplete item disqualifies.
+        assert!(!long_task_todos_qualify(&[
+            todo("completed", Some(gate)),
+            todo("in_progress", Some(gate)),
+        ]));
+        // Low completion confidence disqualifies ("quality gate failed").
+        assert!(!long_task_todos_qualify(&[todo(
+            "completed",
+            Some(crate::todo::ConfidenceState::Plausible)
+        )]));
+        // Missing confidence disqualifies.
+        assert!(!long_task_todos_qualify(&[todo("completed", None)]));
+        // All completed at/above the gate qualifies.
+        assert!(long_task_todos_qualify(&[
+            todo("completed", Some(gate)),
+            todo("completed", Some(crate::todo::ConfidenceState::Verified)),
+        ]));
+    }
+
+    #[test]
+    fn long_task_message_reads_support_wording_with_elapsed() {
+        let message = long_task_message(Duration::from_secs(60 * 83));
+        assert_eq!(
+            message,
+            "✦ jcode just worked 1h 23m for you. Try Jcode hosted models: /hosted"
+        );
+        assert!(long_task_message(Duration::from_secs(3600)).contains("worked 1h for you"));
+        assert!(long_task_message(Duration::from_secs(59 * 60)).contains("worked 59m for you"));
+    }
+
+    #[test]
+    fn rate_limit_copy_leads_with_the_hosted_model_value_prop() {
+        assert!(RATE_LIMIT_NUDGE_LINE.starts_with("Avoid provider rate limits"));
+        assert!(RATE_LIMIT_NUDGE_LINE.contains("/hosted"));
+    }
+
+    #[test]
+    fn pitch_explains_limits_warnings_tranches_and_next_step() {
+        let pitch = subscribe_pitch_markdown();
+        assert!(pitch.contains("No subscription"));
+        assert!(pitch.contains("monthly spending limit"));
+        assert!(pitch.contains("warnings without slowing"));
+        assert!(pitch.contains("$20"));
+        assert!(pitch.contains("progressively larger tranches"));
+        assert!(pitch.contains("month end"));
+        assert!(pitch.contains("open source"));
+        assert!(pitch.contains("/login jcode"));
+        assert!(pitch.contains("/usage"));
+        for model in crate::subscription_catalog::curated_models() {
+            assert!(pitch.contains(model.display_name));
+        }
+    }
+
+    #[test]
+    fn elapsed_formatting_covers_minute_and_hour_shapes() {
+        assert_eq!(format_elapsed(Duration::from_secs(60 * 61)), "1h 1m");
+        assert_eq!(format_elapsed(Duration::from_secs(7200)), "2h");
+        assert_eq!(format_elapsed(Duration::from_secs(60 * 45)), "45m");
     }
 }

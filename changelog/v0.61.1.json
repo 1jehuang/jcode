@@ -1,0 +1,17 @@
+{
+  "version": "0.61.1",
+  "date": "2026-07-28",
+  "title": "A responsive input line while turns stream",
+  "highlights": [
+    "Typing in the input line stays smooth while a turn is streaming: buffered keystrokes are coalesced into one frame and user input now beats server events to the loop"
+  ],
+  "improvements": [
+    "Remote-mode clients drain bursts of buffered terminal input (fast typing, key repeat, scroll wheels) into a single render, matching the local loop",
+    "Both interactive loops poll terminal input ahead of timers and server/bus chatter, so heavy streaming can no longer starve keystrokes",
+    "Header rebuilds no longer probe credential files on the render thread, removing periodic 40ms+ input stalls",
+    "The desktop2 preview keeps evolving: a niri-style session overview on Super, a live RAM readout, pinned live tool cards, display-paced animations, and lower per-window memory"
+  ],
+  "fixes": [
+    "Separator spacing is preserved after LaTeX symbol commands in rendered markdown"
+  ]
+}

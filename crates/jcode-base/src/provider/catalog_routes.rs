@@ -716,18 +716,11 @@ fn append_openrouter_routes(
     // the `openrouter` cache namespace so `/model` can switch back to it
     // without relabeling OpenRouter models as the active direct profile.
     if !supports_openrouter_provider_features && standard_openrouter_profile_configured() {
-        // The shared OpenRouter/OpenAI-compatible slot is occupied by a
-        // direct profile (e.g. NVIDIA NIM), so standard OpenRouter is never
-        // the active provider and its `openrouter` namespace catalog is
-        // never refreshed by the normal active-provider path. Schedule a
-        // background refresh whenever that cache is missing or stale so
-        // models like `openrouter/owl-alpha` appear in `/model` on the next
-        // picker render, and keep self-healing after upgrades (issue #292).
-        // The scheduler is internally rate-limited and a no-op when the
-        // cache is already fresh.
-        openrouter::maybe_schedule_standard_openrouter_catalog_refresh(
-            "inactive standard OpenRouter route hydration",
-        );
+        // The shared OpenRouter/OpenAI-compatible slot is occupied by a direct
+        // profile (e.g. NVIDIA NIM), so standard OpenRouter is never the active
+        // provider and its `openrouter` namespace catalog is never refreshed by
+        // the normal active-provider path. The background catalog scheduler
+        // keeps that namespace fresh (issue #292); rendering only reads it.
         routes.extend(configured_standard_openrouter_profile_routes());
     }
 }
@@ -893,6 +886,13 @@ pub fn remote_model_routes_fallback(
                 },
                 cheapness: None,
             });
+            continue;
+        }
+
+        if model.contains('/')
+            && let Some(route) = remote_openai_compatible_route_for_model(model)
+        {
+            routes.push(route);
             continue;
         }
 
@@ -1110,7 +1110,7 @@ pub fn remote_current_openai_compatible_route_for_model(
     remote_provider_name: Option<&str>,
     model: &str,
 ) -> Option<ModelRoute> {
-    if model.trim().is_empty() || model.contains('/') || provider_for_model(model).is_some() {
+    if model.trim().is_empty() || (!model.contains('/') && provider_for_model(model).is_some()) {
         return None;
     }
 
@@ -1122,6 +1122,13 @@ pub fn remote_current_openai_compatible_route_for_model(
         return None;
     }
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    if model.contains('/')
+        && !remote_openai_compatible_profile_models(&resolved, profile)
+            .iter()
+            .any(|candidate| candidate.0 == model)
+    {
+        return None;
+    }
 
     Some(ModelRoute {
         model: model.to_string(),
@@ -1168,6 +1175,50 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             model: model.to_string(),
             provider: resolved.display_name,
             api_method: format!("openai-compatible:{}", resolved.id),
+            available: true,
+            detail,
+            cheapness: None,
+        });
+    }
+    named_provider_profile_route_for_model(model)
+}
+
+/// Route for `model` when it belongs to a user-defined `[providers.<name>]`
+/// profile from config.toml.
+///
+/// Built-in OpenAI-compatible profiles are handled above; without this, a
+/// bare model id from a custom profile (e.g. a local MLX server) matches no
+/// known provider and falls through to the Copilot heuristic, which then
+/// labels it `Copilot` and builds a `copilot:<model>` id that no runtime can
+/// resolve (issue #694).
+fn named_provider_profile_route_for_model(model: &str) -> Option<ModelRoute> {
+    named_provider_profile_route_for_model_in(model, &crate::config::config().providers)
+}
+
+fn named_provider_profile_route_for_model_in(
+    model: &str,
+    providers: &std::collections::BTreeMap<String, crate::config::NamedProviderConfig>,
+) -> Option<ModelRoute> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    for (profile_name, profile_config) in providers {
+        if !named_provider_profile_routes(profile_name, profile_config)
+            .iter()
+            .any(|route| route.model == model)
+        {
+            continue;
+        }
+        let detail = if profile_config.base_url.trim().is_empty() {
+            "configured provider profile".to_string()
+        } else {
+            profile_config.base_url.trim().to_string()
+        };
+        return Some(ModelRoute {
+            model: model.to_string(),
+            provider: profile_name.clone(),
+            api_method: format!("openai-compatible:{}", profile_name),
             available: true,
             detail,
             cheapness: None,
@@ -1287,6 +1338,52 @@ mod tests {
         }
     }
 
+    /// Issue #694: a bare model id from a user-defined `[providers.<name>]`
+    /// profile must resolve to that profile, not fall through to the Copilot
+    /// heuristic (which mislabels it and builds an unresolvable `copilot:` id).
+    #[test]
+    fn named_provider_profile_model_routes_to_its_own_profile() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "omlx".to_string(),
+            crate::config::NamedProviderConfig {
+                base_url: "http://127.0.0.1:18000/v1".to_string(),
+                default_model: Some("KAT-Coder-V2.5-Dev-OptiQ-4bit".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let route =
+            named_provider_profile_route_for_model_in("KAT-Coder-V2.5-Dev-OptiQ-4bit", &providers)
+                .expect("custom profile model must resolve to its profile");
+        assert_eq!(route.provider, "omlx");
+        assert_eq!(route.api_method, "openai-compatible:omlx");
+        assert_eq!(route.detail, "http://127.0.0.1:18000/v1");
+        assert!(!route.api_method.starts_with("copilot"));
+        assert!(matches!(
+            route.api_method_kind(),
+            jcode_provider_core::ModelRouteApiMethod::OpenAiCompatible { .. }
+        ));
+    }
+
+    #[test]
+    fn unknown_model_does_not_match_named_provider_profiles() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "omlx".to_string(),
+            crate::config::NamedProviderConfig {
+                base_url: "http://127.0.0.1:18000/v1".to_string(),
+                default_model: Some("KAT-Coder-V2.5-Dev-OptiQ-4bit".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            named_provider_profile_route_for_model_in("some-other-model", &providers).is_none()
+        );
+        assert!(named_provider_profile_route_for_model_in("", &providers).is_none());
+    }
+
     #[test]
     fn simplified_anthropic_routes_preserve_oauth_vs_api_key_state_space() {
         for (has_oauth, has_api_key, expected_methods) in [
@@ -1336,6 +1433,95 @@ mod tests {
         }
     }
 
+    /// Issue #694 through the real path a user hits: a custom
+    /// `[providers.<name>]` profile in config.toml. The picker must route the
+    /// model to that profile, and must not offer it a Copilot route.
+    #[test]
+    fn custom_config_profile_model_is_routed_and_not_offered_a_copilot_route() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+        let route = remote_openai_compatible_route_for_model(model)
+            .expect("custom config profile model must be routed to its profile");
+        assert_eq!(route.provider, "omlx");
+        assert_eq!(route.api_method, "openai-compatible:omlx");
+        assert!(
+            !remote_model_should_offer_copilot_route(model),
+            "a custom profile's model must never be offered a Copilot route"
+        );
+
+        // The full fallback builder (what the picker renders) agrees.
+        let routes = remote_model_routes_fallback(Some("omlx"), &[model.to_string()]);
+        assert!(
+            routes
+                .iter()
+                .all(|route| !route.api_method.contains("copilot")),
+            "picker routes must not contain a copilot route: {routes:?}"
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.api_method == "openai-compatible:omlx"),
+            "picker routes must include the profile route: {routes:?}"
+        );
+    }
+
+    /// Issue #694 across both route sources. The picker is fed either by the
+    /// server-built catalog (named profile routes) or, before that frame
+    /// arrives, by the client-side fallback. Neither may attach a Copilot
+    /// route to a custom profile model, otherwise the label flickers to
+    /// Copilot and the selected id becomes a copilot-prefixed id.
+    #[test]
+    fn custom_config_profile_model_never_gets_a_copilot_route_from_either_source() {
+        let _guard = EnvGuard::new();
+        let jcode_home = std::env::var_os("JCODE_HOME").expect("JCODE_HOME set");
+        std::fs::write(
+            std::path::PathBuf::from(jcode_home).join("config.toml"),
+            "[providers.omlx]\ntype = \"openai-compatible\"\nbase_url = \"http://127.0.0.1:18000/v1\"\ndefault_model = \"KAT-Coder-V2.5-Dev-OptiQ-4bit\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let model = "KAT-Coder-V2.5-Dev-OptiQ-4bit";
+
+        // Source 1: the named-profile routes the server contributes.
+        let named = named_provider_profile_routes(
+            "omlx",
+            crate::config::config()
+                .providers
+                .get("omlx")
+                .expect("omlx profile"),
+        );
+        assert!(
+            named
+                .iter()
+                .any(|route| route.model == model && route.api_method == "openai-compatible:omlx"),
+            "server catalog must offer the profile route: {named:?}"
+        );
+
+        // Source 2: the client-side fallback, including the lightweight
+        // variant used while route details are still refreshing.
+        for routes in [
+            remote_model_routes_fallback(Some("omlx"), &[model.to_string()]),
+            remote_model_routes_lightweight_fallback(Some("omlx"), &[model.to_string()], model),
+        ] {
+            assert!(!routes.is_empty(), "fallback must offer the model");
+            assert!(
+                routes.iter().all(|route| {
+                    !route.api_method.contains("copilot") && route.provider != "Copilot"
+                }),
+                "no source may attach a Copilot route: {routes:?}"
+            );
+        }
+    }
+
     #[test]
     fn remote_compatible_route_uses_live_cache_and_does_not_mark_fallback() {
         let guard = EnvGuard::new();
@@ -1348,6 +1534,35 @@ mod tests {
         assert_eq!(route.api_method, "openai-compatible:opencode");
         assert_eq!(route.detail, "https://opencode.ai/zen/v1");
         assert!(!route.detail.contains("fallback"));
+    }
+
+    #[test]
+    fn slash_model_fallback_prefers_matching_compatible_profile() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let routes = remote_model_routes_fallback(Some("OpenCode Zen"), &[model.to_string()]);
+
+        assert_eq!(routes.len(), 1, "unexpected fallback routes: {routes:?}");
+        assert_eq!(routes[0].provider, "OpenCode Zen");
+        assert_eq!(routes[0].api_method, "openai-compatible:opencode");
+        assert!(routes[0].available);
+    }
+
+    #[test]
+    fn current_compatible_profile_accepts_only_cataloged_slash_models() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let route = remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), model)
+            .expect("cataloged slash model should use the current compatible profile");
+        assert_eq!(route.api_method, "openai-compatible:opencode");
+        assert!(
+            remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), "unknown/model")
+                .is_none()
+        );
     }
 
     #[test]

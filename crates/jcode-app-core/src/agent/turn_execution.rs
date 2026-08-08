@@ -20,12 +20,22 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.add_message(
+        self.run_once_capture_with_display_role(user_message, None)
+            .await
+    }
+
+    pub(crate) async fn run_once_capture_with_display_role(
+        &mut self,
+        user_message: &str,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<String> {
+        self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
+            display_role,
         );
         self.session.save()?;
         if trace_enabled() {
@@ -41,6 +51,24 @@ impl Agent {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_display_role(
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_once_streaming_mpsc_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
@@ -62,6 +90,32 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
+        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
+        crate::telemetry::record_turn();
+        let turn_started_at = Instant::now();
+        let start_message_index = self.message_count();
+        self.fire_turn_start_hook("chat");
+        let result = self.run_turn_streaming_mpsc(event_tx).await;
+        self.current_turn_system_reminder = None;
+        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
+        result
+    }
+
+    /// Append and persist a user message without starting a model turn.
+    pub(crate) fn append_user_context_message(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.append_user_context_message_with_display_role(user_message, images, None)
+    }
+
+    fn append_user_context_message_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
             .map(|(media_type, data)| ContentBlock::Image { media_type, data })
@@ -78,16 +132,8 @@ impl Agent {
             ));
         }
 
-        self.add_message(Role::User, blocks);
-        crate::telemetry::record_turn();
-        self.session.save()?;
-        let turn_started_at = Instant::now();
-        let start_message_index = self.message_count();
-        self.fire_turn_start_hook("chat");
-        let result = self.run_turn_streaming_mpsc(event_tx).await;
-        self.current_turn_system_reminder = None;
-        self.fire_turn_end_hook(&result, turn_started_at, start_message_index);
-        result
+        self.add_message_with_display_role(Role::User, blocks, display_role);
+        self.session.save()
     }
 
     /// Fire the `turn_start` observer hook when a turn begins, before the model
@@ -770,8 +816,11 @@ impl Agent {
                 continue;
             }
 
-            // Check for skill invocation
-            if let Some(invocation) = SkillRegistry::parse_invocation(input) {
+            // Check for skill invocation. Resolve against the registry (not
+            // the bare tokenizer) so a `SKILL.md` `name:` field containing
+            // spaces, e.g. "My Custom Skill", can still be matched: the
+            // bare parse always stops at the first whitespace.
+            if let Some(invocation) = skills.resolve_invocation(input) {
                 if let Some(skill) = skills.get(invocation.name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);

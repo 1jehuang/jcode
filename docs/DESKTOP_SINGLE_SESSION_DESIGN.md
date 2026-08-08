@@ -1,5 +1,7 @@
 # Desktop Single Session Design
 
+> Historical: this document describes the removed legacy `crates/jcode-desktop` app. The current desktop app is `crates/jcode-desktop2`.
+
 This document describes the visual target for the default `jcode-desktop` single-session mode.
 
 ## Layering

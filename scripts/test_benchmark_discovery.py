@@ -133,6 +133,64 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
         self.assertEqual(call.tools, [])
         self.assertEqual(call.outcome, "empty")
 
+    def test_parse_accepts_current_integration_vocabulary(self):
+        """The renderers were renamed from discovery to integration wording.
+        Both vocabularies must parse so pre-rename baselines stay comparable
+        with post-rename runs."""
+        listing = benchmark.parse_discovery_output(
+            "Available integrations in 'payments' (Jcode tool directory):\n\n- agentcard: cards\n",
+            1.0,
+        )
+        self.assertEqual(listing.category, "payments")
+        self.assertEqual(listing.tools, ["agentcard"])
+        self.assertEqual(listing.outcome, "listing")
+
+        empty = benchmark.parse_discovery_output(
+            "No integrations in category 'browser-automation' right now.", 1.0
+        )
+        self.assertEqual(empty.category, "browser-automation")
+        self.assertEqual(empty.outcome, "empty")
+
+        selection = benchmark.parse_discovery_output(
+            "Set up 'agentmail' from 'email-messaging' (Jcode tool directory):", 1.0
+        )
+        self.assertEqual(selection.category, "email-messaging")
+        self.assertEqual(selection.tools, ["agentmail"])
+        self.assertEqual(selection.outcome, "selection")
+        self.assertIs(selection.listed, True)
+
+    def test_parse_current_catalog_selection_receipt(self):
+        call = benchmark.parse_discovery_output(
+            "Selected 'context.dev' from 'web-data' (Jcode tool directory; the choice "
+            "must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n"
+            "context.dev: structured extraction",
+            1.25,
+        )
+        self.assertEqual(call.category, "web-data")
+        self.assertEqual(call.tools, ["context.dev"])
+        self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, True)
+
+    def test_parse_off_catalog_selection_receipt(self):
+        call = benchmark.parse_discovery_output(
+            "Selected off-catalog product 'Firecrawl' for 'web-data'.\n\n"
+            "Selection recorded as demand data. Jcode does not list or partner with this product.",
+            2.5,
+        )
+        self.assertEqual(call.category, "web-data")
+        self.assertEqual(call.tools, ["firecrawl"])
+        self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, False)
+
+    def test_parse_unmatched_and_error_outputs_without_crashing(self):
+        other = benchmark.parse_discovery_output("unexpected renderer output", 1.0)
+        self.assertEqual(other.outcome, "other")
+        self.assertIsNone(other.category)
+        self.assertEqual(other.tools, [])
+
+        error = benchmark.parse_discovery_output("Error: unavailable", 1.0)
+        self.assertEqual(error.outcome, "error")
+
     def test_parse_selection_tracks_but_does_not_count_direct_selection(self):
         call = benchmark.parse_discovery_output(
             "Selected 'agentmail' from 'email-messaging' (Jcode tool directory):", 1.5
@@ -140,6 +198,7 @@ class DiscoveryBenchmarkTests(unittest.TestCase):
         self.assertEqual(call.category, "email-messaging")
         self.assertEqual(call.tools, ["agentmail"])
         self.assertEqual(call.outcome, "selection")
+        self.assertIs(call.listed, True)
         case = benchmark.BenchmarkCase(
             "agentmail", "email-messaging", "agentmail", "Set up an inbox."
         )

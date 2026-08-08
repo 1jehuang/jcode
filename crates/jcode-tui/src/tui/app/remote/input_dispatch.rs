@@ -1,6 +1,5 @@
 use super::super::{PendingRemoteMessage, PendingSplitPrompt};
 use super::*;
-use crate::skill::SkillRegistry;
 
 #[expect(
     clippy::too_many_arguments,
@@ -152,7 +151,27 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     prepared: input::PreparedInput,
 ) -> Result<()> {
     let raw_input = prepared.raw_input.clone();
-    let Some(invocation) = SkillRegistry::parse_invocation(&raw_input) else {
+
+    // Text that merely starts with `/` is not necessarily a command. A terminal
+    // file drop (`/tmp/shot.png`) or a bare path (`/home/me/notes`) is ordinary
+    // user input. Routing those through `App::submit_input` stages a *local*
+    // turn via `pending_turn`, which no remote run loop consumes, so the client
+    // parks in "Sending" forever. Send them as a normal remote turn instead.
+    //
+    // `/?` is the one builtin whose token is not identifier-shaped, so it is
+    // allowed through explicitly.
+    // Resolve registered multi-word skill names before falling back to the
+    // existing single-token command handling.
+    let snapshot = app.current_skills_snapshot();
+    let trimmed = raw_input.trim();
+    let is_command_shaped = trimmed == "/?"
+        || (input::parse_dropped_paths(&raw_input).is_none()
+            && snapshot.resolve_invocation(&raw_input).is_some());
+    if !is_command_shaped {
+        return submit_prepared_remote_input(app, remote, prepared).await;
+    }
+
+    let Some(invocation) = snapshot.resolve_invocation(&raw_input) else {
         app.input = raw_input;
         app.cursor_pos = app.input.len();
         app.submit_input();
@@ -167,7 +186,7 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     };
 
     let skill_name = invocation.name.to_string();
-    let mut skill = app.current_skills_snapshot().get(&skill_name).cloned();
+    let mut skill = snapshot.get(&skill_name).cloned();
     if skill.is_none() {
         app.refresh_skills_snapshot();
         skill = app.current_skills_snapshot().get(&skill_name).cloned();
@@ -190,7 +209,9 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     app.pending_images.clear();
     app.submit_input();
 
-    let expanded_prompt = SkillRegistry::parse_invocation(&prepared.expanded)
+    let expanded_prompt = app
+        .current_skills_snapshot()
+        .resolve_invocation(&prepared.expanded)
         .and_then(|invocation| invocation.prompt)
         .unwrap_or(trailing_prompt)
         .to_string();
@@ -339,7 +360,7 @@ fn submit_transcript_input(app: &mut App) {
         SendAction::Queue => queue_transcript_input(app),
         SendAction::Interleave => {
             let prepared = input::take_prepared_input(app);
-            input::stage_local_interleave(app, prepared.expanded);
+            input::stage_local_interleave(app, prepared.expanded, prepared.images);
         }
     }
 }
@@ -386,7 +407,8 @@ async fn submit_remote_transcript_input(
         SendAction::Queue => queue_transcript_input(app),
         SendAction::Interleave => {
             let prepared = input::take_prepared_input(app);
-            app.send_interleave_now(prepared.expanded, remote).await;
+            app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                .await;
         }
     }
 
@@ -489,4 +511,26 @@ pub(in crate::tui::app) async fn apply_remote_transcript_event(
 
     app.follow_chat_bottom_for_typing();
     Ok(())
+}
+
+/// Stage a submitted turn for the remote tick loop when the app is attached to
+/// a remote session, returning true when it took ownership of the turn.
+///
+/// Only the LOCAL run loop consumes `App::pending_turn`. Any path that reaches
+/// `App::submit_input` while remote (a slash command that turned out not to be
+/// one, an unknown skill fallback, a staged prompt) would otherwise set a flag
+/// nobody dispatches, freezing the client in "Sending" forever. Queueing hands
+/// the turn to `process_remote_followups`, which also echoes the user message.
+pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input: &str) -> bool {
+    if !app.is_remote {
+        return false;
+    }
+    if app.is_processing && !app.queue_mode {
+        let images = std::mem::take(&mut app.pending_images);
+        input::stage_local_interleave(app, input.to_string(), images);
+        return true;
+    }
+    app.queued_messages.push(input.to_string());
+    app.pending_images.clear();
+    true
 }

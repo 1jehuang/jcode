@@ -1,6 +1,6 @@
 [package]
 name = "jcode"
-version = "0.58.0"
+version = "0.71.1"
 description = "Possibly the greatest coding agent ever built — blazing-fast TUI, multi-model, swarm coordination, 30+ tools"
 edition = "2024"
 autobins = false
@@ -25,10 +25,12 @@ members = [
     "crates/jcode-build-support",
     "crates/jcode-compaction-core",
     "crates/jcode-config-types",
+    "crates/jcode-command-risk",
     "crates/jcode-core",
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",
     "crates/jcode-harness-api-server",
+    "crates/jcode-sdk",
     "crates/jcode-desktop2",
     "crates/jcode-memory-types",
     "crates/jcode-message-types",
@@ -47,6 +49,7 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-env",
     "crates/jcode-provider-core",
+    "crates/jcode-schema-dialect",
     "crates/jcode-provider-bedrock",
     "crates/jcode-provider-anthropic",
     "crates/jcode-provider-antigravity",
@@ -69,6 +72,7 @@ members = [
     "crates/jcode-tui-core",
     "crates/jcode-tui-mermaid",
     "crates/jcode-task-types",
+    "crates/jcode-transport",
     "crates/jcode-tool-core",
     "crates/jcode-tool-types",
     "crates/jcode-tui-account-picker",
@@ -85,7 +89,6 @@ members = [
     "crates/jcode-terminal-image",
     "crates/jcode-telemetry-core",
     "crates/jcode-tui-workspace",
-    "crates/jcode-desktop",
     "crates/jcode-render-core",
 ]
 
@@ -161,6 +164,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 hex = "0.4"
 open = "5"               # Open URLs in browser
+jcode-tui-style = { path = "crates/jcode-tui-style" }
 jcode-tui-session-picker = { path = "crates/jcode-tui-session-picker", features = ["serde"] }
 
 # Streaming
@@ -230,6 +234,14 @@ linux-compat-vendored-openssl = ["jcode-tui/linux-compat-vendored-openssl"]
 mmdr-size-api = ["jcode-tui/mmdr-size-api"]
 pdf = ["jcode-tui/pdf"]
 
+# The harness API bridge ships inside the released binary as `jcode api-bridge`.
+# SDK users must not need a Rust toolchain to reach the API: requiring
+# `cargo run -p jcode-harness-api-server` made the TypeScript SDK unusable for
+# anyone who installed jcode from a release artifact. Unix-only because the
+# bridge listens on a Unix socket.
+[target.'cfg(unix)'.dependencies]
+jcode-harness-api-server = { path = "crates/jcode-harness-api-server" }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
@@ -268,6 +280,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenuItem",
     "NSRunningApplication",
 ] }
+objc2-user-notifications = "0.3"
 
 [profile.release]
 opt-level = 1
@@ -324,6 +337,86 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package."jcode-fuzzy"]
+opt-level = 3
+
+# Keep the terminal render stack optimized even in dev/selfdev/test builds.
+#
+# Every TUI frame walks ratatui buffers cell-by-cell and re-measures visible
+# text with unicode-width/unicode-segmentation. At opt-level = 0 those inner
+# loops dominated live-client profiles (perf showed str_width, grapheme
+# bsearch, and Buffer::index_of_opt as the top symbols) and pushed a routine
+# full frame to ~12ms p50 / 21ms p95, which reads as input-line lag while
+# streaming saturates the redraw loop. These are stable third-party crates
+# that almost never recompile, so pinning them is a one-time compile cost
+# (same rationale as jcode-tui-anim above).
+[profile.dev.package.ratatui]
+opt-level = 3
+[profile.selfdev.package.ratatui]
+opt-level = 3
+[profile.test.package.ratatui]
+opt-level = 3
+
+[profile.dev.package.ratatui-core]
+opt-level = 3
+[profile.selfdev.package.ratatui-core]
+opt-level = 3
+[profile.test.package.ratatui-core]
+opt-level = 3
+
+[profile.dev.package.ratatui-widgets]
+opt-level = 3
+[profile.selfdev.package.ratatui-widgets]
+opt-level = 3
+[profile.test.package.ratatui-widgets]
+opt-level = 3
+
+[profile.dev.package.ratatui-crossterm]
+opt-level = 3
+[profile.selfdev.package.ratatui-crossterm]
+opt-level = 3
+[profile.test.package.ratatui-crossterm]
+opt-level = 3
+
+[profile.dev.package.crossterm]
+opt-level = 3
+[profile.selfdev.package.crossterm]
+opt-level = 3
+[profile.test.package.crossterm]
+opt-level = 3
+
+[profile.dev.package.unicode-width]
+opt-level = 3
+[profile.selfdev.package.unicode-width]
+opt-level = 3
+[profile.test.package.unicode-width]
+opt-level = 3
+
+[profile.dev.package.unicode-segmentation]
+opt-level = 3
+[profile.selfdev.package.unicode-segmentation]
+opt-level = 3
+[profile.test.package.unicode-segmentation]
+opt-level = 3
+
+[profile.dev.package.unicode-truncate]
+opt-level = 3
+[profile.selfdev.package.unicode-truncate]
+opt-level = 3
+[profile.test.package.unicode-truncate]
+opt-level = 3
+
+[profile.dev.package.unicode-linebreak]
+opt-level = 3
+[profile.selfdev.package.unicode-linebreak]
+opt-level = 3
+[profile.test.package.unicode-linebreak]
+opt-level = 3
+
+[profile.dev.package.compact_str]
+opt-level = 3
+[profile.selfdev.package.compact_str]
+opt-level = 3
+[profile.test.package.compact_str]
 opt-level = 3
 
 # Keep the text-shaping stack optimized even in dev/selfdev/test builds.
@@ -436,6 +529,184 @@ opt-level = 3
 [profile.test.package.memchr]
 opt-level = 3
 
+# Keep the desktop2 (winit + wgpu + Vello + Parley) render stack optimized in
+# dev/selfdev/test builds.
+#
+# Every desktop2 frame re-encodes the scene (vello/vello_encoding/peniko),
+# flattens paths (kurbo: the halftone donut alone is thousands of circles per
+# frame), shapes and rasterizes text (parley/fontique/skrifa/harfrust/
+# read-fonts/zeno), and submits GPU work (wgpu/wgpu-core/wgpu-hal/naga). At
+# opt-level 0 those inner loops are 15-40x slower, which made animations and
+# streaming visibly laggy in selfdev builds while the same code was smooth at
+# opt-level 3. These are stable third-party crates that almost never
+# recompile, so pinning them costs one compile and does not slow rebuilds of
+# jcode's own crates (same rationale as the ratatui/cosmic-text pins above).
+[profile.dev.package.vello]
+opt-level = 3
+[profile.selfdev.package.vello]
+opt-level = 3
+[profile.test.package.vello]
+opt-level = 3
+
+[profile.dev.package.vello_encoding]
+opt-level = 3
+[profile.selfdev.package.vello_encoding]
+opt-level = 3
+[profile.test.package.vello_encoding]
+opt-level = 3
+
+[profile.dev.package.vello_shaders]
+opt-level = 3
+[profile.selfdev.package.vello_shaders]
+opt-level = 3
+[profile.test.package.vello_shaders]
+opt-level = 3
+
+[profile.dev.package.wgpu]
+opt-level = 3
+[profile.selfdev.package.wgpu]
+opt-level = 3
+[profile.test.package.wgpu]
+opt-level = 3
+
+[profile.dev.package.wgpu-core]
+opt-level = 3
+[profile.selfdev.package.wgpu-core]
+opt-level = 3
+[profile.test.package.wgpu-core]
+opt-level = 3
+
+[profile.dev.package.wgpu-hal]
+opt-level = 3
+[profile.selfdev.package.wgpu-hal]
+opt-level = 3
+[profile.test.package.wgpu-hal]
+opt-level = 3
+
+[profile.dev.package.wgpu-types]
+opt-level = 3
+[profile.selfdev.package.wgpu-types]
+opt-level = 3
+[profile.test.package.wgpu-types]
+opt-level = 3
+
+[profile.dev.package.naga]
+opt-level = 3
+[profile.selfdev.package.naga]
+opt-level = 3
+[profile.test.package.naga]
+opt-level = 3
+
+[profile.dev.package.parley]
+opt-level = 3
+[profile.selfdev.package.parley]
+opt-level = 3
+[profile.test.package.parley]
+opt-level = 3
+
+[profile.dev.package.fontique]
+opt-level = 3
+[profile.selfdev.package.fontique]
+opt-level = 3
+[profile.test.package.fontique]
+opt-level = 3
+
+[profile.dev.package.skrifa]
+opt-level = 3
+[profile.selfdev.package.skrifa]
+opt-level = 3
+[profile.test.package.skrifa]
+opt-level = 3
+
+[profile.dev.package.read-fonts]
+opt-level = 3
+[profile.selfdev.package.read-fonts]
+opt-level = 3
+[profile.test.package.read-fonts]
+opt-level = 3
+
+[profile.dev.package.font-types]
+opt-level = 3
+[profile.selfdev.package.font-types]
+opt-level = 3
+[profile.test.package.font-types]
+opt-level = 3
+
+[profile.dev.package.harfrust]
+opt-level = 3
+[profile.selfdev.package.harfrust]
+opt-level = 3
+[profile.test.package.harfrust]
+opt-level = 3
+
+[profile.dev.package.kurbo]
+opt-level = 3
+[profile.selfdev.package.kurbo]
+opt-level = 3
+[profile.test.package.kurbo]
+opt-level = 3
+
+[profile.dev.package.peniko]
+opt-level = 3
+[profile.selfdev.package.peniko]
+opt-level = 3
+[profile.test.package.peniko]
+opt-level = 3
+
+[profile.dev.package.color]
+opt-level = 3
+[profile.selfdev.package.color]
+opt-level = 3
+[profile.test.package.color]
+opt-level = 3
+
+[profile.dev.package.zeno]
+opt-level = 3
+[profile.selfdev.package.zeno]
+opt-level = 3
+[profile.test.package.zeno]
+opt-level = 3
+
+# The workspace release profile is only opt-level 1, so the desktop2 render
+# stack above is pinned to opt-level 3 there too: installed desktop2 builds
+# must not ship with an unoptimized frame pipeline.
+[profile.release.package.vello]
+opt-level = 3
+[profile.release.package.vello_encoding]
+opt-level = 3
+[profile.release.package.vello_shaders]
+opt-level = 3
+[profile.release.package.wgpu]
+opt-level = 3
+[profile.release.package.wgpu-core]
+opt-level = 3
+[profile.release.package.wgpu-hal]
+opt-level = 3
+[profile.release.package.wgpu-types]
+opt-level = 3
+[profile.release.package.naga]
+opt-level = 3
+[profile.release.package.parley]
+opt-level = 3
+[profile.release.package.fontique]
+opt-level = 3
+[profile.release.package.skrifa]
+opt-level = 3
+[profile.release.package.read-fonts]
+opt-level = 3
+[profile.release.package.font-types]
+opt-level = 3
+[profile.release.package.harfrust]
+opt-level = 3
+[profile.release.package.kurbo]
+opt-level = 3
+[profile.release.package.peniko]
+opt-level = 3
+[profile.release.package.color]
+opt-level = 3
+[profile.release.package.zeno]
+opt-level = 3
+
 # The embedding stack (tract ONNX inference + HF tokenizer) runs the MiniLM
 # model for memory recall/maintenance on the shared server. At opt-level 0 a
 # single embed measured ~666 ms (matmul inner loops unoptimized), which keeps
@@ -505,6 +776,9 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+# Used by tests/context_window_matrix.rs to assert the shared context-window
+# resolution invariants directly, without going through a live provider.
+jcode-provider-core = { path = "crates/jcode-provider-core" }
 # Enables the downstream test-support helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, the
 # ExternalAuthReviewCandidate read accessors) for the root crate's own cli test

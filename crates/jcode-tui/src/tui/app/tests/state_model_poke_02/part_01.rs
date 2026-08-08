@@ -228,8 +228,14 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
         pane: super::handterm_native_scroll::PaneKind::Chat,
         delta: -2,
     });
-    assert_eq!(app.scroll_offset, 5, "the first row should render immediately");
-    assert_eq!(app.mouse_scroll_queue, -1, "the second row should remain queued");
+    assert_eq!(
+        app.scroll_offset, 5,
+        "the first row should render immediately"
+    );
+    assert_eq!(
+        app.mouse_scroll_queue, -1,
+        "the second row should remain queued"
+    );
     app.progress_mouse_scroll_animation();
     assert_eq!(app.scroll_offset, 4);
 
@@ -237,10 +243,19 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
         pane: super::handterm_native_scroll::PaneKind::Chat,
         delta: 3,
     });
-    assert_eq!(app.scroll_offset, 5, "the first row should render immediately");
-    assert_eq!(app.mouse_scroll_queue, 2, "later rows should animate on ticks");
+    assert_eq!(
+        app.scroll_offset, 5,
+        "the first row should render immediately"
+    );
+    assert_eq!(
+        app.mouse_scroll_queue, 2,
+        "later rows should animate on ticks"
+    );
     app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 6, "the queued rows should be revealed separately");
+    assert_eq!(
+        app.scroll_offset, 6,
+        "the queued rows should be revealed separately"
+    );
     assert_eq!(app.mouse_scroll_queue, 1);
     app.progress_mouse_scroll_animation();
     assert_eq!(app.scroll_offset, 7);
@@ -1022,7 +1037,7 @@ fn test_context_command_reports_session_context_snapshot() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(77),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(77)),
                 completion_confidence: None,
                 confidence_history: Vec::new(),
             }],
@@ -1044,7 +1059,7 @@ fn test_context_command_reports_session_context_snapshot() {
         assert!(msg.content.contains("Todos"));
         assert!(msg.content.contains("Side Panel"));
         assert!(msg.content.contains("Inspect context summary"));
-        assert!(msg.content.contains("[pending|high|confidence 77%]"));
+        assert!(msg.content.contains("[pending|high|confidence plausible]"));
         assert!(msg.content.contains("active skill: debug"));
         assert!(msg.content.contains("queue mode: on"));
     });

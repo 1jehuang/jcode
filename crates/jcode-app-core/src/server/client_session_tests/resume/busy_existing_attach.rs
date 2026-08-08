@@ -172,7 +172,11 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
     .await
     .expect("subscribe bookkeeping must not wait for a busy live agent");
 
-    let events = collect_events_until_done(&mut client_event_rx, 77).await;
+    // Resume and subscribe both answer request id 77, so each emits its own
+    // Done. Collect both batches, otherwise the assertions below only ever see
+    // resume's events and subscribe's are invisible.
+    let mut events = collect_events_until_done(&mut client_event_rx, 77).await;
+    events.extend(collect_events_until_done(&mut client_event_rx, 77).await);
     assert!(
         events
             .iter()
@@ -184,6 +188,17 @@ async fn handle_resume_session_allows_live_attach_when_existing_agent_is_busy() 
             .iter()
             .any(|event| matches!(event, ServerEvent::Error { .. })),
         "busy live attach should not emit error events: {events:?}"
+    );
+    // A remote (gateway) client has no other way to learn its session id, and
+    // without it a dropped connection cannot reattach: the next Subscribe
+    // carries no `target_session_id`, so the server hands it a fresh session
+    // and the in-flight turn becomes unreachable.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            ServerEvent::SessionId { session_id } if session_id == target_session_id
+        )),
+        "subscribe must report the bound session id so clients can reattach: {events:?}"
     );
 
     let mut peer_reader = tokio::io::BufReader::new(peer_stream);

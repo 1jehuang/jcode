@@ -529,6 +529,25 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "once")]
         json: bool,
     },
+
+    /// Serve the stable harness API on a Unix socket, for SDK clients.
+    ///
+    /// This is the endpoint the TypeScript SDK (`@1jehuang/jcode-sdk`) connects to. It
+    /// ships in the released binary on purpose: the API is only "generally
+    /// available" if reaching it does not require a Rust toolchain and a
+    /// source checkout.
+    #[cfg(unix)]
+    #[command(name = "api-bridge", alias = "api")]
+    ApiBridge {
+        /// Path of the API socket to listen on (default: $XDG_RUNTIME_DIR/jcode-api.sock)
+        ///
+        /// Named `--api-socket` rather than `--socket` because the global
+        /// `--socket` already selects the *internal daemon* socket, and clap
+        /// binds the global first: a subcommand `--socket` silently pointed
+        /// both ends of the bridge at the same path.
+        #[arg(long = "api-socket")]
+        api_socket: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

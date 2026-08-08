@@ -125,6 +125,89 @@ fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'stat
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
 
+/// Draw the Ctrl+R reverse prompt-history search overlay. Reuses the
+/// command-palette positioning: floats below (or above) the input without
+/// reserving layout height. Shows the query line plus the match list with the
+/// selected row highlighted.
+pub(super) fn draw_prompt_history_search_overlay(
+    frame: &mut Frame,
+    app: &dyn TuiState,
+    area: Rect,
+) {
+    let Some(view) = app.prompt_history_search() else {
+        return;
+    };
+    const VISIBLE_LIMIT: usize = 8;
+
+    let accent = Style::default().fg(rgb(255, 213, 128));
+    let dim = Style::default().fg(dim_color());
+    let normal = Style::default().fg(rgb(128, 203, 196));
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("(history search) ", dim),
+        Span::styled(view.query.clone(), accent),
+        Span::styled("█", accent),
+        Span::styled(
+            "  ↑↓ select · ↵ insert · Esc cancel",
+            Style::default().fg(dim_color()),
+        ),
+    ]));
+
+    if view.matches.is_empty() {
+        if view.query.trim().is_empty() {
+            lines.push(Line::from(Span::styled("  type to search history", dim)));
+        } else {
+            lines.push(Line::from(Span::styled("  no matches", dim)));
+        }
+    } else {
+        // Keep the selected row inside the visible window.
+        let window_start = view
+            .selected
+            .saturating_sub(VISIBLE_LIMIT.saturating_sub(1))
+            .min(
+                view.matches
+                    .len()
+                    .saturating_sub(VISIBLE_LIMIT.min(view.matches.len())),
+            );
+        let visible = view
+            .matches
+            .iter()
+            .enumerate()
+            .skip(window_start)
+            .take(VISIBLE_LIMIT);
+        for (index, preview) in visible {
+            let is_selected = index == view.selected;
+            let marker = if is_selected { "▸ " } else { "  " };
+            let style = if is_selected { accent } else { normal };
+            let mut spans = vec![
+                Span::styled(marker.to_string(), style),
+                Span::styled(preview.clone(), style),
+            ];
+            if index == window_start + VISIBLE_LIMIT - 1
+                && view.matches.len() > window_start + VISIBLE_LIMIT
+            {
+                spans.push(Span::styled(
+                    format!(
+                        "  +{} more",
+                        view.matches.len() - (window_start + VISIBLE_LIMIT)
+                    ),
+                    dim,
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    let Some(rect) = command_suggestions_overlay_rect(area, lines.len() as u16, frame.area())
+    else {
+        return;
+    };
+    lines.truncate(rect.height as usize);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
 /// Draw the command-suggestion popover as a late overlay pass.
 ///
 /// Called after the chunked layout (and info widgets) have rendered so the
@@ -951,7 +1034,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 }
 
                 spans.push(Span::styled(
-                    " · Alt+B bg",
+                    format!(" · {} bg", jcode_tui_core::keybind::alt_chord("B")),
                     Style::default().fg(rgb(100, 100, 100)),
                 ));
 
@@ -1046,6 +1129,28 @@ fn streaming_status_spans(
 mod tests {
     use super::*;
     use ratatui::style::Modifier;
+
+    #[test]
+    fn visual_line_move_follows_soft_wrapped_rows() {
+        // 20 chars, width 10 => two visual rows, no newline in the input.
+        let input = "abcdefghijklmnopqrst";
+        // Cursor at col 3 of row 1 (char 13) moving up lands on col 3 of row 0.
+        assert_eq!(visual_line_move(input, 13, 10, -1), Some(3));
+        // And back down again.
+        assert_eq!(visual_line_move(input, 3, 10, 1), Some(13));
+        // Already on the first/last row => None so history recall can take over.
+        assert_eq!(visual_line_move(input, 3, 10, -1), None);
+        assert_eq!(visual_line_move(input, 13, 10, 1), None);
+    }
+
+    #[test]
+    fn visual_line_move_clamps_to_shorter_target_row() {
+        let input = "abcdefghij\nxy";
+        // Cursor at end of the short second row, up goes to col 2 of row 0.
+        assert_eq!(visual_line_move(input, input.len(), 10, -1), Some(2));
+        // From far along row 0, down clamps to the end of the short row.
+        assert_eq!(visual_line_move(input, 8, 10, 1), Some(input.len()));
+    }
 
     #[test]
     fn right_fact_stack_shifts_up_as_a_unit_when_bottom_row_is_occupied() {
@@ -3022,4 +3127,62 @@ enum QueuedMsgType {
     Pending,
     Interleave,
     Queued,
+}
+
+/// The usable text width of one composer row, i.e. the width used by
+/// `wrap_input_segments` when the composer is rendered into `area_width`.
+/// Returns `None` when there is no room for text.
+pub(crate) fn composer_line_width(
+    app: &dyn TuiState,
+    area_width: u16,
+    next_prompt: usize,
+) -> Option<usize> {
+    let prompt_len = input_prompt_len(app, next_prompt);
+    let reserved = send_mode_reserved_width(app);
+    let width = (area_width as usize).saturating_sub(prompt_len + reserved);
+    (width > 0).then_some(width)
+}
+
+/// Move the cursor one *visual* (wrapped) row up (`delta = -1`) or down
+/// (`delta = 1`) within the composer, keeping the display column.
+///
+/// Returns the new byte offset, or `None` when the cursor is already on the
+/// first/last visual row (so callers can fall through to prompt history).
+pub(crate) fn visual_line_move(
+    input: &str,
+    cursor_pos: usize,
+    line_width: usize,
+    delta: isize,
+) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+
+    if line_width == 0 {
+        return None;
+    }
+    let cursor_char_pos = crate::tui::core::byte_offset_to_char_index(input, cursor_pos);
+    let segments = wrap_input_segments(input, line_width);
+    if segments.len() < 2 {
+        return None;
+    }
+    let current = segments
+        .iter()
+        .position(|s| cursor_char_pos >= s.start_char && cursor_char_pos <= s.end_char)?;
+    let target_idx = current.checked_add_signed(delta)?;
+    let target = segments.get(target_idx)?;
+    let col = cursor_col_for_segment(&segments[current], cursor_char_pos);
+
+    // Walk the target row to the same display column.
+    let mut display = 0usize;
+    let mut chars_in = 0usize;
+    for ch in target.text.chars() {
+        if display >= col {
+            break;
+        }
+        display += ch.width().unwrap_or(0);
+        chars_in += 1;
+    }
+    Some(crate::tui::core::char_index_to_byte_offset(
+        input,
+        target.start_char + chars_in,
+    ))
 }

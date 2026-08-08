@@ -41,6 +41,34 @@ impl App {
             .map(|flow| &flow.phase)
     }
 
+    /// The single place the onboarding phase changes.
+    ///
+    /// Routing every transition through here is what keeps the written-down
+    /// graph (`onboarding_graph`) honest: the running flow reports each move in
+    /// graph terms, and a move the graph does not declare is logged as model
+    /// drift. We log rather than panic, because a bookkeeping disagreement must
+    /// never be the reason a user's first run dies.
+    ///
+    /// It is also the natural seam for trace telemetry: the edge events a trace
+    /// needs are exactly the transitions that pass through this function.
+    pub(super) fn set_onboarding_phase(&mut self, next: OnboardingPhase) {
+        use super::onboarding_graph::{node_for_phase, transition_is_declared};
+        let Some(flow) = self.onboarding_flow.as_mut() else {
+            return;
+        };
+        let from = node_for_phase(&flow.phase);
+        let to = node_for_phase(&next);
+        if !transition_is_declared(from, to) {
+            crate::logging::warn(&format!(
+                "onboarding transition {} -> {} is not declared in onboarding_graph; \
+                 the graph and the live flow have drifted",
+                from.label(),
+                to.label()
+            ));
+        }
+        flow.phase = next;
+    }
+
     /// Gate + start the flow after a successful login. Only fires for brand-new
     /// users (no prior onboarding flow this session) so returning users who
     /// re-auth aren't dragged through onboarding.
@@ -272,9 +300,7 @@ impl App {
         if !self.onboarding_telemetry_choice_made {
             crate::telemetry::set_content_sharing_enabled(false);
         }
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::ModelSelect;
-        }
+        self.set_onboarding_phase(OnboardingPhase::ModelSelect);
         self.onboarding_after_model_select();
     }
 
@@ -296,13 +322,11 @@ impl App {
     /// opens the two-action start choice directly.
     #[allow(dead_code)]
     fn onboarding_enter_continue_prompt(&mut self, cli: ExternalCli) {
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::ContinuePrompt {
-                cli,
-                yes_highlighted: true,
-                shown_at: Instant::now(),
-            };
-        }
+        self.set_onboarding_phase(OnboardingPhase::ContinuePrompt {
+            cli,
+            yes_highlighted: true,
+            shown_at: Instant::now(),
+        });
         // The continue prompt is rendered by the onboarding welcome screen
         // (`onboarding_welcome_kind`) so it survives in remote mode.
         self.update_onboarding_continue_prompt_status(cli);
@@ -512,10 +536,8 @@ impl App {
     /// Returns true if the key was consumed.
     ///
     /// The screen has two modes:
-    ///   * Summary (default): a read-only list of everything we detected, with
-    ///     two pills below it. "Continue" (preselected) imports everything;
-    ///     "Choose what to import" switches to the checkbox list. Arrows/Tab
-    ///     move between the pills, Enter/Space commit the focused pill.
+    ///   * Summary: detected logins plus Continue, Subscription, Import less,
+    ///     and Telemetry pills. Arrows/Tab move; Enter/Space commits.
     ///   * Choose (checkbox list): per-login Yes/No rows.
     ///     - Up / Down / k / j -> move the cursor between logins
     ///     - Left / h / y -> choose "Yes" (import) for the highlighted login
@@ -526,6 +548,9 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
+        // Set when the user wants to learn about the hosted Jcode subscription
+        // instead of importing one of the detected third-party logins.
+        let mut open_pricing = false;
         // Set when the user committed a telemetry level, so we persist it
         // outside the review borrow.
         let mut telemetry_choice = None;
@@ -552,9 +577,8 @@ impl App {
                     _ => return false,
                 }
             } else if !review.choosing {
-                // Summary mode: three pills, "Continue" (preselected),
-                // "Import less", and "Telemetry settings". Left/Right (and
-                // Tab) move between them; Enter/Space commit the focused one.
+                // Summary: Continue, Subscription, Import less, and Telemetry pills.
+                // Arrows/Tab move; Enter/Space commits the focused one.
                 match code {
                     KeyCode::Left
                     | KeyCode::Up
@@ -575,6 +599,7 @@ impl App {
                     KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
                     KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
                         SummaryPill::Continue => finished = true,
+                        SummaryPill::Subscription => open_pricing = true,
                         SummaryPill::ImportLess => review.enter_choose_mode(),
                         SummaryPill::Telemetry => review.open_telemetry(),
                     },
@@ -605,6 +630,16 @@ impl App {
             level.persist();
             self.onboarding_telemetry_choice_made = true;
             self.set_status_notice(level.status_label().to_string());
+            return true;
+        }
+        if open_pricing {
+            self.onboarding_import_error = None;
+            let url = crate::subscription_catalog::JCODE_PRICING_URL;
+            if super::helpers::open_path_or_url_detached(url).is_ok() {
+                self.set_status_notice(format!("Opened Jcode pricing: {url}"));
+            } else {
+                self.set_status_notice(format!("Open Jcode pricing: {url}"));
+            }
             return true;
         }
         if finished {
@@ -867,11 +902,9 @@ impl App {
         picker.activate_onboarding_banner(Self::onboarding_start_choice_banner_lines());
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Onboarding;
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::StartChoice {
-                shown_at: Instant::now(),
-            };
-        }
+        self.set_onboarding_phase(OnboardingPhase::StartChoice {
+            shown_at: Instant::now(),
+        });
         self.onboarding_prefetch_recent_project();
         self.set_status_notice("Choose a suggested review or start a new session (↑↓, Enter)");
     }
@@ -1037,9 +1070,7 @@ impl App {
     /// kick off a single lightweight live validation of the auto-selected
     /// default model and report it as one tidy "ready"/"failed" line.
     pub(super) fn onboarding_show_suggestions(&mut self) {
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Suggestions;
-        }
+        self.set_onboarding_phase(OnboardingPhase::Suggestions);
         let suggestions = self.suggestion_prompts();
         if suggestions.is_empty() {
             self.onboarding_finish();
@@ -1401,11 +1432,36 @@ impl App {
             }
             match state {
                 AuthState::Available => ready.push(name.to_string()),
-                AuthState::Expired => attention.push(format!("{name} - login expired")),
+                AuthState::Expired => attention.push(format!(
+                    "{name} - {}",
+                    Self::onboarding_attention_reason(key)
+                )),
                 AuthState::NotConfigured => {}
             }
         }
         (ready, attention)
+    }
+
+    /// Why a provider needs attention, taken from its recorded credential
+    /// lifecycle rather than assumed.
+    ///
+    /// `AuthState::Expired` is overloaded: it means both "partially configured"
+    /// and "the token is dead". Reporting the wrong one is how the readiness
+    /// summary told a user "GitHub Copilot - login expired" for a provider that
+    /// was never configured. `CredState` knows the difference, so ask it.
+    fn onboarding_attention_reason(provider_key: &str) -> &'static str {
+        use crate::auth::refresh_state::{CredState, cred_state};
+        // No refresh token to fingerprint here: `cred_state` then reports
+        // `Stale` rather than `Rejected`, which is the conservative answer.
+        match cred_state(provider_key, None) {
+            // Nothing was ever recorded for this provider, so there is no
+            // evidence of an expiry. Say what we actually know.
+            CredState::Absent => "needs sign-in",
+            CredState::Present => "configured, not verified",
+            CredState::Verified => "needs a retry",
+            CredState::Stale => "login needs a refresh",
+            CredState::Rejected => "login expired, sign in again",
+        }
     }
 
     /// Handle the result of the onboarding default-model validation: render one
@@ -1503,9 +1559,11 @@ impl App {
     pub(super) fn onboarding_finish(&mut self) {
         self.onboarding_auto_model_selection_active
             .store(false, std::sync::atomic::Ordering::Release);
-        if let Some(flow) = self.onboarding_flow.as_mut() {
-            flow.phase = OnboardingPhase::Done;
-        }
+        *self
+            .onboarding_auto_model_selection_baseline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.set_onboarding_phase(OnboardingPhase::Done);
     }
 
     /// A login/import attempt failed while onboarding was driving the Login

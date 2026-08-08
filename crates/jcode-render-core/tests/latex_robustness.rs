@@ -24,45 +24,51 @@ fn assert_visible_and_deterministic(source: &str) {
 #[test]
 fn renders_the_supported_symbol_vocabulary() {
     let cases = [
-        (r"\alpha \beta \gamma \delta \epsilon \varepsilon", "αβγδεε"),
+        (
+            r"\alpha \beta \gamma \delta \epsilon \varepsilon",
+            "α β γ δ ε ε",
+        ),
         (
             r"\theta \vartheta \lambda \mu \pi \varpi \phi \varphi \omega",
-            "θϑλμπϖφϕω",
+            "θ ϑ λ μ π ϖ φ ϕ ω",
         ),
         (
             r"\Gamma \Delta \Theta \Lambda \Xi \Pi \Sigma \Phi \Psi \Omega",
-            "ΓΔΘΛΞΠΣΦΨΩ",
+            "Γ Δ Θ Λ Ξ Π Σ Φ Ψ Ω",
         ),
         (
             r"\sum \prod \coprod \int \iint \iiint \oint \partial \nabla \infty",
-            "∑∏∐∫∬∭∮∂∇∞",
+            "∑ ∏ ∐ ∫ ∬ ∭ ∮ ∂ ∇ ∞",
         ),
-        (r"\times \div \cdot \circ \pm \mp \ast \star", "×÷·∘±∓∗⋆"),
+        (
+            r"\times \div \cdot \circ \pm \mp \ast \star",
+            "× ÷ · ∘ ± ∓ ∗ ⋆",
+        ),
         (
             r"\le \leq \ge \geq \ne \neq \approx \sim \simeq \equiv \propto",
-            "≤≤≥≥≠≠≈∼≃≡∝",
+            "≤ ≤ ≥ ≥ ≠ ≠ ≈ ∼ ≃ ≡ ∝",
         ),
         (
             r"\in \notin \ni \subset \supset \subseteq \supseteq \cup \cap \setminus",
-            "∈∉∋⊂⊃⊆⊇∪∩∖",
+            "∈ ∉ ∋ ⊂ ⊃ ⊆ ⊇ ∪ ∩ ∖",
         ),
         (
             r"\forall \exists \nexists \neg \land \lor \oplus \otimes \vdash \models",
-            "∀∃∄¬∧∨⊕⊗⊢⊨",
+            "∀ ∃ ∄ ¬ ∧ ∨ ⊕ ⊗ ⊢ ⊨",
         ),
         (
             r"\to \leftarrow \leftrightarrow \Rightarrow \Leftarrow \Leftrightarrow \mapsto \uparrow \downarrow",
-            "→←↔⇒⇐⇔↦↑↓",
+            "→ ← ↔ ⇒ ⇐ ⇔ ↦ ↑ ↓",
         ),
         (
             r"\ldots \cdots \vdots \ddots \angle \degree \prime \perp \parallel \mid",
-            "…⋯⋮⋱∠°′⊥∥∣",
+            "… ⋯ ⋮ ⋱ ∠ ° ′ ⊥ ∥ ∣",
         ),
         (
             r"\langle x \rangle \lceil x \rceil \lfloor x \rfloor",
-            "⟨x ⟩⌈x ⌉⌊x ⌋",
+            "⟨ x ⟩ ⌈ x ⌉ ⌊ x ⌋",
         ),
-        (r"\emptyset \varnothing \ell \hbar", "∅∅ℓℏ"),
+        (r"\emptyset \varnothing \ell \hbar", "∅ ∅ ℓ ℏ"),
     ];
     for (source, expected) in cases {
         assert_eq!(render_inline_latex(source), expected, "{source}");

@@ -47,6 +47,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::XiaomiMimo.as_arg_value(), "xiaomi-mimo");
+    assert_eq!(ProviderChoice::MetaMuse.as_arg_value(), "meta-muse");
     assert_eq!(ProviderChoice::Celeris.as_arg_value(), "celeris");
     assert_eq!(ProviderChoice::Lmstudio.as_arg_value(), "lmstudio");
     assert_eq!(ProviderChoice::Ollama.as_arg_value(), "ollama");
@@ -214,7 +215,7 @@ fn test_init_provider_jcode_delegates_runtime_profile_to_wrapper() {
         .block_on(init_provider(&ProviderChoice::Jcode, None))
         .expect("init jcode provider");
 
-    assert_eq!(provider.name(), "Jcode Subscription");
+    assert_eq!(provider.name(), "Jcode Hosted Models");
     assert!(crate::subscription_catalog::is_runtime_mode_enabled());
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_MODEL").ok().as_deref(),
@@ -543,6 +544,55 @@ fn resolved_profile_default_model_uses_openai_compatible_override() {
             crate::env::set_var(&key, value);
         } else {
             crate::env::remove_var(&key);
+        }
+    }
+}
+
+#[test]
+fn apply_login_provider_profile_env_keeps_an_explicit_named_profile() {
+    // Regression for #712: `auth-test --provider-profile <name>` cleared
+    // JCODE_NAMED_PROVIDER_PROFILE before probing, so the probe evaluated the
+    // built-in generic openai-compatible slot and false-negatived every custom
+    // named profile.
+    let _guard = lock_env();
+    let _env_guard = crate::storage::lock_test_env();
+    let saved: Vec<(String, Option<String>)> = [
+        "JCODE_OPENROUTER_API_BASE",
+        "JCODE_OPENROUTER_API_KEY_NAME",
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_PROVIDER_PROFILE_ACTIVE",
+        "JCODE_PROVIDER_PROFILE_NAME",
+    ]
+    .iter()
+    .map(|k| (k.to_string(), std::env::var(k).ok()))
+    .collect();
+    for (key, _) in &saved {
+        crate::env::remove_var(key);
+    }
+
+    crate::env::set_var("JCODE_NAMED_PROVIDER_PROFILE", "company-gateway");
+    crate::env::set_var("JCODE_OPENROUTER_API_BASE", "https://gw.example.com/v1");
+    crate::env::set_var("JCODE_OPENROUTER_API_KEY_NAME", "COMPANY_GATEWAY_KEY");
+
+    apply_login_provider_profile_env(provider_catalog::OPENCODE_GO_LOGIN_PROVIDER);
+
+    assert_eq!(
+        std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+            .ok()
+            .as_deref(),
+        Some("company-gateway"),
+        "explicit named profile must survive the auth-test probe setup"
+    );
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_API_BASE").ok().as_deref(),
+        Some("https://gw.example.com/v1"),
+        "named profile runtime env must not be replaced by a builtin profile"
+    );
+
+    for (key, value) in saved {
+        match value {
+            Some(value) => crate::env::set_var(&key, value),
+            None => crate::env::remove_var(&key),
         }
     }
 }

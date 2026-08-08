@@ -1,5 +1,5 @@
 use super::*;
-use crate::message::{Message, StreamEvent, ToolDefinition};
+use crate::message::{ContentBlock, Message, StreamEvent, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use futures::stream;
@@ -41,6 +41,7 @@ async fn session_control_handle_does_not_wait_for_busy_agent_lock() {
     tokio::time::timeout(Duration::from_millis(100), async {
         assert!(control.queue_soft_interrupt(
             "please stop".to_string(),
+            Vec::new(),
             true,
             SoftInterruptSource::User,
         ));
@@ -193,6 +194,92 @@ async fn busy_agent_request_rejection_does_not_wait_for_agent_lock() {
 }
 
 #[tokio::test]
+async fn context_message_persists_without_starting_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_context_only_no_reply";
+    let forked = Arc::new(AtomicBool::new(false));
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::clone(&forked),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let mut session = crate::session::Session::create_with_id(session_id.to_string(), None, None);
+    session.model = Some("panic-on-fork".to_string());
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider, registry, session, None,
+    )));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let before = agent.lock().await.message_count();
+
+    append_context_message(
+        77,
+        "remember this context",
+        vec![("image/png".to_string(), "AAA".to_string())],
+        session_id,
+        false,
+        &agent,
+        &client_event_tx,
+    )
+    .await;
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::ContextMessageAdded { id: 77 })
+    ));
+    assert!(client_event_rx.try_recv().is_err());
+    assert!(!forked.load(Ordering::SeqCst));
+
+    let persisted = crate::session::Session::load(session_id).expect("persisted session");
+    assert_eq!(persisted.messages.len(), before + 1);
+    let message = persisted.messages.last().unwrap();
+    assert_eq!(format!("{:?}", message.role), "User");
+    assert!(matches!(
+        &message.content[0],
+        ContentBlock::Image { media_type, data }
+            if media_type == "image/png" && data == "AAA"
+    ));
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Text { text, .. } if text == "remember this context"
+    ));
+}
+
+#[tokio::test]
+async fn context_message_rejects_while_busy_without_waiting_for_agent_lock() {
+    let provider: Arc<dyn Provider> = Arc::new(PanicOnForkProvider {
+        forked: Arc::new(AtomicBool::new(false)),
+    });
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let _busy_agent_lock = agent.lock().await;
+
+    tokio::time::timeout(Duration::from_millis(100), async {
+        append_context_message(
+            78,
+            "too busy",
+            Vec::new(),
+            "session_context_busy",
+            true,
+            &agent,
+            &client_event_tx,
+        )
+        .await;
+    })
+    .await
+    .expect("busy rejection must not wait for the agent mutex");
+
+    assert!(matches!(
+        client_event_rx.recv().await,
+        Some(ServerEvent::Error {
+            id: 78,
+            retry_after_secs: Some(1),
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn cancel_without_local_task_still_signals_session_control() {
     let soft_interrupt_queue = Arc::new(std::sync::Mutex::new(Vec::new()));
     let stop_signal = InterruptSignal::new();
@@ -200,6 +287,14 @@ async fn cancel_without_local_task_still_signals_session_control() {
         "session_detached_cancel",
         soft_interrupt_queue,
         stop_signal.clone(),
+    );
+    // The point of this path is a turn this connection does not own (attach
+    // after reload, server-initiated turn). Without a registered active turn
+    // the cancel is a deliberate no-op, because arming the signal with nothing
+    // running only kills the *next* message.
+    let _active_turn = crate::turn_cancel_registry::register_active_turn(
+        "session_detached_cancel",
+        InterruptSignal::new(),
     );
     let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
@@ -260,6 +355,12 @@ async fn deferred_cancel_reset_does_not_erase_newer_cancel() {
         "session_detached_cancel_race",
         Arc::clone(&soft_interrupt_queue),
         stop_signal.clone(),
+    );
+    // A turn owned by another connection is what makes this the signalling
+    // path rather than the idle no-op; see the sibling test.
+    let _active_turn = crate::turn_cancel_registry::register_active_turn(
+        "session_detached_cancel_race",
+        InterruptSignal::new(),
     );
     let (client_event_tx, _client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let swarm_members = Arc::new(RwLock::new(HashMap::new()));
@@ -490,6 +591,80 @@ fn cancel_aborts_detached_streaming_turn_with_stale_stop_signal() -> anyhow::Res
             !agent_signal.is_set(),
             "consumed cancel must not leak into the next turn"
         );
+    });
+    Ok(())
+}
+
+/// A cancel that arrives while the session is idle must not arm the cancel
+/// signal at all.
+///
+/// The no-local-task branch cannot tell an idle session from one whose turn
+/// another connection owns, so it used to fire the signal and clear it on a
+/// 500ms timer. Any message sent inside that window began with the flag
+/// already set and was aborted the instant it started: no reply, no error,
+/// just a message that vanished. Pressing Esc on an idle prompt and typing
+/// immediately is an ordinary thing to do, so this must be a true no-op.
+#[test]
+fn idle_cancel_does_not_arm_the_signal_for_the_next_turn() -> anyhow::Result<()> {
+    let _lock = crate::storage::lock_test_env();
+    let _env = IsolatedReloadRecoveryEnv::new();
+    let session_id = "session_idle_cancel_noop";
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let stop_signal = InterruptSignal::new();
+        let control = SessionControlHandle::cancel_only(
+            session_id,
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+            stop_signal.clone(),
+        );
+        let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+        let swarm_members = Arc::new(RwLock::new(HashMap::new()));
+        let swarms_by_id = Arc::new(RwLock::new(HashMap::new()));
+        let event_history = Arc::new(RwLock::new(std::collections::VecDeque::new()));
+        let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (swarm_event_tx, _) = broadcast::channel(8);
+        let mut client_is_processing = false;
+        let mut message_id = None;
+        let mut cancel_session_id = None;
+        let mut task = None;
+
+        assert!(
+            !crate::turn_cancel_registry::has_active_turn(session_id),
+            "test precondition: the session must be idle"
+        );
+
+        cancel_processing_message(
+            &mut ProcessingState {
+                client_is_processing: &mut client_is_processing,
+                message_id: &mut message_id,
+                session_id: &mut cancel_session_id,
+                task: &mut task,
+            },
+            &control,
+            &client_event_tx,
+            &SwarmStatusRefs {
+                members: &swarm_members,
+                swarms_by_id: &swarms_by_id,
+                event_history: &event_history,
+                event_counter: &event_counter,
+                event_tx: &swarm_event_tx,
+            },
+            Some(1),
+            None,
+        )
+        .await;
+
+        assert!(
+            !stop_signal.is_set(),
+            "an idle cancel must not arm the stop signal; the next turn would die instantly"
+        );
+        // The client still learns the cancel was handled, so a UI showing
+        // "Interrupting..." resolves rather than hanging.
+        match client_event_rx.try_recv() {
+            Ok(ServerEvent::Interrupted) => {}
+            other => panic!("idle cancel must still report Interrupted, got {other:?}"),
+        }
     });
     Ok(())
 }
@@ -745,6 +920,7 @@ fn reload_starting_rejects_new_turn_without_spawning_processing_task() {
             &agent,
             &client_event_tx,
             &processing_done_tx,
+            Vec::new(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -844,6 +1020,7 @@ async fn client_initiated_turn_fans_out_stream_and_terminal_events_to_live_attac
         &agent,
         &origin_tx,
         &processing_done_tx,
+        Vec::new(),
         &SwarmStatusRefs {
             members: &swarm_members,
             swarms_by_id: &swarms_by_id,
@@ -967,6 +1144,7 @@ fn accepted_reload_recovery_continuation_marks_intent_delivered() -> anyhow::Res
             &agent,
             &client_event_tx,
             &processing_done_tx,
+            Vec::new(),
             &SwarmStatusRefs {
                 members: &swarm_members,
                 swarms_by_id: &swarms_by_id,
@@ -1065,6 +1243,7 @@ fn reload_starting_rejects_new_turns_for_multiple_sessions() {
                 &agent,
                 &client_event_tx,
                 &processing_done_tx,
+                Vec::new(),
                 &SwarmStatusRefs {
                     members: &swarm_members,
                     swarms_by_id: &swarms_by_id,

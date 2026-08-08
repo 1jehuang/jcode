@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSoftInterrupt {
     content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<(String, String)>,
     urgent: bool,
     source: PersistedSoftInterruptSource,
 }
@@ -42,6 +44,7 @@ impl From<SoftInterruptMessage> for PersistedSoftInterrupt {
     fn from(value: SoftInterruptMessage) -> Self {
         Self {
             content: value.content,
+            images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
         }
@@ -52,6 +55,7 @@ impl From<PersistedSoftInterrupt> for SoftInterruptMessage {
     fn from(value: PersistedSoftInterrupt) -> Self {
         Self {
             content: value.content,
+            images: value.images,
             urgent: value.urgent,
             source: value.source.into(),
         }

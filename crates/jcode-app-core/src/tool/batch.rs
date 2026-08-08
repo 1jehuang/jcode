@@ -9,6 +9,29 @@ use std::collections::HashMap;
 
 const MAX_PARALLEL: usize = 10;
 
+const BATCH_DESCRIPTION: &str = r#"Run independent tool calls in parallel instead of making them sequentially. Example:
+{
+  "intent": "Inspect the relevant files in parallel",
+  "tool_calls": [
+    {
+      "tool": "read",
+      "intent": "Read the configuration",
+      "file_path": "src/config.rs",
+      "start_line": 1,
+      "limit": 200
+    },
+    {
+      "tool": "agentgrep",
+      "intent": "Find configuration usage",
+      "query": "Config",
+      "path": "src",
+      "glob": "**/*.rs",
+      "max_files": 20,
+      "max_regions": 20
+    }
+  ]
+}"#;
+
 pub(crate) fn generic_batch_schema() -> Value {
     json!({
         "type": "object",
@@ -141,6 +164,21 @@ fn normalize_batch_input(mut input: Value) -> Value {
                     params.insert("intent".to_string(), Value::String(intent));
                 }
 
+                // Same forwarding for the oversized-output opt-in. The context
+                // guard runs per sub-call inside registry.execute(), so a flag
+                // left beside `parameters` would be silently dropped and the
+                // sub-call withheld again. Models place it at either level.
+                let top_level_accept = obj
+                    .get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                    .filter(|value| !value.is_null())
+                    .cloned();
+                if let Some(accept) = top_level_accept
+                    && let Some(params) = obj.get_mut("parameters").and_then(Value::as_object_mut)
+                    && !params.contains_key(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY)
+                {
+                    params.insert(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY.to_string(), accept);
+                }
+
                 if !obj.contains_key("parameters") && obj.contains_key("tool") {
                     let tool_name = obj.get("tool").cloned();
                     let mut params = serde_json::Map::new();
@@ -170,7 +208,7 @@ impl Tool for BatchTool {
     }
 
     fn description(&self) -> &str {
-        "Run tools in parallel."
+        BATCH_DESCRIPTION
     }
 
     fn parameters_schema(&self) -> Value {

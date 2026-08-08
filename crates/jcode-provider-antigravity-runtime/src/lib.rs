@@ -231,6 +231,60 @@ impl AntigravityProvider {
         jcode_base::provider::antigravity::fetch_catalog_snapshot(&self.client).await
     }
 
+    /// Recover from a tool-schema rejection by learning what the backend
+    /// refused and re-sending the turn without it.
+    ///
+    /// Because jcode advertises every tool on every request, one construct the
+    /// backend dislikes 400s the whole session rather than one tool, and the
+    /// historical fix has been to ship a new deny-list entry (#754, #687, #543,
+    /// #446). `jcode-schema-dialect` instead parses the construct out of the
+    /// error, persists it, and normalization strips it from then on, so the
+    /// user's next turn works instead of their next upgrade.
+    ///
+    /// Returns `None` when the error is not a recoverable schema rejection, so
+    /// the caller falls through to its other error handling. The quirk store
+    /// only reports a construct as newly-learned once, which is what bounds
+    /// this to a single retry per distinct construct.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors generate_content's explicit per-request settings so the retry re-sends an identical turn"
+    )]
+    async fn retry_after_schema_rejection(
+        &self,
+        error: &str,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+    ) -> Option<Result<CodeAssistGenerateResponse>> {
+        let resolved = self.resolve_model_for_request(model);
+        let dialect = jcode_provider_antigravity::antigravity_dialect(&resolved);
+        match jcode_schema_dialect::recover_from_error(error, dialect) {
+            jcode_schema_dialect::RecoveryAction::NotSchemaRelated => None,
+            jcode_schema_dialect::RecoveryAction::Unrecoverable { hint } => {
+                jcode_base::logging::warn(&format!("Antigravity tool-schema rejection: {hint}"));
+                None
+            }
+            jcode_schema_dialect::RecoveryAction::RetryWithoutConstruct { description } => {
+                jcode_base::logging::warn(&format!("Antigravity {description}"));
+                Some(
+                    self.generate_content(
+                        model,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        false,
+                        signature_policy,
+                    )
+                    .await,
+                )
+            }
+        }
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "the Code Assist call threads explicit per-request settings, including the signature policy, without hidden state"
@@ -449,32 +503,58 @@ impl Provider for AntigravityProvider {
             {
                 Ok(response) => response,
                 Err(err) => {
-                    if !jcode_provider_gemini::is_missing_thought_signature_error(&err.to_string())
-                    {
-                        let _ = tx.send(Err(err)).await;
-                        return;
-                    }
-                    jcode_base::logging::warn(
-                        "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
-                    );
-                    signature_policy =
-                        jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
-                    match provider
-                        .generate_content(
+                    // A tool schema the backend rejects 400s every single turn,
+                    // so the provider is unusable until jcode ships a new
+                    // deny-list entry. Instead, learn the rejected construct
+                    // from the error, persist it, and retry the same turn
+                    // without it. See `jcode-schema-dialect`.
+                    if let Some(retried) = provider
+                        .retry_after_schema_rejection(
+                            &err.to_string(),
                             &model,
                             &messages,
                             &tools,
                             &system,
                             resume_session_id.as_deref(),
-                            false,
                             signature_policy,
                         )
                         .await
                     {
-                        Ok(response) => response,
-                        Err(retry_err) => {
-                            let _ = tx.send(Err(retry_err)).await;
-                            return;
+                        match retried {
+                            Ok(response) => response,
+                            Err(retry_err) => {
+                                let _ = tx.send(Err(retry_err)).await;
+                                return;
+                            }
+                        }
+                    } else if !jcode_provider_gemini::is_missing_thought_signature_error(
+                        &err.to_string(),
+                    ) {
+                        let _ = tx.send(Err(err)).await;
+                        return;
+                    } else {
+                        jcode_base::logging::warn(
+                            "Antigravity rejected unsigned function calls; retrying with tool calls downgraded to text",
+                        );
+                        signature_policy =
+                            jcode_provider_gemini::SignaturePolicy::DowngradeToolCallsToText;
+                        match provider
+                            .generate_content(
+                                &model,
+                                &messages,
+                                &tools,
+                                &system,
+                                resume_session_id.as_deref(),
+                                false,
+                                signature_policy,
+                            )
+                            .await
+                        {
+                            Ok(response) => response,
+                            Err(retry_err) => {
+                                let _ = tx.send(Err(retry_err)).await;
+                                return;
+                            }
                         }
                     }
                 }
@@ -664,7 +744,11 @@ impl Provider for AntigravityProvider {
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        let trimmed = model.trim();
+        // `--provider antigravity` uses this runtime directly, so session
+        // restore hands it the routing spec `antigravity:<model>` rather than a
+        // bare id. See `strip_own_model_prefix`: keeping the prefix made every
+        // resumed turn 404.
+        let trimmed = jcode_provider_core::strip_own_model_prefix(model, "antigravity:");
         if trimmed.is_empty() {
             anyhow::bail!("Antigravity model cannot be empty");
         }

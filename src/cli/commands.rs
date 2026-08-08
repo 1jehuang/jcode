@@ -1880,7 +1880,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
         eprintln!("  Bind address:  \x1b[2m{}\x1b[0m", bind_hint);
     }
 
-    if connect_host == "<your-mac-hostname>" {
+    if connect_host == gateway::UNKNOWN_CONNECT_HOST {
         eprintln!(
             "\n  \x1b[33mTip:\x1b[0m set JCODE_GATEWAY_HOST to your reachable Tailscale hostname."
         );
@@ -1902,58 +1902,7 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn resolve_connect_host(bind_addr: &str) -> String {
-    if bind_addr == "0.0.0.0" || bind_addr == "::" {
-        if let Some(host) = std::env::var("JCODE_GATEWAY_HOST")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            return host;
-        }
-
-        if let Some(host) = detect_tailscale_dns_name() {
-            return host;
-        }
-
-        return std::env::var("HOSTNAME")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "<your-mac-hostname>".to_string());
-    }
-    bind_addr.to_string()
-}
-
-pub fn parse_tailscale_dns_name(status_json: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(status_json).ok()?;
-    let dns_name = value
-        .get("Self")?
-        .get("DNSName")?
-        .as_str()?
-        .trim()
-        .trim_end_matches('.')
-        .to_string();
-
-    if dns_name.is_empty() {
-        None
-    } else {
-        Some(dns_name)
-    }
-}
-
-pub fn detect_tailscale_dns_name() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    parse_tailscale_dns_name(&output.stdout)
-}
+pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_connect_host};
 
 pub async fn run_browser(action: &str) -> Result<()> {
     match action {
@@ -2150,6 +2099,12 @@ pub async fn run_server_reload_command(force: bool, emit_json: bool) -> Result<(
     }
 
     let mut client = crate::server::Client::connect().await?;
+
+    // The server requires `Subscribe` as the first frame and rejects any other
+    // opening request with "Client must Subscribe with a working_dir before
+    // sending stateful requests", so `reload` alone always failed (issue #648).
+    // `subscribe()` defaults `working_dir` to the current directory.
+    client.subscribe().await?;
 
     // Before asking the (possibly older) daemon to reload, repair a stale
     // `shared-server` channel from the client side. The running server resolves
@@ -2472,7 +2427,7 @@ fn run_command_auto_poke_enabled() -> bool {
             let value = value.trim().to_ascii_lowercase();
             !matches!(value.as_str(), "0" | "false" | "off" | "no")
         })
-        .unwrap_or(true)
+        .unwrap_or_else(|| crate::config::config().features.auto_poke)
 }
 
 /// Whether headless `jcode run` should load MCP servers from `~/.jcode/mcp.json`.
@@ -2573,8 +2528,7 @@ fn run_command_auto_poke_limit_reached(turns_completed: usize, max_turns: Option
         .unwrap_or(false)
 }
 
-const RUN_TODO_CONFIDENCE_THRESHOLD: u8 = 90;
-
+#[derive(Debug)]
 enum RunAutoPokeFollowUp {
     Incomplete {
         count: usize,
@@ -2585,15 +2539,62 @@ enum RunAutoPokeFollowUp {
         message: String,
         confidence_spike_challenge: bool,
     },
+    /// Deferred quality-check reminder for the points this turn flagged and
+    /// never resolved. Delivered once, ahead of the confidence summary.
+    GateDigest {
+        message: String,
+    },
 }
 
 fn run_todos(session_id: &str) -> Vec<crate::todo::TodoItem> {
     crate::todo::load_todos(session_id).unwrap_or_default()
 }
 
+/// Build the deferred quality-check reminder for a headless run, consuming the
+/// turn's observation log.
+///
+/// The log is cleared whether or not a reminder results, so one turn's points
+/// cannot be raised again against the next turn's work. Returns `None` only when
+/// the turn recorded nothing.
+fn take_run_gate_digest(session_id: &str, already_delivered: bool) -> Option<String> {
+    if already_delivered {
+        return None;
+    }
+    let observations = crate::todo::load_gate_observations(session_id).unwrap_or_default();
+    if observations.is_empty() {
+        return None;
+    }
+    let plan = crate::todo::load_plan(session_id).unwrap_or_default();
+    let goals = crate::todo::load_goals(session_id).unwrap_or_default();
+    let digest = crate::todo::build_gate_digest(&observations, &plan, &goals);
+    let _ = crate::todo::clear_gate_observations(session_id);
+    digest
+}
+
+/// Consume the observation log only once the turn has actually ended.
+///
+/// `take_run_gate_digest` clears the log, so calling it while todos are still
+/// open would destroy the reminder: auto-poke iterates many times with open work
+/// on a long run, and the incomplete-todo follow-up takes precedence, so the
+/// digest string would be dropped on the floor with the log already emptied.
+fn take_run_gate_digest_if_turn_ended(
+    session_id: &str,
+    already_delivered: bool,
+    todos: &[crate::todo::TodoItem],
+) -> Option<String> {
+    let work_remains = todos
+        .iter()
+        .any(|todo| todo.status != "completed" && todo.status != "cancelled");
+    if work_remains {
+        return None;
+    }
+    take_run_gate_digest(session_id, already_delivered)
+}
+
 fn build_run_auto_poke_follow_up_from_todos(
     todos: &[crate::todo::TodoItem],
     confidence_spike_challenged: bool,
+    gate_digest: Option<String>,
 ) -> Option<RunAutoPokeFollowUp> {
     let incomplete: Vec<_> = todos
         .iter()
@@ -2605,6 +2606,11 @@ fn build_run_auto_poke_follow_up_from_todos(
             count: incomplete.len(),
             message: build_run_poke_message(&incomplete),
         });
+    }
+    // Verify the weak points before judging completion confidence: the digest
+    // may prompt work that changes those very assessments.
+    if let Some(message) = gate_digest {
+        return Some(RunAutoPokeFollowUp::GateDigest { message });
     }
     if !todos.is_empty()
         && let Some((message, confidence_spike_challenge)) =
@@ -2635,10 +2641,9 @@ fn build_run_todo_validation_message(
         return None;
     }
 
-    let completion_confidence_needs_validation = completed.iter().any(|todo| {
-        todo.completion_confidence
-            .is_none_or(|score| score < RUN_TODO_CONFIDENCE_THRESHOLD)
-    });
+    let completion_confidence_needs_validation = completed
+        .iter()
+        .any(|todo| !crate::todo::completion_confidence_passes(todo.completion_confidence));
     let confidence_spike_detected =
         allow_confidence_spike_challenge && !crate::todo::spike_completed_todos(todos).is_empty();
 
@@ -2651,13 +2656,13 @@ fn build_run_todo_validation_message(
     if completion_confidence_needs_validation {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Completion);
         Some((
-            crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE.to_string(),
+            crate::todo::build_todo_completion_continuation_message(todos),
             false,
         ))
     } else {
         crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::ConfidenceSpike);
         Some((
-            crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_string(),
+            crate::todo::build_todo_confidence_spike_continuation_message(todos),
             true,
         ))
     }
@@ -2671,6 +2676,7 @@ async fn run_single_message_command_plain_with_auto_poke(
     let max_turns = run_command_auto_poke_max_turns();
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
+    let mut gate_digest_delivered = false;
     loop {
         agent.run_once(&next_message).await?;
         turns_completed += 1;
@@ -2678,7 +2684,29 @@ async fn run_single_message_command_plain_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_spike_challenged) {
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        match build_run_auto_poke_follow_up_from_todos(
+            &todos,
+            confidence_spike_challenged,
+            gate_digest,
+        ) {
+            Some(RunAutoPokeFollowUp::GateDigest { message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        eprintln!(
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
+                        );
+                    }
+                    break;
+                }
+                gate_digest_delivered = true;
+                next_message = message;
+                eprintln!(
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                );
+                continue;
+            }
             Some(RunAutoPokeFollowUp::ConfidenceSummary {
                 message,
                 confidence_spike_challenge,
@@ -2687,7 +2715,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with completion confidence still needing validation."
+                            "We stopped poking after {max_turns} turn(s); the agent's completion confidence still needs validation."
                         );
                     }
                     break;
@@ -2695,7 +2723,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 confidence_spike_challenged |= confidence_spike_challenge;
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: todos complete; sending confidence summary follow-up. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                    "Todos are done. Asking the agent for a final confidence check. Set JCODE_RUN_AUTO_POKE=0 to disable."
                 );
                 continue;
             }
@@ -2703,7 +2731,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         eprintln!(
-                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            "We stopped poking after {max_turns} turn(s); {} todo(s) are still unfinished.",
                             count
                         );
                     }
@@ -2711,7 +2739,7 @@ async fn run_single_message_command_plain_with_auto_poke(
                 }
                 next_message = message;
                 eprintln!(
-                    "Auto-poking: {} incomplete todo(s). Set JCODE_RUN_AUTO_POKE=0 to disable.",
+                    "{} incomplete todo(s). We poked the agent for you. Set JCODE_RUN_AUTO_POKE=0 to disable.",
                     count
                 );
             }
@@ -2730,6 +2758,7 @@ async fn run_single_message_command_capture_with_auto_poke(
     let mut outputs = Vec::new();
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
+    let mut gate_digest_delivered = false;
     loop {
         outputs.push(agent.run_once_capture(&next_message).await?);
         turns_completed += 1;
@@ -2737,7 +2766,29 @@ async fn run_single_message_command_capture_with_auto_poke(
             break;
         }
         let todos = run_todos(agent.session_id());
-        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_spike_challenged) {
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        match build_run_auto_poke_follow_up_from_todos(
+            &todos,
+            confidence_spike_challenged,
+            gate_digest,
+        ) {
+            Some(RunAutoPokeFollowUp::GateDigest { message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        eprintln!(
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
+                        );
+                    }
+                    break;
+                }
+                gate_digest_delivered = true;
+                next_message = message;
+                eprintln!(
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                );
+                continue;
+            }
             Some(RunAutoPokeFollowUp::ConfidenceSummary {
                 message,
                 confidence_spike_challenge,
@@ -2746,7 +2797,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
-                            "Auto-poke stopped after {max_turns} turn(s) with completion confidence still needing validation."
+                            "We stopped poking after {max_turns} turn(s); the agent's completion confidence still needs validation."
                         ));
                     }
                     break;
@@ -2759,7 +2810,7 @@ async fn run_single_message_command_capture_with_auto_poke(
                 if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
                     if let Some(max_turns) = max_turns {
                         outputs.push(format!(
-                            "Auto-poke stopped after {max_turns} turn(s) with {} incomplete todo(s).",
+                            "We stopped poking after {max_turns} turn(s); {} todo(s) are still unfinished.",
                             count
                         ));
                     }
@@ -2810,6 +2861,7 @@ async fn run_single_message_command_ndjson(
     let mut result: Result<()> = Ok(());
     let mut turns_completed = 0usize;
     let mut confidence_spike_challenged = false;
+    let mut gate_digest_delivered = false;
     loop {
         let turn_result = {
             let mut run_future = std::pin::pin!(agent.run_once_streaming_mpsc(
@@ -2850,7 +2902,29 @@ async fn run_single_message_command_ndjson(
             break;
         }
         let todos = run_todos(&session_id);
-        match build_run_auto_poke_follow_up_from_todos(&todos, confidence_spike_challenged) {
+        let gate_digest =
+            take_run_gate_digest_if_turn_ended(agent.session_id(), gate_digest_delivered, &todos);
+        match build_run_auto_poke_follow_up_from_todos(
+            &todos,
+            confidence_spike_challenged,
+            gate_digest,
+        ) {
+            Some(RunAutoPokeFollowUp::GateDigest { message }) => {
+                if run_command_auto_poke_limit_reached(turns_completed, max_turns) {
+                    if let Some(max_turns) = max_turns {
+                        eprintln!(
+                            "We stopped poking after {max_turns} turn(s); some quality-review points are still open."
+                        );
+                    }
+                    break;
+                }
+                gate_digest_delivered = true;
+                next_message = message;
+                eprintln!(
+                    "We asked the agent to double-check this turn's weak points. Set JCODE_RUN_AUTO_POKE=0 to disable."
+                );
+                continue;
+            }
             Some(RunAutoPokeFollowUp::ConfidenceSummary {
                 total_todos,
                 message,

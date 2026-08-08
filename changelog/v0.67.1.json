@@ -1,0 +1,13 @@
+{
+  "version": "0.67.1",
+  "date": "2026-08-03",
+  "title": "Provider reliability fixes",
+  "improvements": [
+    "Anthropic usage now shows model-specific weekly limits alongside account-wide windows"
+  ],
+  "fixes": [
+    "Gemini tool schemas are sanitized for provider compatibility",
+    "MCP notifications no longer cause request-handling failures",
+    "Completed desktop todo items render without a duplicate marker glyph"
+  ]
+}

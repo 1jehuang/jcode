@@ -11,6 +11,8 @@ pub const JCODE_SUBSCRIPTION_ACTIVE_ENV: &str = "JCODE_SUBSCRIPTION_ACTIVE";
 pub const DEFAULT_JCODE_API_BASE: &str = "https://api.jcode.sh/v1";
 pub const JCODE_PRICING_URL: &str = "https://jcode.sh/pricing";
 pub const JCODE_ACCOUNT_URL: &str = "https://jcode.sh/account";
+/// User-facing runtime identity. Keep "Subscription" in the name so picker,
+/// header, status, and diagnostics never resemble a generic model host.
 pub const JCODE_PROVIDER_DISPLAY_NAME: &str = "Jcode Subscription";
 pub const JCODE_ROUTE_API_METHOD: &str = "jcode-subscription";
 
@@ -43,13 +45,19 @@ impl JcodeTier {
     }
 
     pub fn usable_budget_usd(self) -> f64 {
-        match self {
-            Self::Plus => 18.00,
-            Self::Pro => 40.00,
-            Self::Max => 225.00,
-            Self::Ultra => 500.00,
-            Self::Flagship => 3000.00,
-        }
+        f64::from(self.retail_price_usd()) * 2.0
+    }
+
+    /// Provider-price inference included with the monthly plan. The included
+    /// portion is billed at 50%, so every subscription dollar buys two dollars
+    /// of inference. Usage after this allowance is billed at 90% of provider API
+    /// price (a 10% discount).
+    pub fn included_inference_usd(self) -> f64 {
+        self.usable_budget_usd()
+    }
+
+    pub fn overage_api_price_multiplier(self) -> f64 {
+        0.9
     }
 
     pub fn display_name(self) -> &'static str {
@@ -122,6 +130,15 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
+        id: "claude-opus-5",
+        display_name: "Claude Opus 5",
+        aliases: &["claude-opus-5", "opus-5", "opus 5", "claude opus 5"],
+        default_enabled: false,
+        routing_policy: UpstreamRoutingPolicy::ServerManaged,
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
+    },
+    CuratedModel {
         id: "claude-sonnet-4-6",
         display_name: "Claude Sonnet 4.6",
         aliases: &[
@@ -150,8 +167,8 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         aliases: &["claude-fable-5", "fable-5", "fable 5", "claude fable 5"],
         default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Ultra,
-        note: "Ultra-tier model; routed server-side to Anthropic by the jcode router.",
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
         id: "gpt-5.6-sol",
@@ -335,11 +352,9 @@ pub fn is_curated_model(model: &str) -> bool {
     canonical_model_id(model).is_some()
 }
 
-/// The effective subscription tier for gating decisions.
-///
-/// `/v1/me` is the source of truth; the last-known tier is persisted to
-/// `jcode-subscription.env` (`JCODE_TIER`). Unknown/absent tier behaves like
-/// Plus for backward compatibility.
+/// Legacy tier metadata retained for compatibility with account servers that
+/// still return tier-shaped responses. Metered hosted billing does not use it
+/// for client-side model gates.
 pub fn effective_tier() -> JcodeTier {
     cached_tier().unwrap_or(JcodeTier::Plus)
 }
@@ -360,18 +375,17 @@ pub fn store_cached_tier(tier: Option<JcodeTier>) -> anyhow::Result<()> {
     )
 }
 
-/// Whether the current (cached) tier is allowed to use `model`.
+/// Whether `model` is in the hosted catalog. Spending limits and model policy
+/// are enforced by the router, never by stale client-side subscription tiers.
 /// Non-curated models return `false`.
 pub fn is_model_allowed_for_current_tier(model: &str) -> bool {
-    find_curated_model(model)
-        .map(|curated| effective_tier().allows(curated.min_tier))
-        .unwrap_or(false)
+    is_curated_model(model)
 }
 
 pub fn routing_policy_detail(model: &CuratedModel) -> String {
     match model.routing_policy {
         UpstreamRoutingPolicy::ServerManaged => {
-            "jcode subscription routing · managed server-side".to_string()
+            "Jcode hosted routing · managed server-side".to_string()
         }
     }
 }
@@ -389,7 +403,7 @@ pub fn has_credentials() -> bool {
 }
 
 /// Persist an account API key and its non-secret account metadata in jcode's
-/// owner-only subscription file.
+/// owner-only hosted-account file.
 pub fn persist_account_credentials(
     api_key: &str,
     account_id: Option<&str>,
@@ -436,7 +450,7 @@ pub fn account_credential_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(crate::storage::app_config_dir()?.join(JCODE_ENV_FILE))
 }
 
-/// Re-harden and verify the subscription file after every credential mutation.
+/// Re-harden and verify the hosted account file after every credential mutation.
 /// This is deliberately an explicit postcondition even though the shared secret
 /// writer also applies owner-only permissions.
 pub fn ensure_account_credential_permissions() -> anyhow::Result<()> {
@@ -511,8 +525,10 @@ mod tests {
 
     const EXPECTED_PLUS_MODELS: &[&str] = &[
         "claude-opus-4-8",
+        "claude-opus-5",
         "claude-sonnet-4-6",
         "gpt-5.5",
+        "claude-fable-5",
         "gpt-5.6-sol",
         "qwen3-coder-next",
         "devstral-2-123b",
@@ -591,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn curated_catalog_has_exact_paid_and_ultra_sets() {
+    fn curated_catalog_has_exact_hosted_set_without_legacy_model_gates() {
         assert_eq!(
             CURATED_MODELS
                 .iter()
@@ -606,14 +622,14 @@ mod tests {
                 .filter(|model| model.min_tier == JcodeTier::Ultra)
                 .map(|model| model.id)
                 .collect::<Vec<_>>(),
-            vec!["claude-fable-5"]
+            Vec::<&str>::new()
         );
         assert!(
             CURATED_MODELS
                 .iter()
                 .all(|model| model.min_tier != JcodeTier::Flagship)
         );
-        assert_eq!(CURATED_MODELS.len(), 19);
+        assert_eq!(CURATED_MODELS.len(), 20);
         assert!(find_curated_model("magistral-small-1.2").is_none());
         assert!(find_curated_model("gemma-3-27b").is_none());
         assert!(find_curated_model("llama-4-maverick").is_none());
@@ -624,11 +640,11 @@ mod tests {
     #[test]
     fn tier_pricing_matches_launched_plans() {
         let expected = [
-            (JcodeTier::Plus, "plus", "Plus", 10, 18.00),
+            (JcodeTier::Plus, "plus", "Plus", 10, 20.00),
             (JcodeTier::Pro, "pro", "Pro", 20, 40.00),
-            (JcodeTier::Max, "max", "Max", 100, 225.00),
-            (JcodeTier::Ultra, "ultra", "Ultra", 200, 500.00),
-            (JcodeTier::Flagship, "flagship", "Solo", 1000, 3000.00),
+            (JcodeTier::Max, "max", "Max", 100, 200.00),
+            (JcodeTier::Ultra, "ultra", "Ultra", 200, 400.00),
+            (JcodeTier::Flagship, "flagship", "Solo", 1000, 2000.00),
         ];
 
         assert_eq!(JcodeTier::ALL, expected.map(|(tier, ..)| tier));
@@ -637,6 +653,8 @@ mod tests {
             assert_eq!(tier.display_name(), display_name);
             assert_eq!(tier.retail_price_usd(), retail_price);
             assert_eq!(tier.usable_budget_usd(), usable_budget);
+            assert_eq!(tier.included_inference_usd(), usable_budget);
+            assert_eq!(tier.overage_api_price_multiplier(), 0.9);
         }
     }
 
@@ -670,27 +688,20 @@ mod tests {
     }
 
     #[test]
-    fn model_entitlements_match_paid_tiers() {
+    fn every_hosted_model_is_available_from_the_base_subscription() {
         for model in CURATED_MODELS {
-            match model.id {
-                "claude-fable-5" => assert_eq!(model.min_tier, JcodeTier::Ultra),
-                _ => assert_eq!(model.min_tier, JcodeTier::Plus),
-            }
+            assert_eq!(model.min_tier, JcodeTier::Plus, "{}", model.id);
         }
 
         for tier in JcodeTier::ALL {
             for model in EXPECTED_PLUS_MODELS {
                 assert!(tier.allows(find_curated_model(model).unwrap().min_tier));
             }
-            assert_eq!(
-                tier.allows(find_curated_model("claude-fable-5").unwrap().min_tier),
-                matches!(tier, JcodeTier::Ultra | JcodeTier::Flagship)
-            );
         }
     }
 
     #[test]
-    fn effective_tier_defaults_to_plus_when_unknown() {
+    fn hosted_catalog_access_does_not_depend_on_legacy_cached_tier() {
         let _guard = crate::storage::lock_test_env();
         crate::env::remove_var(JCODE_TIER_ENV);
         let temp = tempfile::tempdir().expect("temp home");
@@ -701,7 +712,7 @@ mod tests {
         for model in EXPECTED_PLUS_MODELS {
             assert!(is_model_allowed_for_current_tier(model));
         }
-        assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
+        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
 
         crate::env::set_var(JCODE_TIER_ENV, "mystery");
         assert_eq!(cached_tier(), None);
@@ -713,14 +724,12 @@ mod tests {
             for model in EXPECTED_PLUS_MODELS {
                 assert!(is_model_allowed_for_current_tier(model));
             }
-            assert!(!is_model_allowed_for_current_tier("claude-fable-5"));
+            assert!(is_model_allowed_for_current_tier("claude-fable-5"));
         }
 
         crate::env::set_var(JCODE_TIER_ENV, JcodeTier::Ultra.as_str());
         assert_eq!(effective_tier(), JcodeTier::Ultra);
-        assert!(is_model_allowed_for_current_tier("claude-fable-5"));
-
-        crate::env::remove_var(JCODE_TIER_ENV);
+        assert!(!is_model_allowed_for_current_tier("not-a-hosted-model"));
         store_cached_tier(Some(JcodeTier::Flagship)).expect("persist tier");
         assert_eq!(cached_tier(), Some(JcodeTier::Flagship));
         assert!(is_model_allowed_for_current_tier("claude-fable-5"));

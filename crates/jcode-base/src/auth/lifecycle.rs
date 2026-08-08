@@ -481,10 +481,10 @@ fn frontier_families(activation: &AuthActivationResult) -> &'static [FrontierFam
         flagship_token: Some("pro"),
     };
     match activation.provider_id.as_deref() {
-        Some("claude") | Some("claude-api") => &[FABLE, CLAUDE],
+        Some("claude") | Some("claude-api") => &[CLAUDE, FABLE],
         Some("openai") | Some("openai-api") | Some("azure-openai") => &[GPT],
         // Copilot/Cursor proxy both families under canonical ids.
-        Some("copilot") | Some("cursor") => &[FABLE, CLAUDE, GPT],
+        Some("copilot") | Some("cursor") => &[CLAUDE, FABLE, GPT],
         // Bedrock hosts Claude under `anthropic.claude-opus-...` (prefix stripped
         // by normalize), so the Claude family applies.
         Some("bedrock") => &[CLAUDE],
@@ -1799,7 +1799,7 @@ mod tests {
         // Live Anthropic catalogs list `claude-haiku-4-5-...` before the
         // flagship, and an API-key login supplies no activated model. Plain
         // catalog order would auto-select Haiku; the flagship-first fallback
-        // must land on the curated quality-first default (Fable 5) instead.
+        // must land on the curated quality-first default (Opus 5) instead.
         let activation = AuthActivationResult {
             provider_id: Some("claude-api".to_string()),
             provider_label: Some("Anthropic".to_string()),
@@ -1811,13 +1811,14 @@ mod tests {
             route("claude-haiku-4-5-20251001", "Anthropic", "claude-api", true),
             route("claude-opus-4-6", "Anthropic", "claude-api", true),
             route("claude-opus-4-8", "Anthropic", "claude-api", true),
+            route("claude-opus-5", "Anthropic", "claude-api", true),
             route("claude-fable-5", "Anthropic", "claude-api", true),
             route("claude-sonnet-4-6", "Anthropic", "claude-api", true),
         ];
 
         assert_eq!(
             provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
-            Some("claude-fable-5"),
+            Some("claude-opus-5"),
             "API-key login should auto-select the Anthropic flagship, not the first catalog route"
         );
     }
@@ -1834,12 +1835,13 @@ mod tests {
         let routes = vec![
             route("claude-haiku-4-5", "Anthropic", "claude-oauth", true),
             route("claude-opus-4-8", "Anthropic", "claude-oauth", true),
+            route("claude-opus-5", "Anthropic", "claude-oauth", true),
             route("claude-fable-5", "Anthropic", "claude-oauth", true),
         ];
 
         assert_eq!(
             provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
-            Some("claude-fable-5")
+            Some("claude-opus-5")
         );
     }
 
@@ -1921,12 +1923,13 @@ mod tests {
     fn post_auth_model_selection_falls_back_when_quality_first_model_is_unavailable() {
         let claude = activation_for_provider_id("claude-api");
         let claude_routes = vec![
-            route("claude-fable-5", "Anthropic", "claude-api", false),
+            route("claude-opus-5", "Anthropic", "claude-api", false),
+            route("claude-fable-5", "Anthropic", "claude-api", true),
             route("claude-opus-4-8", "Anthropic", "claude-api", true),
         ];
         assert_eq!(
             provider_model_to_select_after_auth(&claude, None, &claude_routes).as_deref(),
-            Some("claude-opus-4-8")
+            Some("claude-fable-5")
         );
 
         let openai = activation_for_provider_id("openai-api");

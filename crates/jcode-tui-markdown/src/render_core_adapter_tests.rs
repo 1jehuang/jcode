@@ -170,30 +170,31 @@ fn parity_two_currency_amounts_not_math() {
 
 #[test]
 fn probe_math_divergence() {
-    let math = crate::math_fg();
-    for input in [
-        "$5x$ and more",
-        "price $5$ each",
-        "$5+$3 = $8",
-        "a $1 and $2 b",
-        "x$5$y",
-        "buy $5 sell $9 net $4",
-        "$$\nx=5\n$$",
-        "inline $a+b$ ok",
-    ] {
-        let cm: Vec<String> = render_markdown_via_core(input)
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .filter(|s| s.style.fg == Some(math))
-            .map(|s| s.content.to_string())
-            .collect();
-        let lm: Vec<String> = render_markdown(input)
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .filter(|s| s.style.fg == Some(math))
-            .map(|s| s.content.to_string())
-            .collect();
-        assert_eq!(cm, lm, "math styling mismatch for {input:?}");
+    for math in [crate::math_fg(), crate::math_inline_fg()] {
+        for input in [
+            "$5x$ and more",
+            "price $5$ each",
+            "$5+$3 = $8",
+            "a $1 and $2 b",
+            "x$5$y",
+            "buy $5 sell $9 net $4",
+            "$$\nx=5\n$$",
+            "inline $a+b$ ok",
+        ] {
+            let cm: Vec<String> = render_markdown_via_core(input)
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.fg == Some(math))
+                .map(|s| s.content.to_string())
+                .collect();
+            let lm: Vec<String> = render_markdown(input)
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.fg == Some(math))
+                .map(|s| s.content.to_string())
+                .collect();
+            assert_eq!(cm, lm, "math styling mismatch for {input:?}");
+        }
     }
 }
 
@@ -559,5 +560,23 @@ fn fuzz_random_documents_wrapped_parity() {
             ))
             .collect::<Vec<_>>()
             .join("\n\n")
+    );
+}
+
+/// A table's delimiter row says how to read its columns, and the TUI has to
+/// honour it too: a right-aligned numeric column that renders left-aligned
+/// misreads what the author wrote, and the desktop and the terminal are meant
+/// to agree about what a document *is*.
+#[test]
+fn table_columns_follow_the_declared_alignment() {
+    let lines = super::render_markdown_via_core_wrapped("| n |\n|--:|\n| 1 |\n| 1000 |\n", 40);
+    let short = lines
+        .iter()
+        .map(crate::line_plain_text)
+        .find(|text| text.trim() == "1")
+        .expect("no short row");
+    assert!(
+        short.starts_with(' '),
+        "right-aligned cell was not padded on the left: {short:?}"
     );
 }

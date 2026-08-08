@@ -160,3 +160,203 @@ fn model_not_found_is_fatal_model_endpoint_error() {
     let err = "chat request failed: 404 model_not_found: The model `gpt-foo` does not exist";
     assert!(is_fatal_model_endpoint_error(err));
 }
+
+/// Behavioral tests for `/colors`, driven through the real `App` so they cover
+/// what a user actually types: dispatch, message text, config persistence, and
+/// error handling.
+///
+/// These use an isolated `JCODE_HOME` (`create_test_app` sets one) so they write
+/// to a throwaway config rather than the developer's real one.
+mod colors {
+    use crate::tui::app::commands_dispatch::dispatch_local_command;
+    use crate::tui::app::tests::create_test_app;
+
+    /// These tests write the config file and mutate the process-global palette,
+    /// so they must serialize against *every* test touching shared config or
+    /// env state, not merely against each other. A module-private lock would
+    /// still let them swap the config out from under another module's test
+    /// mid-assertion, which is the race class that makes unrelated provider and
+    /// header tests fail intermittently.
+    fn lock_shared_state() -> std::sync::MutexGuard<'static, ()> {
+        crate::storage::lock_test_env()
+    }
+
+    /// Take the shared lock and leave the config and palette clean afterwards,
+    /// even if the test body panics.
+    fn with_clean_config(body: impl FnOnce()) {
+        struct Restore;
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let mut config = crate::config::Config::load();
+                config.display.colors.clear();
+                let _ = config.save();
+                jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
+            }
+        }
+        let _lock = lock_shared_state();
+        let _restore = Restore;
+        {
+            let mut config = crate::config::Config::load();
+            config.display.colors.clear();
+            let _ = config.save();
+        }
+        body();
+    }
+
+    /// Text of the last message the app pushed, whatever its role.
+    fn last_message(app: &crate::tui::app::App) -> String {
+        app.display_messages
+            .last()
+            .map(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn colors_lists_every_role_with_its_hex_value() {
+        let mut app = create_test_app();
+        assert!(
+            dispatch_local_command(&mut app, "/colors"),
+            "/colors should be claimed by the shared dispatch table"
+        );
+        let output = last_message(&app);
+        for role in jcode_tui_style::ALL_ROLES.iter().copied() {
+            assert!(
+                output.contains(role.key()),
+                "listing should mention {}: {output}",
+                role.key()
+            );
+        }
+        assert!(
+            output.contains("#8ab4f8"),
+            "listing should show hex values: {output}"
+        );
+    }
+
+    #[test]
+    fn colors_harmony_reports_a_score_and_named_criteria() {
+        let mut app = create_test_app();
+        assert!(dispatch_local_command(&mut app, "/colors harmony"));
+        let output = last_message(&app);
+        assert!(
+            output.contains("/100"),
+            "harmony should report a score: {output}"
+        );
+        for criterion in [
+            "readability",
+            "distinctness",
+            "hue harmony",
+            "chroma coherence",
+            "colorblind safety",
+        ] {
+            assert!(
+                output.contains(criterion),
+                "harmony should report {criterion}: {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn setting_a_role_persists_it_and_reports_the_new_score() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/colors error #1050f0"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("#1050f0"),
+                "should confirm the new value: {output}"
+            );
+            assert!(
+                output.contains("/100"),
+                "should report the resulting harmony: {output}"
+            );
+
+            let saved = crate::config::Config::load();
+            assert_eq!(
+                saved.display.colors.get("error").map(String::as_str),
+                Some("#1050f0"),
+                "the role should be saved to config"
+            );
+
+            // And the live palette must reflect it without a restart.
+            assert!(
+                jcode_tui_style::palette().is_overridden(jcode_tui_style::Role::Error),
+                "the running palette should pick the change up immediately"
+            );
+
+            assert!(dispatch_local_command(&mut app, "/colors reset"));
+            assert!(
+                crate::config::Config::load().display.colors.is_empty(),
+                "reset should clear the configured colors"
+            );
+        });
+    }
+
+    #[test]
+    fn generate_writes_a_complete_palette_and_scores_it() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(&mut app, "/colors generate #8ab4f8"));
+            let output = last_message(&app);
+            assert!(
+                output.contains("/100"),
+                "generate should report the harmony score: {output}"
+            );
+
+            let saved = crate::config::Config::load();
+            assert_eq!(
+                saved.display.colors.len(),
+                jcode_tui_style::ALL_ROLES.len(),
+                "generate should write every role"
+            );
+            for role in jcode_tui_style::ALL_ROLES.iter().copied() {
+                let value = saved
+                    .display
+                    .colors
+                    .get(role.key())
+                    .unwrap_or_else(|| panic!("generate should write {}", role.key()));
+                assert!(
+                    jcode_tui_style::palette::parse_hex(value).is_some(),
+                    "{} should be a valid hex color, got {value}",
+                    role.key()
+                );
+            }
+
+            assert!(dispatch_local_command(&mut app, "/colors reset"));
+        });
+    }
+
+    #[test]
+    fn bad_input_is_rejected_without_touching_the_config() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            for (input, expected) in [
+                ("/colors bogus-role #ffffff", "Unknown color role"),
+                ("/colors error not-a-color", "Invalid color"),
+                ("/colors generate nope", "Invalid seed color"),
+                ("/colors error", "Missing color value"),
+            ] {
+                assert!(dispatch_local_command(&mut app, input), "{input}");
+                let output = last_message(&app);
+                assert!(
+                    output.contains(expected),
+                    "{input} should report '{expected}', got: {output}"
+                );
+            }
+            assert!(
+                crate::config::Config::load().display.colors.is_empty(),
+                "rejected input must not write anything"
+            );
+        });
+    }
+
+    #[test]
+    fn unrelated_commands_are_not_swallowed() {
+        // `/colors` shares a prefix with nothing today, but a future `/color*`
+        // command must not be silently captured by this handler.
+        let mut app = create_test_app();
+        assert!(
+            !dispatch_local_command(&mut app, "/colorscheme dracula"),
+            "/colorscheme must not be claimed by /colors"
+        );
+    }
+}

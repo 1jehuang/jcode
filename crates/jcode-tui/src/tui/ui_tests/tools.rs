@@ -511,12 +511,12 @@ fn test_tool_summary_covers_action_shaped_tools_and_fallback() {
             "bash: missing command",
         ),
         (
-            "discover_tools",
+            "integration_tools",
             serde_json::json!({ "category": "databases", "reason": "need a db" }),
-            "browse databases",
+            "search databases",
         ),
         (
-            "discover_tools",
+            "integration_tools",
             serde_json::json!({
                 "action": "suggest",
                 "category": "payments",

@@ -6,6 +6,31 @@ use std::process::Command;
 /// Default system prompt for jcode (embedded at compile time)
 pub const DEFAULT_SYSTEM_PROMPT: &str = include_str!("prompt/system_prompt.md");
 
+/// Load the base system prompt, allowing the user to fully replace the built-in
+/// [`DEFAULT_SYSTEM_PROMPT`]. Precedence: project `./.jcode/system-prompt.md`,
+/// then global `~/.jcode/system-prompt.md`, then the built-in default.
+///
+/// This is a *replacement* hook. To merely add guidance on top of the default,
+/// use `.jcode/prompt-overlay.md` instead.
+pub fn load_base_system_prompt(working_dir: Option<&Path>) -> String {
+    let project_dir = working_dir.unwrap_or(Path::new("."));
+    let candidates = [
+        Some(project_dir.join(".jcode").join("system-prompt.md")),
+        crate::storage::jcode_dir()
+            .ok()
+            .map(|dir| dir.join("system-prompt.md")),
+    ];
+    for path in candidates.into_iter().flatten() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    DEFAULT_SYSTEM_PROMPT.to_string()
+}
+
 /// Prompt guidance for the optional Mermaid rendering capability.
 pub const MERMAID_PROMPT: &str = "# Mermaid\n\nRender fenced `mermaid` blocks inline.";
 
@@ -29,8 +54,11 @@ impl PromptCapabilities {
     }
 }
 
-fn base_system_prompt_parts(capabilities: PromptCapabilities) -> Vec<String> {
-    let mut parts = vec![DEFAULT_SYSTEM_PROMPT.to_string()];
+fn base_system_prompt_parts(
+    capabilities: PromptCapabilities,
+    working_dir: Option<&Path>,
+) -> Vec<String> {
+    let mut parts = vec![load_base_system_prompt(working_dir)];
     if capabilities.mermaid {
         parts.push(MERMAID_PROMPT.to_string());
     }
@@ -165,7 +193,7 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
 pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
-const SELFDEV_FOCUS_DESKTOP_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop.txt");
+const SELFDEV_FOCUS_DESKTOP2_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop2.txt");
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
 #[derive(Debug, Clone, Default)]
@@ -379,7 +407,7 @@ pub fn build_system_prompt_full_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (String, ContextInfo) {
-    let mut parts = base_system_prompt_parts(capabilities);
+    let mut parts = base_system_prompt_parts(capabilities, working_dir);
     let mut info = ContextInfo {
         system_prompt_chars: parts.join("\n\n").len(),
         ..Default::default()
@@ -475,7 +503,7 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
-    let mut static_parts = base_system_prompt_parts(capabilities);
+    let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
         system_prompt_chars: static_parts.join("\n\n").len(),
@@ -571,7 +599,7 @@ fn build_selfdev_prompt() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelfDevProductContext {
     Tui,
-    Desktop,
+    Desktop2,
 }
 
 impl SelfDevProductContext {
@@ -581,8 +609,8 @@ impl SelfDevProductContext {
         };
 
         let path = working_dir.to_string_lossy().replace('\\', "/");
-        if path.contains("/crates/jcode-desktop") || path.ends_with("crates/jcode-desktop") {
-            Self::Desktop
+        if path.contains("/crates/jcode-desktop") || path.ends_with("crates/jcode-desktop2") {
+            Self::Desktop2
         } else {
             Self::Tui
         }
@@ -591,7 +619,7 @@ impl SelfDevProductContext {
     fn prompt_block(self) -> &'static str {
         match self {
             Self::Tui => SELFDEV_FOCUS_TUI_PROMPT,
-            Self::Desktop => SELFDEV_FOCUS_DESKTOP_PROMPT,
+            Self::Desktop2 => SELFDEV_FOCUS_DESKTOP2_PROMPT,
         }
     }
 }

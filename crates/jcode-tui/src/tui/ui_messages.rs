@@ -14,7 +14,6 @@ use unicode_width::UnicodeWidthStr;
 const MAX_INLINE_DIFF_LINES: usize = 12;
 const MAX_DISCOVERY_DETAIL_LINES: usize = 2;
 const MAX_DISCOVERY_SETUP_LINES: usize = 3;
-const MAX_DISCOVERY_LISTING_ENTRIES: usize = 4;
 
 fn prefer_width_stable_system_glyphs() -> bool {
     std::env::var("TERM_PROGRAM")
@@ -543,9 +542,6 @@ pub(crate) fn render_system_message(
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     if let Some(title) = msg.title.as_deref() {
-        if title == "Reload" {
-            return render_reload_system_message(msg, width);
-        }
         if title == "Connection" {
             return render_connection_system_message(msg, width);
         }
@@ -945,6 +941,14 @@ fn todo_score_color() -> Color {
     rgb(105, 205, 165)
 }
 
+fn todo_warning_color() -> Color {
+    rgb(225, 180, 80)
+}
+
+fn todo_failure_color() -> Color {
+    rgb(225, 105, 105)
+}
+
 fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
@@ -1107,9 +1111,13 @@ pub(crate) fn render_todos_message(
     .max(1);
     let base_indent = if centered { "" } else { "  " };
     let inner_width = card_width.saturating_sub(base_indent.width()).max(1);
+    // Long assessment prose is useful in a wide transcript, but wrapping it
+    // with a hanging label quickly overwhelms the actual task list in a narrow
+    // terminal. Keep those details to one ellipsized line at small widths.
+    let compact_details = inner_width < 72;
 
     let mut lines = Vec::new();
-    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width);
+    push_todo_plan_details(&mut lines, &plan, base_indent, inner_width, compact_details);
     if todos.is_empty() {
         lines.push(todo_card_line(
             vec![Span::styled(
@@ -1150,7 +1158,7 @@ pub(crate) fn render_todos_message(
                     base_indent,
                     inner_width,
                 ));
-                push_todo_goal_details(&mut lines, goal, base_indent, inner_width);
+                push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
                 for todo in items {
                     lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
                 }
@@ -1163,7 +1171,7 @@ pub(crate) fn render_todos_message(
                 inner_width,
             ));
             if goal.is_some() {
-                push_todo_goal_details(&mut lines, goal, base_indent, inner_width);
+                push_todo_goal_details(&mut lines, goal, base_indent, inner_width, compact_details);
             }
             for todo in &todos {
                 lines.push(render_todo_card_item_line(todo, base_indent, inner_width));
@@ -1204,28 +1212,104 @@ fn todo_card_goal_for_group<'a>(
     })
 }
 
-fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'static>> {
-    let Some(goal) = goal else {
-        return Vec::new();
-    };
+fn todo_goal_score_spans(goal: &crate::todo::TodoGoal) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    for (label, score) in [
-        ("Hill climbability", goal.hill_climbability),
-        ("Ownership", goal.end_to_end_ownership),
-    ] {
-        let Some(score) = score else {
-            continue;
-        };
-        if !spans.is_empty() {
+    let mut states: Vec<(&str, String, Color)> = Vec::new();
+    if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
+        let (state, color) = goal.closed_feedback_loop.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state <= crate::todo::FeedbackLoopState::Weak {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Closed feedback loop", state, color));
+    }
+    if !crate::todo::feedback_loop_relevance_passes(goal) {
+        let (state, color) = goal.feedback_loop_relevance.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopRelevance::Indirect {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Relevance", state, color));
+    }
+    if !crate::todo::feedback_loop_coverage_passes(goal) {
+        let (state, color) = goal.feedback_loop_coverage.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopCoverage::Narrow {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Coverage", state, color));
+    }
+    if !crate::todo::feedback_loop_traceability_passes(goal) {
+        let (state, color) = goal.feedback_loop_traceability.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopTraceability::Unmapped {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Traceability", state, color));
+    }
+
+    if states.is_empty() {
+        spans.push(Span::styled(
+            "✓ All quality gates passing",
+            Style::default().fg(todo_score_color()),
+        ));
+    }
+
+    for (index, (label, state, color)) in states.into_iter().enumerate() {
+        if index > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
         }
         spans.push(Span::styled(
             format!("{} ", label),
             Style::default().fg(todo_label_color()),
         ));
+        spans.push(Span::styled(state, Style::default().fg(color)));
+    }
+
+    // Delivery is progress toward the outcome, not a quality gate. Keep it
+    // visible and visually separate from failures so it cannot read as one.
+    if let Some(state) = goal.delivery_state {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        }
         spans.push(Span::styled(
-            format!("{}%", score),
-            Style::default().fg(todo_score_color()),
+            "Delivery ",
+            Style::default().fg(todo_label_color()),
+        ));
+        let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
+            todo_score_color()
+        } else if state == crate::todo::DeliveryState::Integrated {
+            todo_warning_color()
+        } else {
+            todo_failure_color()
+        };
+        spans.push(Span::styled(
+            state.as_str().to_string(),
+            Style::default().fg(color),
         ));
     }
     spans
@@ -1357,8 +1441,9 @@ fn push_todo_plan_details(
     plan: &crate::todo::TodoPlan,
     base_indent: &str,
     inner_width: usize,
+    compact_details: bool,
 ) {
-    if let Some(score) = plan.understands_user_intent {
+    if let Some(state) = plan.understands_user_intent {
         lines.push(todo_card_line(
             vec![
                 Span::styled(
@@ -1366,7 +1451,7 @@ fn push_todo_plan_details(
                     Style::default().fg(todo_label_color()),
                 ),
                 Span::styled(
-                    format!("{}%", score),
+                    state.as_str().to_string(),
                     Style::default().fg(todo_score_color()),
                 ),
             ],
@@ -1380,8 +1465,39 @@ fn push_todo_plan_details(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        push_todo_wrapped_detail(lines, "User intention", intention, base_indent, inner_width);
+        push_todo_detail(
+            lines,
+            "User intention",
+            intention,
+            base_indent,
+            inner_width,
+            compact_details,
+        );
     }
+}
+
+fn push_todo_detail(
+    lines: &mut Vec<Line<'static>>,
+    label: &str,
+    value: &str,
+    base_indent: &str,
+    inner_width: usize,
+    compact: bool,
+) {
+    if !compact {
+        push_todo_wrapped_detail(lines, label, value, base_indent, inner_width);
+        return;
+    }
+
+    let prefix = format!("  {} · ", label);
+    lines.push(todo_card_line(
+        vec![
+            Span::styled(prefix, Style::default().fg(todo_label_color())),
+            Span::styled(value.to_string(), Style::default().fg(todo_meta_color())),
+        ],
+        base_indent,
+        inner_width,
+    ));
 }
 
 /// Wrap one labeled detail line to the card width.
@@ -1419,34 +1535,84 @@ fn push_todo_goal_details(
     goal: Option<&crate::todo::TodoGoal>,
     base_indent: &str,
     inner_width: usize,
+    _compact_details: bool,
 ) {
     let Some(goal) = goal else {
         return;
     };
-    let scores = todo_goal_score_spans(Some(goal));
+    let scores = todo_goal_score_spans(goal);
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
-        let score_count = [goal.hill_climbability, goal.end_to_end_ownership]
-            .into_iter()
-            .flatten()
-            .count();
+        let score_count = usize::from(!crate::todo::feedback_loop_passes(
+            goal.closed_feedback_loop,
+        )) + usize::from(!crate::todo::feedback_loop_relevance_passes(goal))
+            + usize::from(!crate::todo::feedback_loop_coverage_passes(goal))
+            + usize::from(!crate::todo::feedback_loop_traceability_passes(goal))
+            + usize::from(goal.delivery_state.is_some());
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
-            for (label, score) in [
-                ("Hill climbability", goal.hill_climbability),
-                ("Ownership", goal.end_to_end_ownership),
-            ] {
-                let Some(score) = score else {
-                    continue;
-                };
+            let mut states: Vec<(&str, String)> = Vec::new();
+            if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
+                states.push((
+                    "Closed feedback loop",
+                    goal.closed_feedback_loop
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
+            }
+            if !crate::todo::feedback_loop_relevance_passes(goal) {
+                states.push((
+                    "Relevance",
+                    goal.feedback_loop_relevance
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
+            }
+            if !crate::todo::feedback_loop_coverage_passes(goal) {
+                states.push((
+                    "Coverage",
+                    goal.feedback_loop_coverage
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
+            }
+            if !crate::todo::feedback_loop_traceability_passes(goal) {
+                states.push((
+                    "Traceability",
+                    goal.feedback_loop_traceability
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
+            }
+            if let Some(state) = goal.delivery_state {
+                states.push(("Delivery", state.as_str().to_string()));
+            }
+            for (label, state) in states {
                 let mut spans = vec![Span::raw("  ")];
                 spans.push(Span::styled(
                     format!("{} ", label),
                     Style::default().fg(todo_label_color()),
                 ));
-                spans.push(Span::styled(
-                    format!("{}%", score),
-                    Style::default().fg(todo_score_color()),
-                ));
+                let color = if label == "Delivery" {
+                    match crate::todo::DeliveryState::parse(&state) {
+                        Some(value) if value >= crate::todo::DeliveryState::WorkflowValidated => {
+                            todo_score_color()
+                        }
+                        Some(crate::todo::DeliveryState::Integrated) => todo_warning_color(),
+                        _ => todo_failure_color(),
+                    }
+                } else if matches!(
+                    state.as_str(),
+                    "missing" | "absent" | "weak" | "indirect" | "narrow" | "unmapped"
+                ) {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                spans.push(Span::styled(state, Style::default().fg(color)));
                 lines.push(todo_card_line(spans, base_indent, inner_width));
             }
         } else {
@@ -1454,14 +1620,6 @@ fn push_todo_goal_details(
             spans.extend(scores);
             lines.push(todo_card_line(spans, base_indent, inner_width));
         }
-    }
-    if let Some(value) = goal
-        .feedback_loop
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        push_todo_wrapped_detail(lines, "Feedback", value, base_indent, inner_width);
     }
 }
 
@@ -1510,11 +1668,13 @@ fn render_todo_plan_update(
                 update
                     .before
                     .as_ref()
-                    .and_then(|plan| plan.understands_user_intent),
+                    .and_then(|plan| plan.understands_user_intent)
+                    .map(|state| state.as_str().to_string()),
                 update
                     .after
                     .as_ref()
-                    .and_then(|plan| plan.understands_user_intent),
+                    .and_then(|plan| plan.understands_user_intent)
+                    .map(|state| state.as_str().to_string()),
                 base_indent,
                 inner_width,
             ),
@@ -1553,6 +1713,19 @@ fn render_todo_goal_updates(
     let mut lines = Vec::new();
 
     for update in updates {
+        // Narrative assessment fields remain available in the dedicated todos
+        // view. Inline tool cards only show the compact state transitions so a
+        // long feedback loop or stopping rationale cannot dominate the chat.
+        let visible_fields = update.fields.iter().filter(|field| {
+            !matches!(
+                field,
+                crate::todo::TodoGoalField::FeedbackLoop
+                    | crate::todo::TodoGoalField::StoppingEvidence
+            )
+        });
+        if visible_fields.clone().next().is_none() {
+            continue;
+        }
         let goal = update.after.as_ref().or(update.before.as_ref());
         let label = goal
             .and_then(|goal| goal.group.as_deref())
@@ -1571,46 +1744,122 @@ fn render_todo_goal_updates(
             inner_width,
         ));
 
-        for field in &update.fields {
+        for field in visible_fields {
             match field {
-                crate::todo::TodoGoalField::HillClimbability => push_todo_score_update(
+                crate::todo::TodoGoalField::ClosedFeedbackLoop => push_todo_score_update(
                     &mut lines,
-                    "Hill climbability",
+                    "Closed feedback loop",
                     update
                         .before
                         .as_ref()
-                        .and_then(|goal| goal.hill_climbability),
+                        .and_then(|goal| goal.closed_feedback_loop)
+                        .map(|state| state.as_str().to_string()),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.hill_climbability),
+                        .and_then(|goal| goal.closed_feedback_loop)
+                        .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::EndToEndOwnership => push_todo_score_update(
+                crate::todo::TodoGoalField::FeedbackLoopRelevance => push_todo_score_update(
                     &mut lines,
-                    "Ownership",
+                    "Feedback-loop relevance",
                     update
                         .before
                         .as_ref()
-                        .and_then(|goal| goal.end_to_end_ownership),
+                        .and_then(|goal| goal.feedback_loop_relevance)
+                        .map(|state| state.as_str().to_string()),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.end_to_end_ownership),
+                        .and_then(|goal| goal.feedback_loop_relevance)
+                        .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
-                crate::todo::TodoGoalField::FeedbackLoop => push_todo_text_update(
+                crate::todo::TodoGoalField::FeedbackLoopCoverage => push_todo_score_update(
                     &mut lines,
-                    "Feedback",
+                    "Feedback-loop coverage",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_coverage)
+                        .map(|state| state.as_str().to_string()),
                     update
                         .after
                         .as_ref()
-                        .and_then(|goal| goal.feedback_loop.as_deref()),
+                        .and_then(|goal| goal.feedback_loop_coverage)
+                        .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
                 ),
+                crate::todo::TodoGoalField::FeedbackLoopTraceability => push_todo_score_update(
+                    &mut lines,
+                    "Feedback-loop traceability",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_traceability)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_traceability)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::DeliveryState => push_todo_score_update(
+                    &mut lines,
+                    "Delivery",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.delivery_state)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.delivery_state)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::Autonomy => push_todo_score_update(
+                    &mut lines,
+                    "Autonomy",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.autonomy)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.autonomy)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::IterationMaturity => push_todo_score_update(
+                    &mut lines,
+                    "Iteration",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.iteration_maturity)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.iteration_maturity)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::FeedbackLoop
+                | crate::todo::TodoGoalField::StoppingEvidence => unreachable!(),
             }
         }
     }
@@ -1624,8 +1873,8 @@ fn render_todo_goal_updates(
 fn push_todo_score_update(
     lines: &mut Vec<Line<'static>>,
     label: &str,
-    before: Option<u8>,
-    after: Option<u8>,
+    before: Option<String>,
+    after: Option<String>,
     base_indent: &str,
     inner_width: usize,
 ) {
@@ -1638,20 +1887,13 @@ fn push_todo_score_update(
     ];
     match (before, after) {
         (Some(before), Some(after)) => {
-            spans.push(Span::styled(
-                format!("{}%", before),
-                Style::default().fg(todo_meta_color()),
-            ));
+            spans.push(Span::styled(before, Style::default().fg(todo_meta_color())));
             spans.push(Span::styled(" → ", Style::default().fg(todo_label_color())));
-            spans.push(Span::styled(
-                format!("{}%", after),
-                Style::default().fg(todo_score_color()),
-            ));
+            spans.push(Span::styled(after, Style::default().fg(todo_score_color())));
         }
-        (None, Some(after)) => spans.push(Span::styled(
-            format!("{}%", after),
-            Style::default().fg(todo_score_color()),
-        )),
+        (None, Some(after)) => {
+            spans.push(Span::styled(after, Style::default().fg(todo_score_color())))
+        }
         (_, None) => spans.push(Span::styled(
             "cleared",
             Style::default().fg(todo_meta_color()),
@@ -1699,14 +1941,14 @@ fn todo_card_confidence_label(todo: &crate::todo::TodoItem) -> Option<String> {
         && let (Some(planning), Some(completed)) = (todo.confidence, todo.completion_confidence)
         && planning != completed
     {
-        return Some(format!("{}→{}%", planning, completed));
+        return Some(format!("{}→{}", planning.as_str(), completed.as_str()));
     }
-    let score = if todo.status == "completed" {
+    let state = if todo.status == "completed" {
         todo.completion_confidence.or(todo.confidence)
     } else {
         todo.confidence
     };
-    score.map(|score| format!("{}%", score))
+    state.map(|state| state.as_str().to_string())
 }
 
 fn render_todo_card_item_line(
@@ -2158,52 +2400,6 @@ fn render_scheduled_tool_message(msg: &DisplayMessage, width: u16) -> Option<Vec
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     Some(lines)
-}
-
-fn render_reload_system_message(msg: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
-    let centered = markdown::center_code_blocks();
-    let border_style = Style::default().fg(rgb(120, 180, 255));
-    let label_style = Style::default().fg(dim_color());
-    let text_style = Style::default().fg(rgb(220, 236, 255));
-    let max_box_width = if centered {
-        (width.saturating_sub(4) as usize).min(96)
-    } else {
-        (width.saturating_sub(2) as usize).min(88)
-    }
-    .max(20);
-    let inner_width = max_box_width.saturating_sub(4).max(1);
-
-    let mut box_content = Vec::new();
-    let mut non_empty_lines = msg
-        .content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .peekable();
-
-    if non_empty_lines.peek().is_none() {
-        box_content.push(Line::from(Span::styled("No reload details.", label_style)));
-    } else {
-        for (idx, line) in non_empty_lines.enumerate() {
-            if idx > 0 {
-                box_content.push(Line::from(""));
-            }
-            for chunk in split_by_display_width(line, inner_width) {
-                box_content.push(Line::from(Span::styled(chunk, text_style)));
-            }
-        }
-    }
-
-    let mut lines = render_rounded_box(
-        width_stable_system_title("⚡ reload", "reload"),
-        box_content,
-        max_box_width,
-        border_style,
-    );
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines
 }
 
 fn split_resume_hint(detail: &str) -> (&str, Option<&str>) {
@@ -3302,13 +3498,6 @@ fn render_gmail_draft_card(
     ))
 }
 
-#[derive(Debug, Clone)]
-struct DiscoveryListingEntry {
-    name: String,
-    blurb: String,
-    url: Option<String>,
-}
-
 fn split_discovery_blurb_url(value: &str) -> (String, Option<String>) {
     let value = value.trim();
     if let Some((blurb, url)) = value.rsplit_once(" (")
@@ -3320,17 +3509,12 @@ fn split_discovery_blurb_url(value: &str) -> (String, Option<String>) {
     (value.to_string(), None)
 }
 
-fn parse_discovery_listing_entries(output: &str) -> Vec<DiscoveryListingEntry> {
+fn parse_discovery_listing_names(output: &str) -> Vec<String> {
     output
         .lines()
         .filter_map(|line| {
-            let (name, value) = line.trim().strip_prefix("- ")?.split_once(": ")?;
-            let (blurb, url) = split_discovery_blurb_url(value);
-            Some(DiscoveryListingEntry {
-                name: name.trim().to_string(),
-                blurb,
-                url,
-            })
+            let (name, _) = line.trim().strip_prefix("- ")?.split_once(": ")?;
+            Some(name.trim().to_string())
         })
         .collect()
 }
@@ -3415,9 +3599,8 @@ fn render_discovery_card(
     tool_output: &str,
     is_error: bool,
     available_width: usize,
-    show_inline_disclosure: bool,
 ) -> Option<Vec<Line<'static>>> {
-    if tools_ui::canonical_tool_name(&tool.name) != "discover_tools" {
+    if tools_ui::canonical_tool_name(&tool.name) != "integration_tools" {
         return None;
     }
     let block_width = available_width.min(96);
@@ -3434,27 +3617,9 @@ fn render_discovery_card(
     let mut content = Vec::new();
 
     if is_error {
-        if show_inline_disclosure {
-            push_compact_discovery_kv(
-                &mut content,
-                "about",
-                crate::sponsors::DISCOVERY_DISCLOSURE_NOTICE,
-                block_width,
-                muted_style,
-                muted_style,
-                MAX_DISCOVERY_DETAIL_LINES,
-            );
-        }
-        return (!content.is_empty()).then_some(content);
+        return None;
     }
 
-    let category = tool
-        .input
-        .get("category")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("other");
     let explicit_action = tool
         .input
         .get("action")
@@ -3563,16 +3728,23 @@ fn render_discovery_card(
                 MAX_DISCOVERY_DETAIL_LINES,
             );
         }
-        "select" => {
+        "select" | "setup" => {
             let name = tool
                 .input
                 .get("tool")
                 .and_then(|value| value.as_str())
-                .unwrap_or("selected tool");
+                .unwrap_or("tool");
             push_compact_discovery_header(
                 &mut content,
                 vec![
-                    Span::styled("selected ", muted_style),
+                    Span::styled(
+                        if tool_output.starts_with("Selected off-catalog product") {
+                            "selected off-catalog "
+                        } else {
+                            "selected "
+                        },
+                        muted_style,
+                    ),
                     Span::styled(name.to_string(), name_style),
                 ],
                 block_width,
@@ -3619,81 +3791,28 @@ fn render_discovery_card(
             }
         }
         _ => {
-            let entries = parse_discovery_listing_entries(tool_output);
-            let result_label = if entries.len() == 1 {
-                "result"
-            } else {
-                "results"
-            };
-            push_compact_discovery_header(
-                &mut content,
-                vec![
-                    Span::styled(format!("{} {result_label}", entries.len()), muted_style),
-                    Span::styled(" · ", muted_style),
-                    Span::styled(category.to_string(), name_style),
-                ],
-                block_width,
-            );
-            if entries.is_empty() {
-                push_compact_discovery_kv(
-                    &mut content,
-                    "catalog",
-                    "no matching entries",
-                    block_width,
-                    label_style,
-                    muted_style,
-                    1,
-                );
-            } else {
-                for entry in entries.iter().take(MAX_DISCOVERY_LISTING_ENTRIES) {
-                    let details = match (&entry.blurb[..], entry.url.as_deref()) {
-                        ("", Some(url)) => url.to_string(),
-                        (blurb, Some(url)) => format!("{blurb} · {url}"),
-                        (blurb, None) => blurb.to_string(),
-                    };
-                    push_compact_discovery_kv(
-                        &mut content,
-                        &entry.name,
-                        &details,
-                        block_width,
-                        name_style,
-                        muted_style,
-                        MAX_DISCOVERY_DETAIL_LINES,
-                    );
-                }
-                let hidden = entries.len().saturating_sub(MAX_DISCOVERY_LISTING_ENTRIES);
-                if hidden > 0 {
+            // Browse results render as a single compact line: the entry name
+            // when exactly one matched, a count otherwise, and nothing at all
+            // when the catalog had no matches.
+            let entries = parse_discovery_listing_names(tool_output);
+            match entries.len() {
+                0 => return None,
+                1 => {
                     push_compact_discovery_header(
                         &mut content,
-                        vec![Span::styled(format!("+{hidden} more"), muted_style)],
+                        vec![Span::styled(entries[0].clone(), name_style)],
+                        block_width,
+                    );
+                }
+                count => {
+                    push_compact_discovery_header(
+                        &mut content,
+                        vec![Span::styled(format!("{count} integrations"), muted_style)],
                         block_width,
                     );
                 }
             }
-            if let Some(reason) = tool.input.get("reason").and_then(|value| value.as_str()) {
-                push_compact_discovery_kv(
-                    &mut content,
-                    "why",
-                    reason,
-                    block_width,
-                    label_style,
-                    muted_style,
-                    MAX_DISCOVERY_DETAIL_LINES,
-                );
-            }
         }
-    }
-
-    if show_inline_disclosure {
-        push_compact_discovery_kv(
-            &mut content,
-            "about",
-            crate::sponsors::DISCOVERY_DISCLOSURE_NOTICE,
-            block_width,
-            muted_style,
-            muted_style,
-            MAX_DISCOVERY_DETAIL_LINES,
-        );
     }
 
     Some(content)
@@ -3981,20 +4100,10 @@ pub(crate) fn render_tool_message(
     );
     let rendered_tool_line_text = super::line_plain_text(&rendered_tool_line);
     lines.push(rendered_tool_line);
-    let mut show_inline_sponsor_disclosure =
-        msg.title.as_deref() == Some(crate::sponsors::DISCOVERY_DISCLOSURE_TAG);
-
     if let Some(draft_lines) = render_gmail_draft_card(tc, &msg.content, is_error, row_width) {
         lines.extend(draft_lines);
     }
-    if let Some(discovery_lines) = render_discovery_card(
-        tc,
-        &msg.content,
-        is_error,
-        row_width,
-        show_inline_sponsor_disclosure,
-    ) {
-        show_inline_sponsor_disclosure = false;
+    if let Some(discovery_lines) = render_discovery_card(tc, &msg.content, is_error, row_width) {
         lines.extend(discovery_lines);
     }
 
@@ -4106,10 +4215,8 @@ pub(crate) fn render_tool_message(
                     &result.content,
                     sub_errored,
                     row_width.saturating_sub(4),
-                    show_inline_sponsor_disclosure,
                 )
             {
-                show_inline_sponsor_disclosure = false;
                 for line in &mut discovery_lines {
                     line.spans.insert(0, Span::raw("    "));
                 }

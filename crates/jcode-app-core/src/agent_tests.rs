@@ -192,6 +192,38 @@ fn tool_output_to_content_blocks_preserves_labeled_images() {
 }
 
 #[tokio::test]
+async fn queued_soft_interrupt_images_are_injected_as_image_blocks() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let _guard = crate::storage::lock_test_env();
+    let mut agent = Agent::new(provider, registry);
+
+    agent.queue_soft_interrupt(
+        "look at this".to_string(),
+        vec![("image/png".to_string(), "ZmFrZQ==".to_string())],
+        false,
+        SoftInterruptSource::User,
+    );
+    let injected = agent.inject_soft_interrupts();
+
+    assert_eq!(injected.len(), 1);
+    let message = agent
+        .session
+        .messages
+        .last()
+        .expect("soft interrupt should append a user message");
+    assert!(matches!(
+        &message.content[0],
+        ContentBlock::Image { media_type, data }
+            if media_type == "image/png" && data == "ZmFrZQ=="
+    ));
+    assert!(matches!(
+        &message.content[1],
+        ContentBlock::Text { text, .. } if text == "look at this"
+    ));
+}
+
+#[tokio::test]
 async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let _guard = crate::storage::lock_test_env();
     let provider: Arc<dyn Provider> = Arc::new(DelayedProvider {
@@ -747,6 +779,7 @@ fn seed_transient_session_state(agent: &mut Agent) {
     agent.push_alert("pending alert".to_string());
     agent.queue_soft_interrupt(
         "queued interrupt".to_string(),
+        Vec::new(),
         true,
         SoftInterruptSource::User,
     );
@@ -1014,6 +1047,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     agent.session.save().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
+        Vec::new(),
         true,
         SoftInterruptSource::System,
     );
@@ -1310,6 +1344,28 @@ fn output_budget_truncation_requests_a_continuation() {
 }
 
 #[test]
+fn stranded_tool_use_stop_is_detected() {
+    // Second half of the Opus 5 DeepSWE incident: the provider reported
+    // stop_reason="tool_use" while the parsed tool-call list was empty, so the
+    // turn loop had nothing to execute and broke out mid-task, discarding every
+    // uncommitted edit. `tool_use` is a normal completion reason, so
+    // `should_continue_after_stop_reason` must keep rejecting it; the stranded
+    // case is only recoverable when it is paired with zero tool calls, which is
+    // exactly what this predicate is for.
+    assert!(Agent::is_stranded_tool_use_stop(Some("tool_use")));
+    assert!(Agent::is_stranded_tool_use_stop(Some("TOOL_USE")));
+    assert!(Agent::is_stranded_tool_use_stop(Some(" tool_use ")));
+
+    assert!(!Agent::is_stranded_tool_use_stop(Some("end_turn")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("max_tokens")));
+    assert!(!Agent::is_stranded_tool_use_stop(Some("")));
+    assert!(!Agent::is_stranded_tool_use_stop(None));
+    // Must stay disjoint from the truncation path so a turn never takes both
+    // continuation branches for one stop reason.
+    assert!(!Agent::should_continue_after_stop_reason("tool_use"));
+}
+
+#[test]
 fn guardrail_stop_reason_detection() {
     assert!(Agent::is_guardrail_stop_reason(Some("refusal")));
     assert!(Agent::is_guardrail_stop_reason(Some("REFUSAL")));
@@ -1322,6 +1378,63 @@ fn guardrail_stop_reason_detection() {
     assert!(!Agent::is_guardrail_stop_reason(Some("tool_use")));
     assert!(!Agent::is_guardrail_stop_reason(Some("stop")));
     assert!(!Agent::is_guardrail_stop_reason(None));
+}
+
+#[test]
+fn fable_guardrail_reconsideration_is_narrow_and_bounded() {
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        0,
+        1,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "CLAUDE-FABLE-5-20260801",
+        Some("content_filter"),
+        0,
+        1,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        1,
+        3,
+    ));
+    assert!(Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        2,
+        3,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("refusal"),
+        3,
+        3,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-fable-5",
+        Some("end_turn"),
+        0,
+        1,
+    ));
+    assert!(!Agent::should_reconsider_fable_guardrail(
+        "claude-opus-5",
+        Some("refusal"),
+        0,
+        1,
+    ));
+}
+
+#[test]
+fn fable_guardrail_prompt_suite_is_distinct_and_safety_preserving() {
+    let prompts = Agent::FABLE_GUARDRAIL_RECONSIDERATION_PROMPTS;
+    assert_eq!(prompts.len(), 3);
+    assert_ne!(prompts[0], prompts[1]);
+    assert_ne!(prompts[1], prompts[2]);
+    assert!(prompts[0].contains("full context"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("Do not weaken a refusal"));
 }
 
 #[test]
@@ -1358,4 +1471,290 @@ fn guardrail_notice_absent_for_normal_turns() {
     assert!(Agent::provider_guardrail_notice(None, false, true).is_none());
 }
 
+#[test]
+fn empty_turn_log_event_separates_guardrails_from_transient_empties() {
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("refusal")),
+        "PROVIDER_GUARDRAIL"
+    );
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("content_filter")),
+        "PROVIDER_GUARDRAIL"
+    );
+    assert_eq!(
+        Agent::empty_turn_log_event(Some("stop")),
+        "PROVIDER_EMPTY_RESPONSE"
+    );
+    assert_eq!(Agent::empty_turn_log_event(None), "PROVIDER_EMPTY_RESPONSE");
+}
+
+#[test]
+fn guardrail_notice_for_transient_empty_does_not_blame_content_filter() {
+    let notice = Agent::provider_guardrail_notice(Some("stop"), true, false)
+        .expect("empty visible output must produce a notice");
+    assert!(
+        !notice.contains("usually a provider-side guardrail"),
+        "transient empty responses must not be blamed on a guardrail: {notice}"
+    );
+    assert!(notice.contains("empty response"), "{notice}");
+}
+
+#[tokio::test]
+async fn empty_post_tool_response_is_retried_in_shared_helper() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut attempts = 0u32;
+    // Empty response right after tool results: inject continuation.
+    let retried = agent
+        .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
+        .expect("helper must not error");
+    assert!(retried);
+    assert_eq!(attempts, 1);
+    let recovery = agent
+        .session
+        .messages
+        .last()
+        .expect("recovery instruction must be persisted");
+    assert_eq!(recovery.role, Role::User);
+    assert!(
+        recovery
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .is_some_and(|text| text.starts_with("<system-reminder>")),
+        "synthetic recovery instruction must be hidden from the transcript"
+    );
+
+    // A guardrail refusal is deliberate and must not be retried.
+    let retried = agent
+        .maybe_continue_empty_post_tool_response(true, true, Some("refusal"), &mut attempts)
+        .expect("helper must not error");
+    assert!(!retried);
+
+    // Visible output or no recent tool result: no retry.
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(false, true, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(true, false, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+
+    // Retry budget is bounded.
+    attempts = Agent::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS;
+    assert!(
+        !agent
+            .maybe_continue_empty_post_tool_response(true, true, Some("stop"), &mut attempts)
+            .unwrap()
+    );
+}
+
 include!("agent_tests/retention_readiness.rs");
+
+/// Provider that reproduces the DeepSWE Opus 5 incident: the first response
+/// ends with `stop_reason: "tool_use"` while carrying no tool-use block at all,
+/// which is what happens when an unrecognized content block is dropped from the
+/// stream. The second response is a normal completion, so a correct agent
+/// recovers and this provider's queue is exhausted.
+#[derive(Clone, Default)]
+struct StrandedToolUseProvider {
+    calls: Arc<std::sync::Mutex<usize>>,
+}
+
+#[async_trait]
+impl Provider for StrandedToolUseProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut guard = self.calls.lock().unwrap();
+            *guard += 1;
+            *guard
+        };
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            if call == 1 {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("working on it".to_string())))
+                    .await;
+                // No ToolUseStart: the tool block was lost, yet the provider
+                // still reports that it stopped in order to call a tool.
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("tool_use".to_string()),
+                    }))
+                    .await;
+            } else {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta("all done".to_string())))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".to_string()),
+                    }))
+                    .await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "stranded-tool-use"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+/// End-to-end guard for the incident. Before the fix the agent took the
+/// "no tool calls" branch and ended the turn on the very first response, so a
+/// benchmark trial stopped mid-task and its uncommitted work was never
+/// captured. The agent must instead ask the model to continue, which shows up
+/// as a second provider call and a final turn that ends normally.
+#[tokio::test]
+async fn stranded_tool_use_stop_continues_instead_of_ending_the_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let stranded = StrandedToolUseProvider::default();
+    let calls = stranded.calls.clone();
+    let provider: Arc<dyn Provider> = Arc::new(stranded);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("do the task", Vec::new(), None, tx)
+        .await
+        .expect("turn should complete");
+
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text: delta } = event {
+            text.push_str(&delta);
+        }
+    }
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        2,
+        "a tool_use stop with no tool call must trigger exactly one continuation request"
+    );
+    assert!(
+        text.contains("all done"),
+        "the recovered turn must deliver the model's real completion, got {text:?}"
+    );
+}
+
+#[derive(Clone, Default)]
+struct FableGuardrailProvider {
+    calls: Arc<std::sync::Mutex<usize>>,
+    prompts_seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for FableGuardrailProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let call = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if call > 1 {
+            let prompt = messages
+                .last()
+                .map(message_text)
+                .unwrap_or_default()
+                .to_string();
+            self.prompts_seen.lock().unwrap().push(prompt);
+        }
+
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
+        tokio::spawn(async move {
+            if call <= 3 {
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("refusal".to_string()),
+                    }))
+                    .await;
+            } else {
+                let _ = tx
+                    .send(Ok(StreamEvent::TextDelta(
+                        "Reconsidered and completed safely".to_string(),
+                    )))
+                    .await;
+                let _ = tx
+                    .send(Ok(StreamEvent::MessageEnd {
+                        stop_reason: Some("end_turn".to_string()),
+                    }))
+                    .await;
+            }
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    fn model(&self) -> String {
+        "claude-fable-5".to_string()
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
+    let _guard = crate::storage::lock_test_env();
+    let fable = FableGuardrailProvider::default();
+    let calls = fable.calls.clone();
+    let prompts_seen = fable.prompts_seen.clone();
+    let provider: Arc<dyn Provider> = Arc::new(fable);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent
+        .run_once_streaming_mpsc("do this ordinary coding task", Vec::new(), None, tx)
+        .await
+        .expect("turn should recover from the guardrail");
+
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let ServerEvent::TextDelta { text: delta } = event {
+            text.push_str(&delta);
+        }
+    }
+
+    assert_eq!(*calls.lock().unwrap(), 4);
+    let prompts = prompts_seen.lock().unwrap();
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("concrete harmful action"));
+    assert!(prompts[1].contains("safe portions"));
+    assert!(prompts[2].contains("final, independent policy check"));
+    assert!(
+        text.contains("Reconsidered and completed safely"),
+        "{text:?}"
+    );
+}

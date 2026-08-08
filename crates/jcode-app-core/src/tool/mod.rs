@@ -8,12 +8,15 @@ mod browser;
 mod communicate;
 #[cfg(target_os = "macos")]
 mod computer;
+mod config_edit_notice;
 mod conversation_search;
 mod debug_socket;
 mod discover;
+mod discover_secrets;
 mod edit;
 mod gmail;
 mod goal;
+pub mod inflight;
 mod invalid;
 mod ls;
 pub mod mcp;
@@ -88,6 +91,32 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(session_id)
         .cloned()
+}
+
+/// Whether a tool call opted in to receiving an oversized (truncated) result.
+///
+/// Read straight off the raw input rather than each tool's typed args, so every
+/// tool honors the flag without having to declare it. Tools deserialize their
+/// own args with `#[serde(default)]` fields and ignore unknown keys, so an extra
+/// key here is inert for the tool itself.
+///
+/// Only a real JSON `true` counts. A string `"true"` is also accepted because
+/// models routinely stringify booleans, but anything else (including `1`) is
+/// treated as absent: accidentally spending the remaining context window should
+/// take an unambiguous yes.
+#[cfg(test)]
+pub(crate) fn accept_large_output_schema_property_for_test() -> Value {
+    jcode_tool_core::accept_large_output_schema_property()
+}
+
+fn accepts_large_output(input: &Value) -> bool {
+    // Same key the schema advertises, so the documented flag and the honored
+    // flag cannot drift apart.
+    match input.get(jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY) {
+        Some(Value::Bool(accepted)) => *accepted,
+        Some(Value::String(raw)) => raw.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
 }
 
 /// Registry of available tools (Arc-wrapped for sharing)
@@ -287,13 +316,13 @@ impl Registry {
             "conversation_search",
             conversation_search::ConversationSearchTool::new(compaction),
         );
-        // Sponsored discovery is on by default (opt-out); when disabled the
+        // Integration discovery is on by default (opt-out); when disabled the
         // tool is never registered and no discovery endpoint is ever
         // contacted.
         if crate::config::config().sponsors.enabled {
             Self::insert_tool(
                 &mut tools_map,
-                "discover_tools",
+                "integration_tools",
                 discover::DiscoverToolsTool::new(),
             );
         }
@@ -540,8 +569,59 @@ impl Registry {
     /// Even if we have room, a single output shouldn't dominate the context.
     const SINGLE_OUTPUT_MAX_FRACTION: f32 = 0.30;
 
+    /// Hard ceiling on a single tool output, independent of context budget.
+    ///
+    /// A fraction alone is not enough. On a model reporting a 1M-token window,
+    /// 30% permits a 300k-token single result, so a repo-wide grep sailed
+    /// through the guard and cost 233k tokens in one call. No individual tool
+    /// result is worth that much of any window: past roughly 50k tokens the
+    /// caller is reading a haystack, not an answer, and should narrow the query.
+    /// The effective ceiling is the smaller of this and the budget fraction, so
+    /// small windows still get proportional protection.
+    const SINGLE_OUTPUT_MAX_TOKENS: usize = 50_000;
+
+    /// Message returned instead of an oversized tool result.
+    ///
+    /// It has one job: make the price legible and the retry obvious. The caller
+    /// gets the exact cost, what would survive truncation, the cheap fixes, and
+    /// the exact flag to pass if they really want the whole thing.
+    fn oversized_output_refusal(
+        output_tokens: usize,
+        affordable_tokens: usize,
+        current_tokens: usize,
+        budget: usize,
+    ) -> String {
+        let percent_of_budget = if budget > 0 {
+            (output_tokens as f32 / budget as f32) * 100.0
+        } else {
+            0.0
+        };
+        format!(
+            "⚠️ OUTPUT WITHHELD: this result is ~{output}k tokens ({percent:.0}% of the \
+             {budget}k context budget, of which {used}k is already used), so it was not \
+             returned. Nothing was added to the context except this message.\n\n\
+             Narrow the request first: add or tighten `path`, `glob`, or `type`, set \
+             `max_files`/`max_regions`, use `paths_only` when you only need locations, or \
+             read a specific line range. A targeted query is almost always the better \
+             answer than a truncated dump.\n\n\
+             If you genuinely need this output and accept the token cost, repeat the same \
+             call with `\"accept_large_output\": true`. That returns the first ~{affordable}k \
+             tokens and permanently spends them from this session's context.",
+            output = output_tokens as f32 / 1000.0,
+            percent = percent_of_budget,
+            budget = budget / 1000,
+            used = current_tokens / 1000,
+            affordable = affordable_tokens as f32 / 1000.0,
+        )
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        // Mark this call in-flight for the whole execution so the missing
+        // tool-output repair paths do not mistake a slow tool for an
+        // interrupted one and inject a duplicate synthetic result. See
+        // `tool::inflight`.
+        let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name(name);
         if let Some(policy) = session_tool_policy(&ctx.session_id) {
@@ -625,7 +705,9 @@ impl Registry {
         };
 
         // Context overflow guard: check if this output would push us over the limit
-        output = self.guard_context_overflow(name, output).await;
+        output = self
+            .guard_context_overflow(name, output, accepts_large_output(&input))
+            .await;
 
         let mut fields = Self::tool_lifecycle_fields("done", name, resolved_name, &input, &ctx);
         fields.push(("elapsed_ms".to_string(), latency_ms.to_string()));
@@ -642,7 +724,19 @@ impl Registry {
 
     /// Check if a tool output would overflow the context window and truncate if needed.
     /// Returns the (possibly truncated) output.
-    async fn guard_context_overflow(&self, tool_name: &str, output: ToolOutput) -> ToolOutput {
+    ///
+    /// An oversized result is **refused** rather than truncated. Truncating by
+    /// default was the worse failure: the caller still paid the full remaining
+    /// context for a prefix that usually did not contain the answer, and the
+    /// damage was already done by the time they read the warning. Refusing costs
+    /// a few dozen tokens, states the price, and lets the caller either narrow
+    /// the query or knowingly pay by passing `accept_large_output`.
+    async fn guard_context_overflow(
+        &self,
+        tool_name: &str,
+        output: ToolOutput,
+        accept_large_output: bool,
+    ) -> ToolOutput {
         let compaction = self.compaction.read().await;
         let budget = compaction.token_budget();
         if budget == 0 {
@@ -656,8 +750,11 @@ impl Registry {
         let projected = current_tokens + output_tokens;
         let threshold_tokens = (budget as f32 * Self::CONTEXT_GUARD_THRESHOLD) as usize;
 
-        // Check 2: Is this single output unreasonably large relative to budget?
-        let single_max_tokens = (budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize;
+        // Check 2: Is this single output unreasonably large? Proportional to the
+        // budget, but also absolutely capped, because 30% of a 1M-token window is
+        // 300k tokens and no single tool result is worth that.
+        let single_max_tokens = ((budget as f32 * Self::SINGLE_OUTPUT_MAX_FRACTION) as usize)
+            .min(Self::SINGLE_OUTPUT_MAX_TOKENS);
 
         let needs_truncation = projected > threshold_tokens || output_tokens > single_max_tokens;
 
@@ -665,20 +762,68 @@ impl Registry {
             return output;
         }
 
-        // Calculate how many tokens we can afford for this output
-        let remaining = if current_tokens < threshold_tokens {
-            threshold_tokens - current_tokens
-        } else {
-            // Already over threshold — allow a small amount for the error message
-            budget / 50 // ~2% of budget for the truncation notice
-        };
-        let max_tokens = remaining.min(single_max_tokens);
+        // Past the safety threshold there is no room left to spend, so opting in
+        // cannot buy anything: returning a slice would push the conversation over
+        // the window instead of merely being expensive. Refuse outright, and say
+        // how to make room. This is checked before computing an affordable size
+        // so the outcome does not depend on budget arithmetic happening to land
+        // under a character floor.
+        if current_tokens >= threshold_tokens {
+            crate::logging::info(&format!(
+                "Context guard: refused {} output of ~{}k tokens, context exhausted \
+                 ({}k/{}k)",
+                tool_name,
+                output_tokens / 1000,
+                current_tokens / 1000,
+                budget / 1000,
+            ));
+            return ToolOutput {
+                output: format!(
+                    "⚠️ CONTEXT LIMIT REACHED: cannot return this tool output (~{:.0}k tokens) \
+                     because the context window is nearly full ({:.0}k/{}k tokens). \
+                     accept_large_output does not apply here: there is no room left to spend. \
+                     Use /compact to free space, then retry with a narrower query.",
+                    output_tokens as f32 / 1000.0,
+                    current_tokens as f32 / 1000.0,
+                    budget / 1000,
+                ),
+                title: output.title,
+                metadata: output.metadata,
+                images: output.images,
+            };
+        }
+
+        // How much of this output the remaining context could absorb.
+        let max_tokens = (threshold_tokens - current_tokens).min(single_max_tokens);
 
         // Convert token limit back to approximate character limit
         let max_chars = max_tokens * 4;
 
         if output.output.len() <= max_chars {
             return output;
+        }
+
+        if !accept_large_output {
+            crate::logging::info(&format!(
+                "Context guard: refused {} output of ~{}k tokens \
+                 (context: {}k/{}k, {:.0}% used); caller may retry with accept_large_output",
+                tool_name,
+                output_tokens / 1000,
+                current_tokens / 1000,
+                budget / 1000,
+                (current_tokens as f32 / budget as f32) * 100.0,
+            ));
+            return ToolOutput {
+                output: Self::oversized_output_refusal(
+                    output_tokens,
+                    max_tokens,
+                    current_tokens,
+                    budget,
+                ),
+                title: output.title,
+                metadata: output.metadata,
+                images: output.images,
+            };
         }
 
         crate::logging::info(&format!(
@@ -693,33 +838,24 @@ impl Registry {
         ));
 
         // Truncate the output, keeping the beginning (usually most relevant)
-        let truncated = if max_chars > 200 {
-            // Keep beginning of output + truncation notice
-            let kept = &output.output[..output.output.floor_char_boundary(max_chars - 150)];
-            format!(
-                "{}\n\n⚠️ OUTPUT TRUNCATED: This tool output was {:.0}k tokens which would \
-                 exceed the context window ({:.0}k/{}k tokens used, {}k budget). \
-                 Only the first ~{:.0}k tokens are shown. Use more targeted queries \
-                 (e.g., smaller line ranges, specific grep patterns) to get the content \
-                 you need without exceeding context limits.",
-                kept,
-                output_tokens as f32 / 1000.0,
-                current_tokens as f32 / 1000.0,
-                budget / 1000,
-                budget / 1000,
-                max_tokens as f32 / 1000.0,
-            )
-        } else {
-            // Context is almost completely full — just return error
-            format!(
-                "⚠️ CONTEXT LIMIT REACHED: Cannot return this tool output (~{:.0}k tokens) \
-                 because the context window is nearly full ({:.0}k/{}k tokens). \
-                 Consider using /compact to free up space, or use more targeted queries.",
-                output_tokens as f32 / 1000.0,
-                current_tokens as f32 / 1000.0,
-                budget / 1000,
-            )
-        };
+        // Keep the beginning, which is usually the most relevant part, and leave
+        // headroom for the notice itself. `max_chars` is at least 800 here: the
+        // exhaustion check above already returned for anything tighter.
+        let kept = &output.output[..output
+            .output
+            .floor_char_boundary(max_chars.saturating_sub(150))];
+        let truncated = format!(
+            "{}\n\n⚠️ OUTPUT TRUNCATED: you passed accept_large_output, so this ~{:.0}k \
+             token result was returned truncated instead of withheld \
+             ({:.0}k/{}k tokens were already used). Only the first ~{:.0}k tokens are \
+             above, and they are now spent from this session's context. If the answer \
+             is not in them, narrow the query rather than repeating this call.",
+            kept,
+            output_tokens as f32 / 1000.0,
+            current_tokens as f32 / 1000.0,
+            budget / 1000,
+            max_tokens as f32 / 1000.0,
+        );
 
         ToolOutput {
             output: truncated,

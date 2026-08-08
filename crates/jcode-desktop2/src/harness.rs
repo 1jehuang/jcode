@@ -1,117 +1,624 @@
-//! Harness API wiring for desktop2.
+//! Harness wiring for desktop2, on top of the Rust SDK.
 //!
-//! Connects to the harness API socket (`~/.jcode/jcode-api.sock`, served by
-//! `jcode-harness-api-bridge`) on a background thread, attaches a session,
-//! and forwards streamed events to the UI thread over a channel.
+//! This is the app's half of the conversation: it maps SDK events onto the
+//! `HarnessUpdate`s the UI draws, and UI `Command`s onto SDK calls. Everything
+//! that is not desktop2-specific (starting the runtime, correlating replies,
+//! explaining a lost connection) lives in `jcode-sdk`, so this file is about
+//! the app rather than about the protocol.
+//!
+//! Desktop2 is built on the SDK deliberately: it is the SDK's only large,
+//! shipping consumer, which is what keeps the SDK's shape honest instead of
+//! validated only by its own examples.
 
-use jcode_harness_api::{ApiEvent, ApiRequest, ClientFrame, HarnessClient, write_frame};
-use std::io::BufReader;
+use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient, LaunchOptions};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// Failure wording and connection-stage reporting are the SDK's, so the app
+/// and any other client describe the same failure the same way.
+pub use jcode_sdk::{SocketState, Stage, describe_disconnect, explain};
 
 /// UI-facing updates produced by the connection worker.
 #[derive(Debug)]
 pub enum HarnessUpdate {
     Status(String),
-    Attached { session_id: String },
+    Attached {
+        session_id: String,
+        /// The session's working directory, as the daemon reports it.
+        working_dir: Option<String>,
+    },
+    /// The provider and model serving the session.
+    Model {
+        provider: Option<String>,
+        model: Option<String>,
+    },
+    /// One SDK `list_models` result for the caption menu.
+    Models {
+        models: Vec<String>,
+        current: Option<String>,
+    },
+    /// Confirmation that SDK `set_model` accepted the selected route.
+    ModelSelected(String),
     Text(String),
+    /// Streamed reasoning. Kept a separate variant from `Text` so the UI can
+    /// place it in its own subordinate block instead of splicing a thought
+    /// into the middle of the answer.
+    Reasoning(String),
+    /// The agent's current phase (a tool intent, or "thinking"), for the
+    /// activity line. Streamed so the UI is never silent mid-turn.
+    Activity(String),
+    /// A tool call's current label, keyed by call id so a streamed `intent`
+    /// refines the same transcript line the call opened with.
+    Tool {
+        call_id: String,
+        label: String,
+    },
+    /// A finished file edit: its intent, the file, and the diff. Sent only for
+    /// tools that write to disk, and kept separate from `Tool` because an edit
+    /// earns a permanent transcript card while a call's status line does not.
+    Edit(crate::edits::EditCard),
+    /// The newest structured plan snapshot produced by the `todo` tool.
+    Todo(crate::todos::TodoCard),
     TurnDone,
+    /// A background task this session is waiting on: how far along it is, or
+    /// that it finished. Forwarded so a long wait shows a moving bar instead of
+    /// a spinner that only says "still working".
+    Progress {
+        task_id: String,
+        label: String,
+        summary: String,
+        percent: Option<f32>,
+        done: bool,
+    },
+    /// The agent took delivery of the user's message. The proof a send landed,
+    /// separate from the reply: a turn can think for minutes before its first
+    /// token, and until this arrives the app only knows it *wrote* to a socket.
+    MessageAccepted,
+    /// Something failed: a turn that could not run, a provider that could not
+    /// be reached, the runtime going away. Distinct from `Status` because a
+    /// status line is hidden once a session is attached, which is exactly when
+    /// a failure matters most.
+    Failed(String),
+    /// The daemon's current session list, for the session strip.
+    Sessions(Vec<crate::strip::Entry>),
+    /// The tail of another session's conversation, for the overview's preview.
+    Peek {
+        session_id: String,
+        transcript: crate::transcript::Transcript,
+    },
 }
 
-pub fn api_socket_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("JCODE_API_SOCKET") {
-        return PathBuf::from(custom);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".jcode").join("jcode-api.sock")
+/// A command from the UI thread to the connection worker.
+///
+/// Sending a message and switching sessions travel the same channel so they
+/// stay ordered with respect to each other: a switch must never overtake a
+/// message that was typed into the session being left.
+#[derive(Debug)]
+pub enum Command {
+    Send {
+        content: String,
+        /// (media_type, base64_data) pairs, attached to this message only.
+        images: Vec<(String, String)>,
+    },
+    /// Attach to another session; the worker retargets subsequent sends.
+    Attach(String),
+    /// Fetch the tail of another session without attaching to it.
+    Peek(String),
+    /// Start a fresh session and attach to it. Travels the same channel as
+    /// `Send` and `Attach` so a message typed just before it still lands in
+    /// the session the user was looking at when they typed it.
+    New,
+    /// Fetch the current session's SDK model catalog.
+    ListModels,
+    /// Select one exact id returned by `list_models`.
+    SetModel(String),
 }
+
+/// A handle every worker thread can use to reach the UI.
+///
+/// The connection worker, the command thread and the session poller all
+/// produce updates, so the sink is a cloneable handle rather than a closure
+/// borrowed from one of their frames.
+#[derive(Clone)]
+struct Ui {
+    updates: Sender<HarnessUpdate>,
+    redraw: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Ui {
+    fn send(&self, update: HarnessUpdate) {
+        let _ = self.updates.send(update);
+        (self.redraw)();
+    }
+}
+
+/// The API socket both this app and the bridge agree on.
+pub fn api_socket_path() -> PathBuf {
+    jcode_sdk::api_socket_path()
+}
+
+/// Working directory for sessions this app creates.
+///
+/// Desktop2 is developed on itself, so a session opened from the app should
+/// land in the desktop2 crate: the daemon derives self-dev mode and the
+/// desktop2 product focus from this directory, and a session rooted anywhere
+/// else gets an agent that assumes it is working on the TUI. Overridable so a
+/// desktop2 build can be pointed at another project.
+fn default_working_dir() -> Option<String> {
+    if let Some(raw) = std::env::var_os("JCODE_DESKTOP2_WORKING_DIR") {
+        let path = PathBuf::from(raw);
+        if path.is_dir() {
+            return Some(path.display().to_string());
+        }
+    }
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .is_dir()
+        .then(|| manifest_dir.display().to_string())
+}
+
+/// How often the session strip is refreshed.
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Backoff between reconnection attempts, and its ceiling.
+///
+/// A dropped runtime is usually back within a second (a rebuild, a restart), so
+/// the first retry is quick; the ceiling exists so a window left open against a
+/// runtime that is gone for good does not spin.
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 /// Spawn the connection worker. Returns the receiving side for the UI and a
 /// sender for outgoing user messages.
-pub fn spawn(redraw: impl Fn() + Send + 'static) -> (Receiver<HarnessUpdate>, Sender<String>) {
+///
+/// The worker reconnects on its own. A desktop app whose connection dies once
+/// and then silently accepts input forever is the failure this exists to
+/// prevent: every attempt reports why it failed, and the next attempt
+/// re-attaches the session the user was looking at rather than starting a new
+/// one behind their back.
+pub fn spawn(
+    redraw: impl Fn() + Send + Sync + 'static,
+) -> (Receiver<HarnessUpdate>, Sender<Command>) {
     let (update_tx, update_rx) = channel::<HarnessUpdate>();
-    let (outgoing_tx, outgoing_rx) = channel::<String>();
+    let (outgoing_tx, outgoing_rx) = channel::<Command>();
+    let ui = Ui {
+        updates: update_tx,
+        redraw: Arc::new(redraw),
+    };
     std::thread::spawn(move || {
-        let send = move |update: HarnessUpdate| {
-            let _ = update_tx.send(update);
-            redraw();
-        };
-        if let Err(error) = run(&send, outgoing_rx) {
-            send(HarnessUpdate::Status(format!("disconnected: {error}")));
+        // Shared across attempts: the command queue must survive a reconnect,
+        // and the session to re-attach to has to be remembered.
+        let outgoing = Arc::new(Mutex::new(outgoing_rx));
+        let resume = Arc::new(Mutex::new(String::new()));
+        let mut backoff = RECONNECT_BACKOFF;
+        loop {
+            // Where the attempt got to, and when the stream came up: both are
+            // needed to say why it ended and are only known inside `run`.
+            let stage = Arc::new(Mutex::new(Stage::Starting));
+            let connected_at = Arc::new(Mutex::new(None::<Instant>));
+            let error = match run(
+                &ui,
+                Arc::clone(&outgoing),
+                Arc::clone(&resume),
+                Arc::clone(&stage),
+                Arc::clone(&connected_at),
+            ) {
+                // `run` only returns on failure; `Ok` would mean the stream
+                // ended cleanly, which is still a lost connection.
+                Ok(()) => "the harness closed the connection".to_string(),
+                Err(error) => error.to_string(),
+            };
+            let path = api_socket_path();
+            let stage = stage.lock().map(|s| *s).unwrap_or(Stage::Starting);
+            let uptime = connected_at
+                .lock()
+                .ok()
+                .and_then(|guard| *guard)
+                .map(|at| at.elapsed());
+            // Reaching the daemon proves the retry loop recovered. Without
+            // resetting here, one old outage permanently leaves every later
+            // disconnect at the 10-second ceiling.
+            if uptime.is_some() {
+                backoff = RECONNECT_BACKOFF;
+            }
+            ui.send(HarnessUpdate::Failed(describe_disconnect(
+                stage,
+                &error,
+                uptime,
+                &path,
+                SocketState::probe(&path),
+            )));
+            ui.send(HarnessUpdate::Status(format!(
+                "reconnecting in {}s...",
+                backoff.as_secs_f64().round().max(1.0)
+            )));
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
         }
     });
     (update_rx, outgoing_tx)
 }
 
+/// One connection attempt: connect, attach, then stream until it dies.
 fn run(
-    send: &impl Fn(HarnessUpdate),
-    outgoing: Receiver<String>,
+    ui: &Ui,
+    outgoing: Arc<Mutex<Receiver<Command>>>,
+    resume: Arc<Mutex<String>>,
+    stage: Arc<Mutex<Stage>>,
+    connected_at: Arc<Mutex<Option<Instant>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let set_stage = |next: Stage| {
+        if let Ok(mut guard) = stage.lock() {
+            *guard = next;
+        }
+    };
     let path = api_socket_path();
-    send(HarnessUpdate::Status(format!(
+    ui.send(HarnessUpdate::Status(format!(
         "connecting to {}...",
         path.display()
     )));
-    let stream = std::os::unix::net::UnixStream::connect(&path).map_err(|error| {
-        format!(
-            "{error} (start the bridge: jcode-harness-api-bridge, socket {})",
-            path.display()
-        )
-    })?;
-    let reader = BufReader::new(stream.try_clone()?);
-    let mut client = HarnessClient::new(reader, stream.try_clone()?);
-    client.hello(concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")))?;
-    send(HarnessUpdate::Status("connected, attaching...".into()));
-    client.send(ApiRequest::CreateSession { working_dir: None })?;
 
-    // Writer thread: forwards user messages immediately even while the read
-    // loop below is blocked on the stream. Frame ids start high so they never
-    // collide with the reader-side HarnessClient's counter.
-    let session_id = Arc::new(Mutex::new(String::new()));
-    let writer_ids = AtomicU64::new(1_000_000);
+    set_stage(Stage::Starting);
+    jcode_sdk::ensure_runtime(&LaunchOptions::default(), &|status| {
+        ui.send(HarnessUpdate::Status(status.to_string()))
+    })?;
+
+    set_stage(Stage::Connecting);
+    let client = JcodeClient::connect(ConnectOptions {
+        client_name: concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")).to_string(),
+        // The runtime is already up; a second check would only cost a dial.
+        ensure_runtime: false,
+        ..Default::default()
+    })?;
+    if let Ok(mut guard) = connected_at.lock() {
+        *guard = Some(Instant::now());
+    }
+
+    // Subscribe before attaching, so events the daemon pushes as part of the
+    // attach (the model it chose, the first status) are not missed.
+    let events = client.events(None);
+
+    set_stage(Stage::Attaching);
+    ui.send(HarnessUpdate::Status("connected, attaching...".into()));
+    // Re-attach after a reconnect, so the conversation the user was reading
+    // comes back instead of being replaced by a fresh empty session.
+    let previous = resume.lock().map(|guard| guard.clone()).unwrap_or_default();
+    let attached = match previous.is_empty() {
+        true => client.create_session(default_working_dir())?,
+        false => client.attach_session(&previous)?,
+    };
+    let session_id = Arc::new(Mutex::new(attached.session_id.clone()));
+    if let Ok(mut guard) = resume.lock() {
+        *guard = attached.session_id.clone();
+    }
+    set_stage(Stage::Streaming);
+    ui.send(HarnessUpdate::Attached {
+        session_id: attached.session_id,
+        working_dir: attached.working_dir,
+    });
+
+    // Command thread: forwards user messages immediately even while the event
+    // loop below is blocked on the stream. It owns the requests whose replies
+    // are values rather than stream events (peeks, attaches), so the event
+    // loop never has to guess which request a `history` frame answers.
     std::thread::spawn({
+        let client = client.clone();
         let session_id = Arc::clone(&session_id);
-        let mut writer_stream = stream.try_clone()?;
+        let resume = Arc::clone(&resume);
+        let ui = ui.clone();
         move || {
-            while let Ok(content) = outgoing.recv() {
-                let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
-                if session.is_empty() {
-                    continue;
-                }
-                let frame = ClientFrame::new(
-                    writer_ids.fetch_add(1, Ordering::Relaxed),
-                    ApiRequest::SendMessage {
-                        session_id: session,
-                        content,
-                        images: vec![],
-                    },
-                );
-                if write_frame(&mut writer_stream, &frame).is_err() {
-                    break;
+            // `recv_timeout` rather than `recv`: a blocking receive would hold
+            // the queue past this connection's death and swallow the first
+            // command the *next* connection should have sent.
+            while !client.is_closed() {
+                let command = {
+                    let Ok(queue) = outgoing.lock() else { break };
+                    match queue.recv_timeout(Duration::from_millis(100)) {
+                        Ok(command) => command,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                };
+                let outcome = match command {
+                    Command::Send { content, images } => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        // The acknowledgement is rendered from the stream, so
+                        // there is nothing to wait for here.
+                        client.send_message(&session, &content, images, None)
+                    }
+                    // Retarget immediately rather than waiting for the attach
+                    // to complete: a message typed straight after a switch must
+                    // land in the session the user is looking at.
+                    Command::Attach(target) => {
+                        if let Ok(mut guard) = session_id.lock() {
+                            *guard = target.clone();
+                        }
+                        if let Ok(mut guard) = resume.lock() {
+                            *guard = target.clone();
+                        }
+                        client.attach_session(&target).map(|session| {
+                            ui.send(HarnessUpdate::Attached {
+                                session_id: session.session_id,
+                                working_dir: session.working_dir,
+                            })
+                        })
+                    }
+                    // A peek must not retarget anything: it is a read of
+                    // another session, and the one we are attached to has to
+                    // stay the one a message would land in. It is also
+                    // background decoration for a neighboring column, so it
+                    // must never hold the command queue in front of a user's
+                    // message. A missing archive can take the full request
+                    // timeout; run it independently and leave the live session
+                    // usable while that happens.
+                    Command::Peek(target) => {
+                        let ui = ui.clone();
+                        std::thread::spawn(move || {
+                            // The bridge serves one connection's requests in
+                            // order. A stored-history read can block on another
+                            // process writing that archive, so using a clone of
+                            // the live client would still stall message sends
+                            // and stream events behind the peek. Give previews
+                            // their own connection instead.
+                            let preview = JcodeClient::connect(ConnectOptions {
+                                client_name: concat!(
+                                    "jcode-desktop2-preview/",
+                                    env!("CARGO_PKG_VERSION")
+                                )
+                                .to_string(),
+                                ensure_runtime: false,
+                                ..Default::default()
+                            });
+                            if let Ok(client) = preview
+                                && let Ok(messages) = client.peek_session(&target, None)
+                            {
+                                ui.send(HarnessUpdate::Peek {
+                                    session_id: target,
+                                    transcript: to_transcript(messages),
+                                });
+                            }
+                        });
+                        Ok(())
+                    }
+                    // Clearing the current id while the session is created is
+                    // deliberate: a message sent into that gap is dropped
+                    // rather than landing in the session the user just left.
+                    Command::New => {
+                        if let Ok(mut guard) = session_id.lock() {
+                            guard.clear();
+                        }
+                        client.create_session(default_working_dir()).map(|session| {
+                            if let Ok(mut guard) = session_id.lock() {
+                                *guard = session.session_id.clone();
+                            }
+                            if let Ok(mut guard) = resume.lock() {
+                                *guard = session.session_id.clone();
+                            }
+                            ui.send(HarnessUpdate::Attached {
+                                session_id: session.session_id,
+                                working_dir: session.working_dir,
+                            })
+                        })
+                    }
+                    Command::ListModels => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        client.list_models(&session).map(|(models, current)| {
+                            ui.send(HarnessUpdate::Models { models, current })
+                        })
+                    }
+                    Command::SetModel(model) => {
+                        let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
+                        if session.is_empty() {
+                            continue;
+                        }
+                        client.set_model(&session, &model).map(|()| {
+                            ui.send(HarnessUpdate::ModelSelected(model));
+                        })
+                    }
+                };
+                // A failed command is the user's action not happening, so it is
+                // reported rather than swallowed. The connection dying is the
+                // event loop's error to report, so this thread just retires.
+                if let Err(error) = outcome {
+                    if error.code() == "disconnected" {
+                        break;
+                    }
+                    ui.send(HarnessUpdate::Failed(explain(&error.message)));
                 }
             }
         }
     });
 
-    loop {
-        let frame = client.recv()?;
-        match frame.event {
-            ApiEvent::Attached { session } => {
-                if let Ok(mut guard) = session_id.lock() {
-                    *guard = session.session_id.clone();
+    // Session-list poller. The API has no push notification for sessions
+    // appearing or disappearing, so the strip is refreshed on a slow timer;
+    // slow because a strip that is a second stale costs nothing, while a busy
+    // poll would tax the daemon for the whole life of the window.
+    std::thread::spawn({
+        let client = client.clone();
+        let ui = ui.clone();
+        move || {
+            while !client.is_closed() {
+                match client.list_sessions() {
+                    Ok(sessions) => ui.send(HarnessUpdate::Sessions(
+                        sessions.into_iter().map(to_entry).collect(),
+                    )),
+                    // A poll that fails is not worth a banner: the strip simply
+                    // stays as it was, and a dead connection is reported once
+                    // by the event loop rather than every two seconds.
+                    Err(_) => break,
                 }
-                send(HarnessUpdate::Attached {
-                    session_id: session.session_id,
-                });
+                std::thread::sleep(SESSION_POLL_INTERVAL);
             }
-            ApiEvent::TextDelta { text, .. } => send(HarnessUpdate::Text(text)),
-            ApiEvent::TurnDone { .. } => send(HarnessUpdate::TurnDone),
+        }
+    });
+
+    // Streamed tool arguments, keyed by call id, so a tool's `intent` can be
+    // shown while it is still arriving. Cleared as each call finishes: a turn
+    // with hundreds of calls must not accumulate their arguments forever.
+    let mut tool_input: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // The most recent `tool_start`. The server does not populate `call_id` on
+    // `tool_input` deltas, so arguments are attributed to the call that opened
+    // last; tool calls stream one at a time, so this is exact today and would
+    // degrade to a briefly wrong label rather than a panic if that changed.
+    let mut current_call = String::new();
+
+    for event in events {
+        match event {
+            ApiEvent::TextDelta { text, .. } => ui.send(HarnessUpdate::Text(text)),
+            // Reasoning is not rendered as transcript text yet, but its
+            // arrival is proof the model is working, which is the thing the
+            // silent-until-done UI was missing.
+            ApiEvent::ReasoningDelta { text, .. } => {
+                ui.send(HarnessUpdate::Activity("thinking".into()));
+                ui.send(HarnessUpdate::Reasoning(text));
+            }
+            ApiEvent::ToolStart { call_id, name, .. } => {
+                tool_input.remove(&call_id);
+                current_call = call_id.clone();
+                // The call opens under its tool name; the streamed arguments
+                // usually carry a better line (the `intent`), which replaces
+                // this one in place as it arrives.
+                ui.send(HarnessUpdate::Tool {
+                    call_id,
+                    label: name.clone(),
+                });
+                ui.send(HarnessUpdate::Activity(name));
+            }
+            ApiEvent::ToolInputDelta { call_id, delta, .. } => {
+                let key = if call_id.is_empty() {
+                    current_call.clone()
+                } else {
+                    call_id
+                };
+                let buffer = tool_input.entry(key.clone()).or_default();
+                buffer.push_str(&delta);
+                if let Some(intent) = crate::activity::intent_from_partial_json(buffer) {
+                    ui.send(HarnessUpdate::Tool {
+                        call_id: key,
+                        label: intent.clone(),
+                    });
+                    ui.send(HarnessUpdate::Activity(intent));
+                }
+            }
+            ApiEvent::ToolExec { call_id, name, .. } => {
+                // Prefer the intent the model wrote over the bare tool name:
+                // "check the build" says more than "bash". When the arguments
+                // did not carry one, leave the label alone rather than
+                // downgrading a good line back to the tool's name.
+                match tool_input
+                    .get(&call_id)
+                    .and_then(|input| crate::activity::intent_from_partial_json(input))
+                {
+                    Some(intent) => {
+                        ui.send(HarnessUpdate::Tool {
+                            call_id,
+                            label: intent.clone(),
+                        });
+                        ui.send(HarnessUpdate::Activity(intent));
+                    }
+                    None if tool_input.contains_key(&call_id) => {}
+                    None => ui.send(HarnessUpdate::Activity(name)),
+                }
+            }
+            ApiEvent::ToolDone {
+                call_id,
+                name,
+                output,
+                error,
+                ..
+            } => {
+                if error.is_none()
+                    && name == "todo"
+                    && let Some(card) =
+                        crate::todos::parse(tool_input.get(&call_id).map(String::as_str))
+                {
+                    ui.send(HarnessUpdate::Todo(card));
+                }
+                // An edit that changed lines becomes a permanent card in the
+                // transcript: the intent that motivated it and the lines it
+                // added and removed. Read from the call's own arguments and
+                // output, so what is shown is what the agent actually did.
+                // A failed call is skipped: it changed nothing.
+                if error.is_none()
+                    && let Some(card) = crate::edits::parse(
+                        &name,
+                        tool_input.get(&call_id).map(String::as_str),
+                        &output,
+                    )
+                {
+                    ui.send(HarnessUpdate::Edit(card));
+                }
+                tool_input.remove(&call_id);
+                ui.send(HarnessUpdate::Activity("thinking".into()));
+            }
+            ApiEvent::ModelInfo {
+                provider, model, ..
+            } => ui.send(HarnessUpdate::Model { provider, model }),
+            ApiEvent::MessageAccepted { .. } => ui.send(HarnessUpdate::MessageAccepted),
+            ApiEvent::TurnDone { .. } => ui.send(HarnessUpdate::TurnDone),
+            ApiEvent::BackgroundProgress {
+                task_id,
+                label,
+                summary,
+                percent,
+                done,
+                ..
+            } => ui.send(HarnessUpdate::Progress {
+                task_id,
+                label,
+                summary,
+                percent,
+                done,
+            }),
             ApiEvent::Error { message, .. } => {
-                send(HarnessUpdate::Status(format!("error: {message}")));
+                // A failed request is also the end of the turn it belonged to:
+                // the daemon sends `error` *instead of* `done`, so without this
+                // the UI would spin its activity indicator forever.
+                ui.send(HarnessUpdate::Failed(explain(&message)));
+                ui.send(HarnessUpdate::TurnDone);
             }
             _ => {}
         }
     }
+    // The event stream only ends when the connection does.
+    Ok(())
+}
+
+/// A session-list entry, sized for the overview.
+fn to_entry(session: jcode_sdk::SessionInfo) -> crate::strip::Entry {
+    crate::strip::Entry {
+        session_id: session.session_id,
+        title: session.title,
+        working_dir: session.working_dir,
+        busy: session.status == "busy",
+        // The overview sizes a blob by how much conversation the session
+        // holds; a session the server could not measure is drawn at the floor
+        // rather than dropped.
+        weight: session.transcript_bytes.unwrap_or(0) as f64,
+    }
+}
+
+/// Stored history as a transcript the overview can preview.
+fn to_transcript(messages: Vec<jcode_sdk::HistoryMessage>) -> crate::transcript::Transcript {
+    let mut transcript = crate::transcript::Transcript::default();
+    for message in messages {
+        let text = message.content.trim();
+        if text.is_empty() {
+            continue;
+        }
+        transcript.push(match message.role.as_str() {
+            "user" => crate::transcript::Message::user(text),
+            _ => crate::transcript::Message::assistant(text),
+        });
+    }
+    transcript
 }

@@ -142,12 +142,29 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(0),
-                completion_confidence: Some(100),
-                confidence_history: vec![0, 100],
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(0)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
+                confidence_history: vec![
+                    crate::todo::ConfidenceState::from_legacy_score(0),
+                    crate::todo::ConfidenceState::from_legacy_score(100),
+                ],
             }],
         )
         .expect("save todos");
+
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
         app.is_remote = true;
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
@@ -157,14 +174,18 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.todo_confidence_spike_challenged);
         assert!(app.pending_queued_dispatch);
-        assert_eq!(
-            app.queued_messages,
-            vec![crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE]
+        assert_eq!(app.queued_messages.len(), 1);
+        assert!(
+            app.queued_messages[0]
+                .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         );
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("abrupt confidence increase needs independent validation")
-        }));
+        // The continuation names the specific todo whose confidence jumped.
+        assert!(app.queued_messages[0].contains("Finished work"));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.contains("Double-checking a confidence jump") })
+        );
     });
 }
 
@@ -185,12 +206,26 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
                 priority: "high".to_string(),
                 blocked_by: Vec::new(),
                 assigned_to: None,
-                confidence: Some(80),
-                completion_confidence: Some(80),
+                confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
+                completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(80)),
                 confidence_history: Vec::new(),
             }],
         )
         .expect("save todos");
+
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing goal");
         app.is_remote = true;
         app.auto_poke_incomplete_todos = true;
         app.is_processing = true;
@@ -200,14 +235,15 @@ fn test_remote_auto_poke_completion_below_threshold_tells_model_to_keep_working(
         assert!(app.auto_poke_incomplete_todos);
         assert!(app.pending_queued_dispatch);
         assert_eq!(app.queued_messages.len(), 1);
-        assert_eq!(
-            app.queued_messages[0],
-            crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE
+        assert!(
+            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
         );
-        assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Todo completion gate: completion confidence needs stronger validation.")
-        }));
+        assert!(app.queued_messages[0].contains("Needs validation"));
+        assert!(
+            app.display_messages()
+                .iter()
+                .any(|msg| { msg.content.contains("Double-checking confidence") })
+        );
     });
 }
 
@@ -252,8 +288,7 @@ fn test_remote_poke_status_and_off_update_state() {
         rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
             .expect("/poke status should succeed remotely");
         assert!(app.display_messages().iter().any(|msg| {
-            msg.content
-                .contains("Auto-poke: ON. 1 incomplete todo.")
+            msg.content.contains("Auto-poke: ON. 1 incomplete todo.")
                 && msg.content.contains("A follow-up poke is queued.")
                 && msg.content.contains("A turn is currently running.")
         }));

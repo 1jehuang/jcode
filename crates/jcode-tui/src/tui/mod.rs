@@ -31,11 +31,21 @@ pub mod mermaid;
 pub mod permissions {
     pub use jcode_tui_permissions::*;
 }
+mod redraw_schedule;
+#[allow(unused_imports)]
+pub(crate) use redraw_schedule::{
+    REDRAW_DEEP_IDLE, REDRAW_DEEP_IDLE_AFTER, REDRAW_IDLE, REDRAW_PASSIVE_LIVENESS,
+    REDRAW_REMOTE_STARTUP, REDRAW_SWARM_SPINNER, current_full_frame_redraw_reason,
+    idle_donut_active, last_full_frame_redraw_reason, periodic_redraw_required,
+    periodic_redraw_required_excluding_idle_animation, redraw_interval,
+    redraw_interval_with_policy,
+};
 mod remote_diff;
 pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
 mod stream_buffer;
+pub mod terminal_setup;
 pub mod test_harness;
 pub mod theme_detect;
 mod ui;
@@ -191,6 +201,12 @@ pub trait TuiState {
     /// Version counter for display_messages (monotonic, increments on mutation)
     fn display_messages_version(&self) -> u64;
     fn streaming_text(&self) -> &str;
+    /// JSON payload for the pinned todo band rendered at the top of the chat
+    /// viewport when `display.pin_todos` is enabled. `None` when the feature
+    /// is off or the session has no todos.
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        None
+    }
 
     // ---- Input ----
     fn input(&self) -> &str;
@@ -205,6 +221,16 @@ pub trait TuiState {
     fn scroll_offset(&self) -> usize;
     /// Whether auto-scroll to bottom is paused (user scrolled up during streaming)
     fn auto_scroll_paused(&self) -> bool;
+    /// Whether the screen is currently in the terminal-style cleared state
+    /// produced by Ctrl+L / Cmd+L: the transcript ends in a blank spacer, the
+    /// view is pinned to the bottom, and nothing is streaming. In that state
+    /// the renderer collapses the (entirely blank) messages viewport so the
+    /// status line and numbered prompt sit at the *top* of the screen, exactly
+    /// like a terminal after `clear`, instead of floating at the bottom under
+    /// a screenful of blanks.
+    fn terminal_clear_collapsed(&self) -> bool {
+        false
+    }
     /// When older compacted history is being loaded in, this is the reader's
     /// captured distance (in wrapped lines) from the bottom of the transcript.
     /// The renderer uses it to keep the viewport anchored to the same content as
@@ -248,6 +274,21 @@ pub trait TuiState {
     fn status_detail(&self) -> Option<String>;
     fn mcp_servers(&self) -> Vec<(String, usize)>;
     fn available_skills(&self) -> Vec<String>;
+    /// Authoritative active credential (OAuth vs API key) for a dual-auth
+    /// provider, as resolved from the live provider / remote server rather than
+    /// from the `JCODE_RUNTIME_PROVIDER` env var. The header must prefer this
+    /// over its own env-based heuristic: the TUI client process often does not
+    /// inherit `JCODE_RUNTIME_PROVIDER` (it is set inside the agent/server
+    /// process), so the env heuristic silently falls back to "auto prefers
+    /// OAuth" and the header claimed OAuth while the info widget correctly
+    /// reported an API key. Returns `None` when the credential cannot be
+    /// determined, in which case callers fall back to the cached `AuthStatus`.
+    fn active_dual_credential(
+        &self,
+        _provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
+        None
+    }
 
     // ---- Stream / status ----
     fn streaming_tokens(&self) -> (u64, u64);
@@ -266,8 +307,21 @@ pub trait TuiState {
     }
     fn status(&self) -> ProcessingStatus;
     fn command_suggestions(&self) -> Vec<(String, &'static str)>;
+    /// Invalidate any per-frame memo backing [`Self::command_suggestions`].
+    ///
+    /// Called once at the top of each rendered frame. The suggestion list is
+    /// read many times while composing a single frame; implementations may
+    /// cache within a frame but must not serve that cache across frames, since
+    /// the list also depends on mutable session state. Defaults to a no-op for
+    /// impls that do not cache.
+    fn advance_command_suggestions_epoch(&self) {}
     fn command_suggestion_selected(&self) -> usize {
         0
+    }
+    /// Snapshot of the Ctrl+R reverse prompt-history search overlay, or None
+    /// when the overlay is closed.
+    fn prompt_history_search(&self) -> Option<PromptHistorySearchView> {
+        None
     }
     fn active_skill(&self) -> Option<String>;
     fn subagent_status(&self) -> Option<String>;
@@ -319,6 +373,15 @@ pub trait TuiState {
     fn connected_clients(&self) -> Option<usize>;
     /// Short-lived notice shown in the status line (e.g., model switch, toggle diff)
     fn status_notice(&self) -> Option<String>;
+    /// How long since the user last pressed a key, scrolled, or pasted, or
+    /// `None` when they have not interacted yet.
+    ///
+    /// Distinct from [`time_since_activity`], which tracks provider output:
+    /// typing into an idle session produces no stream events, so only this can
+    /// tell "actively composing" from "sitting untouched".
+    fn time_since_user_interaction(&self) -> Option<Duration> {
+        None
+    }
     /// Distinct learned-keybinding nudge shown in its own pop-out color, e.g.
     /// "you usually do X the slow way, press <key>". Separate from
     /// [`status_notice`] so the UI can style it differently.
@@ -826,6 +889,15 @@ pub enum PickerKind {
     Usage,
 }
 
+/// Render snapshot of the Ctrl+R reverse prompt-history search overlay.
+/// `matches` are single-line previews, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptHistorySearchView {
+    pub query: String,
+    pub matches: Vec<String>,
+    pub selected: usize,
+}
+
 /// What the first-run onboarding welcome screen should render in its body,
 /// driven by the active onboarding flow phase. `Suggestions` is the default
 /// resting state (the starter prompt cards).
@@ -898,11 +970,13 @@ pub struct LoginImportPrompt {
     pub seconds_left: u64,
 }
 
-/// The three actions on the import summary screen, left to right.
+/// The actions on the import summary screen, left to right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSummaryPill {
     /// Import everything we detected (default).
     Continue,
+    /// Sign in with a Jcode subscription instead of importing.
+    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.
@@ -1426,390 +1500,6 @@ pub struct PickerOption {
     pub available: bool,
     pub detail: String,
     pub estimated_reference_cost_micros: Option<u64>,
-}
-
-pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
-pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(5000);
-pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
-pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
-pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
-
-fn idle_donut_active_with_policy(
-    state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
-) -> bool {
-    if state.remote_startup_phase_active() {
-        return false;
-    }
-
-    // Decorative animations are purely visual; never spin them while the terminal
-    // window/tab is backgrounded. A swarm of unfocused sessions would otherwise
-    // each render a full-screen 3D scene at animation FPS, saturating every core.
-    if !state.client_focused() {
-        return false;
-    }
-
-    // The onboarding welcome screen draws the same live donut, but it also
-    // shows a welcome/login card so `display_messages()` is not empty.  Keep the
-    // animation loop running smoothly while that screen is up (even past the
-    // deep-idle threshold) so the donut spins as an attention grab instead of
-    // only repainting on input events.
-    if state.onboarding_welcome_active() {
-        return policy.enable_decorative_animations
-            && crate::config::config().display.idle_animation
-            && policy.tier.idle_animation_enabled();
-    }
-
-    // The idle donut is decorative.  Leaving many dormant tabs/sessions open
-    // should not keep every TUI repainting forever, especially when those tabs
-    // are hidden behind a terminal multiplexer or kitty single-instance window.
-    if state
-        .time_since_activity()
-        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-
-    policy.enable_decorative_animations
-        && crate::config::config().display.idle_animation
-        && policy.tier.idle_animation_enabled()
-        && !has_started_conversation(state)
-        && !state.is_processing()
-        && state.streaming_text().is_empty()
-        && state.queued_messages().is_empty()
-}
-
-/// Whether the transcript contains any real conversation yet (a user prompt or
-/// an assistant/tool/reasoning reply). A fresh screen that only holds
-/// non-conversational notices (e.g. the "run /login when you're ready" system
-/// message left after onboarding is declined) is still "idle", so the decorative
-/// donut should keep spinning until the user actually starts chatting.
-fn has_started_conversation(state: &dyn TuiState) -> bool {
-    state
-        .display_messages()
-        .iter()
-        .any(|m| matches!(m.role.as_str(), "user" | "assistant" | "tool" | "reasoning"))
-}
-
-pub(crate) fn idle_donut_active(state: &dyn TuiState) -> bool {
-    let policy = crate::perf::tui_policy();
-    idle_donut_active_with_policy(state, &policy)
-}
-
-fn rate_limit_countdown_redraw_active(state: &dyn TuiState) -> bool {
-    state
-        .rate_limit_remaining()
-        .map(|remaining| remaining <= Duration::from_secs(60))
-        .unwrap_or(false)
-}
-
-/// The notification line shows a live prompt-cache indicator (`⏳ cache Ns`
-/// while warm in the final minute, `🧊 cache cold` once expired). Both states
-/// emerge long after the 30s deep-idle cutoff, so without a dedicated wakeup
-/// the idle loop never repaints to reveal them. Keep redrawing whenever the
-/// cache is within the last-minute countdown window or has just gone cold so
-/// the warning actually appears before the next prompt.
-fn cache_cold_countdown_redraw_active(state: &dyn TuiState) -> bool {
-    if state.is_processing() {
-        return false;
-    }
-    state
-        .cache_ttl_status()
-        .map(|info| info.is_cold || info.expiring_soon())
-        .unwrap_or(false)
-}
-
-fn full_frame_status_animation_active_with_policy(
-    state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
-) -> bool {
-    if !policy.enable_decorative_animations {
-        return false;
-    }
-
-    // These animations are rendered as part of the full status line, not by the
-    // spinner-only cell renderer in app/run_shell.rs, so they need the normal
-    // active redraw loop while visible.
-    matches!(state.status(), ProcessingStatus::RunningTool(_))
-        || rate_limit_countdown_redraw_active(state)
-        || crate::build::read_build_progress().is_some()
-}
-
-fn primary_status_spinner_fast_path_available_with_policy(
-    state: &dyn TuiState,
-    _policy: &crate::perf::TuiPerfPolicy,
-) -> bool {
-    // The single-cell spinner fast path is available in every performance tier,
-    // including Minimal/SSH/WSL where decorative animations are off. Keep these
-    // conditions in sync with `app::run_shell::status_spinner_only_symbol`, which
-    // is what actually gates the spinner-only tick in the run loop.
-    state.is_processing()
-        && app::run_shell::status_uses_primary_spinner(&state.status())
-        && state.streaming_text().is_empty()
-        && !state.centered_mode()
-        && !state.has_pending_mouse_scroll_animation()
-        && !state.remote_startup_phase_active()
-}
-
-fn primary_status_spinner_needs_full_redraw_with_policy(
-    state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
-) -> bool {
-    // The primary spinner only needs the more expensive full-redraw cadence when
-    // the cheap single-cell fast path cannot run (e.g. centered composer). When
-    // the fast path is available we keep full redraws at the slow passive-liveness
-    // rate and let the one-cell renderer animate the spinner.
-    state.is_processing()
-        && app::run_shell::status_uses_primary_spinner(&state.status())
-        && state.streaming_text().is_empty()
-        && !primary_status_spinner_fast_path_available_with_policy(state, policy)
-}
-
-/// Redraw cadence while an inline swarm or session-picker spinner is active.
-/// This matches the glyph's wall-clock cadence and the primary status spinner:
-/// faster wastes unchanged frames, while slower makes the motion visibly step.
-pub(crate) const REDRAW_SWARM_SPINNER: Duration =
-    Duration::from_millis(jcode_tui_render::swarm_gallery::STRIP_SPINNER_FRAME_MS);
-
-/// Whether the swarm strip (above the status line) or the SwarmStatus dock
-/// widget is currently animating a status spinner for an active agent.
-///
-/// Both surfaces derive the spinner glyph from the wall clock, but managed
-/// agents keep running long after the coordinator session itself goes quiet.
-/// Without a dedicated wakeup the idle loop stops repainting (deep idle stops
-/// it entirely) and the spinner freezes, only twitching when a bus update
-/// happens to arrive. Unfocused clients skip this so backgrounded windows do
-/// not burn CPU animating a glyph nobody can see; terminal statuses render
-/// fixed glyphs and need no animation frames.
-fn swarm_spinner_redraw_active(state: &dyn TuiState) -> bool {
-    state.client_focused()
-        && state
-            .inline_swarm_members()
-            .iter()
-            .any(|m| jcode_tui_render::swarm_gallery::is_active_status(&m.status))
-}
-
-/// Whether the open `/resume` picker is showing at least one running session.
-/// The picker uses the same 8 fps spinner cells as the swarm strip, so it needs
-/// an explicit wakeup even when the session underneath the overlay is idle.
-fn session_picker_spinner_redraw_active(state: &dyn TuiState) -> bool {
-    state.client_focused()
-        && state.session_picker_overlay().is_some_and(|picker| {
-            picker
-                .try_borrow()
-                .ok()
-                .is_some_and(|picker| picker.has_visible_running_sessions())
-        })
-}
-
-fn fps_to_duration(fps: u32) -> Duration {
-    Duration::from_millis((1000 / fps.max(1)) as u64)
-}
-
-pub(crate) fn redraw_interval_with_policy(
-    state: &dyn TuiState,
-    policy: &crate::perf::TuiPerfPolicy,
-) -> Duration {
-    let animation_interval = fps_to_duration(policy.animation_fps);
-    let fast_interval = fps_to_duration(policy.redraw_fps);
-
-    // A retained/collapsing reasoning trace used to need animation cadence here;
-    // anchored traces are static transcript messages now. The tail-follow
-    // catch-up slide still needs smooth frames and must skip the deep-idle
-    // short-circuits below.
-    if ui::tail_catchup_active() {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => fast_interval,
-            _ => animation_interval,
-        };
-    }
-
-    // The elastic overscroll line shows a live `(overscroll x.x)` countdown that
-    // depletes over ~1.5s. Without a dedicated branch it falls through to the
-    // 250ms idle cadence and ticks in coarse, steppy jumps. Drive it at the
-    // smooth animation cadence so the countdown reads as continuous. A line
-    // pinned on by config has no countdown (`remaining` is None) and must not
-    // pin the redraw loop at animation cadence forever.
-    if state.chat_overscroll_remaining().is_some() {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => fast_interval,
-            _ => animation_interval,
-        };
-    }
-
-    // While the terminal is backgrounded (FocusLost), an idle session has nothing
-    // worth a fast tick: decorative animations are paused and the run loop only
-    // repaints throttled idle frames. Use the slow deep-idle interval so the
-    // event loop sleeps instead of spinning on shared-server bus chatter. Sessions
-    // with live output keep a responsive cadence below.
-    if !state.client_focused()
-        && !state.is_processing()
-        && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
-        && !state.copy_selection_edge_autoscroll_active()
-        && !state.remote_startup_phase_active()
-        && !rate_limit_countdown_redraw_active(state)
-        && crate::build::read_build_progress().is_none()
-    {
-        return REDRAW_DEEP_IDLE;
-    }
-
-    let deep_idle = state
-        .time_since_activity()
-        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
-        .unwrap_or(false);
-
-    if deep_idle
-        && !state.is_processing()
-        && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
-        && !state.copy_selection_edge_autoscroll_active()
-        && !state.remote_startup_phase_active()
-        && !rate_limit_countdown_redraw_active(state)
-        && !cache_cold_countdown_redraw_active(state)
-        && crate::build::read_build_progress().is_none()
-        && !state.onboarding_welcome_active()
-        && !swarm_spinner_redraw_active(state)
-        && !session_picker_spinner_redraw_active(state)
-    {
-        return REDRAW_DEEP_IDLE;
-    }
-
-    if idle_donut_active_with_policy(state, policy) {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => fast_interval,
-            _ => animation_interval,
-        };
-    }
-
-    if full_frame_status_animation_active_with_policy(state, policy) {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
-            _ => fast_interval,
-        };
-    }
-
-    if primary_status_spinner_needs_full_redraw_with_policy(state, policy) {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
-            _ => fast_interval,
-        };
-    }
-
-    // Swarm status spinners animate at a fixed 12.5 fps off the wall clock.
-    // Streaming/scroll branches below already repaint faster than this, but
-    // both the quiet-coordinator case and the processing-without-streaming
-    // case (which otherwise idles at the 1s passive-liveness cadence) need
-    // this to keep agent spinners smooth while the swarm works.
-    if (swarm_spinner_redraw_active(state) || session_picker_spinner_redraw_active(state))
-        && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
-    {
-        return match policy.tier {
-            // Minimal tier drops decorative animation; a liveness-rate tick
-            // still advances the glyph so agents never look frozen.
-            crate::perf::PerformanceTier::Minimal => REDRAW_PASSIVE_LIVENESS,
-            _ => REDRAW_SWARM_SPINNER,
-        };
-    }
-
-    if !state.has_pending_mouse_scroll_animation()
-        && state.streaming_text().is_empty()
-        && (state.is_processing() || rate_limit_countdown_redraw_active(state))
-    {
-        return REDRAW_PASSIVE_LIVENESS;
-    }
-
-    if state.is_processing()
-        || !state.streaming_text().is_empty()
-        || state.status_notice().is_some()
-        || state.learn_hint().is_some()
-        || state.has_pending_mouse_scroll_animation()
-        || state.copy_selection_edge_autoscroll_active()
-        || state.has_notification()
-        || rate_limit_countdown_redraw_active(state)
-    {
-        return match policy.tier {
-            crate::perf::PerformanceTier::Minimal => REDRAW_IDLE,
-            _ => fast_interval,
-        };
-    }
-
-    if state.remote_startup_phase_active() {
-        return REDRAW_REMOTE_STARTUP;
-    }
-
-    if deep_idle {
-        REDRAW_DEEP_IDLE
-    } else {
-        REDRAW_IDLE
-    }
-}
-
-pub(crate) fn redraw_interval(state: &dyn TuiState) -> Duration {
-    let policy = crate::perf::tui_policy();
-    redraw_interval_with_policy(state, &policy)
-}
-
-pub(crate) fn periodic_redraw_required(state: &dyn TuiState) -> bool {
-    let policy = crate::perf::tui_policy();
-
-    let deep_idle = state
-        .time_since_activity()
-        .map(|d| d >= REDRAW_DEEP_IDLE_AFTER)
-        .unwrap_or(false);
-
-    if deep_idle
-        && !state.is_processing()
-        && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
-        && !state.copy_selection_edge_autoscroll_active()
-        // Only the elastic countdown needs ticks; a config-pinned line is static.
-        && state.chat_overscroll_remaining().is_none()
-        && !state.remote_startup_phase_active()
-        && !rate_limit_countdown_redraw_active(state)
-        && !cache_cold_countdown_redraw_active(state)
-        && crate::build::read_build_progress().is_none()
-        && !state.onboarding_welcome_active()
-        && !swarm_spinner_redraw_active(state)
-        && !session_picker_spinner_redraw_active(state)
-    {
-        return false;
-    }
-
-    if idle_donut_active_with_policy(state, &policy) {
-        return true;
-    }
-
-    if full_frame_status_animation_active_with_policy(state, &policy) {
-        return true;
-    }
-
-    if swarm_spinner_redraw_active(state) {
-        return true;
-    }
-
-    if session_picker_spinner_redraw_active(state) {
-        return true;
-    }
-
-    if state.is_processing()
-        || !state.streaming_text().is_empty()
-        || ui::tail_catchup_active()
-        || state.status_notice().is_some()
-        || state.learn_hint().is_some()
-        || state.has_pending_mouse_scroll_animation()
-        || state.copy_selection_edge_autoscroll_active()
-        || state.chat_overscroll_remaining().is_some()
-        || state.has_notification()
-        || rate_limit_countdown_redraw_active(state)
-        || state.remote_startup_phase_active()
-    {
-        return true;
-    }
-
-    false
 }
 
 pub(crate) fn subscribe_metadata(

@@ -3,52 +3,77 @@ use crate::color::rgb;
 use ratatui::prelude::*;
 
 pub fn user_color() -> Color {
-    rgb(138, 180, 248)
+    crate::palette::role_color(crate::palette::Role::User)
 }
 pub fn ai_color() -> Color {
-    rgb(129, 199, 132)
+    crate::palette::role_color(crate::palette::Role::Ai)
 }
 pub fn tool_color() -> Color {
-    rgb(120, 120, 120)
+    crate::palette::role_color(crate::palette::Role::Tool)
 }
 pub fn file_link_color() -> Color {
-    rgb(180, 200, 255)
+    crate::palette::role_color(crate::palette::Role::FileLink)
 }
 pub fn dim_color() -> Color {
-    rgb(80, 80, 80)
+    crate::palette::role_color(crate::palette::Role::Dim)
 }
 pub fn accent_color() -> Color {
-    rgb(186, 139, 255)
+    crate::palette::role_color(crate::palette::Role::Accent)
 }
 pub fn system_message_color() -> Color {
-    rgb(255, 170, 220)
+    crate::palette::role_color(crate::palette::Role::System)
 }
 pub fn queued_color() -> Color {
-    rgb(255, 193, 7)
+    crate::palette::role_color(crate::palette::Role::Queued)
 }
 pub fn asap_color() -> Color {
-    rgb(110, 210, 255)
+    crate::palette::role_color(crate::palette::Role::Asap)
 }
 pub fn pending_color() -> Color {
-    rgb(140, 140, 140)
+    crate::palette::role_color(crate::palette::Role::Pending)
 }
 pub fn user_text() -> Color {
-    rgb(245, 245, 255)
+    crate::palette::role_color(crate::palette::Role::UserText)
 }
 pub fn user_bg() -> Color {
-    rgb(35, 40, 50)
+    crate::palette::role_color(crate::palette::Role::UserBg)
 }
 pub fn ai_text() -> Color {
-    rgb(220, 220, 215)
+    crate::palette::role_color(crate::palette::Role::AiText)
 }
 pub fn header_icon_color() -> Color {
-    rgb(120, 210, 230)
+    crate::palette::role_color(crate::palette::Role::HeaderIcon)
 }
 pub fn header_name_color() -> Color {
-    rgb(190, 210, 235)
+    crate::palette::role_color(crate::palette::Role::HeaderName)
 }
 pub fn header_session_color() -> Color {
-    rgb(255, 255, 255)
+    crate::palette::role_color(crate::palette::Role::HeaderSession)
+}
+
+/// Success / additions accent.
+pub fn success_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Success)
+}
+/// Warning accent.
+pub fn warning_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Warning)
+}
+/// Error / deletions accent.
+pub fn error_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Error)
+}
+/// Informational accent.
+pub fn info_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Info)
+}
+/// Borders and rules.
+pub fn border_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::Border)
+}
+/// Selected-row background.
+pub fn selection_bg_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::SelectionBg)
 }
 
 // Spinner frames for animated status. Keep these single-cell because the fast

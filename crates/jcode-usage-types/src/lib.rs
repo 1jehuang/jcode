@@ -27,6 +27,7 @@ pub struct ProviderUsageProgress {
 }
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CopilotUsageTracker {
@@ -166,6 +167,8 @@ pub enum SessionEndReason {
     Signal,
     Disconnect,
     Reload,
+    /// A new session replaced this one in-process without an explicit close.
+    Superseded,
     Unknown,
 }
 
@@ -177,6 +180,7 @@ impl SessionEndReason {
             SessionEndReason::Signal => "signal",
             SessionEndReason::Disconnect => "disconnect",
             SessionEndReason::Reload => "reload",
+            SessionEndReason::Superseded => "superseded",
             SessionEndReason::Unknown => "unknown",
         }
     }
@@ -341,6 +345,59 @@ pub struct OnboardingStepEvent {
     pub ran_from_cargo: bool,
 }
 
+/// One traversal of one edge of the onboarding graph.
+///
+/// Every string field is a `&'static str` drawn from the closed vocabulary
+/// defined by `onboarding_graph` (`NodeId::label`, `EdgeId::label`) or by the
+/// auth failure taxonomy. There is deliberately no free-text field, so this
+/// payload is structurally incapable of carrying prompts, paths, hostnames, or
+/// credentials. That is a guarantee of the type, not of a scrubbing pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingTraceStep {
+    /// Node the user was on, e.g. "login_openai".
+    pub node: &'static str,
+    /// Edge taken out of it, e.g. "login_fail". `None` on the final step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<&'static str>,
+    /// Classified reason, only for failure edges, e.g. "callback_timeout".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// Time spent on this node, bucketed to 100ms and capped, so timings
+    /// cannot act as a behavioral fingerprint.
+    pub dt_ms: u64,
+}
+
+/// A complete onboarding traversal: the shape of one user's first run.
+///
+/// Because it is a path through a known graph, aggregating these answers the
+/// questions we could never answer before (which edge fails, where users
+/// abandon, which screens nobody reaches) while carrying no user data at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingTraceEvent {
+    pub event_id: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub event: &'static str,
+    pub version: String,
+    pub os: &'static str,
+    pub arch: &'static str,
+    /// Probed environment capabilities, all three-valued enums.
+    pub env: BTreeMap<String, &'static str>,
+    pub steps: Vec<OnboardingTraceStep>,
+    /// "ready" | "abandoned" | "degraded" | "stuck".
+    pub outcome: &'static str,
+    /// Total in-TUI keystrokes across the traversal.
+    pub keystrokes: u32,
+    /// True when the trace hit the step cap and was cut short.
+    pub truncated: bool,
+    pub schema_version: u32,
+    pub build_channel: String,
+    pub is_git_checkout: bool,
+    pub is_ci: bool,
+    pub ran_from_cargo: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackEvent {
     pub event_id: String,
@@ -397,6 +454,58 @@ pub struct DiscoveryEvent {
     #[serde(default)]
     pub benchmark_run: bool,
     pub custom_endpoint: bool,
+    pub schema_version: u32,
+    pub build_channel: String,
+    pub is_git_checkout: bool,
+    pub is_ci: bool,
+    pub ran_from_cargo: bool,
+}
+
+/// Privacy-safe todo progress for one runtime session.
+///
+/// `id` is deliberately the same fresh, session-scoped UUID as
+/// `correlation_id`, not the install's persistent telemetry ID. This lets the
+/// receiving telemetry worker join the aggregate to discovery API requests
+/// without linking either side to an install or account. Todo, goal, plan, and
+/// feedback-loop text are intentionally not representable in this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoSessionEvent {
+    pub event_id: String,
+    pub id: String,
+    pub correlation_id: String,
+    pub event: &'static str,
+    pub version: String,
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub session_end_reason: &'static str,
+    pub todos_created: u32,
+    pub todos_completed: u32,
+    pub todos_abandoned: u32,
+    pub todo_updates: u32,
+    pub groups_completed: u32,
+    pub groups_total: u32,
+    pub max_todo_list_size: u32,
+    pub confidence_min: Option<u8>,
+    pub confidence_mean: Option<f64>,
+    pub confidence_count: u32,
+    pub completion_confidence_min: Option<u8>,
+    pub completion_confidence_mean: Option<f64>,
+    pub completion_confidence_count: u32,
+    pub understands_user_intent_min: Option<u8>,
+    pub understands_user_intent_mean: Option<f64>,
+    pub understands_user_intent_count: u32,
+    pub closed_feedback_loop_min: Option<u8>,
+    pub closed_feedback_loop_mean: Option<f64>,
+    pub closed_feedback_loop_count: u32,
+    pub feedback_loop_relevance_min: Option<u8>,
+    pub feedback_loop_relevance_mean: Option<f64>,
+    pub feedback_loop_relevance_count: u32,
+    pub feedback_loop_coverage_min: Option<u8>,
+    pub feedback_loop_coverage_mean: Option<f64>,
+    pub feedback_loop_coverage_count: u32,
+    pub end_to_end_ownership_min: Option<u8>,
+    pub end_to_end_ownership_mean: Option<f64>,
+    pub end_to_end_ownership_count: u32,
     pub schema_version: u32,
     pub build_channel: String,
     pub is_git_checkout: bool,
@@ -500,8 +609,8 @@ pub struct SessionLifecycleEvent {
     pub tool_cat_todo: u32,
     #[serde(default)]
     pub todo_gate_ownership_count: u32,
-    #[serde(default)]
-    pub todo_gate_hill_count: u32,
+    #[serde(default, alias = "todo_gate_hill_count")]
+    pub todo_gate_feedback_loop_count: u32,
     #[serde(default)]
     pub todo_gate_alignment_count: u32,
     #[serde(default)]
@@ -631,8 +740,8 @@ pub struct TurnEndEvent {
     pub tool_cat_todo: u32,
     #[serde(default)]
     pub todo_gate_ownership_count: u32,
-    #[serde(default)]
-    pub todo_gate_hill_count: u32,
+    #[serde(default, alias = "todo_gate_hill_count")]
+    pub todo_gate_feedback_loop_count: u32,
     #[serde(default)]
     pub todo_gate_alignment_count: u32,
     #[serde(default)]

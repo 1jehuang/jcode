@@ -120,6 +120,12 @@ async fn rename_shutdown_signal(
     }
     drop(signals);
     rename_background_tool_signal(old_session_id, new_session_id);
+    // In-flight turns are registered in the process-global cancel registry by
+    // session id. Attaching to / resuming a session renames it underneath a
+    // still-streaming turn, so the registration must follow, or a later Esc
+    // finds no active-turn signal for the new id and the model keeps
+    // generating (issue #732, regression of issue #428).
+    crate::turn_cancel_registry::rename_active_turns(old_session_id, new_session_id);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,6 +862,14 @@ pub(super) async fn handle_subscribe(
     // plan graph immediately instead of waiting for the next plan mutation.
     send_swarm_plan_to_session(client_session_id, swarm_members, swarm_plans).await;
 
+    // Tell the client which session it is bound to. Local clients learn this
+    // from their own launch state, but a remote client (gateway/WebSocket) has
+    // no other source, and without it a dropped connection cannot reattach:
+    // the next Subscribe carries no `target_session_id`, so the server hands
+    // it a brand-new session and the in-flight turn becomes unreachable.
+    let _ = client_event_tx.send(ServerEvent::SessionId {
+        session_id: client_session_id.to_string(),
+    });
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 

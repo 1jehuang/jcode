@@ -32,7 +32,7 @@ use std::time::Instant;
 
 pub(super) const REVIEW_PREFERRED_MODEL: &str = "gpt-5.5";
 const POKE_OFF_UI_HINT: &str = "/poke off to stop.";
-const TODO_CONFIDENCE_THRESHOLD: u8 = crate::todo::QUALITY_GATE_THRESHOLD;
+
 const TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
     crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE;
 const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
@@ -106,8 +106,14 @@ pub(super) fn clear_queued_poke_messages(app: &mut App) -> usize {
 pub(super) fn disable_auto_poke(app: &mut App) -> usize {
     let cleared = clear_queued_poke_messages(app);
     app.auto_poke_incomplete_todos = false;
+    // Disarming is explicit (/poke off) or a circuit breaker; either way it must
+    // stick for the rest of the session instead of being re-armed by the
+    // default-on re-arm in `schedule_auto_poke_followup_if_needed`.
+    app.auto_poke_default_on = false;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    app.todo_gate_digest_delivered = false;
     cleared
 }
 
@@ -181,7 +187,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
     app.rate_limit_pending_message = None;
     app.rate_limit_reset = None;
     app.push_display_message(DisplayMessage::system(format!(
-        "🛑 Auto-poke stopped because the last request failed with a non-retryable error.{} Fix the request/session, then run /poke again if you want to resume.",
+        "🛑 The last request failed in a way that retrying won't fix, so we stopped poking.{} Fix the request or session, then /poke to resume.",
         if cleared == 0 {
             String::new()
         } else {
@@ -192,7 +198,7 @@ pub(super) fn stop_auto_poke_for_non_retryable_error(app: &mut App, error: &str)
             )
         }
     )));
-    app.set_status_notice("Poke stopped: non-retryable error");
+    app.set_status_notice("Poke stopped: this error won't fix itself");
     true
 }
 
@@ -212,19 +218,19 @@ pub(super) fn poke_disabled_message(cleared: usize) -> String {
 }
 
 pub(super) fn poke_enabled_without_incomplete_message() -> String {
-    "Auto-poke enabled. No incomplete todos found right now.".to_string()
+    "Auto-poke enabled. Nothing unfinished right now; we'll poke the agent if it stops with todos left.".to_string()
 }
 
 pub(super) fn poke_queued_display_message() -> String {
     format!(
-        "👉 /poke queued. Re-checking incomplete todos after this turn. {}",
+        "👉 Poke queued. We'll re-check for unfinished todos after this turn. {}",
         POKE_OFF_UI_HINT
     )
 }
 
 pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String {
     format!(
-        "👉 Poking model: {} incomplete todo{}. {}",
+        "👉 {} incomplete todo{}. We poked the agent. {}",
         incomplete_count,
         if incomplete_count == 1 { "" } else { "s" },
         POKE_OFF_UI_HINT,
@@ -234,8 +240,14 @@ pub(super) fn poke_triggered_display_message(incomplete_count: usize) -> String 
 pub(super) fn activate_auto_poke(app: &mut App) -> PokeActivation {
     let incomplete = incomplete_poke_todos(app);
     app.auto_poke_incomplete_todos = true;
+    // Explicitly turning poke on also restores default-on re-arming.
+    app.auto_poke_default_on = true;
     app.todo_confidence_spike_challenged = false;
     app.todo_completion_gate_attempts = 0;
+    app.last_auto_poke_fingerprint = None;
+    // Re-arming starts a fresh review cycle, so the deferred quality digest is
+    // eligible to be delivered again for the upcoming work.
+    app.todo_gate_digest_delivered = false;
     // Re-arming is an explicit user action: give the guardrail circuit
     // breaker its full budget again (the user likely rephrased the task).
     app.consecutive_guardrail_stops = 0;
@@ -518,6 +530,7 @@ pub(super) fn handle_transfer_command_local(app: &mut App) {
     app.pending_transfer_request = true;
     if app.is_processing {
         app.interleave_message = Some(transfer_pause_message());
+        app.interleave_images.clear();
         app.push_display_message(DisplayMessage::system(
             "Queued /transfer. The current session will be asked to pause, then the compacted handoff will open in a new window."
                 .to_string(),
@@ -823,9 +836,11 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let pending_retry = app.rate_limit_reset.is_some() && app.rate_limit_pending_message.is_some();
     if app.is_processing {
         app.cancel_requested = true;
         app.interleave_message = None;
+        app.interleave_images.clear();
         app.pending_soft_interrupts.clear();
         app.pending_soft_interrupt_requests.clear();
         if app.cancel_overnight_for_interrupt() {
@@ -833,6 +848,13 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         } else {
             app.set_status_notice("Interrupting...");
         }
+    } else if pending_retry {
+        app.clear_pending_remote_retry();
+        if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+            app.status = ProcessingStatus::Idle;
+            app.status_detail = None;
+        }
+        app.set_status_notice("Pending retry cancelled");
     } else {
         app.push_display_message(DisplayMessage::system(
             "Nothing to cancel: no prompt or operation is in progress.".to_string(),
@@ -1629,6 +1651,7 @@ pub(super) fn handle_git_status_completed(app: &mut App, completed: GitStatusCom
 pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
     if handle_subagent_model_command(app, trimmed)
         || app.handle_hotkeys_command(trimmed)
+        || app.handle_terminal_setup_command(trimmed)
         || handle_subagent_command(app, trimmed)
         || handle_observe_command(app, trimmed)
         || handle_todos_view_command(app, trimmed)
@@ -1667,8 +1690,18 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/fast-macos-release" {
+        handle_fast_macos_release_command_local(app);
+        return true;
+    }
+
     if trimmed == "/remote-release" {
         handle_remote_release_command_local(app);
+        return true;
+    }
+
+    // After `/remote-release`: the parser claims only `/remote` + whitespace/end.
+    if super::commands_remote::handle_remote_command(app, trimmed) {
         return true;
     }
 
@@ -1712,6 +1745,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/clear" {
         reset_current_session(app);
+        return true;
+    }
+
+    if trimmed == "/cls" || trimmed == "/clear-view" {
+        app.clear_view_keep_context();
         return true;
     }
 
@@ -2140,6 +2178,13 @@ pub(super) fn build_fast_release_prompt() -> String {
     )
 }
 
+pub(super) fn build_fast_macos_release_prompt() -> String {
+    build_release_prompt(
+        "Before editing Cargo.toml or the changelog for the version bump, run scripts/quick-release.sh --prepare-fast-macos v<version>. It must cross-build and record the macOS arm64 binary with the future release identity while the release metadata is still unchanged.",
+        "Then run scripts/quick-release.sh --fast-macos-local v<version>. It must validate and publish the prepared macOS arm64 asset and GitHub release immediately, while CI replaces it with the signoff artifact and adds macOS Intel, Linux, Windows, FreeBSD, signatures, and final checksums. If preparation is stale or the release-metadata commit contains code changes, stop instead of publishing a binary that differs from the tag.",
+    )
+}
+
 pub(super) fn build_remote_release_prompt() -> String {
     build_release_prompt(
         "",
@@ -2212,6 +2257,14 @@ pub(super) fn fast_release_launch_notice(interrupted: bool) -> String {
     }
 }
 
+pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting logical commits + push + fast macOS release...".to_string()
+    } else {
+        "🚀 Starting logical commits + push + fast macOS release...".to_string()
+    }
+}
+
 pub(super) fn remote_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + remote release...".to_string()
@@ -2261,6 +2314,23 @@ fn handle_fast_release_command_local(app: &mut App) {
         );
     } else {
         app.push_display_message(DisplayMessage::system(fast_release_launch_notice(false)));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
+fn handle_fast_macos_release_command_local(app: &mut App) {
+    let prompt = build_fast_macos_release_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /fast-macos-release...",
+            fast_macos_release_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
+            false,
+        )));
         super::commands_improve::start_synthetic_user_turn(app, prompt);
     }
 }
@@ -2615,12 +2685,10 @@ fn weighted_confidence_average(scores: impl IntoIterator<Item = (u8, u32)>) -> O
 
 pub(super) fn build_todo_confidence_summary_message(todos: &[crate::todo::TodoItem]) -> String {
     let summary = todo_confidence_summary(todos);
-    if summary.completion_confidence_needs_validation {
-        TODO_COMPLETION_CONTINUATION_MESSAGE.to_string()
-    } else if summary.confidence_spike_detected {
-        TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_string()
+    if summary.confidence_spike_detected && !summary.completion_confidence_needs_validation {
+        crate::todo::build_todo_confidence_spike_continuation_message(todos)
     } else {
-        TODO_COMPLETION_CONTINUATION_MESSAGE.to_string()
+        crate::todo::build_todo_completion_continuation_message(todos)
     }
 }
 
@@ -2629,29 +2697,28 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
         .iter()
         .filter(|todo| todo.status == "completed")
         .collect();
-    let completion_scores: Vec<(&crate::todo::TodoItem, u8, u32)> = completed
-        .iter()
-        .filter_map(|todo| {
-            todo.completion_confidence
-                .map(|score| (*todo, score, todo_confidence_weight(&todo.priority)))
-        })
-        .collect();
-    let completion_average = weighted_confidence_average(
-        completion_scores
+    let completion_states: Vec<(&crate::todo::TodoItem, crate::todo::ConfidenceState, u32)> =
+        completed
             .iter()
-            .map(|(_, score, weight)| (*score, *weight)),
+            .filter_map(|todo| {
+                todo.completion_confidence
+                    .map(|state| (*todo, state, todo_confidence_weight(&todo.priority)))
+            })
+            .collect();
+    let completion_average = weighted_confidence_average(
+        completion_states
+            .iter()
+            .map(|(_, state, weight)| (state.legacy_score(), *weight)),
     );
     let missing_completion_confidence = completed
         .iter()
         .filter(|todo| todo.completion_confidence.is_none())
         .count();
-    let below_threshold_count = completion_scores
+    let below_threshold_count = completion_states
         .iter()
-        .filter(|(_, score, _)| *score < TODO_CONFIDENCE_THRESHOLD)
+        .filter(|(_, state, _)| !crate::todo::completion_confidence_passes(Some(*state)))
         .count();
-    let completion_confidence_needs_validation = completion_average
-        .map(|avg| avg < TODO_CONFIDENCE_THRESHOLD)
-        .unwrap_or(true)
+    let completion_confidence_needs_validation = completion_average.is_none()
         || missing_completion_confidence > 0
         || below_threshold_count > 0;
     let confidence_spike_detected = !crate::todo::spike_completed_todos(todos).is_empty();
@@ -2666,10 +2733,11 @@ pub(super) fn todo_confidence_summary(todos: &[crate::todo::TodoItem]) -> TodoCo
 }
 
 pub(super) fn format_todo_completion_confidence(summary: TodoConfidenceSummary) -> String {
-    match summary.completion_average {
-        Some(avg) => format!("{}%", avg),
-        None => "unknown".to_string(),
-    }
+    summary
+        .completion_average
+        .map(crate::todo::ConfidenceState::from_legacy_score)
+        .map(|state| state.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 pub(super) fn active_working_dir(app: &App) -> Option<std::path::PathBuf> {
@@ -3009,9 +3077,9 @@ fn handle_alignment_command(app: &mut App, trimmed: &str) -> bool {
     if rest.is_empty() || matches!(rest, "show" | "status") {
         let saved = crate::config::Config::load().display.centered;
         app.push_display_message(DisplayMessage::system(format!(
-            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press Alt+C to toggle it for the current session.",
+            "Alignment is currently {}.\nSaved default: {}.\n\nUse /alignment centered or /alignment left to change it permanently, or press {} to toggle it for the current session.",
             alignment_label(app.centered),
-            alignment_label(saved)
+            alignment_label(saved), jcode_tui_core::keybind::alt_chord("C")
         )));
         return true;
     }
@@ -3378,14 +3446,6 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
     false
 }
 
-pub(super) fn handle_debug_command(app: &mut App, trimmed: &str) -> bool {
-    super::debug::handle_debug_command(app, trimmed)
-}
-
-pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
-    super::model_context::handle_model_command(app, trimmed)
-}
-
 pub(super) fn handle_usage_command(app: &mut App, trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("/usage") else {
         return false;
@@ -3425,10 +3485,6 @@ pub(super) fn handle_feedback_command(app: &mut App, trimmed: &str) -> bool {
     ));
     app.set_status_notice("Feedback recorded");
     true
-}
-
-pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
-    super::tui_lifecycle_runtime::handle_dev_command(app, trimmed)
 }
 
 /// `/telemetry [everything|no-prompts|nothing]` - show or change the same

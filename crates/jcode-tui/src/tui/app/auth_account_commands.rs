@@ -73,12 +73,15 @@ pub(crate) fn handle_auth_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
-    if trimmed == "/subscription" || trimmed == "/subscription status" {
+    if matches!(
+        trimmed,
+        "/hosted status" | "/subscription" | "/subscription status"
+    ) {
         app.show_jcode_subscription_status();
         return true;
     }
 
-    if trimmed == "/subscribe" {
+    if trimmed == "/hosted" || trimmed == "/subscribe" {
         app.show_subscribe_pitch();
         return true;
     }

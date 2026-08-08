@@ -152,7 +152,8 @@ pub use jcode_render_core::{REASONING_SENTINEL, reasoning_line_markup, reasoning
 pub use jcode_render_core::reasoning_summary_line_markup;
 
 use render_support::{
-    highlight_code_cached, line_plain_text, placeholder_code_block, ranges_overlap, render_table,
+    highlight_code_cached, line_plain_text, placeholder_code_block, ranges_overlap,
+    render_table_aligned,
 };
 
 fn should_render_mermaid_block(lang: Option<&str>) -> bool {
@@ -480,7 +481,8 @@ fn rendered_rule_width(max_width: Option<usize>) -> usize {
 
 // Colors matching ui.rs palette
 use jcode_tui_workspace::color_support::rgb;
-const MATH_FOREGROUND: (u8, u8, u8) = (100, 160, 255);
+const MATH_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
+const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
 
 fn code_bg() -> Color {
     rgb(45, 45, 45)
@@ -490,6 +492,13 @@ fn code_fg() -> Color {
 }
 fn math_fg() -> Color {
     rgb(MATH_FOREGROUND.0, MATH_FOREGROUND.1, MATH_FOREGROUND.2)
+}
+fn math_inline_fg() -> Color {
+    rgb(
+        MATH_INLINE_FOREGROUND.0,
+        MATH_INLINE_FOREGROUND.1,
+        MATH_INLINE_FOREGROUND.2,
+    )
 }
 fn link_fg() -> Color {
     rgb(120, 180, 240)
@@ -554,23 +563,31 @@ fn mermaid_sidebar_placeholder(text: &str) -> Line<'static> {
 /// render epoch advances).
 pub const MERMAID_PENDING_PLACEHOLDER_TEXT: &str = "↻ rendering mermaid diagram...";
 
+/// Placeholder emitted while a deferred LaTeX image render runs in the
+/// background. Shares the pending-detection prefix with the mermaid
+/// placeholder so the same cache-invalidation path covers both.
+pub const MATH_PENDING_PLACEHOLDER_TEXT: &str = "↻ rendering math...";
+
 /// Prefix used to recognize the pending placeholder even when a narrow width
 /// wraps its tail onto a following line.
-const MERMAID_PENDING_MATCH_PREFIX: &str = "↻ rendering mermaid";
+const MERMAID_PENDING_MATCH_PREFIX: &str = "↻ rendering";
 
-/// True when `line` is the deferred-mermaid pending placeholder. Tolerates
-/// leading/trailing padding spans added by centered display modes and the
-/// truncated tail produced when a narrow width wraps the placeholder.
+/// True when `line` is a deferred-render pending placeholder (mermaid or
+/// math). Tolerates leading/trailing padding spans added by centered display
+/// modes and the truncated tail produced when a narrow width wraps it.
+///
+/// Matches on the line's joined text rather than a single span: the wrapping
+/// pass splits a line into one span per word, so a per-span test silently
+/// stops recognizing placeholders once content reaches the wrapper. That made
+/// prepared bodies miss their staleness stamp, leaving "rendering..." on
+/// screen permanently because no cache layer knew to rebuild.
 pub fn line_is_mermaid_pending_placeholder(line: &Line<'_>) -> bool {
-    let mut spans = line
+    let joined: String = line
         .spans
         .iter()
-        .map(|span| span.content.as_ref().trim())
-        .filter(|content| !content.is_empty());
-    let Some(first) = spans.next() else {
-        return false;
-    };
-    first.starts_with(MERMAID_PENDING_MATCH_PREFIX) && spans.next().is_none()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    joined.trim().starts_with(MERMAID_PENDING_MATCH_PREFIX)
 }
 
 fn apply_inline_decorations(mut style: Style, strike: bool, in_link: bool) -> Style {
@@ -947,12 +964,12 @@ fn count_unescaped_double_dollar(line: &str) -> usize {
 fn math_inline_span(math: &str) -> Span<'static> {
     Span::styled(
         jcode_render_core::render_inline_latex(math),
-        Style::default().fg(math_fg()),
+        Style::default().fg(math_inline_fg()),
     )
 }
 
 fn raw_math_inline_span(math: &str) -> Span<'static> {
-    Span::styled(format!("${math}$"), Style::default().fg(math_fg()))
+    Span::styled(format!("${math}$"), Style::default().fg(math_inline_fg()))
 }
 
 fn math_display_lines(math: &str) -> Vec<Line<'static>> {
@@ -1003,8 +1020,11 @@ fn latex_image_lines(
         return Some(lines);
     }
     match latex_image::render_latex_image(math, display, max_width) {
-        Ok(lines) => Some(lines),
-        Err(error) => {
+        latex_image::LatexImageOutcome::Ready(lines) => Some(lines),
+        latex_image::LatexImageOutcome::Pending => Some(vec![mermaid_sidebar_placeholder(
+            MATH_PENDING_PLACEHOLDER_TEXT,
+        )]),
+        latex_image::LatexImageOutcome::Failed(error) => {
             latex_image::report_error(&error);
             None
         }

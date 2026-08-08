@@ -36,6 +36,42 @@ fn test_scroll_cmd_j_k_fallback_in_app() {
     assert!(app.scroll_offset <= after_up);
 }
 
+/// Terminal-style Ctrl+L: after the clear the rendered messages area shows no
+/// transcript body (the spacer fills the viewport; only the sticky
+/// previous-prompt preview band may remain at the top), and scrolling up
+/// brings the old content back, exactly like a terminal's
+/// clear-with-scrollback.
+#[test]
+fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+
+    // Seed viewport geometry (viewport height, max scroll) with a real frame.
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("Intro line"),
+        "sanity: transcript body is visible before Ctrl+L"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    let after = render_and_snap(&app, &mut terminal);
+    assert!(
+        !after.contains("Intro line"),
+        "after Ctrl+L no transcript body is visible:\n{after}"
+    );
+
+    // History is still there: scroll up a page and the content returns.
+    for _ in 0..12 {
+        app.scroll_up(3);
+    }
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("Intro line"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
+    );
+}
+
 #[test]
 fn test_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
@@ -356,6 +392,9 @@ fn test_remote_ctrl_c_still_arms_quit_when_idle() {
 #[test]
 fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     let _render_lock = scroll_render_test_lock();
+    // Route the copy into the in-process sink so this passes on a headless
+    // runner instead of hitting the real OS clipboard.
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_copy_test_app();
 
     render_and_snap(&app, &mut terminal);
@@ -363,6 +402,11 @@ fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
     app.handle_key(KeyCode::Char('S'), KeyModifiers::ALT)
         .unwrap();
 
+    let copied = clipboard.text().expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
     let notice = app.status_notice().unwrap_or_default();
     assert!(
         notice == "Copied rust",
@@ -381,6 +425,7 @@ fn test_local_copy_badge_shortcut_accepts_alt_uppercase_encoding() {
 #[test]
 fn test_remote_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_copy_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -391,6 +436,11 @@ fn test_remote_copy_badge_shortcut_supported() {
     rt.block_on(app.handle_remote_key(KeyCode::Char('S'), KeyModifiers::ALT, &mut remote))
         .unwrap();
 
+    let copied = clipboard.text().expect("code block should reach the clipboard");
+    assert!(
+        copied.contains("println!(\"hello\");"),
+        "clipboard should carry the code block: {copied:?}"
+    );
     let notice = app.status_notice().unwrap_or_default();
     assert!(
         notice == "Copied rust",
@@ -403,5 +453,76 @@ fn test_remote_copy_badge_shortcut_supported() {
         text.contains("Copied!"),
         "expected inline copied feedback: {}",
         text
+    );
+}
+
+/// Ctrl+L collapses the (entirely blank) messages viewport so the numbered
+/// prompt indicator lands at the *top* of the screen, exactly like a terminal
+/// after `clear`, instead of floating at the bottom under a screenful of
+/// blanks. Scrolling up drops the spacer and immediately brings the transcript
+/// back with the normal bottom-anchored layout.
+#[test]
+fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    let mut messages = Vec::new();
+    for prompt in 0..4 {
+        messages.push(DisplayMessage::user(format!("prompt number {prompt}")));
+        messages.push(DisplayMessage::assistant(
+            (0..15)
+                .map(|line| format!("resp {prompt} line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ));
+    }
+    app.display_messages = messages;
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+
+    let backend = ratatui::backend::TestBackend::new(80, 25);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let before = render_and_snap(&app, &mut terminal);
+    assert!(
+        before.contains("resp 3 line 14"),
+        "sanity: transcript is visible before Ctrl+L:\n{before}"
+    );
+
+    app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert!(
+        app.terminal_clear_collapsed(),
+        "Ctrl+L enters the collapsed terminal-clear state"
+    );
+
+    let after = render_and_snap(&app, &mut terminal);
+    let rows: Vec<&str> = after.lines().collect();
+    let prompt_row = rows
+        .iter()
+        .position(|row| row.trim_end().ends_with('>'))
+        .unwrap_or_else(|| panic!("no prompt indicator row found:\n{after}"));
+    assert!(
+        prompt_row <= 2,
+        "prompt indicator should sit at the top after Ctrl+L, found on row \
+         {prompt_row}:\n{after}"
+    );
+    assert!(
+        !after.contains("resp 3 line 14"),
+        "the transcript is cleared from the screen:\n{after}"
+    );
+
+    // Scrolling up leaves the collapsed state and brings history straight back
+    // without first travelling through a viewport of blank spacer rows.
+    app.scroll_up(5);
+    assert!(
+        !app.terminal_clear_collapsed(),
+        "scrolling up exits the collapsed state"
+    );
+    let scrolled = render_and_snap(&app, &mut terminal);
+    assert!(
+        scrolled.contains("prompt number 0"),
+        "scrolling up reveals the pre-clear transcript:\n{scrolled}"
     );
 }

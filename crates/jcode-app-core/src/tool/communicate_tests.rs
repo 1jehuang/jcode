@@ -1013,7 +1013,7 @@ fn schema_requires_a_nonblank_label_for_spawn() {
         schema["properties"]["action"]["description"]
             .as_str()
             .expect("action description")
-            .contains("Spawn requires a nonblank label")
+            .contains("spawn requires label")
     );
 
     let branches = schema["anyOf"]
@@ -1034,6 +1034,29 @@ fn schema_requires_a_nonblank_label_for_spawn() {
         })
         .expect("non-spawn schema branch");
     assert_eq!(non_spawn_branch["required"], json!(["action"]));
+}
+
+#[test]
+fn schema_branches_only_require_properties_they_declare() {
+    // Gemini rejects the entire request when a `required` entry names a property
+    // the same object does not define, which made every tool-enabled Gemini call
+    // fail on this tool's spawn branch (issue #655).
+    let schema = CommunicateTool::new().parameters_schema();
+    for branch in schema["anyOf"].as_array().expect("schema branches") {
+        let declared = branch["properties"]
+            .as_object()
+            .expect("branch properties")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for required in branch["required"].as_array().expect("branch required") {
+            let name = required.as_str().expect("required name");
+            assert!(
+                declared.iter().any(|known| known == name),
+                "branch requires '{name}' without declaring it: {branch}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1094,18 +1117,12 @@ fn description_includes_swarm_prompt_guidance() {
     let tool = CommunicateTool::new();
     let description = tool.description();
     assert!(
+        description.starts_with("Coordinate agents"),
+        "description should lead with the short coordination summary"
+    );
+    assert!(
         description.contains("Swarm prompt"),
         "description should embed the swarm prompt section"
-    );
-    assert!(
-        description.contains("only the root session may spawn agents"),
-        "description should advertise the enforced light/ad hoc spawn boundary"
-    );
-    assert!(
-        description.contains(
-            "Recursive spawning is enabled only when the root session is running in swarm-deep mode"
-        ),
-        "description should reserve recursive spawning for deep-swarm roots"
     );
 }
 
@@ -1160,9 +1177,7 @@ fn schema_advertises_supported_swarm_fields() {
     assert!(props.contains_key("to_session"));
     assert_eq!(
         props["to_session"]["description"],
-        json!(
-            "Target session for actions that address one agent (dm, and as an alias for target_session). Accepts an exact session ID or a unique friendly name within the swarm. Interchangeable with target_session. If a friendly name is ambiguous, run swarm list and use the exact session ID."
-        )
+        json!("Session ID or unique friendly name of one agent. Alias of target_session.")
     );
     assert!(props.contains_key("channel"));
     assert!(props.contains_key("proposer_session"));
@@ -1170,9 +1185,7 @@ fn schema_advertises_supported_swarm_fields() {
     assert!(props.contains_key("target_session"));
     assert_eq!(
         props["target_session"]["description"],
-        json!(
-            "Target session for management actions (assign_role, summary, status, stop, start, resume, wake, etc.). Accepts an exact session ID or a unique friendly name. Interchangeable with to_session."
-        )
+        json!("Session ID or unique friendly name for management actions. Alias of to_session.")
     );
     assert!(props.contains_key("role"));
     assert!(props.contains_key("prompt"));
@@ -1428,6 +1441,7 @@ impl RawClient {
             content: content.to_string(),
             images: vec![],
             system_reminder: None,
+            no_reply: false,
         })
         .await
     }

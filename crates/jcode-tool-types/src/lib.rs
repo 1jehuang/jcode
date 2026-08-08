@@ -92,6 +92,9 @@ pub fn resolve_tool_name(name: &str) -> &str {
         // work as-is.
         "grep" | "file_grep" => "agentgrep",
         "skill" | "Skill" => "skill_manage",
+        // The integration catalog tool was renamed from `discover_tools`;
+        // models trained on or resuming from the old vocabulary still emit it.
+        "discover_tools" => "integration_tools",
         "todoread" | "todowrite" | "todo_read" | "todo_write" | "todos" => "todo",
         // The Anthropic OAuth surface advertises PascalCase tool names and
         // reverse-maps them provider-side for top-level calls, but nested

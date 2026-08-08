@@ -49,6 +49,40 @@ function makeDiscoveryBody(overrides = {}) {
   });
 }
 
+function makeTodoSessionBody(overrides = {}) {
+  const correlationId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  return makeBody({
+    id: correlationId,
+    event: "todo_session",
+    event_id: "todo-session-event-1",
+    correlation_id: correlationId,
+    session_end_reason: "normal_exit",
+    todos_created: 4,
+    todos_completed: 3,
+    todos_abandoned: 1,
+    todo_updates: 6,
+    groups_completed: 2,
+    groups_total: 3,
+    max_todo_list_size: 4,
+    confidence_min: 70,
+    confidence_mean: 82.5,
+    confidence_count: 4,
+    completion_confidence_min: 96,
+    completion_confidence_mean: 98,
+    completion_confidence_count: 3,
+    understands_user_intent_min: 95,
+    understands_user_intent_mean: 95,
+    understands_user_intent_count: 1,
+    closed_feedback_loop_min: 85,
+    closed_feedback_loop_mean: 92.5,
+    closed_feedback_loop_count: 2,
+    end_to_end_ownership_min: 96,
+    end_to_end_ownership_mean: 98,
+    end_to_end_ownership_count: 2,
+    ...overrides,
+  });
+}
+
 function postRequest(body, url = EVENT_URL) {
   return new Request(url, {
     method: "POST",
@@ -113,6 +147,22 @@ function makeDb(plan = {}) {
                 "outcome", "failure_reason", "http_status", "latency_ms",
                 "response_bytes", "result_count", "query_present",
                 "reason_present", "custom_endpoint", "benchmark_run",
+              ].map((name) => ({ name })),
+            };
+          }
+          if (/table_info\(todo_session_details\)/.test(sql)) {
+            return {
+              results: [
+                "event_id", "correlation_id", "session_end_reason",
+                "todos_created", "todos_completed", "todos_abandoned", "todo_updates",
+                "groups_completed", "groups_total", "max_todo_list_size",
+                "confidence_min", "confidence_mean", "confidence_count",
+                "completion_confidence_min", "completion_confidence_mean",
+                "completion_confidence_count", "understands_user_intent_min",
+                "understands_user_intent_mean", "understands_user_intent_count",
+                "closed_feedback_loop_min", "closed_feedback_loop_mean",
+                "closed_feedback_loop_count", "end_to_end_ownership_min",
+                "end_to_end_ownership_mean", "end_to_end_ownership_count",
               ].map((name) => ({ name })),
             };
           }
@@ -339,6 +389,37 @@ test("discovery event rejects unknown failure classifications", async () => {
   assert.match((await response.json()).error, /failure_reason/);
 });
 
+test("todo session event persists numeric aggregates under only its ephemeral correlation id", async () => {
+  const db = makeDb();
+  const body = makeTodoSessionBody();
+  const response = await worker.fetch(postRequest(body), { DB: db }, makeCtx());
+  assert.equal(response.status, 200);
+
+  const eventInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql));
+  assert.ok(eventInsert);
+  const eventColumns = eventInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(eventInsert.values[eventColumns.indexOf("telemetry_id")], body.correlation_id);
+
+  const detailInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO todo_session_details/.test(sql));
+  assert.ok(detailInsert);
+  const columns = detailInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(detailInsert.values[columns.indexOf("correlation_id")], body.correlation_id);
+  assert.equal(detailInsert.values[columns.indexOf("todos_completed")], 3);
+  assert.equal(detailInsert.values[columns.indexOf("confidence_mean")], 82.5);
+  assert.ok(!columns.includes("content"));
+  assert.ok(!columns.includes("feedback_loop"));
+});
+
+test("todo session event rejects a persistent id distinct from its correlation id", async () => {
+  const response = await worker.fetch(
+    postRequest(makeTodoSessionBody({ id: "11111111-2222-4333-8444-555555555555" })),
+    { DB: makeDb() },
+    makeCtx(),
+  );
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /must equal correlation_id/);
+});
+
 test("D1 failure with firehose success degrades to durable:false instead of 500", async () => {
   const db = makeDb({ failInserts: true });
   const firehose = makeFirehose();
@@ -400,8 +481,34 @@ test("health endpoint reports database size vs soft limit", async () => {
   assert.equal(response.status, 200);
   assert.equal(json.ok, true);
   assert.equal(json.db_size_bytes, 12345678);
-  assert.equal(typeof json.db_soft_limit_bytes, "number");
+  assert.equal(json.db_soft_limit_bytes, 4_500_000_000);
   assert.equal(json.over_soft_limit, false);
+});
+
+test("paid-plan database size below the budget guardrail is healthy", async () => {
+  const db = makeDb({ sizeAfter: 1_200_000_000 });
+  const response = await worker.fetch(
+    new Request(HEALTH_URL, { method: "GET" }),
+    { DB: db },
+    makeCtx(),
+  );
+  const json = await response.json();
+
+  assert.equal(json.db_size_bytes, 1_200_000_000);
+  assert.equal(json.over_soft_limit, false);
+});
+
+test("database size above the paid-plan budget guardrail is reported", async () => {
+  const db = makeDb({ sizeAfter: 4_600_000_000 });
+  const response = await worker.fetch(
+    new Request(HEALTH_URL, { method: "GET" }),
+    { DB: db },
+    makeCtx(),
+  );
+  const json = await response.json();
+
+  assert.equal(json.db_size_bytes, 4_600_000_000);
+  assert.equal(json.over_soft_limit, true);
 });
 
 test("unknown event type is rejected", async () => {
@@ -897,4 +1004,76 @@ test("POST responses from the beacon origin carry CORS headers", async () => {
   const response = await worker.fetch(request, { DB: db }, makeCtx());
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Access-Control-Allow-Origin"), "https://jcode.sh");
+});
+
+// ---------------------------------------------------------------------------
+// Coarse geography (country only, resolved at Cloudflare's edge).
+// ---------------------------------------------------------------------------
+
+function postRequestFromCountry(body, country, url = EVENT_URL) {
+  const request = postRequest(body, url);
+  Object.defineProperty(request, "cf", { value: { country }, configurable: true });
+  return request;
+}
+
+test("country is taken from request.cf and rolled up per day", async () => {
+  const db = makeDb();
+  const geo = makeFirehose();
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "install" }), "de"),
+    { DB: db, FIREHOSE_GEO: geo },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  // Geo firehose point: blob2 = country, normalized to uppercase.
+  assert.equal(geo.points.length, 1);
+  assert.equal(geo.points[0].blobs[0], "install");
+  assert.equal(geo.points[0].blobs[1], "DE");
+
+  const rollup = db.executed.find(({ sql }) => /INSERT INTO country_daily/.test(sql));
+  assert.ok(rollup, "country_daily rollup should be written");
+  assert.equal(rollup.values[1], "DE");
+  assert.equal(rollup.values[2], "install");
+  assert.equal(rollup.values[3], 0);
+});
+
+test("lifecycle events stamp last_country on the DAU rollup", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "session_end", event_id: "se-geo" }), "JP"),
+    { DB: db },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  const dau = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(dau, "daily_active_users rollup should be written");
+  assert.ok(columnIndex(dau.sql, "last_country") >= 0, "last_country column should be present");
+  // last_country is the final bound placeholder (raw_active is a literal 1, so
+  // column positions and bind positions are intentionally not aligned).
+  assert.equal(dau.values[dau.values.length - 1], "JP");
+});
+
+test("client-supplied country is ignored and bogus codes are dropped", async () => {
+  const db = makeDb();
+  const geo = makeFirehose();
+  // "XX" (unknown) and "T1" (Tor) are not real countries; a spoofed body field
+  // must never win over the edge value.
+  const response = await worker.fetch(
+    postRequestFromCountry(makeBody({ event: "install", country: "US" }), "XX"),
+    { DB: db, FIREHOSE_GEO: geo },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(geo.points.length, 0);
+  assert.ok(!db.executed.some(({ sql }) => /INSERT INTO country_daily/.test(sql)));
+});
+
+test("missing geo binding and missing cf never break the event insert", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(postRequest(makeBody()), { DB: db }, makeCtx());
+  const json = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(json.durable, true);
 });

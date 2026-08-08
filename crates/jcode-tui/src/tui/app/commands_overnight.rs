@@ -304,9 +304,9 @@ impl App {
         }
         self.overnight_auto_poke = None;
         self.push_display_message(DisplayMessage::system(
-            "🛑 Overnight auto-poke stopped because the last request failed with a non-retryable error. Fix the request/session, then run /overnight status and continue manually if appropriate.".to_string(),
+            "🛑 The last request failed in a way that retrying won't fix, so we stopped the overnight run. Check /overnight status and continue manually if it looks right.".to_string(),
         ));
-        self.set_status_notice("Overnight poke stopped: non-retryable error");
+        self.set_status_notice("Overnight run stopped: this error won't fix itself");
         true
     }
 

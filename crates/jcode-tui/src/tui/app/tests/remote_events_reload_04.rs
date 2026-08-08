@@ -252,7 +252,7 @@ fn test_remote_non_retryable_error_stops_auto_poke_after_short_retry_budget() {
     assert!(
         app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Auto-poke stopped"))
+            .any(|m| m.role == "system" && m.content.contains("we stopped poking"))
     );
 }
 
@@ -425,7 +425,7 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
     assert!(
         !app.display_messages()
             .iter()
-            .any(|m| m.role == "system" && m.content.contains("Auto-poke stopped"))
+            .any(|m| m.role == "system" && m.content.contains("we stopped poking"))
     );
 }
 

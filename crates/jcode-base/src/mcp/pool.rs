@@ -39,6 +39,9 @@ pub struct SharedMcpPool {
     clients: Mutex<HashMap<String, McpClient>>,
     handles: RwLock<HashMap<String, McpHandle>>,
     config: RwLock<McpConfig>,
+    /// Directory against which the pool's default config was resolved. Keep it
+    /// stable across reloads because the daemon may serve sessions in many dirs.
+    config_dir: Option<std::path::PathBuf>,
     ref_counts: Mutex<HashMap<String, usize>>,
     connecting: Mutex<HashMap<String, Arc<Notify>>>,
     last_errors: RwLock<HashMap<String, FailedConnectRecord>>,
@@ -47,10 +50,15 @@ pub struct SharedMcpPool {
 impl SharedMcpPool {
     /// Create a new shared pool with the given config
     pub fn new(config: McpConfig) -> Self {
+        Self::new_for_dir(config, std::env::current_dir().ok())
+    }
+
+    fn new_for_dir(config: McpConfig, config_dir: Option<std::path::PathBuf>) -> Self {
         Self {
             clients: Mutex::new(HashMap::new()),
             handles: RwLock::new(HashMap::new()),
             config: RwLock::new(config),
+            config_dir,
             ref_counts: Mutex::new(HashMap::new()),
             connecting: Mutex::new(HashMap::new()),
             last_errors: RwLock::new(HashMap::new()),
@@ -59,7 +67,9 @@ impl SharedMcpPool {
 
     /// Create pool loading config from default locations
     pub fn from_default_config() -> Self {
-        Self::new(McpConfig::load())
+        let config_dir = std::env::current_dir().ok();
+        let config = McpConfig::load_for_dir(config_dir.as_deref());
+        Self::new_for_dir(config, config_dir)
     }
 
     /// Connect to all configured servers.
@@ -250,7 +260,7 @@ impl SharedMcpPool {
     /// Reload config and reconnect all servers
     pub async fn reload(&self) -> (usize, Vec<(String, String)>) {
         self.disconnect_all().await;
-        *self.config.write().await = McpConfig::load();
+        *self.config.write().await = McpConfig::load_for_dir(self.config_dir.as_deref());
         self.connect_all().await
     }
 
@@ -419,6 +429,53 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    async fn issue_790_reload_reuses_default_config_directory() {
+        let _guard = crate::storage::lock_test_env();
+        let original_cwd = std::env::current_dir().expect("current cwd");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let first_project = tempfile::tempdir().expect("first project tempdir");
+        let second_project = tempfile::tempdir().expect("second project tempdir");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            first_project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"first":{"command":"first-server","shared":false}}}"#,
+        )
+        .expect("write first project config");
+        std::fs::write(
+            second_project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"second":{"command":"second-server","shared":false}}}"#,
+        )
+        .expect("write second project config");
+
+        std::env::set_current_dir(first_project.path()).expect("set first project cwd");
+        let pool = SharedMcpPool::from_default_config();
+        let initially_loaded_first = pool.config().await.servers.contains_key("first");
+
+        std::fs::write(
+            first_project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"first-reloaded":{"command":"first-reloaded-server","shared":false}}}"#,
+        )
+        .expect("update first project config");
+
+        std::env::set_current_dir(second_project.path()).expect("set second project cwd");
+        let _ = pool.reload().await;
+        let reloaded = pool.config().await;
+
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+
+        assert!(initially_loaded_first);
+        assert!(!reloaded.servers.contains_key("first"));
+        assert!(reloaded.servers.contains_key("first-reloaded"));
+        assert!(!reloaded.servers.contains_key("second"));
+    }
+
+    #[tokio::test]
     async fn begin_connect_deduplicates_concurrent_attempts() {
         let pool = Arc::new(SharedMcpPool::new(McpConfig::default()));
 
@@ -452,6 +509,7 @@ mod tests {
                 shared: false,
                 transport: None,
                 url: None,
+                headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
             },

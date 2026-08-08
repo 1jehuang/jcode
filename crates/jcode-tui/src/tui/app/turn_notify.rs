@@ -8,6 +8,10 @@
 
 use super::App;
 use crate::todo::TodoItem;
+#[cfg(any(target_os = "macos", test))]
+use base64::Engine as _;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 
 /// Maximum characters of assistant text shown in the notification body.
 /// Notification banners truncate aggressively; keep the payload tight.
@@ -65,12 +69,18 @@ impl App {
         );
         let sound = cfg.turn_complete_sound.trim();
         let sound = (!sound.is_empty()).then_some(sound);
-        crate::notifications::send_desktop_notification_rich(
-            &notification.title,
-            notification.subtitle.as_deref(),
-            &notification.body,
+        if !send_originating_terminal_notification(
+            &notification,
+            self.active_client_session_id().unwrap_or("unknown"),
             sound,
-        );
+        ) {
+            crate::notifications::send_desktop_notification_rich(
+                &notification.title,
+                notification.subtitle.as_deref(),
+                &notification.body,
+                sound,
+            );
+        }
     }
 
     fn runtime_mode_allows_turn_notifications(&self) -> bool {
@@ -85,6 +95,116 @@ impl App {
             .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
             .map(|m| m.content.clone())
     }
+}
+
+/// Ask the terminal to create the notification when it has a native protocol.
+///
+/// On macOS, a notification emitted by `osascript` belongs to the helper
+/// process, so clicking it cannot identify, much less focus, the terminal pane
+/// that owns this session. Kitty retains that origin natively. The bundled
+/// broker records the controlling tty and uses it to return Terminal.app and
+/// iTerm2 users to the exact originating tab/session when one is exposed.
+#[cfg(target_os = "macos")]
+fn send_originating_terminal_notification(
+    notification: &TurnNotification,
+    session_id: &str,
+    sound: Option<&str>,
+) -> bool {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let term = std::env::var("TERM").unwrap_or_default();
+    let is_kitty = term_program.eq_ignore_ascii_case("kitty") || term == "xterm-kitty";
+
+    // Kitty's OSC 99 path is strictly better than a generic helper because the
+    // terminal itself can focus the exact originating surface. All other macOS
+    // terminals use the LSUIElement broker when installed; it carries durable
+    // route metadata and can target Terminal.app/iTerm2 by tty on click.
+    if !is_kitty
+        && crate::notifications::send_macos_turn_notification(
+            &notification.title,
+            notification.subtitle.as_deref(),
+            &notification.body,
+            sound,
+        )
+    {
+        return true;
+    }
+
+    let sequence = if is_kitty {
+        kitty_notification_sequence(notification, session_id)
+    } else if term_program.eq_ignore_ascii_case("iTerm.app") {
+        iterm_notification_sequence(notification)
+    } else {
+        return false;
+    };
+
+    // This runs on the TUI event thread, after the completed turn has rendered,
+    // so one atomic write and flush cannot interleave with a frame draw.
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(sequence.as_bytes()).is_ok() && stdout.flush().is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_originating_terminal_notification(
+    _notification: &TurnNotification,
+    _session_id: &str,
+    _sound: Option<&str>,
+) -> bool {
+    false
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn notification_text(notification: &TurnNotification) -> String {
+    match notification.subtitle.as_deref() {
+        Some(subtitle) => format!("{}\n{}", subtitle, notification.body),
+        None => notification.body.clone(),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn osc_safe(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_control()).collect()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn kitty_notification_id(session_id: &str) -> String {
+    let safe: String = session_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '+' | '.'))
+        .take(128)
+        .collect();
+    format!(
+        "jcode-turn-{}",
+        if safe.is_empty() { "unknown" } else { &safe }
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn kitty_notification_sequence(notification: &TurnNotification, session_id: &str) -> String {
+    // OSC 99 is Kitty's desktop-notification protocol. Notifications are tied
+    // to the originating Kitty window, which is what makes click-to-focus work.
+    // Base64 is required because the body can contain a newline and OSC 99's
+    // unencoded form forbids every C0/C1 control character.
+    let encoder = base64::engine::general_purpose::STANDARD;
+    let title = encoder.encode(notification.title.as_bytes());
+    let body = encoder.encode(notification_text(notification).as_bytes());
+    let id = kitty_notification_id(session_id);
+    // Request focus explicitly instead of relying on Kitty's current default.
+    // This is the protocol guarantee that clicking the completed notification
+    // returns to the exact window that emitted it.
+    format!(
+        "\x1b]99;i={id}:d=0:e=1:p=title;{title}\x1b\\\x1b]99;i={id}:d=1:e=1:p=body:a=focus;{body}\x1b\\"
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn iterm_notification_sequence(notification: &TurnNotification) -> String {
+    // iTerm2's OSC 9 notification is likewise associated with its source tab.
+    let text = osc_safe(&format!(
+        "{}: {}",
+        notification.title,
+        notification_text(notification)
+    ));
+    format!("\x1b]9;{text}\x07")
 }
 
 fn load_session_todos(session_id: &str) -> Vec<TodoItem> {
@@ -194,9 +314,9 @@ fn todo_work_line(todos: &[TodoItem]) -> Option<String> {
     if let Some(done) = last_done {
         let mut seg = format!("✓ {}", clip_todo(&done.content));
         if let Some(conf) = done.completion_confidence
-            && conf < 50
+            && conf == crate::todo::ConfidenceState::Speculative
         {
-            seg.push_str(&format!(" (low conf {}%)", conf));
+            seg.push_str(&format!(" (low conf: {})", conf.as_str()));
         }
         parts.push(seg);
     }
@@ -352,10 +472,10 @@ mod tests {
     #[test]
     fn low_confidence_completion_is_flagged() {
         let mut done = todo_named("risky refactor", "completed", &[]);
-        done.completion_confidence = Some(35);
+        done.completion_confidence = Some(crate::todo::ConfidenceState::from_legacy_score(35));
         let n = build_turn_notification(None, 200.0, &[done], None);
         assert_eq!(n.subtitle.as_deref(), Some("✓ all 1 todos"));
-        assert_eq!(n.body, "✓ risky refactor (low conf 35%)");
+        assert_eq!(n.body, "✓ risky refactor (low conf: speculative)");
     }
 
     #[test]
@@ -411,5 +531,30 @@ mod tests {
         assert_eq!(format_duration_compact(60.0), "1m");
         assert_eq!(format_duration_compact(3600.0), "1h");
         assert_eq!(format_duration_compact(3725.0), "1h 2m");
+    }
+
+    #[test]
+    fn kitty_notification_is_one_completed_clickable_message() {
+        let n = TurnNotification {
+            title: "jcode · fox".to_string(),
+            subtitle: Some("2/3 todos".to_string()),
+            body: "Finished parser".to_string(),
+        };
+        assert_eq!(
+            kitty_notification_sequence(&n, "session:fox/123"),
+            "\x1b]99;i=jcode-turn-sessionfox123:d=0:e=1:p=title;amNvZGUgwrcgZm94\x1b\\\x1b]99;i=jcode-turn-sessionfox123:d=1:e=1:p=body:a=focus;Mi8zIHRvZG9zCkZpbmlzaGVkIHBhcnNlcg==\x1b\\"
+        );
+    }
+
+    #[test]
+    fn terminal_notification_payload_strips_osc_terminators() {
+        let n = TurnNotification {
+            title: "unsafe\x1b] title".to_string(),
+            subtitle: None,
+            body: "body\x07text".to_string(),
+        };
+        let sequence = iterm_notification_sequence(&n);
+        assert_eq!(sequence.matches('\x07').count(), 1);
+        assert!(!sequence.contains("\x1b] title"));
     }
 }

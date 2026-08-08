@@ -35,9 +35,17 @@ DEFAULT_OUTPUT = REPO_ROOT / "target" / "discovery-benchmark" / "latest.json"
 CATEGORY_SOURCE = REPO_ROOT / "crates" / "jcode-base" / "src" / "sponsors.rs"
 BENCHMARK_ENV = "JCODE_DISCOVERY_BENCHMARK"
 BENCHMARK_HEADER = "x-jcode-discovery-benchmark"
-LISTING_RE = re.compile(r"Discoverable tools in '([^']+)'")
-EMPTY_RE = re.compile(r"No discoverable tools in category '([^']+)'")
-SELECTION_RE = re.compile(r"Selected '([^']+)' from '([^']+)'")
+# Accept both the current and legacy tool name when scanning transcripts.
+DISCOVERY_TOOL_NAMES = ("integration_tools", "discover_tools")
+# The tool was renamed from `discover_tools` to `integration_tools`, and its
+# renderers from discovery vocabulary to integration vocabulary. Both are
+# matched so saved baselines and old transcripts stay comparable with new runs.
+LISTING_RE = re.compile(r"(?:Discoverable tools|Available integrations) in '([^']+)'")
+EMPTY_RE = re.compile(r"No (?:discoverable tools|integrations) in category '([^']+)'")
+SELECTION_RE = re.compile(r"(?:Selected|Set up) '([^']+)' from '([^']+)'")
+OFF_CATALOG_SELECTION_RE = re.compile(
+    r"Selected off-catalog product '([^']+)' for '([^']+)'"
+)
 TOOL_RE = re.compile(r"^- ([^:\n]+):", re.MULTILINE)
 RUNTIME_ERROR_RE = re.compile(
     r"\b(error|failed|failure|timed out|timeout|did not start|exited before startup)\b",
@@ -61,6 +69,7 @@ class DiscoveryCall:
     tools: list[str]
     outcome: str
     output: str
+    listed: bool | None = None
 
 
 @dataclass
@@ -164,6 +173,7 @@ def load_cases(path: Path) -> list[BenchmarkCase]:
         if (
             (case.expected_tool and case.expected_tool in lowered_prompt)
             or "discover_tools" in lowered_prompt
+            or "integration_tools" in lowered_prompt
             or "tool discovery" in lowered_prompt
         ):
             raise BenchmarkError(f"case {case.id} leaks its expected tool or Discovery into the prompt")
@@ -237,6 +247,7 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
     listing = LISTING_RE.search(output)
     empty = EMPTY_RE.search(output)
     selection = SELECTION_RE.search(output)
+    off_catalog_selection = OFF_CATALOG_SELECTION_RE.search(output)
     category = (
         listing.group(1)
         if listing
@@ -244,6 +255,8 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if empty
         else selection.group(2)
         if selection
+        else off_catalog_selection.group(2)
+        if off_catalog_selection
         else None
     )
     tools = (
@@ -251,13 +264,15 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         if listing
         else [selection.group(1).strip().lower()]
         if selection
+        else [off_catalog_selection.group(1).strip().lower()]
+        if off_catalog_selection
         else []
     )
     if listing:
         outcome = "listing"
     elif empty:
         outcome = "empty"
-    elif selection:
+    elif selection or off_catalog_selection:
         outcome = "selection"
     elif output.startswith("Error:"):
         outcome = "error"
@@ -269,6 +284,7 @@ def parse_discovery_output(output: str, elapsed: float) -> DiscoveryCall:
         tools=tools,
         outcome=outcome,
         output=output[:4000],
+        listed=True if selection else False if off_catalog_selection else None,
     )
 
 
@@ -388,7 +404,7 @@ def fetch_catalog_via_jcode(
                         args,
                         socket_path,
                         "tool",
-                        f"discover_tools {tool_input}",
+                        f"integration_tools {tool_input}",
                         session_id=session_id,
                         timeout=20,
                     )
@@ -433,7 +449,7 @@ def run_attempt(args: argparse.Namespace, case: BenchmarkCase, attempt: int, soc
     if args.provider:
         command += ["--provider", args.provider]
     if args.discovery_only:
-        command += ["--disable-base-tools", "--tools", "discover_tools"]
+        command += ["--disable-base-tools", "--tools", "integration_tools"]
     command += ["run", "--ndjson", case.prompt]
 
     environment = benchmark_environment(socket_path)
@@ -486,7 +502,7 @@ def run_attempt(args: argparse.Namespace, case: BenchmarkCase, attempt: int, soc
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "tool_done" or event.get("name") != "discover_tools":
+        if event.get("type") != "tool_done" or event.get("name") not in DISCOVERY_TOOL_NAMES:
             continue
         call = parse_discovery_output(str(event.get("output", "")), time.monotonic() - started)
         discovery_calls.append(call)

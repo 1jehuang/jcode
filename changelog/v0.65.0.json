@@ -1,0 +1,34 @@
+{
+  "version": "0.65.0",
+  "date": "2026-08-02",
+  "title": "Seamless self-update, calmer TUI",
+  "highlights": [
+    "Self-update is now seamless: a live progress bar during download and a graceful in-place reload when it finishes",
+    "Todos you are working on stay pinned in a band at the top of the viewport while you scroll",
+    "Ctrl+L is a true terminal-style clear: the screen blanks, history stays above, and the prompt sits at the top"
+  ],
+  "improvements": [
+    "New display.external_sessions setting hides other CLIs' sessions from the session picker",
+    "The swarm gallery and snapshots now show which provider and auth route each agent is using",
+    "Markdown tables honour column alignment in every renderer, and copying a table gives you clean text",
+    "Inline math stays inline in image mode and blends with the surrounding prose colour",
+    "The discover_tools browse card is now a single compact line, and the sponsored-discovery notice is gone",
+    "Tool descriptions and parameter docs are capped, leaving more of the context window for your work",
+    "Ollama reports the context window it is actually serving instead of the trained window",
+    "Crash-resume hints now point at the session picker"
+  ],
+  "fixes": [
+    "Custom OpenAI-compatible profile models route to their own profile instead of Copilot",
+    "OpenAI tool catalogs no longer break on MCP tools with untyped or unsupported schema properties",
+    "Ctrl+D forward-deletes mid-edit instead of quitting",
+    "Copying on X11 uses xclip/xsel so the selection survives after jcode exits",
+    "One bad value in [display] no longer discards the rest of config.toml",
+    "Reasoning text with multi-byte characters no longer crashes the TUI",
+    "Cursor provider uses the correct regional agent host instead of hardcoding global",
+    "Anthropic reasoning effort chosen with Ctrl+O in /model now persists",
+    "launch_hotkeys enabled = false is honoured on macOS",
+    "The API key login prompt visibly responds and tells you when a key already exists",
+    "Desktop no longer shows a false 'update ready' banner on dev builds",
+    "Builds on musl and Termux/aarch64 targets are fixed"
+  ]
+}

@@ -5,6 +5,7 @@ use crate::side_panel::{
 use crate::todo::TodoItem;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 pub(super) const TODOS_VIEW_PAGE_ID: &str = "session_todos";
 const TODOS_VIEW_TITLE: &str = "Todos";
@@ -75,6 +76,60 @@ impl App {
         self.todo_card_rendered_hash = next_hash;
         let content = todo_card_payload_json(&todos, &plan, &goals);
         self.replace_display_message_content(idx, content)
+    }
+
+    /// Live-refresh the payload behind the pinned todo band
+    /// (`display.pin_todos`). Returns true when the payload changed and the
+    /// viewport should redraw. Disk reads are throttled to once per second.
+    pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        if !crate::config::config().display.pin_todos {
+            if self.pinned_todos_payload.is_some() {
+                self.pinned_todos_payload = None;
+                self.pinned_todos_rendered_hash = 0;
+                return true;
+            }
+            return false;
+        }
+        const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        if let Some(checked_at) = self.pinned_todos_checked_at
+            && checked_at.elapsed() < REFRESH_INTERVAL
+        {
+            return false;
+        }
+        self.pinned_todos_checked_at = Some(Instant::now());
+        let session_id = self.active_client_session_id().map(str::to_string);
+        let todos = load_current_session_todos(session_id.as_deref());
+        if todos.is_empty() {
+            if self.pinned_todos_payload.is_some() {
+                self.pinned_todos_payload = None;
+                self.pinned_todos_rendered_hash = 0;
+                return true;
+            }
+            return false;
+        }
+        let goals = load_current_session_goals(session_id.as_deref());
+        let plan = load_current_session_plan(session_id.as_deref());
+        let next_hash = hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
+        if next_hash == self.pinned_todos_rendered_hash && self.pinned_todos_payload.is_some() {
+            return false;
+        }
+        self.pinned_todos_rendered_hash = next_hash;
+        self.pinned_todos_payload = Some(todo_card_payload_json(&todos, &plan, &goals));
+        true
+    }
+
+    /// The pinned-band renderer that reads this is landing separately, so the
+    /// accessor is allowed to be unused (outside tests) until it does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn pinned_todos_payload_ref(&self) -> Option<&str> {
+        self.pinned_todos_payload.as_deref()
+    }
+
+    /// Force the pinned todo band to re-read state on the next tick, bypassing
+    /// the 1s throttle. Used right after the user toggles `/todos pin`.
+    pub(super) fn refresh_pinned_todos_now(&mut self) {
+        self.pinned_todos_checked_at = None;
+        self.refresh_pinned_todos_if_needed();
     }
 
     pub(super) fn set_todos_view_enabled(&mut self, enabled: bool, focus: bool) {
@@ -203,9 +258,14 @@ impl App {
 
 pub(super) fn todos_view_status_message(app: &App) -> String {
     format!(
-        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.",
+        "Todo card: shown inline in the chat with /todos or {}.\n\nTodo side-panel screen: {}\n\nPinned todo band: {}\n\nWhen the panel screen is enabled (/todos panel), the side panel shows a transient Todos page dedicated to the current session's todo list and refreshes as the list changes. It is not persisted to session side-panel storage.\n\nWhen the pinned band is enabled (/todos pin), the full todo list stays pinned to the top of the chat transcript while it scrolls, like the previous-prompt preview.",
         crate::tui::keybind::todo_card_key_label(),
         if app.todos_view_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if crate::config::config().display.pin_todos {
             "enabled"
         } else {
             "disabled"
@@ -260,6 +320,33 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
                 "Todo screen disabled.".to_string(),
             ));
         }
+        // Pin the full todo list to the top of the chat transcript.
+        "pin" | "pin on" | "pin off" => {
+            let enabled = match arg {
+                "pin on" => true,
+                "pin off" => false,
+                _ => !crate::config::config().display.pin_todos,
+            };
+            app.set_status_notice(if enabled {
+                "Pinned todos: ON"
+            } else {
+                "Pinned todos: OFF"
+            });
+            match crate::config::Config::set_pin_todos(enabled) {
+                Ok(()) => app.push_display_message(crate::tui::DisplayMessage::system(
+                    if enabled {
+                        "Pinned todo band enabled. The todo list stays pinned to the top of the transcript while it scrolls."
+                    } else {
+                        "Pinned todo band disabled."
+                    }
+                    .to_string(),
+                )),
+                Err(error) => app.push_display_message(crate::tui::DisplayMessage::error(
+                    format!("Failed to save display.pin_todos: {}", error),
+                )),
+            }
+            app.refresh_pinned_todos_now();
+        }
         "status" => {
             app.push_display_message(crate::tui::DisplayMessage::system(
                 todos_view_status_message(app),
@@ -267,7 +354,7 @@ pub(super) fn handle_todos_view_command(app: &mut App, trimmed: &str) -> bool {
         }
         _ => {
             app.push_display_message(crate::tui::DisplayMessage::error(
-                "Usage: /todos [card|panel|on|off|status]".to_string(),
+                "Usage: /todos [card|panel|pin|on|off|status]".to_string(),
             ));
         }
     }
@@ -446,9 +533,9 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         return String::new();
     };
     let mut line = String::new();
-    if let Some(score) = goal.hill_climbability {
+    if let Some(state) = goal.closed_feedback_loop {
         line.push('\n');
-        line.push_str(&format!("- Hill climbability: **{}%**\n", score));
+        line.push_str(&format!("- Closed feedback loop: **{}**\n", state.as_str()));
     }
     if let Some(feedback_loop) = goal
         .feedback_loop
@@ -460,8 +547,32 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
         }
         line.push_str(&format!("- Feedback loop: {}\n", feedback_loop.trim()));
     }
-    if let Some(score) = goal.end_to_end_ownership {
-        line.push_str(&format!("- End-to-end ownership: **{}%**\n", score));
+    if let Some(state) = goal.feedback_loop_relevance {
+        line.push_str(&format!(
+            "- Feedback-loop relevance: **{}**\n",
+            state.as_str()
+        ));
+    }
+    if let Some(state) = goal.feedback_loop_coverage {
+        line.push_str(&format!(
+            "- Feedback-loop coverage: **{}**\n",
+            state.as_str()
+        ));
+    }
+    if let Some(state) = goal.feedback_loop_traceability {
+        line.push_str(&format!(
+            "- Feedback-loop traceability: **{}**\n",
+            state.as_str()
+        ));
+    }
+    if let Some(state) = goal.delivery_state {
+        line.push_str(&format!("- Delivery state: **{}**\n", state.as_str()));
+    }
+    if let Some(difficulty) = goal.difficulty {
+        line.push_str(&format!("- Difficulty: {}\n", difficulty.as_str()));
+    }
+    if let Some(autonomy) = goal.autonomy {
+        line.push_str(&format!("- Autonomy: {}\n", autonomy.as_str()));
     }
     line
 }
@@ -477,8 +588,11 @@ fn format_plan_markdown(plan: &crate::todo::TodoPlan) -> String {
     {
         markdown.push_str(&format!("- User intention: {}\n", intention));
     }
-    if let Some(score) = plan.understands_user_intent {
-        markdown.push_str(&format!("- Understands user intent: **{}%**\n", score));
+    if let Some(state) = plan.understands_user_intent {
+        markdown.push_str(&format!(
+            "- Understands user intent: **{}**\n",
+            state.as_str()
+        ));
     }
     markdown
 }
@@ -573,7 +687,7 @@ fn todo_confidence_weight(priority: &str) -> u32 {
     }
 }
 
-fn todo_effective_confidence(todo: &TodoItem) -> Option<u8> {
+fn todo_effective_confidence(todo: &TodoItem) -> Option<crate::todo::ConfidenceState> {
     if todo.status == "completed" {
         todo.completion_confidence.or(todo.confidence)
     } else {
@@ -581,27 +695,31 @@ fn todo_effective_confidence(todo: &TodoItem) -> Option<u8> {
     }
 }
 
-fn weighted_todo_confidence(todos: &[TodoItem]) -> Option<u8> {
+/// Weighted-typical confidence across the list, reported as the semantic
+/// state nearest the weighted mean of representative scores.
+fn weighted_todo_confidence(todos: &[TodoItem]) -> Option<crate::todo::ConfidenceState> {
     let mut weighted_sum = 0u32;
     let mut total_weight = 0u32;
     for todo in todos.iter().filter(|todo| todo.status != "cancelled") {
-        let Some(score) = todo_effective_confidence(todo) else {
+        let Some(state) = todo_effective_confidence(todo) else {
             continue;
         };
         let weight = todo_confidence_weight(&todo.priority);
-        weighted_sum += u32::from(score) * weight;
+        weighted_sum += u32::from(state.legacy_score()) * weight;
         total_weight += weight;
     }
     if total_weight == 0 {
         None
     } else {
-        Some(((weighted_sum + total_weight / 2) / total_weight) as u8)
+        Some(crate::todo::ConfidenceState::from_legacy_score(
+            ((weighted_sum + total_weight / 2) / total_weight) as u8,
+        ))
     }
 }
 
-fn format_confidence_value(score: Option<u8>) -> String {
-    score
-        .map(|score| format!("{}%", score))
+fn format_confidence_value(state: Option<crate::todo::ConfidenceState>) -> String {
+    state
+        .map(|state| state.as_str().to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -648,9 +766,14 @@ fn hash_todos_payload(
     plan.understands_user_intent.hash(&mut hasher);
     for goal in goals {
         goal.group.hash(&mut hasher);
-        goal.hill_climbability.hash(&mut hasher);
+        goal.closed_feedback_loop.hash(&mut hasher);
         goal.feedback_loop.hash(&mut hasher);
-        goal.end_to_end_ownership.hash(&mut hasher);
+        goal.feedback_loop_relevance.hash(&mut hasher);
+        goal.feedback_loop_coverage.hash(&mut hasher);
+        goal.feedback_loop_traceability.hash(&mut hasher);
+        goal.delivery_state.hash(&mut hasher);
+        goal.difficulty.hash(&mut hasher);
+        goal.autonomy.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -674,7 +797,8 @@ mod tests {
     fn plan() -> crate::todo::TodoPlan {
         crate::todo::TodoPlan {
             user_intention: Some("make navigation feel immediate".to_string()),
-            understands_user_intent: Some(96),
+            understands_user_intent: Some(crate::todo::IntentUnderstanding::from_legacy_score(96)),
+            ..Default::default()
         }
     }
 
@@ -692,8 +816,9 @@ mod tests {
             status: status.to_string(),
             priority: priority.to_string(),
             group: None,
-            confidence,
-            completion_confidence,
+            confidence: confidence.map(crate::todo::ConfidenceState::from_legacy_score),
+            completion_confidence: completion_confidence
+                .map(crate::todo::ConfidenceState::from_legacy_score),
             confidence_history: Vec::new(),
             blocked_by: Vec::new(),
             assigned_to: None,
@@ -723,12 +848,12 @@ mod tests {
 
         let markdown = build_todos_view_markdown(Some("session_test"), &todos, &plan(), &[]);
 
-        assert!(markdown.contains("- Weighted confidence: **86%**"));
-        assert!(markdown.contains("- Lowest completed confidence: **95%**"));
+        assert!(markdown.contains("- Weighted confidence: **plausible**"));
+        assert!(markdown.contains("- Lowest completed confidence: **plausible**"));
         assert!(markdown.contains("- Missing completion confidence: 0"));
-        assert!(markdown.contains("  - confidence: `80%`"));
-        assert!(markdown.contains("  - confidence: `70%`"));
-        assert!(markdown.contains("  - completion confidence: `95%`"));
+        assert!(markdown.contains("  - confidence: `plausible`"));
+        assert!(markdown.contains("  - confidence: `plausible`"));
+        assert!(markdown.contains("  - completion confidence: `plausible`"));
     }
 
     #[test]
@@ -742,7 +867,7 @@ mod tests {
             None,
         )];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
-        todos[0].confidence = Some(81);
+        todos[0].confidence = Some(crate::todo::ConfidenceState::Validated);
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
 
         assert_ne!(before, after);
@@ -778,11 +903,14 @@ mod tests {
             &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
-                hill_climbability: Some(90),
+                closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(90)),
                 feedback_loop: Some(
                     "run the frame benchmark and compare p95 frame time".to_string(),
                 ),
-                end_to_end_ownership: Some(85),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                delivery_state: Some(crate::todo::DeliveryState::from_legacy_score(85)),
+                ..Default::default()
             }],
         );
 
@@ -796,11 +924,11 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Understands user intent: **96%**"),
+            markdown.contains("- Understands user intent: **clear**"),
             "{markdown}"
         );
         assert!(
-            markdown.contains("- Hill climbability: **90%**"),
+            markdown.contains("- Closed feedback loop: **strong**"),
             "{markdown}"
         );
         assert!(
@@ -809,7 +937,15 @@ mod tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("- End-to-end ownership: **85%**"),
+            markdown.contains("- Feedback-loop relevance: **representative**"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("- Feedback-loop coverage: **main_paths**"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("- Delivery state: **workflow_validated**"),
             "{markdown}"
         );
         assert!(markdown.contains("## scrollback (0/1)"), "{markdown}");
@@ -837,7 +973,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let before = hash_todos_payload(Some("session_test"), &todos, &plan(), &[]);
         let goals = vec![crate::todo::TodoGoal {
-            hill_climbability: Some(30),
+            closed_feedback_loop: Some(crate::todo::FeedbackLoopState::from_legacy_score(30)),
             ..Default::default()
         }];
         let after = hash_todos_payload(Some("session_test"), &todos, &plan(), &goals);
@@ -872,7 +1008,7 @@ mod tests {
         let todos = vec![todo("g", "Goal hash", "pending", "high", Some(80), None)];
         let mut current = plan();
         let before = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
-        current.understands_user_intent = Some(99);
+        current.understands_user_intent = Some(crate::todo::IntentUnderstanding::Complete);
         let after = hash_todos_payload(Some("session_test"), &todos, &current, &[]);
         assert_ne!(before, after);
     }

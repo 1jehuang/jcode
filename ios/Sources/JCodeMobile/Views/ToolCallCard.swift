@@ -12,7 +12,7 @@ struct ToolCallCard: View {
     @State private var expanded = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     expanded.toggle()
@@ -128,10 +128,11 @@ struct ToolCallCard: View {
             Text(text)
                 .font(Theme.mono(11))
                 .foregroundStyle(Theme.textSecondary)
-                .padding(8)
+                .padding(10)
+                .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.background)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.small, style: .continuous))
     }
 }

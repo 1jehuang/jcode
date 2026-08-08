@@ -35,13 +35,12 @@ pub(super) fn handle_tool_done(
     let is_batch = tool_call.name == "batch";
     app.observe_tool_result(&tool_call, &output, error.is_some(), None);
     app.note_tool_completed(&tool_call, error.is_some());
-    let sponsor_disclosure_title = app.inline_sponsor_disclosure_title(&tool_call);
     app.push_display_message(DisplayMessage {
         role: "tool".to_string(),
         content: display_output,
         tool_calls: vec![],
         duration_secs: None,
-        title: sponsor_disclosure_title,
+        title: None,
         tool_data: Some(tool_call.clone()),
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());

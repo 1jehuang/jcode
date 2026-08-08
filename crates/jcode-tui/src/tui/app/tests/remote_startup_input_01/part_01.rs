@@ -804,6 +804,51 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
 }
 
 #[test]
+fn test_duplicate_available_models_updated_event_is_a_no_op() {
+    // Temp home: handling the event persists the remote catalog cache, which
+    // must not leak into other tests that hydrate from a shared test home.
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        let event = || crate::protocol::ServerEvent::AvailableModelsUpdated {
+            provider_name: Some("Copilot".to_string()),
+            provider_model: Some("claude-opus-4.6".to_string()),
+            available_models: vec!["claude-opus-4.6".to_string()],
+            available_model_routes: vec![crate::provider::ModelRoute {
+                model: "claude-opus-4.6".to_string(),
+                provider: "Copilot".to_string(),
+                api_method: "copilot".to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            }],
+        };
+
+        let first_redraw = app.handle_server_event(event(), &mut remote);
+        assert!(first_redraw, "first catalog update should request a redraw");
+        let generation_after_first = app.remote_model_catalog_generation;
+
+        // Shared-server bus chatter redelivers identical catalog snapshots to
+        // every connected client. A byte-identical follow-up must not
+        // invalidate caches, bump the generation, or request a redraw (that
+        // starved the input line).
+        let second_redraw = app.handle_server_event(event(), &mut remote);
+        assert!(
+            !second_redraw,
+            "duplicate catalog update must not request a redraw"
+        );
+        assert_eq!(
+            app.remote_model_catalog_generation, generation_after_first,
+            "duplicate catalog update must not bump the catalog generation"
+        );
+    });
+}
+
+#[test]
 fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1055,5 +1100,62 @@ fn test_model_picker_remote_falls_back_to_current_model_when_catalog_empty() {
         assert_eq!(picker.entries[0].options[0].provider, "openrouter");
         assert_eq!(picker.entries[0].options[0].api_method, "current");
         assert!(picker.entries[0].options[0].available);
+    });
+}
+
+/// A names-only catalog (what the server sends when the fully-routed frame is
+/// oversized) leaves placeholder routes in place. The detailed catalog that
+/// follows carries the same model names, so the no-op fast path must still
+/// recognize it as a change and let the real routes land.
+#[test]
+fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        app.is_remote = true;
+        app.remote_provider_name = Some("Copilot".to_string());
+
+        // Names-only frame: same model list, no route expansion.
+        app.handle_server_event(
+            crate::protocol::ServerEvent::AvailableModelsUpdated {
+                provider_name: Some("Copilot".to_string()),
+                provider_model: Some("claude-opus-4.6".to_string()),
+                available_models: vec!["claude-opus-4.6".to_string()],
+                available_model_routes: Vec::new(),
+            },
+            &mut remote,
+        );
+
+        // Detailed frame with identical model names but real routes.
+        let detailed_redraw = app.handle_server_event(
+            crate::protocol::ServerEvent::AvailableModelsUpdated {
+                provider_name: Some("Copilot".to_string()),
+                provider_model: Some("claude-opus-4.6".to_string()),
+                available_models: vec!["claude-opus-4.6".to_string()],
+                available_model_routes: vec![crate::provider::ModelRoute {
+                    model: "claude-opus-4.6".to_string(),
+                    provider: "Copilot".to_string(),
+                    api_method: "copilot".to_string(),
+                    available: true,
+                    detail: String::new(),
+                    cheapness: None,
+                }],
+            },
+            &mut remote,
+        );
+
+        assert!(
+            detailed_redraw,
+            "detailed routes arriving after a names-only frame must repaint"
+        );
+        assert!(
+            app.remote_model_options
+                .iter()
+                .any(|route| route.api_method == "copilot"),
+            "detailed routes must replace the names-only placeholder state"
+        );
     });
 }

@@ -1831,6 +1831,86 @@ fn anthropic_quality_rank_orders_opus_before_haiku_and_retired_last() {
 }
 
 #[test]
+fn fable_quota_fallback_selects_the_best_available_opus() {
+    let fallback = AnthropicProvider::best_available_opus_model("claude-fable-5")
+        .expect("the curated Anthropic catalog should contain an Opus fallback");
+    assert!(
+        fallback.contains("claude-opus"),
+        "unexpected fallback: {fallback}"
+    );
+
+    let candidates = jcode_base::provider::cached_anthropic_model_ids()
+        .unwrap_or_else(jcode_base::provider::known_anthropic_model_ids);
+    let best_rank = candidates
+        .iter()
+        .filter(|model| model.to_ascii_lowercase().contains("claude-opus"))
+        .filter(|model| !anthropic_model_is_retired(model))
+        .map(|model| anthropic_model_quality_rank(model))
+        .min()
+        .expect("available Opus model");
+    assert_eq!(anthropic_model_quality_rank(&fallback), best_rank);
+}
+
+#[test]
+fn model_scoped_usage_routes_only_exhausted_fable_to_opus() {
+    let usage = jcode_base::usage::UsageData {
+        model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
+            model_name: "Fable".to_string(),
+            utilization: 1.0,
+            resets_at: Some("2026-08-11T00:00:00Z".to_string()),
+        }],
+        ..Default::default()
+    };
+    let fallback = AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &usage)
+        .expect("exhausted Fable should route to Opus");
+    assert!(
+        fallback.contains("claude-opus"),
+        "unexpected fallback: {fallback}"
+    );
+    assert!(
+        AnthropicProvider::fallback_for_model_scoped_usage("claude-opus-5", &usage).is_none(),
+        "an exhausted Fable scope must not reroute an explicitly selected Opus"
+    );
+
+    let available = jcode_base::usage::UsageData {
+        model_scoped: vec![jcode_base::usage::ModelScopedUsageWindow {
+            model_name: "Fable".to_string(),
+            utilization: 0.98,
+            resets_at: None,
+        }],
+        ..Default::default()
+    };
+    assert!(
+        AnthropicProvider::fallback_for_model_scoped_usage("claude-fable-5", &available).is_none(),
+        "Fable must remain selected while its scoped quota is available"
+    );
+}
+
+#[test]
+fn detects_live_fable_scoped_limit_errors_without_misrouting_other_limits() {
+    assert!(is_fable_scoped_limit_error(
+        "claude-fable-5",
+        r#"429 {"type":"rate_limit_error","message":"You have reached your weekly Fable limit"}"#,
+    ));
+    assert!(is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "usage limit reached for the 7-day model window",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-opus-5",
+        "weekly Fable rate limit reached",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "429 overloaded_error: service temporarily overloaded",
+    ));
+    assert!(!is_fable_scoped_limit_error(
+        "claude-fable-5",
+        "global 5-hour rate limit reached",
+    ));
+}
+
+#[test]
 fn ping_keepalive_emits_streaming_phase_event() {
     // Issue #451: during silent reasoning phases, `ping` events can be the
     // only upstream traffic. They must surface as a StreamEvent so the client
@@ -1850,4 +1930,88 @@ fn ping_keepalive_emits_streaming_phase_event() {
         )),
         "expected ping to emit a Streaming ConnectionPhase event, got {events:?}"
     );
+}
+
+#[test]
+fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
+    // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
+    // *defaults* to `low` (jcode's default model/effort pairing), and an
+    // explicit `low` must survive normalization, must NOT be silently
+    // promoted, and must land in `output_config.effort` on the request.
+    assert!(AnthropicProvider::model_supports_output_effort(
+        "claude-opus-5"
+    ));
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
+        Some("low"),
+    );
+    assert_eq!(
+        AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
+        Some("low"),
+    );
+    // Downward selection is never clamped upward toward the model default.
+    assert_eq!(
+        AnthropicProvider::actual_effort_for_model("claude-opus-5", "low"),
+        "low",
+    );
+    assert_eq!(
+        AnthropicProvider::store_effort_for_model("claude-opus-5", "low"),
+        "low",
+    );
+
+    let provider = AnthropicProvider::new();
+    *provider
+        .model
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = "claude-opus-5".to_string();
+    provider.set_reasoning_effort("low").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    let (thinking, output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-opus-5", true, false);
+    assert_eq!(
+        output_config
+            .expect("explicit low effort should set output_config")
+            .effort,
+        "low",
+    );
+    // Opus 5 rejects `thinking.type.enabled`; it requires adaptive thinking.
+    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+}
+
+/// A `content_block_start` carrying an unrecognized block type must still
+/// deserialize. Before the `Unknown` catch-all the whole event failed to parse
+/// and was dropped, so an unknown *tool* block produced a turn that reported
+/// `stop_reason: tool_use` with no tool call for the agent to run.
+#[test]
+fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
+    for block_type in [
+        "server_tool_use",
+        "web_search_tool_result",
+        "some_future_block",
+    ] {
+        let mut state = SseStreamState::default();
+        let event = SseEvent {
+            event_type: "content_block_start".to_string(),
+            data: serde_json::json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": block_type, "id": "srvtoolu_1", "name": "web_search"}
+            })
+            .to_string(),
+        };
+        let events = process_sse_event(&event, &mut state, false);
+        assert!(
+            events.is_empty(),
+            "{block_type}: unknown block must not synthesize stream events"
+        );
+        assert!(
+            state.current_tool_use.is_none(),
+            "{block_type}: unknown block must not start tool accumulation"
+        );
+        assert!(
+            !state.current_thinking_block,
+            "{block_type}: unknown block must not start a thinking block"
+        );
+    }
 }

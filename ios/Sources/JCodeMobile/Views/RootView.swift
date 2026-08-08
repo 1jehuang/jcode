@@ -56,6 +56,7 @@ struct RootView: View {
 /// they carry information.
 struct StatusPill: View {
     let phase: ConnectionPhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 8) {
@@ -80,6 +81,13 @@ struct StatusPill: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Connection")
         .accessibilityValue(label)
+    }
+
+    @State private var pulse = false
+
+    private var isLive: Bool {
+        if case .connected = phase { return true }
+        return false
     }
 
     private var color: Color {
@@ -107,33 +115,18 @@ struct ErrorBanner: View {
     let dismiss: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(Theme.error)
-                .accessibilityHidden(true)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(3)
-            Spacer(minLength: 0)
-            Button(action: dismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Dismiss error")
-            .accessibilityHint("Hides this error message")
+        BannerStrip(
+            icon: "exclamationmark.triangle.fill",
+            tint: Theme.error,
+            message: message
+        ) {
+            DismissButton(
+                label: "Dismiss error",
+                hint: "Hides this error message",
+                action: dismiss
+            )
         }
-        .padding(12)
-        .background(Theme.error.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(Theme.error.opacity(0.35), lineWidth: 1)
-        )
-        .padding(.horizontal)
-        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 16)
     }
 }
 
@@ -144,12 +137,12 @@ struct NoticeStack: View {
     let onDismiss: (UUID) -> Void
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 6) {
             ForEach(notices) { notice in
                 NoticeRow(notice: notice) { onDismiss(notice.id) }
             }
         }
-        .padding(.horizontal)
+        .padding(.horizontal, 16)
     }
 }
 
@@ -159,32 +152,13 @@ private struct NoticeRow: View {
     let dismiss: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon)
-                .foregroundStyle(tint)
-                .accessibilityHidden(true)
-            Text(notice.message)
-                .font(.footnote)
-                .foregroundStyle(Theme.textPrimary)
-                .lineLimit(3)
-            Spacer(minLength: 0)
-            Button(action: dismiss) {
-                Image(systemName: "xmark")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("Dismiss notice")
-            .accessibilityHint("Hides this notice")
+        BannerStrip(icon: icon, tint: tint, message: notice.message) {
+            DismissButton(
+                label: "Dismiss notice",
+                hint: "Hides this notice",
+                action: dismiss
+            )
         }
-        .padding(12)
-        .background(tint.opacity(0.12))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .stroke(tint.opacity(0.35), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
         // Honor Reduce Motion: skip the slide/fade for motion-sensitive users.
         .transition(reduceMotion
             ? .opacity

@@ -949,12 +949,12 @@ impl App {
     pub(super) fn toggle_inline_images(&mut self) {
         self.inline_images_visible = !self.inline_images_visible;
         super::ui_prefs::save_inline_images_visible(self.inline_images_visible);
-        let status = if self.inline_images_visible {
-            "Inline images: ON"
+        self.set_status_notice(if self.inline_images_visible {
+            "Inline images: ON".to_string()
         } else {
-            "Inline images: hidden (Alt+Shift+I to show)"
-        };
-        self.set_status_notice(status);
+            let alt = jcode_tui_core::keybind::alt_chord("Shift+I");
+            format!("Inline images: hidden ({alt} to show)")
+        });
     }
 
     /// Toggle the per-image inline expand level (Fit <-> Large) for
@@ -1598,6 +1598,14 @@ impl App {
     /// "phantom" scroll once the viewport is already pinned to the top.
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
         // Scrolling up cancels any pending overscroll rebound line immediately
+        // Leaving the collapsed terminal-clear screen: drop the trailing Ctrl+L
+        // spacer so scrolling up reveals the transcript immediately instead of
+        // first having to travel back through a viewport of blank rows.
+        if self.terminal_clear_collapsed() {
+            self.display_messages.pop();
+            self.bump_display_messages_version();
+            self.request_full_repaint();
+        }
         // and ends the current downward gesture, so a subsequent scroll down
         // starts a fresh gesture evaluated from wherever the view is then.
         self.chat_overscroll_last = None;

@@ -289,6 +289,16 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
         "scroll_bookmark",
         "toggle the scroll bookmark",
     );
+    out.push(KnownHotkey::new(
+        ctrl('l'),
+        "clear_screen",
+        "clear the screen; history stays in scrollback",
+    ));
+    out.push(KnownHotkey::new(
+        key(KeyCode::Char('l'), KeyModifiers::SUPER),
+        "clear_screen",
+        "clear the screen; history stays in scrollback",
+    ));
 
     // Built-in readline-style editing chords.
     out.push(KnownHotkey::new(
@@ -359,8 +369,8 @@ pub(super) fn build_registry(inputs: &RegistryInputs<'_>) -> Vec<KnownHotkey> {
     ));
     out.push(KnownHotkey::new(
         ctrl('r'),
-        "recover_session",
-        "recover the session without tools",
+        "history_search",
+        "search prompt history across sessions",
     ));
     out.push(KnownHotkey::new(
         key(KeyCode::Enter, KeyModifiers::CONTROL),
@@ -684,7 +694,10 @@ impl App {
     /// Handle the `/hotkeys` command: list every known chord with a
     /// description and the user's personal usage counts.
     pub(super) fn handle_hotkeys_command(&mut self, trimmed: &str) -> bool {
-        if trimmed != "/hotkeys" && trimmed != "/keys" {
+        // `/keys` belongs to the keymap-conflict diagnostics command, which is
+        // dispatched earlier; claiming it here was dead code that only made the
+        // alias ambiguous.
+        if trimmed != "/hotkeys" {
             return false;
         }
         let registry = self.hotkey_registry(self.is_remote);

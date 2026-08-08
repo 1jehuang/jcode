@@ -204,6 +204,44 @@ CREATE INDEX IF NOT EXISTS idx_discovery_selected_tool ON discovery_details(sele
 CREATE INDEX IF NOT EXISTS idx_discovery_failure_reason ON discovery_details(failure_reason);
 CREATE INDEX IF NOT EXISTS idx_discovery_benchmark_run ON discovery_details(benchmark_run);
 
+-- One privacy-safe aggregate per client runtime session. `correlation_id` is a
+-- fresh UUID and the parent event's telemetry_id is the same ephemeral value,
+-- never the install telemetry ID, so these rows cannot be joined to accounts or
+-- activity across sessions.
+CREATE TABLE IF NOT EXISTS todo_session_details (
+    event_id TEXT PRIMARY KEY,
+    correlation_id TEXT NOT NULL UNIQUE,
+    session_end_reason TEXT NOT NULL,
+    todos_created INTEGER NOT NULL DEFAULT 0,
+    todos_completed INTEGER NOT NULL DEFAULT 0,
+    todos_abandoned INTEGER NOT NULL DEFAULT 0,
+    todo_updates INTEGER NOT NULL DEFAULT 0,
+    groups_completed INTEGER NOT NULL DEFAULT 0,
+    groups_total INTEGER NOT NULL DEFAULT 0,
+    max_todo_list_size INTEGER NOT NULL DEFAULT 0,
+    confidence_min INTEGER,
+    confidence_mean REAL,
+    confidence_count INTEGER NOT NULL DEFAULT 0,
+    completion_confidence_min INTEGER,
+    completion_confidence_mean REAL,
+    completion_confidence_count INTEGER NOT NULL DEFAULT 0,
+    understands_user_intent_min INTEGER,
+    understands_user_intent_mean REAL,
+    understands_user_intent_count INTEGER NOT NULL DEFAULT 0,
+    closed_feedback_loop_min INTEGER,
+    closed_feedback_loop_mean REAL,
+    closed_feedback_loop_count INTEGER NOT NULL DEFAULT 0,
+    end_to_end_ownership_min INTEGER,
+    end_to_end_ownership_mean REAL,
+    end_to_end_ownership_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (event_id) REFERENCES events(event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_todo_session_completed
+    ON todo_session_details(todos_completed);
+CREATE INDEX IF NOT EXISTS idx_todo_session_groups_completed
+    ON todo_session_details(groups_completed);
+
 CREATE TABLE IF NOT EXISTS session_details (
     event_id TEXT PRIMARY KEY,
     session_start_hour_utc INTEGER,
@@ -354,6 +392,9 @@ CREATE TABLE IF NOT EXISTS daily_active_users (
     ci_active INTEGER DEFAULT 0,
     last_is_ci INTEGER DEFAULT 0,
     last_build_channel TEXT,
+    -- Coarse geo: 2-letter country code from Cloudflare's edge (migration
+    -- 0022). Country only; IP / city / coordinates are never stored.
+    last_country TEXT,
     PRIMARY KEY (activity_date, telemetry_id)
 );
 
@@ -365,3 +406,42 @@ CREATE INDEX IF NOT EXISTS idx_daily_active_date_release
 
 CREATE INDEX IF NOT EXISTS idx_daily_active_date_ci
     ON daily_active_users(activity_date, last_is_ci, meaningful_release_active);
+
+-- Coarse geographic dimension (migration 0022). Country only, derived from
+-- Cloudflare's edge (request.cf.country); IP addresses are never stored.
+CREATE INDEX IF NOT EXISTS idx_daily_active_date_country
+    ON daily_active_users(activity_date, last_country);
+
+CREATE TABLE IF NOT EXISTS country_daily (
+    activity_date TEXT NOT NULL,
+    country TEXT NOT NULL,
+    event TEXT NOT NULL,
+    is_ci INTEGER NOT NULL DEFAULT 0,
+    event_count INTEGER NOT NULL DEFAULT 0,
+    first_seen_at TEXT DEFAULT (datetime('now')),
+    last_seen_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (activity_date, country, event, is_ci)
+);
+
+CREATE INDEX IF NOT EXISTS idx_country_daily_date ON country_daily(activity_date);
+CREATE INDEX IF NOT EXISTS idx_country_daily_country ON country_daily(country);
+
+-- List prices per model, in USD per million tokens (migration 0023). Populated
+-- by scripts/sync-model-prices.mjs from https://models.dev/api.json, keyed on
+-- the raw telemetry model label (not a models.dev id) so gateway aliases can be
+-- priced. Powers token-value.sql. See migrations/0023_model_prices.sql for the
+-- full rationale, especially input_includes_cache_read.
+CREATE TABLE IF NOT EXISTS model_prices (
+    model TEXT PRIMARY KEY,
+    source_model TEXT,
+    source_provider TEXT,
+    input_usd_per_mtok REAL,
+    output_usd_per_mtok REAL,
+    cache_read_usd_per_mtok REAL,
+    cache_write_usd_per_mtok REAL,
+    input_includes_cache_read INTEGER NOT NULL DEFAULT 0,
+    price_kind TEXT NOT NULL DEFAULT 'catalog',
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_prices_price_kind ON model_prices(price_kind);

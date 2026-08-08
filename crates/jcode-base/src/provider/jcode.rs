@@ -11,12 +11,21 @@ pub struct JcodeProvider {
 }
 
 impl JcodeProvider {
+    fn runtime_model_spec(model: &str) -> String {
+        // Subscription model ids overlap with direct providers (for example,
+        // `claude-*` and `gpt-*`). Passing a bare id to MultiProvider lets its
+        // family heuristic escape to the user's Anthropic/OpenAI credentials.
+        // Pin the managed OpenRouter slot, whose transport is configured below
+        // as `jcode-subscription`, for every curated model.
+        format!("openrouter:{}", model.trim())
+    }
+
     pub fn new() -> Self {
         crate::subscription_catalog::apply_runtime_env();
         Self::apply_runtime_profile();
         let inner = MultiProvider::new_fast();
         let default_model = crate::subscription_catalog::default_model().id.to_string();
-        let _ = inner.set_model(&default_model);
+        let _ = inner.set_model(&Self::runtime_model_spec(&default_model));
         Self {
             inner,
             selected_model: Arc::new(RwLock::new(default_model)),
@@ -38,11 +47,11 @@ impl JcodeProvider {
     }
 
     fn entitled_models_for(
-        tier: crate::subscription_catalog::JcodeTier,
+        _tier: crate::subscription_catalog::JcodeTier,
     ) -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel> {
-        crate::subscription_catalog::curated_models()
-            .iter()
-            .filter(move |model| tier.allows(model.min_tier))
+        // Metered hosted billing has one model catalog. Keep accepting legacy
+        // tier metadata, but never let it hide a router-supported model.
+        crate::subscription_catalog::curated_models().iter()
     }
 
     fn entitled_models() -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel>
@@ -119,7 +128,7 @@ impl Provider for JcodeProvider {
     fn set_model(&self, model: &str) -> Result<()> {
         self.ensure_runtime_mode();
         ensure_model_allowed_for_subscription(model)?;
-        self.inner.set_model(model)?;
+        self.inner.set_model(&Self::runtime_model_spec(model))?;
         if let Ok(mut selected_model) = self.selected_model.write() {
             *selected_model = crate::subscription_catalog::canonical_model_id(model)
                 .unwrap_or(model)
@@ -173,7 +182,9 @@ impl Provider for JcodeProvider {
         self.ensure_runtime_mode();
         self.inner.on_auth_changed();
         let selected_model = self.model();
-        let _ = self.inner.set_model(&selected_model);
+        let _ = self
+            .inner
+            .set_model(&Self::runtime_model_spec(&selected_model));
     }
 
     fn auth_model_refresh_pending(&self) -> bool {
@@ -321,6 +332,22 @@ mod tests {
     }
 
     #[test]
+    fn jcode_models_are_pinned_to_the_managed_transport() {
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("claude-opus-4-8"),
+            "openrouter:claude-opus-4-8"
+        );
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("gpt-5.5"),
+            "openrouter:gpt-5.5"
+        );
+        assert_eq!(
+            JcodeProvider::runtime_model_spec("minimax-m2.5"),
+            "openrouter:minimax-m2.5"
+        );
+    }
+
+    #[test]
     fn jcode_provider_exposes_only_explicit_subscription_routes() {
         use crate::subscription_catalog::JcodeTier;
 
@@ -333,8 +360,10 @@ mod tests {
         let flagship_routes = JcodeProvider::model_routes_for(JcodeTier::Flagship);
         let expected_models = vec![
             "claude-opus-4-8",
+            "claude-opus-5",
             "claude-sonnet-4-6",
             "gpt-5.5",
+            "claude-fable-5",
             "gpt-5.6-sol",
             "qwen3-coder-next",
             "devstral-2-123b",
@@ -380,7 +409,8 @@ mod tests {
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
         assert_eq!(route_selection.provider_label, "Jcode Subscription");
-        assert_eq!(flagship_routes.len(), 19);
+        assert_eq!(plus_routes, flagship_routes);
+        assert_eq!(flagship_routes.len(), 20);
         assert!(
             flagship_routes
                 .iter()

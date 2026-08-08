@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 
 use crate::{
     bold_color, code_bg, code_fg, heading_color, heading_h1_color, heading_h2_color,
-    heading_h3_color, html_fg, link_fg, math_fg, md_dim_color, text_color,
+    heading_h3_color, html_fg, link_fg, math_fg, math_inline_fg, md_dim_color, text_color,
 };
 
 /// Convert a parsed neutral [`Document`] into ratatui lines using the TUI
@@ -102,6 +102,11 @@ fn styled_span_to_span(span: &StyledSpan, kind: &BlockKind) -> Span<'static> {
     if span.attrs.underline {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
+    // H1/H2 render underlined to stand apart from body text (terminal cells
+    // cannot change font size). Keep in sync with the legacy renderers.
+    if span.role == StyleRole::Strong && matches!(kind, BlockKind::Heading { level: 1 | 2 }) {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
 
     Span::styled(span.text.clone(), style)
 }
@@ -114,7 +119,9 @@ fn role_color(role: StyleRole, kind: &BlockKind) -> ratatui::style::Color {
         StyleRole::Link => link_fg(),
         StyleRole::Html => html_fg(),
         StyleRole::Reasoning => md_dim_color(),
-        StyleRole::Math => math_fg(),
+        // Display math is framed by `push_math_display` with `math_fg`;
+        // this arm only ever colors inline math inside prose.
+        StyleRole::Math => math_inline_fg(),
         StyleRole::Strong => match kind {
             BlockKind::Heading { level } => match level {
                 1 => heading_h1_color(),
@@ -150,7 +157,11 @@ pub fn document_to_lines_with_width(doc: &Document, width: Option<usize>) -> Vec
                 push_math_display(&mut lines, block);
             }
             BlockKind::Table => {
-                lines.extend(crate::render_support::render_table(&block.table, width));
+                lines.extend(crate::render_support::render_table_aligned(
+                    &block.table,
+                    width,
+                    &block.alignments,
+                ));
             }
             BlockKind::ThematicBreak => {
                 lines.push(Line::from(Span::styled(

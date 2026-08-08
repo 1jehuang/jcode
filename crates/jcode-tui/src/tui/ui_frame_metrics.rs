@@ -24,6 +24,21 @@ pub(crate) struct FramePerfStats {
     pub full_prep_last_prepared_bytes: usize,
     pub full_prep_last_total_wrapped_lines: usize,
     pub full_prep_last_section_count: usize,
+    /// Wall time inside the `prepare_ms` span spent in `restage_requested_payloads`
+    /// (image restaging), which runs before any cache lookup.
+    pub prep_restage_ms: f64,
+    /// Wall time computing the transcript mermaid aspect ratio, which probes
+    /// terminal font geometry.
+    pub prep_aspect_ms: f64,
+    /// Total wall time in `prepare_at()` calls, including cache hits. The
+    /// difference between this and `full_prep_build_ms` is cache-lookup and
+    /// clone overhead.
+    pub prep_prepare_at_ms: f64,
+    /// Number of `prepare_at()` invocations this frame. Two means the
+    /// scrollbar hysteresis had to wrap the transcript at both widths.
+    pub prep_prepare_at_calls: usize,
+    /// Wall time in `overflows()` checks between prepare calls.
+    pub prep_overflow_ms: f64,
     pub body_requests: usize,
     pub body_hits: usize,
     pub body_oversized_hits: usize,
@@ -110,6 +125,71 @@ pub(crate) struct FrameInputAttribution {
     pub model_picker_open: bool,
 }
 
+/// Milliseconds from reading a key event off the terminal to the frame carrying
+/// it being flushed, for the most recent keystrokes.
+///
+/// This is the number the user actually feels, and nothing measured it: existing
+/// stats cover render and flush cost *within* a draw, so a keystroke that waited
+/// a long time before any draw started looked perfectly fast. Kept as a small
+/// ring so a single unlucky frame cannot be mistaken for a trend.
+static KEY_TO_PAINT_MS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+
+/// When the pending keystroke was read, if a frame carrying it has not yet been
+/// flushed. Only the oldest unpainted keystroke is tracked: that is the one whose
+/// latency the user perceives, and it bounds the rest.
+static PENDING_KEY_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Record that a key event was just read from the terminal.
+pub(crate) fn note_key_event_read() {
+    let mut slot = PENDING_KEY_AT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_none() {
+        *slot = Some(std::time::Instant::now());
+    }
+}
+
+/// Record that a frame has been flushed, closing out any pending keystroke.
+pub(crate) fn note_frame_painted() {
+    let pending = {
+        let mut slot = PENDING_KEY_AT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot.take()
+    };
+    if let Some(at) = pending {
+        let mut samples = KEY_TO_PAINT_MS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        samples.push(at.elapsed().as_secs_f64() * 1000.0);
+        const MAX_SAMPLES: usize = 64;
+        if samples.len() > MAX_SAMPLES {
+            let excess = samples.len() - MAX_SAMPLES;
+            samples.drain(0..excess);
+        }
+    }
+}
+
+/// Key-to-paint latency summary for `draw-stats`.
+pub(crate) fn key_to_paint_debug_json() -> serde_json::Value {
+    let samples = KEY_TO_PAINT_MS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if samples.is_empty() {
+        return serde_json::Value::Null;
+    }
+    let mut sorted = samples.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pick = |q: f64| sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)];
+    serde_json::json!({
+        "samples": sorted.len(),
+        "p50_ms": pick(0.5),
+        "p95_ms": pick(0.95),
+        "max_ms": sorted[sorted.len() - 1],
+    })
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct DrawCallAttribution {
     pub timestamp_ms: u64,
@@ -194,6 +274,7 @@ pub(crate) fn debug_draw_call_history(limit: usize) -> serde_json::Value {
     if samples.is_empty() {
         return serde_json::json!({
             "buffered_samples": 0,
+            "idle_animation": crate::tui::ui::idle_animation_debug_json(),
             "summary": serde_json::Value::Null,
             "samples": [],
         });
@@ -236,6 +317,7 @@ pub(crate) fn debug_draw_call_history(limit: usize) -> serde_json::Value {
     serde_json::json!({
         "buffered_samples": samples.len(),
         "window_ms": window_ms,
+        "idle_animation": crate::tui::ui::idle_animation_debug_json(),
         "summary": {
             "draws_per_second": draws_per_second,
             "render_ms": {
@@ -428,6 +510,25 @@ pub(super) fn note_full_prep_request() {
 
 pub(super) fn note_full_prep_cache_lookup(elapsed: Duration) {
     with_frame_perf_stats_mut(|stats| stats.full_prep_cache_lookup_ms += duration_ms(elapsed));
+}
+
+pub(super) fn note_prep_restage(elapsed: Duration) {
+    with_frame_perf_stats_mut(|stats| stats.prep_restage_ms += duration_ms(elapsed));
+}
+
+pub(super) fn note_prep_aspect(elapsed: Duration) {
+    with_frame_perf_stats_mut(|stats| stats.prep_aspect_ms += duration_ms(elapsed));
+}
+
+pub(super) fn note_prep_prepare_at(elapsed: Duration) {
+    with_frame_perf_stats_mut(|stats| {
+        stats.prep_prepare_at_ms += duration_ms(elapsed);
+        stats.prep_prepare_at_calls += 1;
+    });
+}
+
+pub(super) fn note_prep_overflow(elapsed: Duration) {
+    with_frame_perf_stats_mut(|stats| stats.prep_overflow_ms += duration_ms(elapsed));
 }
 
 pub(super) fn note_full_prep_cache_hit(kind: CacheEntryKind, prepared: &PreparedChatFrame) {

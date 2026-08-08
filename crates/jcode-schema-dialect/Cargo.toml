@@ -1,0 +1,24 @@
+[package]
+name = "jcode-schema-dialect"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "jcode_schema_dialect"
+path = "src/lib.rs"
+
+[dependencies]
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Exposes the per-thread quirk-store redirect so integration tests (which see
+# the crate as an external dependency) can isolate themselves from the real
+# ~/.jcode store.
+test-support = []
+
+[dev-dependencies]
+tempfile = "3"
+jcode-schema-dialect = { path = ".", features = ["test-support"] }

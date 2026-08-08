@@ -15,12 +15,20 @@ struct EmptyTranscript: View {
     ]
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
             Image(systemName: "terminal")
-                .font(Theme.icon(40, weight: .light))
-                .foregroundStyle(Theme.textSecondary)
+                .font(Theme.icon(30, weight: .regular))
+                .foregroundStyle(Theme.mint)
+                .frame(width: 72, height: 72)
+                .background(Theme.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Theme.border, lineWidth: 1)
+                )
+                .accessibilityHidden(true)
             Text("Ready when you are")
-                .font(Theme.mono(16, weight: .medium))
+                .font(Theme.mono(17, weight: .semibold))
                 .foregroundStyle(Theme.textPrimary)
             Text("Send a message to start driving this session.")
                 .font(.subheadline)
@@ -50,6 +58,7 @@ struct EmptyTranscript: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -61,26 +70,36 @@ struct EntryView: View {
         switch entry.role {
         case .user:
             HStack {
-                Spacer(minLength: 48)
-                VStack(alignment: .trailing, spacing: 4) {
+                Spacer(minLength: 40)
+                VStack(alignment: .trailing, spacing: 5) {
                     Text(entry.text)
                         .font(.body)
                         .foregroundStyle(Theme.textPrimary)
-                        .padding(12)
-                        .background(Theme.mintTint)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Theme.userBubble)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous)
+                                .stroke(Theme.mint.opacity(0.22), lineWidth: 1)
+                        )
+                        .textSelection(.enabled)
                         .copyContextMenu(entry.text)
                     if entry.isQueued {
                         Label("queued", systemImage: "clock")
-                            .font(Theme.mono(11))
+                            .font(Theme.mono(10.5))
                             .foregroundStyle(Theme.textTertiary)
+                            .padding(.trailing, 4)
                             .accessibilityLabel("Queued")
                             .accessibilityHint("Delivers after the current response")
                     }
                 }
             }
         case .assistant:
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 if !entry.reasoning.isEmpty {
                     ReasoningDisclosure(text: entry.reasoning)
                 }
@@ -92,10 +111,16 @@ struct EntryView: View {
                         .copyContextMenu(entry.text)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         case .system:
             Text(entry.text)
-                .font(.footnote)
+                .font(Theme.mono(11))
                 .foregroundStyle(Theme.textTertiary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.surface.opacity(0.6))
+                .clipShape(Capsule())
                 .frame(maxWidth: .infinity, alignment: .center)
                 .copyContextMenu(entry.text)
         }

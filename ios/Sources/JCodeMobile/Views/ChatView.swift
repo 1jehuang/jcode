@@ -104,10 +104,12 @@ struct ChatView: View {
                 Image(systemName: "line.3.horizontal")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
-                    .frame(width: 44, height: 44)
-                    .background(Theme.surfaceElevated)
+                    .frame(width: 36, height: 36)
+                    .background(Theme.surface)
                     .clipShape(Circle())
                     .overlay(Circle().stroke(Theme.border, lineWidth: 1))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Circle())
             }
             .accessibilityLabel("Sessions")
             .accessibilityHint("Switch session, manage servers, and open settings")
@@ -145,8 +147,25 @@ struct ChatView: View {
             StatusPill(phase: model.session.phase)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 6)
         .padding(.top, edgePads.top)
+        .background(alignment: .bottom) {
+            ZStack(alignment: .bottom) {
+                Theme.background
+                Theme.chrome
+                Hairline()
+            }
+            .ignoresSafeArea(edges: .top)
+        }
+    }
+
+    /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")
+    /// so the header shows the model, not plumbing.
+    private func shortModelName(_ name: String) -> String {
+        if let idx = name.firstIndex(of: ":"), idx != name.startIndex {
+            return String(name[name.index(after: idx)...])
+        }
+        return name
     }
 
     /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")

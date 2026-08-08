@@ -41,6 +41,9 @@ impl App {
                 *shared = reloaded;
             }
             self.invalidate_command_candidates_cache();
+            // The header lists loaded skills; refresh it now rather than
+            // waiting out the header cache TTL.
+            crate::tui::ui::prepare::invalidate_header_prep_cache();
         }
     }
 

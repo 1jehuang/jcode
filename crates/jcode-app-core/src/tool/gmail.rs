@@ -70,7 +70,7 @@ impl Tool for GmailTool {
                 "action": {
                     "type": "string",
                     "enum": ["connect", "search", "read", "list", "draft", "send", "send_draft", "threads", "thread", "labels", "trash", "modify_labels"],
-                    "description": "Action. Use 'connect' to set up Gmail access via the Composio managed backend (opens a browser OAuth screen for the user to approve)."
+                    "description": "Action. 'connect' sets up Gmail access via a browser OAuth screen the user approves."
                 },
                 "query": { "type": "string" },
                 "message_id": { "type": "string" },

@@ -445,6 +445,7 @@ pub(super) fn interrupt_and_queue_synthetic_message(
 ) {
     app.cancel_requested = true;
     app.interleave_message = None;
+    app.interleave_images.clear();
     app.pending_soft_interrupts.clear();
     app.pending_soft_interrupt_requests.clear();
     app.set_status_notice(status_notice);
@@ -592,7 +593,7 @@ pub(super) fn format_refactor_status(app: &App) -> String {
 
 fn todo_confidence_suffix(todo: &crate::todo::TodoItem) -> String {
     match todo.confidence {
-        Some(score) => format!(" · confidence {}%", score),
+        Some(state) => format!(" · confidence {}", state.as_str()),
         None => " · confidence unknown".to_string(),
     }
 }

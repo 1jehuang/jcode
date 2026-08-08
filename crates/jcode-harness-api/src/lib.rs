@@ -18,14 +18,20 @@ use serde::{Deserialize, Serialize};
 mod client;
 mod events;
 mod requests;
+mod sockets;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
 pub use requests::*;
+pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 
 #[cfg(test)]
 #[path = "harness_api_tests/schema_snapshot.rs"]
 mod schema_snapshot_tests;
+
+#[cfg(test)]
+#[path = "harness_api_tests/capability_coverage.rs"]
+mod capability_coverage_tests;
 
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;

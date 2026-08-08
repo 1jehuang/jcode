@@ -5,6 +5,28 @@
 //! a fresh connection, or a real error to surface. Keeping the classifier here
 //! ensures all providers recognize the same fault vocabulary.
 
+use anyhow::Result;
+use std::time::Duration;
+
+/// Send a request while bounding the wait for response headers.
+///
+/// Reqwest's `send` future covers connection establishment and the wait for
+/// response headers, but streaming body reads happen after it resolves. Provider
+/// stream loops apply their own idle timeout to those body reads, so using the
+/// same budget here closes the zero-response-bytes gap without imposing an
+/// overall deadline on a legitimately long stream.
+pub async fn send_with_initial_response_timeout(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<reqwest::Response> {
+    match tokio::time::timeout(timeout, request.send()).await {
+        Ok(response) => Ok(response?),
+        Err(_) => anyhow::bail!(
+            "Initial response timeout: no response headers received within {timeout:?}"
+        ),
+    }
+}
+
 /// Whether an error message describes a transient transport-level fault
 /// (connection reset, DNS hiccup, TLS teardown, HTTP/2 stream error, ...)
 /// that is likely to succeed on retry with a fresh connection.
@@ -66,7 +88,62 @@ pub fn is_transient_transport_error(error_str: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_transient_transport_error;
+    use super::{is_transient_transport_error, send_with_initial_response_timeout};
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn accepted_request_without_response_headers_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind blackhole server");
+        let address = listener.local_addr().expect("read blackhole address");
+        let (request_seen_tx, request_seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set request read timeout");
+            let mut request = [0_u8; 4096];
+            let bytes_read = stream.read(&mut request).expect("read request");
+            assert!(bytes_read > 0, "client should send request bytes");
+            request_seen_tx.send(()).expect("report request received");
+
+            // Keep the socket open without sending status or response headers.
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+        });
+
+        let request = reqwest::Client::new()
+            .post(format!("http://{address}/chat/completions"))
+            .body("{}");
+        let timeout = Duration::from_millis(250);
+        let started = Instant::now();
+        let error = send_with_initial_response_timeout(request, timeout)
+            .await
+            .expect_err("blackholed response should time out");
+
+        assert!(
+            error.to_string().contains("Initial response timeout"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            is_transient_transport_error(&error.to_string()),
+            "initial response timeouts must enter provider retry machinery"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "initial response wait exceeded its timeout"
+        );
+        request_seen_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("server should receive the request before the timeout");
+
+        let _ = release_tx.send(());
+        server.join().expect("blackhole server should exit");
+    }
 
     #[test]
     fn http2_stream_protocol_error_is_transient() {

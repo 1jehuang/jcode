@@ -1271,7 +1271,7 @@ pub(super) fn get_tool_summary_with_budget(
                 _ => truncate_end_display(error, bounded(40)),
             }
         }
-        "discover_tools" => {
+        "integration_tools" => {
             let action = tool
                 .input
                 .get("action")
@@ -1292,9 +1292,9 @@ pub(super) fn get_tool_summary_with_budget(
                 format!("suggest {}", truncate_end_display(detail, bounded(30)))
             } else {
                 match tool.input.get("tool").and_then(|v| v.as_str()) {
-                    Some(name) => format!("select {}", truncate_end_display(name, bounded(30))),
-                    None if !category.is_empty() => format!("browse {}", category),
-                    None => "browse".to_string(),
+                    Some(name) => format!("setup {}", truncate_end_display(name, bounded(30))),
+                    None if !category.is_empty() => format!("search {}", category),
+                    None => "search".to_string(),
                 }
             }
         }

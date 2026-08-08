@@ -1,5 +1,7 @@
 # Desktop Stable Host, Hot Reload, and Fast Startup Plan
 
+> Historical: this document describes the removed legacy `crates/jcode-desktop` app. The current desktop app is `crates/jcode-desktop2`.
+
 Status: In progress
 Updated: 2026-05-24
 

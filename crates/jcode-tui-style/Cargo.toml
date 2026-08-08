@@ -5,4 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+jcode-logging = { path = "../jcode-logging" }
 ratatui = "0.30"

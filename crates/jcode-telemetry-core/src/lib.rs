@@ -1,13 +1,14 @@
 use jcode_logging as logging;
 use jcode_storage as storage;
 mod lifecycle;
+pub mod onboarding_trace;
 mod state_support;
 use chrono::{DateTime, NaiveDate, Utc};
 use jcode_usage_types::{
     AuthEvent, DiscoveryEvent, ErrorCounts, FeedbackEvent, InstallEvent, OnboardingStepEvent,
     SessionLifecycleEvent, SessionStartEvent, TelemetryProjectProfile as ProjectProfile,
-    TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts, TurnEndEvent, UpgradeEvent,
-    classify_telemetry_tool_category as classify_tool_category,
+    TelemetryToolCategory as ToolCategory, TelemetryWorkflowCounts, TodoSessionEvent, TurnEndEvent,
+    UpgradeEvent, classify_telemetry_tool_category as classify_tool_category,
     looks_like_telemetry_test_run as looks_like_test_run,
     mcp_telemetry_server_name as mcp_server_name, sanitize_feedback_text, sanitize_telemetry_label,
     telemetry_workflow_flags_from_counts,
@@ -33,6 +34,8 @@ static TELEMETRY_PERMANENTLY_REJECTED: AtomicBool = AtomicBool::new(false);
 static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
 static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+#[cfg(test)]
+static TEST_EMITTED_PAYLOADS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
 #[derive(Debug, Clone)]
 pub struct DiscoveryTelemetry<'a> {
@@ -50,6 +53,99 @@ pub struct DiscoveryTelemetry<'a> {
     pub reason_present: bool,
     pub benchmark_run: bool,
     pub endpoint: &'a str,
+}
+
+/// A distribution-safe numeric summary. Callers provide only scores, never the
+/// todo, goal, plan, or feedback-loop text those scores describe.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TelemetryScoreSummary {
+    pub min: Option<u8>,
+    pub mean: Option<f64>,
+    pub count: u32,
+}
+
+impl TelemetryScoreSummary {
+    pub fn from_scores(scores: impl IntoIterator<Item = u8>) -> Self {
+        let mut min = None;
+        let mut sum = 0_u64;
+        let mut count = 0_u32;
+        for score in scores {
+            let score = score.min(100);
+            min = Some(min.map_or(score, |current: u8| current.min(score)));
+            sum = sum.saturating_add(u64::from(score));
+            count = count.saturating_add(1);
+        }
+        Self {
+            min,
+            mean: (count > 0).then(|| sum as f64 / f64::from(count)),
+            count,
+        }
+    }
+}
+
+/// Numeric-only state derived by the todo tool from its persisted before/after
+/// models. Text and item identifiers are intentionally absent from this API.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TodoTelemetryUpdate {
+    pub todos_created: u32,
+    pub todos_completed: u32,
+    pub todos_abandoned: u32,
+    pub current_incomplete: u32,
+    pub list_size: u32,
+    pub groups_completed: u32,
+    pub groups_total: u32,
+    pub confidence: TelemetryScoreSummary,
+    pub completion_confidence: TelemetryScoreSummary,
+    pub understands_user_intent: TelemetryScoreSummary,
+    pub closed_feedback_loop: TelemetryScoreSummary,
+    pub feedback_loop_relevance: TelemetryScoreSummary,
+    pub feedback_loop_coverage: TelemetryScoreSummary,
+    pub end_to_end_ownership: TelemetryScoreSummary,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TodoSessionTelemetry {
+    todo_updates: u32,
+    todos_created: u32,
+    todos_completed: u32,
+    removed_incomplete: u32,
+    current_incomplete: u32,
+    groups_completed: u32,
+    groups_total: u32,
+    max_todo_list_size: u32,
+    confidence: TelemetryScoreSummary,
+    completion_confidence: TelemetryScoreSummary,
+    understands_user_intent: TelemetryScoreSummary,
+    closed_feedback_loop: TelemetryScoreSummary,
+    feedback_loop_relevance: TelemetryScoreSummary,
+    feedback_loop_coverage: TelemetryScoreSummary,
+    end_to_end_ownership: TelemetryScoreSummary,
+}
+
+impl TodoSessionTelemetry {
+    fn record(&mut self, update: TodoTelemetryUpdate) {
+        self.todos_created = self.todos_created.saturating_add(update.todos_created);
+        self.todos_completed = self.todos_completed.saturating_add(update.todos_completed);
+        self.removed_incomplete = self
+            .removed_incomplete
+            .saturating_add(update.todos_abandoned);
+        self.current_incomplete = update.current_incomplete;
+        self.groups_completed = update.groups_completed;
+        self.groups_total = update.groups_total;
+        self.max_todo_list_size = self.max_todo_list_size.max(update.list_size);
+        self.confidence = update.confidence;
+        self.completion_confidence = update.completion_confidence;
+        self.understands_user_intent = update.understands_user_intent;
+        self.closed_feedback_loop = update.closed_feedback_loop;
+        self.feedback_loop_relevance = update.feedback_loop_relevance;
+        self.feedback_loop_coverage = update.feedback_loop_coverage;
+        self.end_to_end_ownership = update.end_to_end_ownership;
+    }
+
+    fn abandoned(&self) -> u32 {
+        self.removed_incomplete
+            .saturating_add(self.current_incomplete)
+    }
 }
 
 // Error/switch counters live inside `SessionTelemetry` (guarded by
@@ -113,7 +209,7 @@ struct TurnTelemetry {
     tool_cat_other: u32,
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
-    todo_gate_hill_count: u32,
+    todo_gate_feedback_loop_count: u32,
     todo_gate_alignment_count: u32,
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
@@ -123,6 +219,7 @@ struct TurnTelemetry {
 #[derive(Debug, Clone)]
 struct SessionTelemetry {
     session_id: String,
+    correlation_id: String,
     started_at: Instant,
     started_at_utc: DateTime<Utc>,
     provider_start: String,
@@ -199,7 +296,7 @@ struct SessionTelemetry {
     tool_cat_other: u32,
     tool_cat_todo: u32,
     todo_gate_ownership_count: u32,
-    todo_gate_hill_count: u32,
+    todo_gate_feedback_loop_count: u32,
     todo_gate_alignment_count: u32,
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
@@ -232,6 +329,7 @@ struct SessionTelemetry {
     error_rate_limited: u32,
     provider_switches: u32,
     model_switches: u32,
+    todo: TodoSessionTelemetry,
 }
 
 impl TurnTelemetry {
@@ -294,7 +392,7 @@ impl TurnTelemetry {
             tool_cat_other: 0,
             tool_cat_todo: 0,
             todo_gate_ownership_count: 0,
-            todo_gate_hill_count: 0,
+            todo_gate_feedback_loop_count: 0,
             todo_gate_alignment_count: 0,
             todo_gate_intent_count: 0,
             todo_gate_completion_count: 0,
@@ -620,6 +718,32 @@ pub fn record_discovery_event(data: DiscoveryTelemetry<'_>) {
     }
 }
 
+/// Return the fresh correlation UUID for the active telemetry session.
+///
+/// This is intentionally unavailable while telemetry is disabled, so callers
+/// cannot accidentally attach the join key to an otherwise opted-out request.
+pub fn current_session_correlation_id() -> Option<String> {
+    if !is_enabled() {
+        return None;
+    }
+    SESSION_STATE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|state| state.correlation_id.clone()))
+}
+
+/// Record a numeric-only snapshot derived from the todo tool's persisted state.
+pub fn record_todo_update(update: TodoTelemetryUpdate) {
+    if !is_enabled() {
+        return;
+    }
+    if let Ok(mut guard) = SESSION_STATE.lock()
+        && let Some(state) = guard.as_mut()
+    {
+        state.todo.record(update);
+    }
+}
+
 fn update_active_days(id: &str) -> (u32, u32) {
     let Some(path) = active_days_path(id) else {
         return (0, 0);
@@ -717,7 +841,10 @@ fn increment_tool_category(state: &mut SessionTelemetry, category: ToolCategory)
         ToolCategory::Email => state.tool_cat_email += 1,
         ToolCategory::SidePanel => state.tool_cat_side_panel += 1,
         ToolCategory::Goal => state.tool_cat_goal += 1,
-        ToolCategory::Todo => state.tool_cat_todo += 1,
+        ToolCategory::Todo => {
+            state.tool_cat_todo += 1;
+            state.todo.todo_updates = state.todo.todo_updates.saturating_add(1);
+        }
         ToolCategory::Mcp => state.tool_cat_mcp += 1,
         ToolCategory::Other => state.tool_cat_other += 1,
     }
@@ -1097,6 +1224,10 @@ fn background_sender() -> &'static SyncSender<Value> {
 }
 
 fn send_payload(payload: serde_json::Value, mode: DeliveryMode) -> bool {
+    #[cfg(test)]
+    if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
+        emitted.push(payload.clone());
+    }
     match mode {
         DeliveryMode::Background => {
             if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
@@ -1313,7 +1444,7 @@ fn finalize_current_turn(
         tool_cat_other: turn.tool_cat_other,
         tool_cat_todo: turn.tool_cat_todo,
         todo_gate_ownership_count: turn.todo_gate_ownership_count,
-        todo_gate_hill_count: turn.todo_gate_hill_count,
+        todo_gate_feedback_loop_count: turn.todo_gate_feedback_loop_count,
         todo_gate_alignment_count: turn.todo_gate_alignment_count,
         todo_gate_intent_count: turn.todo_gate_intent_count,
         todo_gate_completion_count: turn.todo_gate_completion_count,
@@ -1631,6 +1762,7 @@ fn begin_session_with_mode(
     let started_at = Instant::now();
     let started_at_utc = Utc::now();
     let session_id = uuid::Uuid::new_v4().to_string();
+    let correlation_id = uuid::Uuid::new_v4().to_string();
     let (previous_session_gap_secs, sessions_started_24h, sessions_started_7d) = get_or_create_id()
         .map(|id| update_session_start_history(&id, started_at_utc))
         .unwrap_or((None, 0, 0));
@@ -1638,6 +1770,7 @@ fn begin_session_with_mode(
         register_active_session(&session_id);
     let state = SessionTelemetry {
         session_id,
+        correlation_id,
         started_at,
         started_at_utc,
         provider_start: sanitize_telemetry_label(provider),
@@ -1714,7 +1847,7 @@ fn begin_session_with_mode(
         tool_cat_other: 0,
         tool_cat_todo: 0,
         todo_gate_ownership_count: 0,
-        todo_gate_hill_count: 0,
+        todo_gate_feedback_loop_count: 0,
         todo_gate_alignment_count: 0,
         todo_gate_intent_count: 0,
         todo_gate_completion_count: 0,
@@ -1745,7 +1878,37 @@ fn begin_session_with_mode(
         error_rate_limited: 0,
         provider_switches: 0,
         model_switches: 0,
+        todo: TodoSessionTelemetry::default(),
     };
+    // A live session in the slot means the process is switching sessions
+    // without anyone calling end_session (agent create/attach both call
+    // begin_session unconditionally). Overwriting it silently orphaned the
+    // previous session_start, which is why only ~25% of release
+    // session_starts ever saw a matching session_end. Close it out first so
+    // every start has a terminal event.
+    let superseded = match SESSION_STATE.lock() {
+        Ok(guard) => guard.as_ref().map(|prior| {
+            (
+                prior.provider_start.clone(),
+                prior.model_start.clone(),
+                prior.start_event_sent,
+            )
+        }),
+        Err(_) => None,
+    };
+    if let Some((provider_start, model_start, start_event_sent)) = superseded {
+        // Only worth an end event if the start was actually emitted; an
+        // unsent start has no orphan to pair with.
+        if start_event_sent {
+            emit_lifecycle_event(
+                "session_end",
+                &provider_start,
+                &model_start,
+                SessionEndReason::Superseded,
+                true,
+            );
+        }
+    }
     if let Ok(mut guard) = SESSION_STATE.lock() {
         *guard = Some(state);
     }
@@ -2005,8 +2168,14 @@ pub fn record_user_cancelled() {
 pub enum TodoGateKind {
     /// End-to-end ownership was too low to complete a goal.
     Ownership,
-    /// Hill-climbability was too low; the goal needs a measurable objective.
-    HillClimbability,
+    /// Closed feedback loop was too low; the goal needs a measurable objective.
+    ClosedFeedbackLoop,
+    /// Completion checks were too indirect to represent acceptance behavior.
+    FeedbackLoopRelevance,
+    /// Completion checks did not cover enough success and failure paths.
+    FeedbackLoopCoverage,
+    /// Requirements or changed outputs were not mapped to observed checks.
+    FeedbackLoopTraceability,
     /// Plan-level alignment with the user's intention was too low.
     Alignment,
     /// Plan-level understanding of the user's intent was too low.
@@ -2025,7 +2194,10 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         observe_session_concurrency(state);
         let counter = match kind {
             TodoGateKind::Ownership => &mut state.todo_gate_ownership_count,
-            TodoGateKind::HillClimbability => &mut state.todo_gate_hill_count,
+            TodoGateKind::ClosedFeedbackLoop
+            | TodoGateKind::FeedbackLoopRelevance
+            | TodoGateKind::FeedbackLoopCoverage
+            | TodoGateKind::FeedbackLoopTraceability => &mut state.todo_gate_feedback_loop_count,
             TodoGateKind::Alignment => &mut state.todo_gate_alignment_count,
             TodoGateKind::IntentUnderstanding => &mut state.todo_gate_intent_count,
             TodoGateKind::Completion => &mut state.todo_gate_completion_count,
@@ -2035,7 +2207,10 @@ pub fn record_todo_gate(kind: TodoGateKind) {
         if let Some(turn) = state.current_turn.as_mut() {
             let counter = match kind {
                 TodoGateKind::Ownership => &mut turn.todo_gate_ownership_count,
-                TodoGateKind::HillClimbability => &mut turn.todo_gate_hill_count,
+                TodoGateKind::ClosedFeedbackLoop
+                | TodoGateKind::FeedbackLoopRelevance
+                | TodoGateKind::FeedbackLoopCoverage
+                | TodoGateKind::FeedbackLoopTraceability => &mut turn.todo_gate_feedback_loop_count,
                 TodoGateKind::Alignment => &mut turn.todo_gate_alignment_count,
                 TodoGateKind::IntentUnderstanding => &mut turn.todo_gate_intent_count,
                 TodoGateKind::Completion => &mut turn.todo_gate_completion_count,

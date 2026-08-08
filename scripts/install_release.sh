@@ -91,7 +91,15 @@ echo "Updated launcher symlink: $install_dir/jcode -> $current_dir/jcode"
 # idempotent and best-effort because headless installs may not expose a desktop
 # session; the first interactive launch retries automatically.
 case "$(uname -s)" in
-  Darwin|Linux)
+  Darwin)
+    if "$install_dir/jcode" setup-launcher </dev/null >/dev/null 2>&1; then
+      echo "Installed macOS launcher and turn-notification broker."
+    fi
+    if "$install_dir/jcode" setup-hotkey </dev/null >/dev/null 2>&1; then
+      echo "Configured system-wide jcode launch hotkeys (when supported)."
+    fi
+    ;;
+  Linux)
     if "$install_dir/jcode" setup-hotkey </dev/null >/dev/null 2>&1; then
       echo "Configured system-wide jcode launch hotkeys (when supported)."
     fi

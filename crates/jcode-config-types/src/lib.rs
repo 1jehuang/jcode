@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+mod display;
+pub use display::DisplayConfig;
 pub mod keybindings;
+mod serde_lenient;
 pub use keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
     KeybindingPlatform, KeybindingProvenance, PlatformDefault, default_binding, default_binding_or,
@@ -155,7 +158,12 @@ impl OverscrollStatusMode {
 #[serde(rename_all = "lowercase")]
 pub enum DiagramDisplayMode {
     /// Don't show diagrams in dedicated widgets (only inline in messages).
+    ///
+    /// `inline`/`off` are accepted spellings: diagrams still render inline in
+    /// the transcript in this mode, and users reasonably write `"inline"`
+    /// (issue #689).
     #[default]
+    #[serde(alias = "inline", alias = "off")]
     None,
     /// Show diagrams in info widget margins (opportunistic, if space available).
     Margin,
@@ -758,6 +766,59 @@ pub struct TerminalConfig {
 /// failures only logged. `pre_tool` is a gate: jcode waits for it and exit
 /// code 2 blocks the tool call (stderr becomes the error shown to the model);
 /// exit 0 allows; anything else fails open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCommands(Vec<String>);
+
+impl HookCommands {
+    pub fn one(command: impl Into<String>) -> Self {
+        Self(vec![command.into()])
+    }
+
+    pub fn many(commands: Vec<String>) -> Self {
+        Self(commands)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+
+    pub fn first(&self) -> Option<&str> {
+        self.0.first().map(String::as_str)
+    }
+}
+
+impl Serialize for HookCommands {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let [command] = self.0.as_slice() {
+            command.serialize(serializer)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HookCommands {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+
+        Ok(match OneOrMany::deserialize(deserializer)? {
+            OneOrMany::One(command) => Self::one(command),
+            OneOrMany::Many(commands) => Self::many(commands),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
@@ -766,27 +827,27 @@ pub struct HooksConfig {
     /// so integrations can detect that the agent is actively working even while
     /// it is only thinking/streaming text. Fields: MODEL, SOURCE
     /// ("chat"/"resume"/"ambient"). Env override: JCODE_HOOK_TURN_START.
-    pub turn_start: Option<String>,
+    pub turn_start: Option<HookCommands>,
     /// Runs when an agent turn completes.
     /// Fields: STATUS ("ok"/"error"), DURATION_MS, MODEL, LAST_ASSISTANT_TEXT.
     /// Env override: JCODE_HOOK_TURN_END.
-    pub turn_end: Option<String>,
+    pub turn_end: Option<HookCommands>,
     /// Runs when a session becomes active (created or resumed).
     /// Fields: SOURCE ("create"/"resume").
     /// Env override: JCODE_HOOK_SESSION_START.
-    pub session_start: Option<String>,
+    pub session_start: Option<HookCommands>,
     /// Runs when a session closes normally.
     /// Env override: JCODE_HOOK_SESSION_END.
-    pub session_end: Option<String>,
+    pub session_end: Option<HookCommands>,
     /// Gate hook before each tool call. Receives TOOL_NAME and the tool input
     /// JSON on stdin (also truncated in TOOL_INPUT). Exit 0 allows, exit 2
     /// blocks (stderr is fed back to the model), anything else fails open.
     /// Env override: JCODE_HOOK_PRE_TOOL.
-    pub pre_tool: Option<String>,
+    pub pre_tool: Option<HookCommands>,
     /// Runs after each tool call completes.
     /// Fields: TOOL_NAME, STATUS ("ok"/"error"), DURATION_MS, OUTPUT_BYTES.
     /// Env override: JCODE_HOOK_POST_TOOL.
-    pub post_tool: Option<String>,
+    pub post_tool: Option<HookCommands>,
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
@@ -816,19 +877,17 @@ pub struct AutoReviewConfig {
     pub model: Option<String>,
 }
 
-/// Tool partner discovery configuration.
+/// Integration discovery configuration (legacy `[sponsors]` section name).
 ///
-/// Partner discovery makes third-party developer tools discoverable to the
-/// agent via a `discover_tools` tool backed by a hosted directory. Some
-/// partners may share revenue with Jcode when a referred user becomes a
-/// customer, but partnership status never influences recommendations. Each
-/// session's first use of `discover_tools` shows a concise disclosure with a
-/// learn-more link.
+/// Integration discovery makes third-party developer tools discoverable to
+/// the agent via a `discover_tools` tool backed by a hosted directory. Some
+/// providers may share revenue with Jcode when a referred user becomes a
+/// customer, but partnership status never influences recommendations.
 /// See <https://jcode.sh/discovery-tools>.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SponsorsConfig {
-    /// Enable tool partner discovery. Enabled by default; set to false to opt
+    /// Enable integration discovery. Enabled by default; set to false to opt
     /// out. When false, no discovery categories are added to the prompt, the
     /// `discover_tools` tool is not registered, and jcode never contacts the
     /// discovery endpoint.
@@ -1000,170 +1059,6 @@ impl Default for NativeScrollbarConfig {
 fn default_true() -> bool {
     true
 }
-/// Display/UI configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DisplayConfig {
-    /// How to display file diffs (off/inline/full-inline/pinned/file, default: inline)
-    pub diff_mode: DiffDisplayMode,
-    /// Legacy: "show_diffs = true/false" maps to diff_mode inline/off
-    #[serde(default)]
-    show_diffs: Option<bool>,
-    /// Queue mode by default - wait until done before sending (default: false)
-    pub queue_mode: bool,
-    /// Automatically reload the remote server when a newer server binary is detected (default: true)
-    pub auto_server_reload: bool,
-    /// Capture mouse events (default: true). Enables scroll wheel but disables terminal selection.
-    pub mouse_capture: bool,
-    /// Enable debug socket for external control (default: false)
-    pub debug_socket: bool,
-    /// Render emoji in terminal-facing TUI and CLI output (default: true)
-    pub emoji: bool,
-    /// Center all content (default: false)
-    pub centered: bool,
-    /// Show thinking/reasoning content by default (default: false)
-    pub show_thinking: bool,
-    /// How to display reasoning/thinking content (off/full/current).
-    /// When unset, falls back to `show_thinking` (true => full, false => off).
-    #[serde(default)]
-    reasoning_display: Option<ReasoningDisplayMode>,
-    /// How to display mermaid diagrams (none/margin/pinned, default: none).
-    /// `none` still renders diagrams inline in the transcript via the inline
-    /// image pipeline; `margin`/`pinned` add dedicated widget placements.
-    pub diagram_mode: DiagramDisplayMode,
-    /// Markdown block spacing style (compact/document, default: compact)
-    pub markdown_spacing: MarkdownSpacingMode,
-    /// LaTeX rendering style (none/unicode/image, default: image)
-    pub latex_rendering: LatexRenderingMode,
-    /// Pin read images to side pane (default: true)
-    pub pin_images: bool,
-    /// Show idle animation before first prompt (default: true)
-    pub idle_animation: bool,
-    /// Briefly animate user prompt line when it enters viewport (default: true)
-    pub prompt_entry_animation: bool,
-    /// Disable specific animation variants by name (e.g. ["donut", "orbit_rings"])
-    pub disabled_animations: Vec<String>,
-    /// Wrap long lines in the pinned diff pane (default: true)
-    pub diff_line_wrap: bool,
-    /// Performance tier override: auto/full/reduced/minimal (default: auto)
-    pub performance: String,
-    /// FPS for animations (startup, idle donut): 1-120 (default: 60)
-    pub animation_fps: u32,
-    /// FPS for active redraw (processing, streaming): 1-120 (default: 30)
-    pub redraw_fps: u32,
-    /// Show a truncated preview of the previous prompt at the top when it scrolls out of view (default: true)
-    pub prompt_preview: bool,
-    /// Render swarm/file-activity notifications in a compact single-line form
-    /// instead of the full multi-line card with diff preview (default: false)
-    pub compact_notifications: bool,
-    /// Override the Alt/Option label shown in copy badges. Empty = auto (⌥ on macOS, Alt elsewhere).
-    pub copy_badge_alt_label: String,
-    /// Show the full agentgrep tool output inline in the transcript instead of
-    /// just the one-line summary (default: false)
-    #[serde(default)]
-    pub show_agentgrep_output: bool,
-    /// Show the dimmed technical detail (command, path, args) after the
-    /// model-provided intent on tool rows (default: false). When off, rows
-    /// that have an intent show only the intent; rows without an intent
-    /// always fall back to the technical detail.
-    #[serde(default)]
-    pub tool_call_details: bool,
-    /// Native terminal scrollbar configuration for scrollable panes
-    pub native_scrollbars: NativeScrollbarConfig,
-    /// Surface occasional "learn this keybinding" nudges when the user keeps
-    /// performing an action the slow way (slash command) instead of using its
-    /// configured shortcut (default: true). Set false to disable all such hints.
-    #[serde(default = "default_true")]
-    pub keybinding_hints: bool,
-    /// Color theme: "auto" (detect terminal background), "dark", or "light".
-    /// Auto queries the terminal's background color (OSC 11) at startup and
-    /// adapts jcode's palette for light backgrounds. Default: auto.
-    #[serde(default)]
-    pub theme: String,
-    /// Opt-in active sessions manager: pressing Left arrow on an empty input
-    /// opens a picker scoped to live (open) sessions, showing which are still
-    /// working and which are ready for input (default: false). The `/active`
-    /// command works regardless of this setting.
-    #[serde(default)]
-    pub active_sessions_manager: bool,
-    /// When to show the overscroll status line below the input
-    /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
-    /// reveal when scrolling past the bottom, "on" keeps it always visible.
-    #[serde(default)]
-    pub overscroll_status: OverscrollStatusMode,
-}
-impl Default for DisplayConfig {
-    fn default() -> Self {
-        Self {
-            diff_mode: DiffDisplayMode::default(),
-            show_diffs: None,
-            pin_images: true,
-            queue_mode: false,
-            auto_server_reload: true,
-            mouse_capture: true,
-            debug_socket: false,
-            emoji: true,
-            centered: false,
-            show_thinking: false,
-            reasoning_display: Some(ReasoningDisplayMode::Off),
-            diagram_mode: DiagramDisplayMode::default(),
-            markdown_spacing: MarkdownSpacingMode::default(),
-            latex_rendering: LatexRenderingMode::default(),
-            idle_animation: true,
-            prompt_entry_animation: true,
-            disabled_animations: Vec::new(),
-            diff_line_wrap: true,
-            performance: String::new(),
-            animation_fps: 60,
-            redraw_fps: 60,
-            prompt_preview: true,
-            compact_notifications: false,
-            copy_badge_alt_label: String::new(),
-            show_agentgrep_output: false,
-            tool_call_details: false,
-            native_scrollbars: NativeScrollbarConfig::default(),
-            keybinding_hints: true,
-            theme: String::new(),
-            active_sessions_manager: false,
-            overscroll_status: OverscrollStatusMode::default(),
-        }
-    }
-}
-impl DisplayConfig {
-    pub fn apply_legacy_compat(&mut self) {
-        if let Some(show) = self.show_diffs.take() {
-            self.diff_mode = if show {
-                DiffDisplayMode::Inline
-            } else {
-                DiffDisplayMode::Off
-            };
-        }
-    }
-
-    /// Resolve the effective reasoning display mode. Prefers the explicit
-    /// `reasoning_display` field, falling back to the legacy `show_thinking`
-    /// boolean (true => Full, false => Off) when unset.
-    pub fn reasoning_display(&self) -> ReasoningDisplayMode {
-        self.reasoning_display.unwrap_or(if self.show_thinking {
-            ReasoningDisplayMode::Full
-        } else {
-            ReasoningDisplayMode::Off
-        })
-    }
-
-    /// Set the reasoning display mode and keep `show_thinking` in sync so the
-    /// provider request path (which still keys off `show_thinking`) requests
-    /// reasoning whenever any display mode is active.
-    pub fn set_reasoning_display(&mut self, mode: ReasoningDisplayMode) {
-        self.reasoning_display = Some(mode);
-        self.show_thinking = !matches!(mode, ReasoningDisplayMode::Off);
-    }
-
-    /// Whether reasoning content should be generated/requested at all.
-    pub fn reasoning_enabled(&self) -> bool {
-        !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
-    }
-}
 
 /// Runtime feature toggles
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1175,6 +1070,10 @@ pub struct FeatureConfig {
     pub swarm: bool,
     /// Enable Mermaid rendering and Mermaid-specific model guidance (default: true)
     pub mermaid: bool,
+    /// Default state of auto-poke (automatic follow-up when the model stops with
+    /// incomplete todos). `/poke on` / `/poke off` still override this per session
+    /// (default: true)
+    pub auto_poke: bool,
     /// Inject timestamps into user messages and tool results sent to the model (default: true)
     pub message_timestamps: bool,
     /// Persist auto-recalled memory injections into normal session history instead of sending
@@ -1197,6 +1096,7 @@ impl Default for FeatureConfig {
             memory: true,
             swarm: true,
             mermaid: true,
+            auto_poke: true,
             message_timestamps: true,
             persist_memory_injections: false,
             kv_cache_miss_notices: true,
@@ -1615,4 +1515,35 @@ pub struct LaunchHotkeysConfig {
     /// Set true once auto-import has populated `entries`, so we only bake the
     /// per-repo mapping a single time and never clobber later user edits.
     pub imported: bool,
+}
+
+#[cfg(test)]
+mod reasoning_display_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_reasoning_display_is_distinguishable_from_the_legacy_fallback() {
+        // Front-ends (the desktop) apply their own default only when the user
+        // has not chosen one, so this flag must not be true just because
+        // `show_thinking` happens to be set.
+        let mut display = DisplayConfig {
+            reasoning_display: None,
+            show_thinking: true,
+            ..DisplayConfig::default()
+        };
+        assert!(!display.has_explicit_reasoning_display());
+        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Full);
+
+        display.set_reasoning_display(ReasoningDisplayMode::Current);
+        assert!(display.has_explicit_reasoning_display());
+        assert_eq!(display.reasoning_display(), ReasoningDisplayMode::Current);
+        assert!(
+            display.show_thinking,
+            "any active display mode must keep reasoning requested from the provider"
+        );
+
+        display.set_reasoning_display(ReasoningDisplayMode::Off);
+        assert!(display.has_explicit_reasoning_display());
+        assert!(!display.show_thinking);
+    }
 }

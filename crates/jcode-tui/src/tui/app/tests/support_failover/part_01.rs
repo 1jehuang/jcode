@@ -175,9 +175,16 @@ impl Provider for OpenRouterSpecCaptureProvider {
     }
 }
 
-fn create_test_app() -> App {
+pub(crate) fn create_test_app() -> App {
     ensure_test_jcode_home_if_unset();
     clear_persisted_test_ui_state();
+    // `clear_test_render_state_for_tests` wipes process-global render state
+    // (flicker history, layout snapshots, copy targets) and internally takes
+    // the shared render-state lock unless this thread already holds it. Do
+    // not take `render_state_test_lock()` explicitly here: the mutex is not
+    // reentrant, so tests that hold the lock and then build an app (e.g. the
+    // pinned-todo-band render test) would self-deadlock, which hung the CI
+    // TUI test step at its 35-minute job timeout.
     crate::tui::ui::clear_test_render_state_for_tests();
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -324,10 +331,47 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
     }
 }
 
+/// Point `JCODE_HOME` at a per-process scratch directory if nothing set one.
+///
+/// This runs from `create_test_app`, so roughly 570 tests call it, and it
+/// mutates a process-global that Rust's parallel test threads all share. Tests
+/// that scope their own `JCODE_HOME` restore it by *removing* the variable, so
+/// without serialization this function would observe the gap and repoint
+/// `JCODE_HOME` at the shared scratch home while that test was still running.
+/// That is the race behind jcode-tui's intermittent failures in unrelated
+/// ambient, header, and model-picker tests, which all read files under
+/// `JCODE_HOME` mid-assertion.
+///
+/// Taking the same lock those tests use makes the check-then-set atomic with
+/// respect to them. The lock is released on return, which is correct: it only
+/// needs to cover this read-modify-write, not the caller's whole test.
+///
+/// The lock is acquired with `try_lock`, never blocking: tests like
+/// `with_temp_jcode_home` hold this same non-reentrant mutex for their whole
+/// body and may call `create_*_test_app` inside it, so a blocking lock here
+/// self-deadlocks (this hung CI's TUI test step at the job timeout). When
+/// `try_lock` fails because this thread holds the lock, the caller's own
+/// exclusion already covers the transition; a cross-thread `try_lock` miss
+/// falls back to the pre-serialization benign race for that one call.
 fn ensure_test_jcode_home_if_unset() {
     use std::sync::OnceLock;
 
     static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+    if std::env::var_os("JCODE_HOME").is_some() {
+        return;
+    }
+
+    // Serialize the unset -> set transition against tests that scope their
+    // own JCODE_HOME under `lock_test_env`. The mutex is not reentrant and
+    // several tests hold it while calling `create_test_app` (e.g. the
+    // pinned-todo-band test), so a blocking `lock_test_env()` here would
+    // self-deadlock whenever a preceding test removed JCODE_HOME on drop.
+    // `try_lock` keeps the serialization when the lock is free and degrades
+    // to the caller's own exclusion when this thread already holds it: if
+    // try_lock fails because *we* hold the lock, no other thread can race
+    // this read-modify-write anyway.
+    let _env_lock = crate::storage::test_env_lock().try_lock();
 
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
@@ -361,6 +405,9 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     crate::auth::claude::set_active_account_override(None);
     crate::auth::codex::set_active_account_override(None);
     crate::auth::AuthStatus::invalidate_cache();
+    // The config cache is keyed by content, not by home, so a config written
+    // under the previous home would otherwise be read inside this one.
+    crate::config::invalidate_config_cache();
     clear_persisted_test_ui_state();
 
     let result = f();
@@ -374,6 +421,9 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+    // Drop any config loaded from the temp home so it cannot leak into the next
+    // test, which is process-global state shared across this suite.
+    crate::config::invalidate_config_cache();
     result
 }
 
@@ -499,6 +549,48 @@ fn test_handle_turn_error_failover_prompt_countdown_can_switch_and_retry() {
         assert!(
             last.content
                 .contains("cross_provider_failover = \"manual\"")
+        );
+    });
+}
+
+/// A new session must start with auto-poke off when the config says so, and
+/// `/poke on` must still be able to turn it back on for that session (#664).
+///
+/// The point of the feature is that the setting survives a restart, so
+/// asserting only the config value would miss the actual bug: the session
+/// default was a hardcoded `true` that ignored config entirely.
+#[test]
+fn auto_poke_config_sets_the_session_default_and_poke_on_still_overrides() {
+    with_temp_jcode_home(|| {
+        let mut cfg = crate::config::Config::load();
+        cfg.features.auto_poke = false;
+        cfg.save().expect("save auto_poke = false");
+        crate::config::invalidate_config_cache();
+
+        let mut app = create_test_app();
+        assert!(
+            !app.auto_poke_incomplete_todos,
+            "a new session must honour features.auto_poke = false"
+        );
+
+        // The session-scoped override must still win.
+        super::commands::activate_auto_poke_local(&mut app);
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "/poke on must still re-enable auto-poke for the running session"
+        );
+    });
+}
+
+/// The default is unchanged for everyone who does not opt out.
+#[test]
+fn auto_poke_defaults_on_when_config_does_not_disable_it() {
+    with_temp_jcode_home(|| {
+        crate::config::invalidate_config_cache();
+        let app = create_test_app();
+        assert!(
+            app.auto_poke_incomplete_todos,
+            "auto-poke must stay on by default"
         );
     });
 }

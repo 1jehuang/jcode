@@ -8,6 +8,7 @@ mod commands;
 pub mod copilot;
 pub mod cursor;
 pub mod doctor;
+pub mod env_facts;
 pub mod external;
 pub mod gemini;
 pub mod google;
@@ -66,6 +67,34 @@ fn auth_cache_home_key() -> Option<std::ffi::OsString> {
 const AUTH_STATUS_CACHE_TTL_SECS: u64 = 30;
 const AUTH_STATUS_FAST_CACHE_TTL_SECS: u64 = 60;
 
+/// Bumped whenever the cached auth status is invalidated.
+///
+/// Lets downstream caches (notably the TUI's prepared-header cache) key on
+/// "have credentials changed" without re-running the expensive probes
+/// themselves, so a credential change repaints immediately instead of waiting
+/// out an unrelated TTL.
+static AUTH_STATUS_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Current auth-status generation; see [`AUTH_STATUS_GENERATION`].
+pub fn auth_status_generation() -> u64 {
+    AUTH_STATUS_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Bump the auth generation without clearing the cached status.
+///
+/// Tests that only need to observe generation-driven invalidation use this so
+/// they do not evict the process-global auth cache that sibling tests in the
+/// same binary rely on.
+pub fn bump_auth_status_generation_for_tests() {
+    AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Guards the background refresh spawned by
+/// [`AuthStatus::check_fast_nonblocking`] so an expired snapshot triggers one
+/// probe thread, not one per frame.
+static AUTH_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Per-process cache for command existence lookups.
 /// CLI tools don't get installed/uninstalled while jcode is running, so caching
 /// indefinitely per process is correct and avoids repeated PATH scans.
@@ -83,6 +112,25 @@ pub fn browser_suppressed(cli_no_browser: bool) -> bool {
         || env_truthy("NO_BROWSER")
         || env_truthy("JCODE_NO_BROWSER")
         || running_in_test_harness()
+        || browser_unusable_here()
+}
+
+/// True when the probed environment says a browser launch cannot work.
+///
+/// Without this, jcode would open a browser that does not exist (or that opens
+/// on the wrong machine, over SSH) and then wait out a callback timeout before
+/// telling the user anything. Probing first turns a 60-second dead end into an
+/// immediate fallback to a paste/device flow.
+///
+/// Deliberately conservative: only a *positive* determination suppresses the
+/// browser, so an inconclusive probe never downgrades a working setup.
+fn browser_unusable_here() -> bool {
+    use crate::auth::env_facts::{AuthMethodChoice, EnvFacts};
+    static CHOICE: std::sync::OnceLock<AuthMethodChoice> = std::sync::OnceLock::new();
+    matches!(
+        CHOICE.get_or_init(|| EnvFacts::probe().preferred_auth_method()),
+        AuthMethodChoice::DeviceCode | AuthMethodChoice::ApiKeyNonInteractive
+    )
 }
 
 /// True when the current process is a Rust test binary (`cargo test` /
@@ -268,6 +316,72 @@ impl AuthStatus {
         let status = Self::check_uncached_fast();
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = Some((status.clone(), Instant::now(), home_key));
+        }
+
+        status
+    }
+
+    /// Non-blocking auth snapshot for per-frame render paths (the TUI header).
+    ///
+    /// [`Self::check_fast`] blocks on a cold probe (~20-30ms of credential-file
+    /// reads on this hardware), and the TUI's prepared-header cache re-probes
+    /// every TTL lapse - directly on the render thread, where it showed up as a
+    /// periodic 40-55ms frame while typing. This variant never runs a probe on
+    /// the caller's thread once a snapshot exists: it serves the freshest
+    /// cached snapshot (even if expired) and refreshes the cache on a detached
+    /// background thread, bumping the auth generation when the refreshed
+    /// snapshot actually differs so signature-keyed caches repaint.
+    ///
+    /// The only blocking case is the very first call in a process with no
+    /// cached snapshot at all, which matches the old behavior for frame one.
+    /// Tests always take the blocking path: background refreshes racing
+    /// per-test `JCODE_HOME` swaps would poison the shared cache.
+    pub fn check_fast_nonblocking() -> Self {
+        if running_in_test_harness() {
+            return Self::check_fast();
+        }
+
+        let home_key = auth_cache_home_key();
+        if let Ok(cache) = AUTH_STATUS_CACHE.read()
+            && let Some((ref status, ref when, ref cached_home)) = *cache
+            && when.elapsed().as_secs() < AUTH_STATUS_CACHE_TTL_SECS
+            && *cached_home == home_key
+        {
+            return status.clone();
+        }
+
+        let stale = AUTH_STATUS_FAST_CACHE
+            .read()
+            .ok()
+            .and_then(|cache| cache.clone())
+            .filter(|(_, _, cached_home)| *cached_home == home_key);
+
+        let Some((status, when, _)) = stale else {
+            // First probe of the process: nothing to serve yet.
+            return Self::check_fast();
+        };
+
+        if when.elapsed().as_secs() >= AUTH_STATUS_FAST_CACHE_TTL_SECS
+            && !AUTH_REFRESH_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            let previous = status.clone();
+            std::thread::Builder::new()
+                .name("auth-refresh".into())
+                .spawn(move || {
+                    let refreshed = Self::check_uncached_fast();
+                    let changed = format!("{previous:?}") != format!("{refreshed:?}");
+                    if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
+                        *cache = Some((refreshed, Instant::now(), auth_cache_home_key()));
+                    }
+                    AUTH_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+                    if changed {
+                        AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                })
+                .map(drop)
+                .unwrap_or_else(|_| {
+                    AUTH_REFRESH_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release)
+                });
         }
 
         status
@@ -774,6 +888,7 @@ impl AuthStatus {
         if let Ok(mut cache) = AUTH_STATUS_FAST_CACHE.write() {
             *cache = None;
         }
+        AUTH_STATUS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Invalidate all auth-derived state after credentials actually change.
@@ -833,8 +948,11 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_copilot_status(&mut status)
     });
     record_auth_probe_step(&mut timings, "antigravity", || {
-        status.antigravity =
-            token_state(antigravity::load_tokens().map(|tokens| tokens.is_expired()))
+        status.antigravity = refreshable_token_state(
+            "antigravity",
+            antigravity::load_tokens()
+                .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+        )
     });
     record_auth_probe_step(&mut timings, "gemini", || {
         // An official Gemini Developer API key is a static credential with no
@@ -843,7 +961,11 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         status.gemini = if gemini::has_api_key() {
             AuthState::Available
         } else {
-            token_state(gemini::load_tokens().map(|tokens| tokens.is_expired()))
+            refreshable_token_state(
+                "gemini",
+                gemini::load_tokens()
+                    .map(|tokens| (tokens.is_expired(), tokens.refresh_token.clone())),
+            )
         }
     });
     record_auth_probe_step(&mut timings, "cursor", || {
@@ -864,10 +986,37 @@ fn record_auth_probe_step(
     timings.push((name, step_start.elapsed().as_millis()));
 }
 
-fn token_state(result: anyhow::Result<bool>) -> AuthState {
+/// Auth state for an OAuth credential that refreshes automatically.
+///
+/// A short-lived access token is *not* a broken login. Antigravity/Gemini
+/// access tokens expire roughly hourly and the provider transparently
+/// refreshes them on the next request, so reporting `Expired` purely because
+/// the cached access token aged out makes a perfectly working provider look
+/// dead in `/login`, the header, onboarding, and `jcode auth status`.
+///
+/// Only report `Expired` when the refresh token itself is missing or was
+/// already permanently rejected (revoked / `invalid_grant`), which is the case
+/// where the user genuinely has to log in again.
+fn refreshable_token_state(provider_id: &str, result: anyhow::Result<(bool, String)>) -> AuthState {
+    refreshable_token_state_with(result, |refresh_token| {
+        crate::auth::refresh_state::refresh_token_is_known_rejected(provider_id, refresh_token)
+    })
+}
+
+/// Pure decision core of [`refreshable_token_state`], with the persisted
+/// "this refresh token was permanently rejected" lookup injected so it can be
+/// unit tested without touching `$HOME`.
+fn refreshable_token_state_with(
+    result: anyhow::Result<(bool, String)>,
+    is_known_rejected: impl Fn(&str) -> bool,
+) -> AuthState {
     match result {
-        Ok(is_expired) => {
-            if is_expired {
+        Ok((is_expired, refresh_token)) => {
+            if !is_expired {
+                return AuthState::Available;
+            }
+            let refresh_token = refresh_token.trim();
+            if refresh_token.is_empty() || is_known_rejected(refresh_token) {
                 AuthState::Expired
             } else {
                 AuthState::Available

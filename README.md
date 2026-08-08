@@ -18,7 +18,7 @@ The most most intelligent harness
 
 <br>
 
-[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [Benchmarks](https://jcode.sh/bench) · [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
+[Website](https://jcode.sh) · [Docs](https://jcode.sh/docs) · [SDK](https://jcode.sh/sdk) · [Benchmarks](https://jcode.sh/bench) · [Features](#features) · [Install](#installation) · [Quick Start](#quick-start) · [Further Reading](#further-reading) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -298,7 +298,7 @@ To show you important information without taking space away from the screen that
 
 Jcode can render at over a thousand fps. Your monitor will not have the refresh rate to show you, but this means you will not have silly flicker problems. 
 
-The custom scrollback implementation of jcode allows it to do much more than a native scrollback. However, it is a terminal-level limitation that I cannot have smooth, partial line scrolling with a custom scrollback. To fix this, I made my own terminal. Handterm https://github.com/1jehuang/handterm implements a native scroll api, and also happens to be very effiecent. This is a work in progress. Scrolling is still well implemented for normal terminals.
+The custom scrollback implementation of jcode allows it to do much more than a native scrollback. However, it is a terminal-level limitation that I cannot have smooth, partial line scrolling with a custom scrollback. To fix this, I made my own terminal. Handterm https://github.com/1jehuang/handterm implements a native scroll api, and also happens to be very efficient. This is a work in progress. Scrolling is still well implemented for normal terminals.
 
 Jcode is left-aligned by default. You can switch to centered mode with the `Alt+C` hotkey, with the `/alignment` command, or in the config.
 
@@ -338,6 +338,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
 - **Fireworks** (`jcode login --provider fireworks`)
 - **MiniMax** (`jcode login --provider minimax`)
+- **Meta Model API / Muse** (`jcode login --provider meta-muse`)
 - **LM Studio** (`jcode login --provider lmstudio`)
 - **Ollama** (`jcode login --provider ollama`)
 - **Custom OpenAI-compatible endpoint** (`jcode login --provider openai-compatible`)
@@ -363,9 +364,10 @@ There are two ways to set one up:
   jcode login --provider deepseek
   jcode login --provider opencode      # OpenCode Zen
   jcode login --provider moonshotai
+  jcode login --provider meta-muse     # Meta Model API / Muse Spark
   ```
 
-  Built-in OpenAI-compatible profile ids include: `openrouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
+  Built-in OpenAI-compatible profile ids include: `openrouter`, `deepseek`, `zai`, `kimi`, `moonshotai`, `meta-muse` (Meta Model API / Muse Spark), `opencode` (OpenCode Zen), `opencode-go`, `302ai`, `baseten`, `cortecs`, `huggingface`, `nebius`, `scaleway`, `stackit`, and `firmware`. Each profile only sets the endpoint and key variable; you still pick the model with `/model` (or `--model`). Run `jcode login` with no provider to see the interactive list.
 
 - **Any other endpoint** — point jcode at an arbitrary OpenAI-compatible API (hosted or local) with `jcode login --provider openai-compatible` or the scriptable `jcode provider add` command described below.
 
@@ -512,6 +514,15 @@ Claude Code compatibility:
 - `.mcp.json` at the repo root (Claude Code's project config)
 - `.claude/mcp.json` (legacy fallback)
 
+Claude Code config is read live on every load rather than copied into jcode's
+global config. Additions, edits, and deletions therefore take effect without
+leaving a stale snapshot (and inline environment values are not duplicated).
+For migration from Codex CLI, jcode still performs a one-time import from
+`~/.codex/config.toml` into `~/.jcode/mcp.json` when the latter does not exist.
+That imported file is then jcode-owned; later Codex changes are not synced
+automatically. Imported environment values are copied too and may contain
+secrets.
+
 Both the canonical `mcpServers` key and jcode's historical `servers` key are accepted. jcode currently supports stdio (command-based) servers only; HTTP/SSE entries (`"type": "http"`/`"sse"`) are recognized and skipped with a log line.
 
 Example MCP config:
@@ -528,8 +539,6 @@ Example MCP config:
   }
 }
 ```
-
-On first run, jcode also tries to import MCP servers from `~/.claude.json` (falling back to the legacy `~/.claude/mcp.json`) and `~/.codex/config.toml` if `~/.jcode/mcp.json` does not exist yet.
 
 For headless or SSH sessions, OAuth-style providers support `jcode login --provider <provider> --no-browser` (alias: `--headless`) so jcode prints the auth URL/QR and falls back to manual code or callback paste instead of trying to launch a local browser.
 
@@ -706,6 +715,7 @@ Notes:
 
 - [jcode.sh/docs](https://jcode.sh/docs) — install, providers, configuration, keybindings
 - [jcode.sh/swarm](https://jcode.sh/swarm) — many coding agents in one repository
+- [jcode.sh/sdk](https://jcode.sh/sdk) — TypeScript SDK: drive jcode sessions from your own program
 - [jcode.sh/bench](https://jcode.sh/bench) — benchmark methodology and results
 - [Ambient Mode / OpenClaw](docs/AMBIENT_MODE.md)
 - [Browser Provider Protocol](docs/BROWSER_PROVIDER_PROTOCOL.md)

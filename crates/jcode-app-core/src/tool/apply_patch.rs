@@ -60,7 +60,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a Codex-style patch using *** Begin Patch / *** End Patch blocks. Prefer this over patch for Jcode/Codex patches."
+        "Apply a Codex-style *** Begin Patch / *** End Patch patch. Prefer over patch."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -80,6 +80,11 @@ impl Tool for ApplyPatchTool {
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: ApplyPatchInput = serde_json::from_value(input)?;
         let hunks = parse_apply_patch(&params.patch_text)?;
+
+        // A patch can reach config.toml through any hunk kind (add, update,
+        // move), so watch the file across the whole invocation rather than
+        // threading before/after content through each branch.
+        let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
 
         let mut results = Vec::new();
         let mut touched_paths = Vec::new();
@@ -110,6 +115,21 @@ impl Tool for ApplyPatchTool {
                 }
                 PatchHunk::DeleteFile { path } => {
                     let resolved = ctx.resolve_path(Path::new(path));
+                    // `resolve_path` passes absolute paths through unchanged, so
+                    // a patch can name any file on disk. The bash gate does not
+                    // cover this path, so apply the same absolute deny here
+                    // (#604). Only the catastrophic tier: ordinary file deletes
+                    // are this tool's normal job.
+                    let risk_ctx =
+                        jcode_command_risk::RiskContext::from_env(ctx.working_dir.clone());
+                    if jcode_command_risk::is_catastrophic_target(&resolved, &risk_ctx) {
+                        results.push(format!(
+                            "✗ {}: refused, this path is protected and must never \
+                             be deleted by an agent",
+                            path
+                        ));
+                        continue;
+                    }
                     let old_contents = tokio::fs::read_to_string(&resolved)
                         .await
                         .unwrap_or_default();
@@ -221,7 +241,9 @@ impl Tool for ApplyPatchTool {
         if results.is_empty() {
             Ok(ToolOutput::new("No changes applied"))
         } else {
-            let output = ToolOutput::new(results.join("\n"));
+            let mut body = results.join("\n");
+            config_watch.finish(&mut body);
+            let output = ToolOutput::new(body);
             if touched_paths.len() == 1 {
                 Ok(output.with_title(touched_paths[0].clone()))
             } else {

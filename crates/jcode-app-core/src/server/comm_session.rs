@@ -676,6 +676,7 @@ pub(super) async fn spawn_swarm_agent(
                 spawn_effort.clone(),
                 Some(Arc::clone(mcp_pool)),
                 Some(req_session_id.to_string()),
+                super::headless::HeadlessMemoryScope::RealProject,
             )
             .await
             .and_then(|result_json| {

@@ -1,6 +1,6 @@
 use super::{
-    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, LatexRenderingMode, ProviderConfig,
-    SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
+    AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
+    ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
     populate_context_limits_from_config_ref,
 };
 use std::ffi::OsString;
@@ -73,6 +73,28 @@ fn mermaid_environment_override_uses_standard_boolean_values() {
 }
 
 #[test]
+fn auto_poke_feature_defaults_on_and_parses_false() {
+    assert!(Config::default().features.auto_poke);
+
+    let cfg: Config =
+        toml::from_str("[features]\nauto_poke = false\n").expect("features.auto_poke should parse");
+    assert!(!cfg.features.auto_poke);
+}
+
+#[test]
+fn auto_poke_environment_override_uses_standard_boolean_values() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_AUTO_POKE");
+    crate::env::set_var("JCODE_AUTO_POKE", "off");
+
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert!(!cfg.features.auto_poke);
+
+    restore_env_var("JCODE_AUTO_POKE", previous);
+}
+
+#[test]
 fn latex_rendering_defaults_to_image_and_parses_all_modes() {
     assert_eq!(
         Config::default().display.latex_rendering,
@@ -88,7 +110,13 @@ fn latex_rendering_defaults_to_image_and_parses_all_modes() {
         assert_eq!(cfg.display.latex_rendering, expected);
         assert_eq!(LatexRenderingMode::parse(expected.as_str()), Some(expected));
     }
-    assert!(toml::from_str::<Config>("[display]\nlatex_rendering = \"canvas\"\n").is_err());
+    // An unknown mode degrades to the default instead of failing the whole
+    // config parse, which used to silently discard every other setting in
+    // config.toml (issue #689).
+    let cfg: Config = toml::from_str("[display]\ncentered = true\nlatex_rendering = \"canvas\"\n")
+        .expect("an unknown latex mode must not invalidate the config");
+    assert_eq!(cfg.display.latex_rendering, LatexRenderingMode::Image);
+    assert!(cfg.display.centered, "unrelated settings must survive");
 }
 
 #[test]
@@ -213,10 +241,47 @@ fn hooks_config_defaults_and_parses_from_toml() {
         "[hooks]\nturn_start = \"notify-start\"\nturn_end = \"notify-turn\"\npre_tool = \"~/bin/policy\"\npre_tool_timeout_ms = 1500\n",
     )
     .expect("hooks config should parse");
-    assert_eq!(cfg.hooks.turn_start.as_deref(), Some("notify-start"));
-    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("notify-turn"));
-    assert_eq!(cfg.hooks.pre_tool.as_deref(), Some("~/bin/policy"));
+    assert_eq!(
+        cfg.hooks.turn_start.as_ref().and_then(HookCommands::first),
+        Some("notify-start")
+    );
+    assert_eq!(
+        cfg.hooks.turn_end.as_ref().and_then(HookCommands::first),
+        Some("notify-turn")
+    );
+    assert_eq!(
+        cfg.hooks.pre_tool.as_ref().and_then(HookCommands::first),
+        Some("~/bin/policy")
+    );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 1500);
+
+    let cfg: Config = toml::from_str(
+        "[hooks]\nturn_end = [\"notify-one --direct\", \"notify-two 'quoted arg'\"]\npre_tool = [\"policy-a\", \"policy-b\"]\n",
+    )
+    .expect("hook arrays should parse");
+    assert_eq!(
+        cfg.hooks
+            .turn_end
+            .as_ref()
+            .expect("turn_end commands")
+            .iter()
+            .collect::<Vec<_>>(),
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
+    );
+    assert_eq!(
+        cfg.hooks
+            .pre_tool
+            .as_ref()
+            .expect("pre_tool commands")
+            .iter()
+            .collect::<Vec<_>>(),
+        vec!["policy-a", "policy-b"]
+    );
+
+    let serialized = toml::to_string(&cfg).expect("hook command arrays should serialize");
+    let round_trip: Config = toml::from_str(&serialized).expect("serialized hooks should parse");
+    assert_eq!(round_trip.hooks.turn_end, cfg.hooks.turn_end);
+    assert_eq!(round_trip.hooks.pre_tool, cfg.hooks.pre_tool);
 }
 
 #[test]
@@ -229,15 +294,29 @@ fn test_env_override_lifecycle_hooks() {
     crate::env::set_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", "250");
     let mut cfg = Config::default();
     cfg.apply_env_overrides();
-    assert_eq!(cfg.hooks.turn_end.as_deref(), Some("my-notifier --fast"));
+    assert_eq!(
+        cfg.hooks.turn_end.as_ref().and_then(HookCommands::first),
+        Some("my-notifier --fast")
+    );
     assert_eq!(cfg.hooks.pre_tool_timeout_ms, 250);
 
     // Empty env value disables a config-file hook.
     crate::env::set_var("JCODE_HOOK_TURN_END", " ");
     let mut cfg = Config::default();
-    cfg.hooks.turn_end = Some("from-config".to_string());
+    cfg.hooks.turn_end = Some(HookCommands::one("from-config"));
     cfg.apply_env_overrides();
     assert_eq!(cfg.hooks.turn_end, None);
+
+    crate::env::set_var(
+        "JCODE_HOOK_TURN_END",
+        r#"["notify-one --direct", "notify-two 'quoted arg'"]"#,
+    );
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(
+        cfg.hooks.turn_end.unwrap().iter().collect::<Vec<_>>(),
+        vec!["notify-one --direct", "notify-two 'quoted arg'"]
+    );
 
     restore_env_var("JCODE_HOOK_TURN_END", prev_turn_end);
     restore_env_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", prev_timeout);
@@ -1087,6 +1166,74 @@ fn migrate_legacy_swarm_spawn_mode_noops_without_visible_value() {
 }
 
 #[test]
+fn migrate_idle_animation_off_flips_true_to_false_once() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let config_path = dir.path().join("config.toml");
+    let original = "[display]\ncentered = true\nidle_animation = true\nanimation_fps = 60\n";
+    std::fs::write(&config_path, original).expect("write config");
+
+    assert!(
+        Config::migrate_idle_animation_off_once(),
+        "migration should rewrite an enabled idle animation"
+    );
+    let migrated = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(
+        migrated.contains("idle_animation = false"),
+        "idle animation should be flipped off: {migrated}"
+    );
+    // The rest of the file is untouched.
+    assert!(migrated.contains("centered = true"));
+    assert!(migrated.contains("animation_fps = 60"));
+    let parsed: Config = toml::from_str(&migrated).expect("migrated config parses");
+    assert!(!parsed.display.idle_animation);
+
+    // Marker written: a later explicit re-enable survives future launches.
+    std::fs::write(&config_path, "[display]\nidle_animation = true\n").expect("write config");
+    assert!(
+        !Config::migrate_idle_animation_off_once(),
+        "migration must run at most once"
+    );
+    let content = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(content.contains("idle_animation = true"));
+
+    restore_env_var("JCODE_HOME", prev_home);
+}
+
+#[test]
+fn migrate_idle_animation_off_noops_without_enabled_value() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    // No config file at all: no migration, but the marker is written.
+    assert!(!Config::migrate_idle_animation_off_once());
+    assert!(
+        dir.path()
+            .join("migrations")
+            .join("idle-animation-off")
+            .exists(),
+        "marker should be written even when there is nothing to migrate"
+    );
+
+    // Already-false values are never rewritten (fresh home to bypass marker).
+    let dir2 = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir2.path());
+    let config_path = dir2.path().join("config.toml");
+    let original = "[display]\nidle_animation = false\n";
+    std::fs::write(&config_path, original).expect("write config");
+    assert!(!Config::migrate_idle_animation_off_once());
+    let content = std::fs::read_to_string(&config_path).expect("read config");
+    assert_eq!(content, original);
+
+    restore_env_var("JCODE_HOME", prev_home);
+}
+
+#[test]
 fn frozen_machine_written_sponsors_optout_is_repaired() {
     let raw = "[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n";
     let mut config: Config = toml::from_str(raw).expect("parse");
@@ -1173,5 +1320,16 @@ fn default_sponsors_section_is_not_written_back() {
     assert!(
         !rendered.contains("[sponsors]"),
         "default discovery settings must not be baked into config.toml"
+    );
+}
+
+#[test]
+fn config_reload_generation_increments_on_cache_invalidation() {
+    let before = crate::config::config_reload_generation();
+    crate::config::invalidate_config_cache();
+    let after = crate::config::config_reload_generation();
+    assert!(
+        after > before,
+        "invalidate_config_cache must bump the reload generation ({before} -> {after})"
     );
 }

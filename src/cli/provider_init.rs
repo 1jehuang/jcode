@@ -94,6 +94,14 @@ pub enum ProviderChoice {
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
     XiaomiMimo,
+    #[value(
+        alias = "meta",
+        alias = "muse",
+        alias = "muse-spark",
+        alias = "meta-model-api",
+        alias = "meta-ai"
+    )]
+    MetaMuse,
     #[value(alias = "celeris-ai", alias = "celeris1", alias = "celeris-1")]
     Celeris,
     #[value(alias = "lm-studio")]
@@ -165,6 +173,7 @@ impl ProviderChoice {
             Self::Xai => "xai",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
+            Self::MetaMuse => "meta-muse",
             Self::Celeris => "celeris",
             Self::Lmstudio => "lmstudio",
             Self::Ollama => "ollama",
@@ -324,6 +333,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::XiaomiMimo,
         crate::provider_catalog::XIAOMI_MIMO_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::MetaMuse,
+        crate::provider_catalog::META_MUSE_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Celeris,
@@ -1211,6 +1224,11 @@ fn disable_subscription_runtime_mode_preserving_active_provider_profile() {
 }
 
 pub fn apply_login_provider_profile_env(provider: LoginProviderDescriptor) {
+    // #712: the arms below clear an explicitly selected named profile, which
+    // made auth-test probe (and false-negative) the generic compatible slot.
+    if std::env::var_os("JCODE_NAMED_PROVIDER_PROFILE").is_some() {
+        return;
+    }
     match provider.target {
         LoginProviderTarget::OpenAiCompatible(profile) => {
             force_apply_openai_compatible_profile_env(Some(profile));
@@ -1524,6 +1542,7 @@ async fn init_provider_with_options(
         | ProviderChoice::Xai
         | ProviderChoice::NvidiaNim
         | ProviderChoice::XiaomiMimo
+        | ProviderChoice::MetaMuse
         | ProviderChoice::Celeris
         | ProviderChoice::Lmstudio
         | ProviderChoice::Ollama

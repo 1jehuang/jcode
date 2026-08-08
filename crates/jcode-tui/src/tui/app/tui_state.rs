@@ -277,7 +277,12 @@ impl App {
             return Some(resolved.into());
         }
 
-        let auth_status = crate::auth::AuthStatus::check_fast();
+        // Render path: use the non-blocking probe. `check_fast` blocks on a
+        // cold/expired snapshot (~20-30ms of credential-file reads) directly on
+        // the frame thread, which shows up as a periodic stall while typing.
+        // `auth_status()` above already made this choice; these sibling
+        // per-frame lookups must match it.
+        let auth_status = crate::auth::AuthStatus::check_fast_nonblocking();
         let runtime_provider = active_runtime_provider_key();
         crate::auth::resolve_dual_credential_auth(
             provider,
@@ -333,7 +338,8 @@ impl App {
             WidgetProviderKind::CostBasedApiKey => crate::tui::info_widget::AuthMethod::ApiKey,
             WidgetProviderKind::Copilot => crate::tui::info_widget::AuthMethod::CopilotOAuth,
             WidgetProviderKind::Gemini => {
-                let auth_status = crate::auth::AuthStatus::check_fast();
+                // Per-frame: never block the render thread on a credential probe.
+                let auth_status = crate::auth::AuthStatus::check_fast_nonblocking();
                 if auth_status.gemini == crate::auth::AuthState::Available {
                     crate::tui::info_widget::AuthMethod::GeminiOAuth
                 } else {
@@ -579,6 +585,10 @@ impl crate::tui::TuiState for App {
         &self.streaming.streaming_text
     }
 
+    fn pinned_todos_payload(&self) -> Option<&str> {
+        self.pinned_todos_payload_ref()
+    }
+
     fn input(&self) -> &str {
         &self.input
     }
@@ -609,6 +619,10 @@ impl crate::tui::TuiState for App {
 
     fn auto_scroll_paused(&self) -> bool {
         self.auto_scroll_paused
+    }
+
+    fn terminal_clear_collapsed(&self) -> bool {
+        self.terminal_clear_collapsed()
     }
 
     fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
@@ -751,8 +765,16 @@ impl crate::tui::TuiState for App {
         App::command_suggestions(self)
     }
 
+    fn advance_command_suggestions_epoch(&self) {
+        App::advance_command_suggestions_epoch(self)
+    }
+
     fn command_suggestion_selected(&self) -> usize {
         self.command_suggestion_selected
+    }
+
+    fn prompt_history_search(&self) -> Option<crate::tui::PromptHistorySearchView> {
+        self.prompt_history_search_view()
     }
 
     fn active_skill(&self) -> Option<String> {
@@ -784,6 +806,10 @@ impl crate::tui::TuiState for App {
 
     fn client_focused(&self) -> bool {
         App::client_focused(self)
+    }
+
+    fn time_since_user_interaction(&self) -> Option<std::time::Duration> {
+        self.last_user_interaction.map(|at| at.elapsed())
     }
 
     fn stream_message_ended(&self) -> bool {
@@ -1621,7 +1647,21 @@ impl crate::tui::TuiState for App {
     }
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
-        crate::auth::AuthStatus::check_fast()
+        // Render path: never pay a cold credential probe on the frame thread.
+        // A TTL lapse serves the previous snapshot and refreshes in the
+        // background; the auth generation bump repaints the header when the
+        // refreshed snapshot differs.
+        crate::auth::AuthStatus::check_fast_nonblocking()
+    }
+
+    fn active_dual_credential(
+        &self,
+        provider: jcode_provider_core::ActiveProvider,
+    ) -> Option<crate::auth::ActiveCredential> {
+        // Reuse the same resolution the info widget uses so the header tag and
+        // the widget's auth line can never disagree.
+        let route = self.widget_route_info(None);
+        self.dual_credential_active(route, provider)
     }
 
     fn diagram_mode(&self) -> crate::config::DiagramDisplayMode {

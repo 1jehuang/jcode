@@ -1,0 +1,222 @@
+{
+  "version": 1,
+  "comment": "Call-rate suite for integration_tools. Unlike scripts/discovery_benchmark_cases.json this suite is not catalog-locked: it measures how often the agent reaches for Discovery at all across a broad spread of tasks, including tasks where reaching for it is wrong. `expect` is `call`, `no-call`, or `select`. Selection cases name an already-chosen product and require `expected_category`, `expected_tool`, and `expected_listed`. Other prompts must not name a product, category slug, or integration_tools.",
+  "cases": [
+    {
+      "id": "payments-agent-purchase",
+      "expect": "call",
+      "expected_category": "payments",
+      "tags": ["capability-gap", "commerce"],
+      "prompt": "I want this agent to be able to buy things online on my behalf with a spending limit it cannot exceed. Set that up but do not buy anything yet."
+    },
+    {
+      "id": "code-review-automation",
+      "expect": "call",
+      "expected_category": "code-review",
+      "tags": ["capability-gap", "ci"],
+      "prompt": "Every pull request in this repo should get an automated, repository-aware review with inline findings. Propose the setup before changing anything."
+    },
+    {
+      "id": "databases-managed-postgres",
+      "expect": "call",
+      "expected_category": "databases",
+      "tags": ["capability-gap", "infra"],
+      "prompt": "I need a hosted Postgres database for this side project with branching per pull request. Walk me through provisioning it."
+    },
+    {
+      "id": "browser-automation-scraper",
+      "expect": "call",
+      "expected_category": "browser-automation",
+      "tags": ["capability-gap"],
+      "prompt": "I need a reliable headless browser running in the cloud that can log into a dashboard, click through a report wizard, and download a CSV every morning."
+    },
+    {
+      "id": "deployment-preview-envs",
+      "expect": "call",
+      "expected_category": "deployment",
+      "tags": ["capability-gap", "infra"],
+      "prompt": "Get this app deployed with a public URL and a preview environment for every branch. Show me the plan first."
+    },
+    {
+      "id": "observability-traces",
+      "expect": "call",
+      "expected_category": "observability",
+      "tags": ["capability-gap"],
+      "prompt": "Our production service has mystery latency spikes. I want distributed traces and alerting wired up so I can see which downstream call is slow."
+    },
+    {
+      "id": "authentication-signin",
+      "expect": "call",
+      "expected_category": "authentication",
+      "tags": ["capability-gap"],
+      "prompt": "Add real user sign-in to this app with email and Google login, sessions, and a hosted user database. Do not write throwaway auth code."
+    },
+    {
+      "id": "security-secret-scanning",
+      "expect": "call",
+      "expected_category": "security",
+      "tags": ["capability-gap"],
+      "prompt": "I want continuous scanning of this repository for leaked credentials and vulnerable dependencies, with findings reported somewhere I will actually see them."
+    },
+    {
+      "id": "storage-user-uploads",
+      "expect": "call",
+      "expected_category": "storage",
+      "tags": ["capability-gap"],
+      "prompt": "Users need to upload large video files from the browser and get back permanent URLs. I do not want the files touching my server disk."
+    },
+    {
+      "id": "analytics-product-funnel",
+      "expect": "call",
+      "expected_category": "analytics",
+      "tags": ["capability-gap"],
+      "prompt": "I want to see funnel conversion and retention for this web app: which steps people drop off at, broken down by signup cohort."
+    },
+    {
+      "id": "web-search-live-answers",
+      "expect": "call",
+      "expected_category": "web-search",
+      "tags": ["capability-gap", "ai"],
+      "prompt": "My assistant feature needs to answer questions about events from the last few days with citations. Give it a way to search the live web from my backend."
+    },
+    {
+      "id": "web-data-company-enrichment",
+      "expect": "call",
+      "expected_category": "web-data",
+      "tags": ["capability-gap"],
+      "prompt": "Build a daily job that visits a list of 100 company websites and keeps a structured JSON record of each company's logo, colors, description, and pricing."
+    },
+    {
+      "id": "financial-data-quotes",
+      "expect": "call",
+      "expected_category": "financial-data",
+      "tags": ["capability-gap"],
+      "prompt": "I am building a portfolio tracker and need real historical daily prices and fundamentals for US equities going back ten years."
+    },
+    {
+      "id": "cloud-infrastructure-sandbox",
+      "expect": "call",
+      "expected_category": "cloud-infrastructure",
+      "tags": ["capability-gap"],
+      "prompt": "I need to run code that my users write, isolated from my machine and from each other, with a per-run time limit."
+    },
+    {
+      "id": "compliance-soc2",
+      "expect": "call",
+      "expected_category": "compliance-and-privacy",
+      "tags": ["capability-gap"],
+      "prompt": "An enterprise customer is asking for a SOC 2 report. I have nothing today. What do I put in place to start collecting evidence continuously?"
+    },
+    {
+      "id": "integration-platform-sync",
+      "expect": "call",
+      "expected_category": "integration-platforms",
+      "tags": ["capability-gap"],
+      "prompt": "When a deal closes in our CRM I want a row appended in a spreadsheet and a task created in our project tracker, without me maintaining three sets of webhook glue."
+    },
+    {
+      "id": "email-messaging-agent-inbox",
+      "expect": "call",
+      "expected_category": "email-messaging",
+      "tags": ["capability-gap"],
+      "prompt": "Give this agent its own email address so it can receive verification codes and reply programmatically. Do not send anything yet."
+    },
+    {
+      "id": "ai-models-multi-provider",
+      "expect": "call",
+      "expected_category": "ai-models",
+      "tags": ["capability-gap", "ai"],
+      "prompt": "I want one API in my backend that can call several different frontier model providers, with automatic failover and per-request cost tracking."
+    },
+    {
+      "id": "sms-notifications",
+      "expect": "call",
+      "tags": ["capability-gap", "open-category"],
+      "prompt": "When our nightly pipeline fails I want a text message on my phone within a minute. Set that up end to end."
+    },
+    {
+      "id": "voice-transcription",
+      "expect": "call",
+      "tags": ["capability-gap", "open-category"],
+      "prompt": "I have a folder of recorded customer calls and want accurate transcripts with speaker labels, produced automatically for new recordings too."
+    },
+    {
+      "id": "select-context-dev",
+      "expect": "select",
+      "expected_category": "web-data",
+      "expected_tool": "context.dev",
+      "expected_listed": true,
+      "tags": ["selection", "catalog-selection"],
+      "prompt": "I've compared the options and chosen context.dev for the company website enrichment pipeline. Set up that product in this project."
+    },
+    {
+      "id": "select-firecrawl",
+      "expect": "select",
+      "expected_category": "web-data",
+      "expected_tool": "firecrawl",
+      "expected_listed": false,
+      "tags": ["selection", "off-catalog-selection"],
+      "prompt": "I've compared the options and chosen Firecrawl to crawl customer websites into structured records. Set up that product in this project."
+    },
+    {
+      "id": "control-local-refactor",
+      "expect": "no-call",
+      "tags": ["control", "local-code"],
+      "prompt": "Look at the Python files in this directory and tell me which functions are longer than 50 lines. Do not change anything."
+    },
+    {
+      "id": "control-write-tests",
+      "expect": "no-call",
+      "tags": ["control", "local-code"],
+      "prompt": "Write a small pure-Python module with a function that parses ISO 8601 durations, plus unit tests, and run the tests."
+    },
+    {
+      "id": "control-email-copy",
+      "expect": "no-call",
+      "tags": ["control", "writing"],
+      "prompt": "Draft the text of a friendly onboarding email for new users of a note-taking app. Just the copy, saved to a file."
+    },
+    {
+      "id": "control-git-history",
+      "expect": "no-call",
+      "tags": ["control", "local-tooling"],
+      "prompt": "Summarize what changed in this repository over its last five commits."
+    },
+    {
+      "id": "control-algorithm-explain",
+      "expect": "no-call",
+      "tags": ["control", "knowledge"],
+      "prompt": "Explain the difference between optimistic and pessimistic locking, with a short example of when each one goes wrong."
+    },
+    {
+      "id": "control-sqlite-local",
+      "expect": "no-call",
+      "tags": ["control", "local-code", "near-miss"],
+      "prompt": "Create a local SQLite database file in this directory with a table for tasks and a couple of seeded rows, using only the standard library."
+    },
+    {
+      "id": "control-dockerfile",
+      "expect": "no-call",
+      "tags": ["control", "local-code", "near-miss"],
+      "prompt": "Write a Dockerfile for a small Node service in this directory. Do not build or push it."
+    },
+    {
+      "id": "control-regex-debug",
+      "expect": "no-call",
+      "tags": ["control", "local-code"],
+      "prompt": "This regex is supposed to match semantic version tags but it also matches 1.2.3.4. Fix it and show me test cases: ^v?\\d+\\.\\d+\\.\\d+.*$"
+    },
+    {
+      "id": "control-readme",
+      "expect": "no-call",
+      "tags": ["control", "writing"],
+      "prompt": "Write a README section documenting the environment variables an app reads, based on the files in this directory."
+    },
+    {
+      "id": "control-shell-oneliner",
+      "expect": "no-call",
+      "tags": ["control", "local-tooling"],
+      "prompt": "Give me a shell command that finds the ten largest files under the current directory, and run it."
+    }
+  ]
+}

@@ -27,7 +27,7 @@ pub static malloc_conf: Option<&'static [u8; 78]> =
 
 use anyhow::Result;
 
-#[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
 fn configure_system_allocator() {
     unsafe extern "C" {
         fn mallopt(param: i32, value: i32) -> i32;
@@ -57,13 +57,16 @@ fn configure_system_allocator() {
 
 /// Parse a positive i32 allocator tuning knob from an env var, falling back
 /// to `default` when unset, unparsable, or non-positive.
-#[cfg(all(target_os = "linux", not(feature = "jemalloc")))]
+#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc")))]
 fn parse_alloc_tuning_env(var: &str, default: i32) -> i32 {
     parse_alloc_tuning(std::env::var(var).ok().as_deref(), default)
 }
 
 /// Pure parsing core of [`parse_alloc_tuning_env`], separated for unit tests.
-#[cfg(any(test, all(target_os = "linux", not(feature = "jemalloc"))))]
+#[cfg(any(
+    test,
+    all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc"))
+))]
 fn parse_alloc_tuning(value: Option<&str>, default: i32) -> i32 {
     value
         .and_then(|value| value.trim().parse::<i32>().ok())
@@ -71,7 +74,7 @@ fn parse_alloc_tuning(value: Option<&str>, default: i32) -> i32 {
         .unwrap_or(default)
 }
 
-#[cfg(not(all(target_os = "linux", not(feature = "jemalloc"))))]
+#[cfg(not(all(target_os = "linux", target_env = "gnu", not(feature = "jemalloc"))))]
 fn configure_system_allocator() {}
 
 #[cfg(windows)]
@@ -119,6 +122,14 @@ fn run_main() -> Result<()> {
     // the Cmd+; hotkey silently dead.
     if is_macos_hotkey_listener_invocation() {
         return jcode::setup_hints::run_macos_hotkey_listener_main_thread();
+    }
+
+    // The generated LSUIElement helper hard-links this universal binary under
+    // a dedicated executable name. Intercept that multicall entry point before
+    // Tokio/CLI startup so AppKit and Notification Center stay on the real main
+    // thread and the helper never initializes an agent session.
+    if jcode::cli::macos_notification_broker::is_invocation() {
+        return jcode::cli::macos_notification_broker::run();
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()

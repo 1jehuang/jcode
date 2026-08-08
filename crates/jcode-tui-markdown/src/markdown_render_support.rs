@@ -144,9 +144,18 @@ fn strip_blockquote_gutter(text: &str) -> &str {
     }
 }
 
-/// Render a table as ASCII-style lines
-/// max_width: Optional maximum width for the entire table
-pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Vec<Line<'static>> {
+/// Render a table as ASCII-style lines, honouring the delimiter row's
+/// per-column alignment.
+///
+/// `max_width` bounds the whole table. `alignments` may be empty, in which case
+/// every column is left-aligned: a right-aligned numeric column that renders
+/// left-aligned misreads what the author wrote, and the alignment is the one
+/// piece of table structure a front-end cannot recover from the cells alone.
+pub(super) fn render_table_aligned(
+    rows: &[Vec<String>],
+    max_width: Option<usize>,
+    alignments: &[jcode_render_core::Alignment],
+) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return vec![];
     }
@@ -230,7 +239,23 @@ pub(super) fn render_table(rows: &[Vec<String>], max_width: Option<usize>) -> Ve
                     .unwrap_or_else(|| UnicodeWidthStr::width(display_text));
                 let text_width = UnicodeWidthStr::width(display_text);
                 let pad = col_width.saturating_sub(text_width);
-                let padded = format!("{}{}", display_text, " ".repeat(pad));
+                let padded = match alignments.get(i).copied().unwrap_or_default() {
+                    jcode_render_core::Alignment::Left => {
+                        format!("{}{}", display_text, " ".repeat(pad))
+                    }
+                    jcode_render_core::Alignment::Right => {
+                        format!("{}{}", " ".repeat(pad), display_text)
+                    }
+                    jcode_render_core::Alignment::Center => {
+                        let left = pad / 2;
+                        format!(
+                            "{}{}{}",
+                            " ".repeat(left),
+                            display_text,
+                            " ".repeat(pad - left)
+                        )
+                    }
+                };
 
                 // Header row gets bold styling
                 let style = if row_idx == 0 {
@@ -336,7 +361,7 @@ fn wrap_long_table_word(word: &str, width: usize) -> Vec<String> {
 
 /// Render a table with a specific max width constraint
 pub fn render_table_with_width(rows: &[Vec<String>], max_width: usize) -> Vec<Line<'static>> {
-    render_table(rows, Some(max_width))
+    render_table_aligned(rows, Some(max_width), &[])
 }
 
 /// Highlight a code block with syntax highlighting (cached)

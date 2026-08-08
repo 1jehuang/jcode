@@ -40,8 +40,10 @@ pub(super) fn route_supports_reasoning_effort(api_method: &str) -> bool {
         | Method::OpenAIOAuth
         | Method::OpenAIApiKey
         | Method::OpenRouter => true,
+        // Named OpenAI-compatible profiles expose effort through `/effort`.
+        // Expanding them here creates one duplicate picker row per effort.
+        Method::OpenAiCompatible { .. } => false,
         Method::JcodeSubscription
-        | Method::OpenAiCompatible { .. }
         | Method::Copilot
         | Method::Cursor
         | Method::Bedrock

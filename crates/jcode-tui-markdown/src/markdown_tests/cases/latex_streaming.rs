@@ -10,10 +10,9 @@ fn exact_multiline_latex_response() -> &'static str {
 }
 
 #[test]
-fn latex_foreground_is_saturated_blue_and_styles_inline_math() {
-    assert_eq!(MATH_FOREGROUND, (100, 160, 255));
-    assert!(MATH_FOREGROUND.2 > MATH_FOREGROUND.1);
-    assert!(MATH_FOREGROUND.1 > MATH_FOREGROUND.0);
+fn latex_foreground_is_white_and_styles_inline_math() {
+    assert_eq!(MATH_FOREGROUND, (255, 255, 255));
+    assert_eq!(MATH_INLINE_FOREGROUND, (255, 255, 255));
 
     let lines = with_streaming_render_context(|| render_markdown("Inline $x^2$ math."));
     let math_spans: Vec<_> = lines
@@ -22,7 +21,7 @@ fn latex_foreground_is_saturated_blue_and_styles_inline_math() {
         .filter(|span| span.content.contains("x²"))
         .collect();
     assert_eq!(math_spans.len(), 1);
-    assert_eq!(math_spans[0].style.fg, Some(math_fg()));
+    assert_eq!(math_spans[0].style.fg, Some(crate::math_inline_fg()));
 }
 
 #[test]
@@ -56,19 +55,44 @@ fn every_streaming_prefix_converges_to_the_full_math_render() {
     assert_eq!(lines_to_string(&incremental).matches("┌─ math").count(), 5);
 }
 
+/// Regression for #735: no markdown render, streaming or completed, may run
+/// the TeX toolchain on the calling (draw) thread. A blocking toolchain run
+/// there starves the TUI event loop and makes Esc/interrupt look ignored.
 #[test]
-fn streaming_math_never_invokes_the_synchronous_image_toolchain() {
-    latex_image::reset_test_render_attempts();
+fn math_rendering_never_runs_the_toolchain_on_the_render_thread() {
+    let before = latex_image::test_toolchain_runs();
     let mut renderer = IncrementalMarkdownRenderer::new(Some(90));
     let _ = renderer.update(exact_multiline_latex_response());
-    assert_eq!(latex_image::test_render_attempts(), 0);
-
-    latex_image::reset_test_render_attempts();
     let _ = render_markdown(r"$$x^2$$");
-    assert!(
-        latex_image::test_render_attempts() > 0,
-        "completed non-streaming Image mode should attempt the configured image renderer"
+    assert_eq!(
+        latex_image::test_toolchain_runs(),
+        before,
+        "markdown rendering must defer LaTeX toolchain work to the background worker"
     );
+}
+
+#[test]
+fn inline_math_stays_inline_in_image_mode_and_skips_the_image_toolchain() {
+    latex_image::reset_test_render_attempts();
+    // Non-streaming render with Image mode active: inline math is part of a
+    // sentence and must never become a block-level image panel.
+    let lines =
+        render_markdown_with_width("where $\\mathbf{u}$ is velocity, $p$ pressure.", Some(90));
+    assert_eq!(
+        latex_image::test_render_attempts(),
+        0,
+        "inline math must not invoke the image toolchain"
+    );
+    let rendered = lines_to_string(&lines);
+    let sentence_lines: Vec<_> = rendered
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(sentence_lines.len(), 1, "{rendered}");
+    assert!(sentence_lines[0].contains("where"), "{rendered}");
+    assert!(sentence_lines[0].contains("is velocity"), "{rendered}");
+    assert!(sentence_lines[0].contains("pressure"), "{rendered}");
+    assert!(!rendered.contains("math"), "{rendered}");
 }
 
 #[test]

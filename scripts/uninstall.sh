@@ -58,6 +58,10 @@ esac
 TARGETS=()
 [ -e "$LAUNCHER" ] || [ -L "$LAUNCHER" ] && TARGETS+=("$LAUNCHER (launcher)")
 [ -d "$BUILDS_DIR" ] && TARGETS+=("$BUILDS_DIR (installed binaries: stable/current/canary/versions)")
+if [ "$OS" = "Darwin" ]; then
+  [ -d "$HOME/Applications/Jcode.app" ] && TARGETS+=("$HOME/Applications/Jcode.app (macOS launcher)")
+  [ -d "$HOME/Applications/Jcode Notifications.app" ] && TARGETS+=("$HOME/Applications/Jcode Notifications.app (notification broker)")
+fi
 if [ "$PURGE" = true ] && [ -d "$USER_DATA_DIR" ]; then
   TARGETS+=("$USER_DATA_DIR (ALL user data: config, auth, sessions, logs, memory)")
 fi
@@ -115,6 +119,10 @@ remove() {
 }
 
 remove "$LAUNCHER"
+if [ "$OS" = "Darwin" ]; then
+  remove "$HOME/Applications/Jcode.app"
+  remove "$HOME/Applications/Jcode Notifications.app"
+fi
 if [ "$PURGE" = true ]; then
   remove "$USER_DATA_DIR"
 else

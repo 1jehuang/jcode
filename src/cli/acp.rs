@@ -90,6 +90,45 @@ struct DaemonSession {
     next_request_id: AtomicU64,
     active_prompt_id: Mutex<Option<u64>>,
     prompt_running: AtomicBool,
+    ui_state: Mutex<SessionUiState>,
+}
+
+/// Session-scoped provider/model state used to surface ACP `configOptions`
+/// (model selector, reasoning effort) and `usage_update` notifications.
+#[derive(Clone, Debug, Default)]
+struct SessionUiState {
+    provider_name: Option<String>,
+    model: Option<String>,
+    available_models: Vec<String>,
+    reasoning_effort: Option<String>,
+}
+
+impl SessionUiState {
+    fn from_history_fields(
+        provider_name: Option<String>,
+        provider_model: Option<String>,
+        available_models: Vec<String>,
+        reasoning_effort: Option<String>,
+    ) -> Self {
+        Self {
+            provider_name,
+            model: provider_model,
+            available_models,
+            reasoning_effort,
+        }
+    }
+
+    fn context_limit(&self) -> u64 {
+        self.model
+            .as_deref()
+            .and_then(|model| {
+                crate::provider::context_limit_for_model_with_provider(
+                    model,
+                    self.provider_name.as_deref(),
+                )
+            })
+            .unwrap_or(crate::provider::DEFAULT_CONTEXT_LIMIT) as u64
+    }
 }
 
 impl DaemonSession {
@@ -101,6 +140,14 @@ impl DaemonSession {
             next_request_id: AtomicU64::new(next_request_id),
             active_prompt_id: Mutex::new(None),
             prompt_running: AtomicBool::new(false),
+            ui_state: Mutex::new(SessionUiState::default()),
+        }
+    }
+
+    fn with_ui_state(self, state: SessionUiState) -> Self {
+        Self {
+            ui_state: Mutex::new(state),
+            ..self
         }
     }
 
@@ -215,6 +262,7 @@ impl AcpRuntime {
             "session/prompt" => self.handle_session_prompt(message).await?,
             "session/cancel" => self.handle_session_cancel(message).await?,
             "session/close" => self.handle_session_close(message).await?,
+            "session/set_config_option" => self.handle_set_config_option(message).await?,
             _ if method.starts_with('_') => {
                 if let Some(id) = message.id {
                     self.write_error_value(
@@ -261,12 +309,18 @@ impl AcpRuntime {
         match self.create_new_session(cwd).await {
             Ok(session) => {
                 let session_id = session.session_id.clone();
+                let config_options = session_config_options(&*session.ui_state.lock().await);
                 self.sessions
                     .lock()
                     .await
                     .insert(session_id.clone(), Arc::new(session));
-                self.write_result(id, json!({ "sessionId": session_id }))
-                    .await?;
+                let mut result = json!({ "sessionId": session_id });
+                if !config_options.is_empty()
+                    && let Some(object) = result.as_object_mut()
+                {
+                    object.insert("configOptions".to_string(), Value::Array(config_options));
+                }
+                self.write_result(id, result).await?;
             }
             Err(err) => {
                 self.write_error_value(
@@ -315,11 +369,18 @@ impl AcpRuntime {
             .await
         {
             Ok(session) => {
+                let config_options = session_config_options(&*session.ui_state.lock().await);
                 self.sessions
                     .lock()
                     .await
                     .insert(session.session_id.clone(), Arc::new(session));
-                self.write_result(id, json!({})).await?;
+                let mut result = json!({});
+                if !config_options.is_empty()
+                    && let Some(object) = result.as_object_mut()
+                {
+                    object.insert("configOptions".to_string(), Value::Array(config_options));
+                }
+                self.write_result(id, result).await?;
             }
             Err(err) => {
                 self.write_error_value(
@@ -442,6 +503,115 @@ impl AcpRuntime {
         Ok(())
     }
 
+    async fn handle_set_config_option(&self, message: JsonRpcMessage) -> Result<()> {
+        let Some(id) = message.id else {
+            return Ok(());
+        };
+        let session_id = match required_session_id(&message.params) {
+            Ok(session_id) => session_id,
+            Err(err) => {
+                self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
+                    .await?;
+                return Ok(());
+            }
+        };
+        let config_id = message
+            .params
+            .get("configId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let value = message
+            .params
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let (Some(config_id), Some(value)) = (config_id, value) else {
+            self.write_error_value(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                "session/set_config_option requires string configId and value".to_string(),
+            )
+            .await?;
+            return Ok(());
+        };
+
+        let session = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(&session_id).cloned()
+        };
+        let Some(session) = session else {
+            self.write_error_value(
+                id,
+                JSONRPC_INVALID_PARAMS,
+                format!("Unknown ACP session id: {session_id}"),
+            )
+            .await?;
+            return Ok(());
+        };
+        if session.prompt_running.load(Ordering::SeqCst) {
+            self.write_error_value(
+                id,
+                JSONRPC_SERVER_ERROR,
+                format!("Session {session_id} is processing a prompt; retry when it finishes"),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let request_id = session.next_id();
+        let apply_result = match config_id.as_str() {
+            CONFIG_ID_MODEL => {
+                session
+                    .send(&Request::SetModel {
+                        id: request_id,
+                        model: value.clone(),
+                    })
+                    .await?;
+                wait_for_model_changed(&session, request_id).await
+            }
+            CONFIG_ID_EFFORT => {
+                session
+                    .send(&Request::SetReasoningEffort {
+                        id: request_id,
+                        effort: value.clone(),
+                        target_session_id: None,
+                    })
+                    .await?;
+                wait_for_effort_changed(&session, request_id).await
+            }
+            other => Err(anyhow::anyhow!("Unknown config option id: {other}")),
+        };
+
+        match apply_result {
+            Ok(()) => {
+                let config_options = session_config_options(&*session.ui_state.lock().await);
+                // The spec requires the full option set in the response itself.
+                self.write_result(id, json!({ "configOptions": config_options }))
+                    .await?;
+                self.write_notification(
+                    "session/update",
+                    json!({
+                        "sessionId": session.session_id,
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": config_options,
+                        }
+                    }),
+                )
+                .await?;
+            }
+            Err(err) => {
+                self.write_error_value(
+                    id,
+                    JSONRPC_SERVER_ERROR,
+                    format!("Failed to set {config_id}: {err:#}"),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn ensure_daemon(&self) -> Result<()> {
         if dispatch::server_is_running().await {
             return Ok(());
@@ -478,8 +648,23 @@ impl AcpRuntime {
             .await?;
         wait_for_done(&session, subscribe_id).await?;
         let history = request_history(&session).await?;
-        let session_id = match history {
-            ServerEvent::History { session_id, .. } => session_id,
+        let (session_id, ui_state) = match history {
+            ServerEvent::History {
+                session_id,
+                provider_name,
+                provider_model,
+                available_models,
+                reasoning_effort,
+                ..
+            } => (
+                session_id,
+                SessionUiState::from_history_fields(
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    reasoning_effort,
+                ),
+            ),
             other => anyhow::bail!("expected history after session creation, got {other:?}"),
         };
         Ok(DaemonSession::new(
@@ -487,29 +672,34 @@ impl AcpRuntime {
             session.reader.into_inner().into_inner(),
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
-        ))
+        )
+        .with_ui_state(ui_state))
     }
 
     async fn attach_existing_session(
         &self,
         target_session_id: String,
-        _cwd: PathBuf,
+        cwd: PathBuf,
         replay_history: bool,
     ) -> Result<DaemonSession> {
         let (reader, writer) = self.connect_daemon().await?;
         let session = DaemonSession::new(String::new(), reader, writer, 2);
         let resume_id = 1;
         session
-            .send(&Request::ResumeSession {
+            .send(&Request::Subscribe {
                 id: resume_id,
-                session_id: target_session_id.clone(),
+                working_dir: Some(cwd.display().to_string()),
+                selfdev: None,
+                target_session_id: Some(target_session_id.clone()),
                 client_instance_id: Some("acp".to_string()),
                 client_has_local_history: false,
                 allow_session_takeover: false,
+                terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
             })
             .await?;
 
         let mut attached_id = target_session_id;
+        let mut ui_state = SessionUiState::default();
         loop {
             let event = session.read_event().await?;
             match event {
@@ -517,9 +707,19 @@ impl AcpRuntime {
                 ServerEvent::History {
                     session_id,
                     messages,
+                    provider_name,
+                    provider_model,
+                    available_models,
+                    reasoning_effort,
                     ..
                 } => {
                     attached_id = session_id.clone();
+                    ui_state = SessionUiState::from_history_fields(
+                        provider_name,
+                        provider_model,
+                        available_models,
+                        reasoning_effort,
+                    );
                     if replay_history {
                         self.replay_history(&session_id, messages).await?;
                     }
@@ -542,7 +742,8 @@ impl AcpRuntime {
             session.reader.into_inner().into_inner(),
             session.writer.into_inner(),
             session.next_request_id.load(Ordering::Relaxed),
-        ))
+        )
+        .with_ui_state(ui_state))
     }
 
     async fn replay_history(
@@ -593,6 +794,7 @@ impl AcpRuntime {
                 content: text,
                 images,
                 system_reminder: None,
+                no_reply: false,
             })
             .await;
         if let Err(err) = send_result {
@@ -625,6 +827,70 @@ impl AcpRuntime {
                     self.write_error_value(rpc_id, JSONRPC_SERVER_ERROR, message)
                         .await?;
                     return Ok(());
+                }
+                ServerEvent::TokenUsage {
+                    input,
+                    output: _,
+                    cache_read_input,
+                    cache_creation_input,
+                } => {
+                    let (provider_name, context_limit) = {
+                        let state = session.ui_state.lock().await;
+                        (
+                            state.provider_name.clone().unwrap_or_default(),
+                            state.context_limit(),
+                        )
+                    };
+                    let used = crate::compaction::effective_context_tokens_from_usage(
+                        &provider_name,
+                        input,
+                        cache_read_input,
+                        cache_creation_input,
+                    );
+                    self.write_notification(
+                        "session/update",
+                        json!({
+                            "sessionId": session.session_id,
+                            "update": {
+                                "sessionUpdate": "usage_update",
+                                "used": used,
+                                "size": context_limit,
+                            }
+                        }),
+                    )
+                    .await?;
+                }
+                ServerEvent::ModelChanged {
+                    model,
+                    provider_name,
+                    error,
+                    ..
+                } => {
+                    // Mid-prompt model changes happen on provider failover;
+                    // keep the selector in sync.
+                    if error.is_none() {
+                        let config_options = {
+                            let mut state = session.ui_state.lock().await;
+                            state.model = Some(model);
+                            if provider_name.is_some() {
+                                state.provider_name = provider_name;
+                            }
+                            session_config_options(&state)
+                        };
+                        if !config_options.is_empty() {
+                            self.write_notification(
+                                "session/update",
+                                json!({
+                                    "sessionId": session.session_id,
+                                    "update": {
+                                        "sessionUpdate": "config_option_update",
+                                        "configOptions": config_options,
+                                    }
+                                }),
+                            )
+                            .await?;
+                        }
+                    }
                 }
                 other => {
                     for update in mapper.map_event(other) {
@@ -735,6 +1001,119 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
                 message,
                 ..
             } if event_id == id => anyhow::bail!(message),
+            _ => {}
+        }
+    }
+}
+
+const CONFIG_ID_MODEL: &str = "model";
+const CONFIG_ID_EFFORT: &str = "reasoning_effort";
+
+/// Build the ACP `configOptions` array (model selector plus reasoning effort)
+/// from the current session provider state. Empty when the daemon reported no
+/// usable model state.
+fn session_config_options(state: &SessionUiState) -> Vec<Value> {
+    let mut options = Vec::new();
+
+    if let Some(model) = state.model.as_deref() {
+        let mut models = state.available_models.clone();
+        if !models.iter().any(|candidate| candidate == model) {
+            models.insert(0, model.to_string());
+        }
+        let select_options: Vec<Value> = models
+            .iter()
+            .map(|name| json!({ "value": name, "name": name }))
+            .collect();
+        options.push(json!({
+            "type": "select",
+            "id": CONFIG_ID_MODEL,
+            "name": "Model",
+            "category": "model",
+            "currentValue": model,
+            "options": select_options,
+        }));
+    }
+
+    let efforts: Vec<&str> = crate::provider::inferred_reasoning_efforts(
+        state.provider_name.as_deref(),
+        state.model.as_deref(),
+    )
+    .into_iter()
+    // `swarm`/`swarm-deep` are TUI sentinels, not provider effort levels.
+    .filter(|effort| !effort.starts_with("swarm"))
+    .collect();
+    if !efforts.is_empty() {
+        let current = state
+            .reasoning_effort
+            .as_deref()
+            .filter(|effort| efforts.contains(effort))
+            .unwrap_or_else(|| {
+                if efforts.contains(&"medium") {
+                    "medium"
+                } else {
+                    efforts[0]
+                }
+            });
+        let select_options: Vec<Value> = efforts
+            .iter()
+            .map(|name| json!({ "value": name, "name": name }))
+            .collect();
+        options.push(json!({
+            "type": "select",
+            "id": CONFIG_ID_EFFORT,
+            "name": "Reasoning effort",
+            "category": "thought_level",
+            "currentValue": current,
+            "options": select_options,
+        }));
+    }
+
+    options
+}
+
+async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
+    loop {
+        match session.read_event().await? {
+            ServerEvent::Ack { .. } => {}
+            ServerEvent::ModelChanged {
+                id,
+                model,
+                provider_name,
+                error,
+            } if id == request_id => {
+                if let Some(error) = error {
+                    anyhow::bail!(error);
+                }
+                let mut state = session.ui_state.lock().await;
+                state.model = Some(model);
+                if provider_name.is_some() {
+                    state.provider_name = provider_name;
+                }
+                return Ok(());
+            }
+            ServerEvent::Error { id, message, .. } if id == request_id => {
+                anyhow::bail!(message)
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn wait_for_effort_changed(session: &DaemonSession, request_id: u64) -> Result<()> {
+    loop {
+        match session.read_event().await? {
+            ServerEvent::Ack { .. } => {}
+            ServerEvent::ReasoningEffortChanged { id, effort, error } if id == request_id => {
+                if let Some(error) = error {
+                    anyhow::bail!(error);
+                }
+                let mut state = session.ui_state.lock().await;
+                state.reasoning_effort = effort;
+                return Ok(());
+            }
+            ServerEvent::Error { id, message, .. } if id == request_id => {
+                anyhow::bail!(message)
+            }
             _ => {}
         }
     }
@@ -1184,5 +1563,79 @@ mod tests {
         assert!(cwd_from_params(&params).is_err());
         let params = json!({"cwd": "/tmp"});
         assert_eq!(cwd_from_params(&params).unwrap(), Path::new("/tmp"));
+    }
+
+    #[test]
+    fn config_options_include_model_selector_and_effort_ladder() {
+        let state = SessionUiState {
+            provider_name: Some("openai".to_string()),
+            model: Some("gpt-5.2".to_string()),
+            available_models: vec!["gpt-5.2".to_string(), "gpt-5.2-codex".to_string()],
+            reasoning_effort: Some("high".to_string()),
+        };
+        let options = session_config_options(&state);
+        assert_eq!(options.len(), 2);
+
+        let model = &options[0];
+        assert_eq!(model["id"], CONFIG_ID_MODEL);
+        assert_eq!(model["category"], "model");
+        assert_eq!(model["type"], "select");
+        assert_eq!(model["currentValue"], "gpt-5.2");
+        assert_eq!(model["options"].as_array().unwrap().len(), 2);
+
+        let effort = &options[1];
+        assert_eq!(effort["id"], CONFIG_ID_EFFORT);
+        assert_eq!(effort["category"], "thought_level");
+        assert_eq!(effort["currentValue"], "high");
+        let effort_values: Vec<&str> = effort["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["value"].as_str().unwrap())
+            .collect();
+        assert!(effort_values.contains(&"medium"));
+        assert!(
+            !effort_values.iter().any(|value| value.starts_with("swarm")),
+            "swarm sentinels are TUI-only and must not leak over ACP: {effort_values:?}"
+        );
+    }
+
+    #[test]
+    fn config_options_current_model_prepended_when_not_listed() {
+        let state = SessionUiState {
+            provider_name: Some("anthropic".to_string()),
+            model: Some("claude-opus-4-6".to_string()),
+            available_models: vec!["claude-sonnet-4-5".to_string()],
+            reasoning_effort: None,
+        };
+        let options = session_config_options(&state);
+        let model_values: Vec<&str> = options[0]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|option| option["value"].as_str().unwrap())
+            .collect();
+        assert_eq!(model_values[0], "claude-opus-4-6");
+        assert!(model_values.contains(&"claude-sonnet-4-5"));
+    }
+
+    #[test]
+    fn config_options_empty_without_model_state() {
+        let options = session_config_options(&SessionUiState::default());
+        assert!(options.is_empty());
+    }
+
+    #[test]
+    fn context_limit_falls_back_to_default_for_unknown_models() {
+        let state = SessionUiState {
+            provider_name: Some("mystery".to_string()),
+            model: Some("mystery-model-9000".to_string()),
+            available_models: Vec::new(),
+            reasoning_effort: None,
+        };
+        assert_eq!(
+            state.context_limit(),
+            crate::provider::DEFAULT_CONTEXT_LIMIT as u64
+        );
     }
 }

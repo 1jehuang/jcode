@@ -61,13 +61,14 @@ pub struct McpManager {
 impl McpManager {
     /// Create a new manager in owned in-process mode (used by tests and local harnesses).
     pub fn new() -> Self {
+        let project_dir = std::env::current_dir().ok();
         Self {
             pool: None,
             pool_handles: RwLock::new(HashMap::new()),
             owned_clients: RwLock::new(HashMap::new()),
-            config: McpConfig::load(),
+            config: McpConfig::load_for_dir(project_dir.as_deref()),
             session_id: "owned".to_string(),
-            project_dir: None,
+            project_dir,
         }
     }
 
@@ -211,7 +212,7 @@ impl McpManager {
             crate::sponsors::provenance::on_server_connected(name, &config.command, &config.args)
         {
             crate::logging::info(&format!(
-                "MCP: '{name}' connected via partner discovery (partner: {sponsor}); \
+                "MCP: '{name}' connected via integration discovery (provider: {sponsor}); \
                  coarse usage counts are shared per the disclosed policy"
             ));
         }
@@ -517,6 +518,36 @@ mod tests {
         McpConfig::default()
     }
 
+    #[test]
+    fn issue_790_owned_manager_keeps_its_initial_config_directory() {
+        let _guard = crate::storage::lock_test_env();
+        let original_cwd = std::env::current_dir().expect("current cwd");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let home = tempfile::tempdir().expect("home tempdir");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let elsewhere = tempfile::tempdir().expect("elsewhere tempdir");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(
+            project.path().join(".mcp.json"),
+            r#"{"mcpServers":{"project-only":{"command":"project-server"}}}"#,
+        )
+        .expect("write project config");
+
+        std::env::set_current_dir(project.path()).expect("set project cwd");
+        let manager = McpManager::new();
+        std::env::set_current_dir(elsewhere.path()).expect("set different cwd");
+        let fresh = manager.load_fresh_config();
+
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+        if let Some(previous_home) = previous_home {
+            crate::env::set_var("JCODE_HOME", previous_home);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+
+        assert!(fresh.servers.contains_key("project-only"));
+    }
+
     #[tokio::test]
     async fn call_tool_unconfigured_server_bails_cleanly() {
         let manager = McpManager::with_config(empty_config());
@@ -555,6 +586,7 @@ mod tests {
                 shared: false,
                 transport: None,
                 url: None,
+                headers: std::collections::HashMap::new(),
                 enabled: Some(false),
                 disabled: None,
             },
@@ -588,6 +620,7 @@ mod tests {
                 shared: false,
                 transport: None,
                 url: None,
+                headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
             },
@@ -694,6 +727,7 @@ done
                 shared: false,
                 transport: None,
                 url: None,
+                headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
             },

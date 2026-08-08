@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::items_after_test_module))]
 
+mod clipboard_helper;
 pub(crate) mod model_names;
 
 use crate::todo::TodoItem;
@@ -21,7 +22,7 @@ type GitInfoCacheEntry = (std::time::Instant, Option<GitInfo>, bool);
 static GIT_INFO_CACHE: Mutex<Option<GitInfoCacheEntry>> = Mutex::new(None);
 
 /// Stale-while-revalidate cache for per-session todos plus their goal-level
-/// assessments (hill-climbability etc.). Module-level so the app can force a
+/// assessments (closed feedback loop etc.). Module-level so the app can force a
 /// refresh the moment it persists a todo write locally, instead of showing
 /// the previous list until the TTL lapses.
 type TodosCacheEntry = (
@@ -329,91 +330,160 @@ pub(super) fn format_tokens(tokens: u64) -> String {
     }
 }
 
+/// Test-only clipboard sink.
+///
+/// A headless CI runner has no Wayland socket, no X11 display, and a
+/// non-terminal stdout, so every real clipboard path correctly fails and
+/// `copy_to_clipboard` returns false. Tests that only care about shortcut
+/// wiring (does Alt+S reach the copy handler with the right text?) then fail
+/// for an environment reason rather than a code reason. Capturing into this
+/// sink lets those tests assert the wiring *and* the copied text without
+/// depending on a desktop session (refs #596).
+#[cfg(test)]
+static TEST_CLIPBOARD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Test-only: route clipboard writes into an in-process sink instead of the OS.
+#[cfg(test)]
+pub(crate) fn capture_clipboard_for_tests() {
+    if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+        *sink = Some(String::new());
+    }
+}
+
+/// Test-only: the last text written while capture was enabled.
+#[cfg(test)]
+pub(crate) fn captured_clipboard_for_tests() -> Option<String> {
+    TEST_CLIPBOARD.lock().ok().and_then(|sink| sink.clone())
+}
+
+/// Test-only: stop capturing and drop any captured text.
+#[cfg(test)]
+pub(crate) fn stop_capturing_clipboard_for_tests() {
+    if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+        *sink = None;
+    }
+}
+
 /// Copy text to clipboard. On Windows and macOS, the native clipboard API
 /// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
-/// Elsewhere, try wl-copy first (Wayland), then OSC 52 (works over SSH /
-/// Docker / tmux), then arboard as a final fallback.
+/// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
+/// the selection unlike arboard), then arboard, then OSC 52 as the
+/// remote-session fallback (SSH / Docker / tmux).
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    // On Windows, the native clipboard API must run before OSC 52. Writing an
-    // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
-    // older Windows Terminal) silently ignores it, which reported "Copied"
-    // while leaving the clipboard empty (issue #497). arboard talks to the
-    // Win32 clipboard directly and is authoritative there.
-    #[cfg(windows)]
+    // Under test, never touch the OS clipboard. Beyond making results identical
+    // on a desktop and a headless runner, the Linux path below spawns `wl-copy`,
+    // which forks a clipboard server that does not exit; waiting on it hangs the
+    // test binary indefinitely. Tests that assert copied text call
+    // `capture_clipboard_for_tests` first and then read the sink; tests that
+    // only assert "a copy happened" get a truthy result either way.
+    //
+    // The OS paths are cfg'd out (not merely skipped) so the test build does
+    // not carry an unreachable tail after this block's `return`.
+    #[cfg(test)]
     {
-        if arboard::Clipboard::new()
-            .and_then(|mut cb| cb.set_text(text.to_string()))
-            .is_ok()
-        {
-            return true;
-        }
-        return copy_to_clipboard_osc52(text);
-    }
-
-    // Same class of bug on macOS: Apple Terminal (Terminal.app) silently
-    // ignores OSC 52, yet writing the sequence to stdout "succeeds", so we
-    // reported "Copied" while leaving the clipboard untouched. NSPasteboard
-    // via arboard (with pbcopy as a belt-and-braces fallback) is authoritative
-    // for local sessions; OSC 52 remains as the final remote-session fallback.
-    #[cfg(target_os = "macos")]
-    {
-        if arboard::Clipboard::new()
-            .and_then(|mut cb| cb.set_text(text.to_string()))
-            .is_ok()
-        {
-            return true;
-        }
-        if let Ok(mut child) = std::process::Command::new("pbcopy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut()
-                && stdin.write_all(text.as_bytes()).is_ok()
-            {
-                drop(child.stdin.take());
-                if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    return true;
+        if let Ok(mut sink) = TEST_CLIPBOARD.lock() {
+            match sink.as_mut() {
+                Some(captured) => {
+                    captured.clear();
+                    captured.push_str(text);
                 }
+                None => *sink = Some(text.to_string()),
             }
         }
-        return copy_to_clipboard_osc52(text);
+        return true;
     }
 
-    // Linux has the same failure class (issue #504, Kali/X11): wl-copy fails
-    // outside Wayland, and many terminals (xterm, older VTE) silently ignore
-    // OSC 52 while the stdout write still "succeeds", so the arboard fallback
-    // never ran. Prefer native clipboards when a display is available: wl-copy
-    // (Wayland), then arboard (X11), and only then OSC 52 for genuinely
-    // headless/remote sessions (SSH, Docker, tmux) where both native paths
-    // fail fast for lack of a display server.
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(test))]
     {
-        if let Ok(mut child) = std::process::Command::new("wl-copy")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
+        // On Windows, the native clipboard API must run before OSC 52. Writing an
+        // OSC 52 sequence to stdout "succeeds" even when the console (conhost,
+        // older Windows Terminal) silently ignores it, which reported "Copied"
+        // while leaving the clipboard empty (issue #497). arboard talks to the
+        // Win32 clipboard directly and is authoritative there.
+        #[cfg(windows)]
         {
-            use std::io::Write;
-            if let Some(stdin) = child.stdin.as_mut()
-                && stdin.write_all(text.as_bytes()).is_ok()
+            if arboard::Clipboard::new()
+                .and_then(|mut cb| cb.set_text(text.to_string()))
+                .is_ok()
             {
-                drop(child.stdin.take());
-                if child.wait().map(|s| s.success()).unwrap_or(false) {
-                    return true;
+                return true;
+            }
+            return copy_to_clipboard_osc52(text);
+        }
+
+        // Same class of bug on macOS: Apple Terminal (Terminal.app) silently
+        // ignores OSC 52, yet writing the sequence to stdout "succeeds", so we
+        // reported "Copied" while leaving the clipboard untouched. NSPasteboard
+        // via arboard (with pbcopy as a belt-and-braces fallback) is authoritative
+        // for local sessions; OSC 52 remains as the final remote-session fallback.
+        #[cfg(target_os = "macos")]
+        {
+            if arboard::Clipboard::new()
+                .and_then(|mut cb| cb.set_text(text.to_string()))
+                .is_ok()
+            {
+                return true;
+            }
+            if let Ok(mut child) = std::process::Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut()
+                    && stdin.write_all(text.as_bytes()).is_ok()
+                {
+                    drop(child.stdin.take());
+                    if child.wait().map(|s| s.success()).unwrap_or(false) {
+                        return true;
+                    }
                 }
             }
+            return copy_to_clipboard_osc52(text);
         }
-        if arboard::Clipboard::new()
-            .and_then(|mut cb| cb.set_text(text.to_string()))
-            .is_ok()
+
+        // Linux has the same failure class (issue #504, Kali/X11): wl-copy fails
+        // outside Wayland, and many terminals (xterm, older VTE) silently ignore
+        // OSC 52 while the stdout write still "succeeds", so the arboard fallback
+        // never ran. Prefer native clipboards when a display is available:
+        // wl-copy (Wayland), then xclip/xsel (X11, which keep owning the
+        // selection), then arboard, and only then OSC 52 for genuinely
+        // headless/remote sessions (SSH, Docker, tmux) where the native paths
+        // fail fast for lack of a display server.
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
-            return true;
+            if clipboard_helper::copy_via_clipboard_helper("wl-copy", &[], text) {
+                return true;
+            }
+            // X11: prefer xclip/xsel over arboard. arboard's X11 backend sets the
+            // selection on a connection it owns and then closes it when the
+            // `Clipboard` is dropped, so the selection owner disappears and the
+            // clipboard silently reverts (issue #684) even though `set_text`
+            // returned Ok. xclip and xsel fork a background process that keeps
+            // owning the selection until a paste, which is what users expect.
+            if clipboard_helper::copy_via_clipboard_helper(
+                "xclip",
+                &["-selection", "clipboard"],
+                text,
+            ) {
+                return true;
+            }
+            if clipboard_helper::copy_via_clipboard_helper(
+                "xsel",
+                &["--clipboard", "--input"],
+                text,
+            ) {
+                return true;
+            }
+            if arboard::Clipboard::new()
+                .and_then(|mut cb| cb.set_text(text.to_string()))
+                .is_ok()
+            {
+                return true;
+            }
+            copy_to_clipboard_osc52(text)
         }
-        copy_to_clipboard_osc52(text)
     }
 }
 
@@ -713,7 +783,13 @@ fn resumed_window_title(session_id: &str) -> String {
     )
 }
 
-#[cfg(unix)]
+/// Open `session_id` in a new terminal window.
+///
+/// Routes through `terminal_launch` on every platform. This used to be a
+/// hardcoded `Ok(false)` off Unix, which made `/judge`, `/fork`, `/review`,
+/// `/transfer` and crash-restore silently print "No terminal found" on Windows
+/// even though the launcher already had Windows Terminal / Alacritty / WezTerm
+/// detection plus a `cmd /C start` fallback (see #715).
 pub(super) fn spawn_in_new_terminal(
     exe: &Path,
     session_id: &str,
@@ -723,16 +799,6 @@ pub(super) fn spawn_in_new_terminal(
     let title = resumed_window_title(session_id);
     let args = resume_invocation_args(session_id, socket);
     spawn_command_in_new_terminal(exe, &args, &title, cwd)
-}
-
-#[cfg(not(unix))]
-pub(super) fn spawn_in_new_terminal(
-    _exe: &Path,
-    _session_id: &str,
-    _cwd: &Path,
-    _socket: Option<&str>,
-) -> anyhow::Result<bool> {
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -978,7 +1044,7 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
 /// Fetch a session's todos plus its goal-level assessments through the same
 /// stale-while-revalidate cache, so the info widget can render goal metadata
-/// (hill-climbability and objectives) without extra disk reads per frame.
+/// (closed feedback loop and objectives) without extra disk reads per frame.
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {

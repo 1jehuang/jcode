@@ -61,6 +61,14 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
+    // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
+    // the last phase that made progress.
+    crate::logging::watchdog::beat("tui.idle_tick");
+    // The decorative animation must still request redraws here: the run loops
+    // decide *how* to paint (cheap animation-only repaint vs full frame) at the
+    // draw site. Excluding it here instead would mean animation ticks request
+    // no paint at all, which drops the animation to whatever unrelated events
+    // happen to trigger (~4fps in practice).
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
@@ -88,6 +96,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     }
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_pinned_todos_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
@@ -100,6 +109,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.maybe_progress_provider_failover_countdown();
     app.check_debug_command();
     needs_redraw |= app.check_stable_version();
+    needs_redraw |= app.refresh_keybindings_if_config_reloaded();
     needs_redraw |= app.maybe_finish_background_client_reload();
     if app.pending_migration.is_some() && !app.is_processing {
         app.execute_migration();
@@ -128,6 +138,7 @@ pub(super) fn handle_terminal_event(
     terminal: &mut DefaultTerminal,
     event: Option<std::result::Result<Event, std::io::Error>>,
 ) -> Result<bool> {
+    crate::logging::watchdog::beat("tui.terminal_event");
     let mut needs_redraw = apply_terminal_event(app, terminal, event)?;
     const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
     for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
@@ -192,6 +203,7 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::ModelsUpdated) => {
             app.invalidate_model_picker_cache();
+            app.maybe_apply_event_driven_onboarding_model();
             true
         }
         Ok(BusEvent::AuthCatalogRefreshReady) => {
@@ -384,6 +396,7 @@ fn apply_terminal_event(
             Ok(false)
         }
         Some(Ok(Event::Key(key))) => {
+            crate::tui::ui::note_key_event_read();
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);
             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {

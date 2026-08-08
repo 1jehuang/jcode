@@ -119,34 +119,44 @@ impl Agent {
 
     /// Queue a soft interrupt message to be injected at the next safe point.
     /// This method can be called even while the agent is processing (uses separate lock).
-    pub fn queue_soft_interrupt(&self, content: String, urgent: bool, source: SoftInterruptSource) {
+    pub fn queue_soft_interrupt(
+        &self,
+        content: String,
+        images: Vec<(String, String)>,
+        urgent: bool,
+        source: SoftInterruptSource,
+    ) {
         let content_bytes = content.len();
         let content_chars = content.chars().count();
+        let image_count = images.len();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             let pending_before = queue.len();
             queue.push(SoftInterruptMessage {
                 content,
+                images,
                 urgent,
                 source,
             });
             logging::info(&format!(
-                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} pending_before={} pending_after={}",
+                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} pending_before={} pending_after={}",
                 self.session_id(),
                 source,
                 urgent,
                 content_bytes,
                 content_chars,
+                image_count,
                 pending_before,
                 queue.len()
             ));
         } else {
             logging::warn(&format!(
-                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH_FAILED session={} source={:?} urgent={} content_bytes={} content_chars={} reason=queue_lock_poisoned",
+                "AGENT_SOFT_INTERRUPT_QUEUE_PUSH_FAILED session={} source={:?} urgent={} content_bytes={} content_chars={} image_count={} reason=queue_lock_poisoned",
                 self.session_id(),
                 source,
                 urgent,
                 content_bytes,
-                content_chars
+                content_chars,
+                image_count
             ));
         }
     }
@@ -348,22 +358,31 @@ impl Agent {
         let mut injected = Vec::new();
         let mut current_source: Option<SoftInterruptSource> = None;
         let mut current_parts: Vec<String> = Vec::new();
+        let mut current_images: Vec<(String, String)> = Vec::new();
 
         let flush_group = |agent: &mut Self,
                            injected: &mut Vec<InjectedSoftInterrupt>,
                            source: SoftInterruptSource,
-                           parts: &mut Vec<String>| {
-            if parts.is_empty() {
+                           parts: &mut Vec<String>,
+                           images: &mut Vec<(String, String)>| {
+            if parts.is_empty() && images.is_empty() {
                 return;
             }
             let content = parts.join("\n\n");
             parts.clear();
-            agent.add_message_with_display_role(
-                Role::User,
-                vec![ContentBlock::Text {
+            let mut blocks: Vec<ContentBlock> = std::mem::take(images)
+                .into_iter()
+                .map(|(media_type, data)| ContentBlock::Image { media_type, data })
+                .collect();
+            if !content.is_empty() {
+                blocks.push(ContentBlock::Text {
                     text: content.clone(),
                     cache_control: None,
-                }],
+                });
+            }
+            agent.add_message_with_display_role(
+                Role::User,
+                blocks,
                 soft_interrupt_session_display_role(source),
             );
             injected.push(InjectedSoftInterrupt { content, source });
@@ -372,17 +391,30 @@ impl Agent {
         for message in messages {
             match current_source {
                 Some(source) if source != message.source => {
-                    flush_group(self, &mut injected, source, &mut current_parts);
+                    flush_group(
+                        self,
+                        &mut injected,
+                        source,
+                        &mut current_parts,
+                        &mut current_images,
+                    );
                     current_source = Some(message.source);
                 }
                 None => current_source = Some(message.source),
                 _ => {}
             }
             current_parts.push(message.content);
+            current_images.extend(message.images);
         }
 
         if let Some(source) = current_source {
-            flush_group(self, &mut injected, source, &mut current_parts);
+            flush_group(
+                self,
+                &mut injected,
+                source,
+                &mut current_parts,
+                &mut current_images,
+            );
         }
 
         self.persist_session_best_effort("soft interrupt injection");
@@ -404,6 +436,9 @@ impl Agent {
         incomplete_continuations: &mut u32,
     ) -> Result<NoToolCallOutcome> {
         if self.maybe_continue_incomplete_response(stop_reason, incomplete_continuations)? {
+            return Ok(NoToolCallOutcome::ContinueWithoutEvent);
+        }
+        if self.maybe_continue_stranded_tool_use(stop_reason, incomplete_continuations)? {
             return Ok(NoToolCallOutcome::ContinueWithoutEvent);
         }
         logging::info("Turn complete - no tool calls");

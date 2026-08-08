@@ -201,10 +201,11 @@ fn todo_gate_notice(name: &str, output: &str, is_error: bool) -> Option<&'static
     }
 
     if output.contains(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE) {
-        Some("🛑 Todo completion gate: end-to-end ownership needs full-outcome follow-through.")
-    } else if !is_error && output.contains(crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
+        Some("🔍 Checking the delivery state of the finished work...")
+    } else if !is_error
+        && output.contains(crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
     {
-        Some("👉 Todo quality gate: hill-climbability needs a stronger feedback loop.")
+        Some("🔍 Asking for a stronger way to verify this work...")
     } else {
         None
     }
@@ -303,17 +304,27 @@ mod tests {
             false,
         )
         .expect("ownership gate should produce a notice");
-        let hill = todo_gate_notice(
+        let feedback = todo_gate_notice(
             "todo",
-            crate::todo::TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE,
+            crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
             false,
         )
-        .expect("hill-climbability gate should produce a notice");
+        .expect("closed feedback loop gate should produce a notice");
 
-        assert!(ownership.contains("completion gate"));
-        assert!(hill.contains("quality gate"));
-        assert!(!ownership.contains(&crate::todo::QUALITY_GATE_THRESHOLD.to_string()));
-        assert!(!hill.contains(&crate::todo::QUALITY_GATE_THRESHOLD.to_string()));
+        // Assert the *intent* of each notice rather than incidental phrasing:
+        // these strings get reworded, and 7a5ad004f changed "follow through"
+        // to "owned end to end" without updating this test, turning it red on
+        // master. What must hold is that each gate names what is being checked.
+        assert!(
+            ownership.contains("delivery state"),
+            "ownership notice should say what is being checked: {ownership}"
+        );
+        assert!(
+            feedback.contains("verify"),
+            "feedback-loop notice should say what is being checked: {feedback}"
+        );
+        assert!(!ownership.chars().any(|ch| ch.is_ascii_digit()));
+        assert!(!feedback.chars().any(|ch| ch.is_ascii_digit()));
         assert!(todo_gate_notice("bash", ownership, true).is_none());
     }
 }

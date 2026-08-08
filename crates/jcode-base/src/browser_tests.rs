@@ -68,11 +68,23 @@ fn test_should_prompt_extension_install_only_before_setup_complete() {
     };
     assert!(should_prompt_extension_install(&incomplete));
 
-    let complete = BrowserStatus {
+    // A completed setup whose bridge is healthy stays inert.
+    let complete_and_healthy = BrowserStatus {
         setup_complete: true,
+        responding: true,
+        ..incomplete.clone()
+    };
+    assert!(!should_prompt_extension_install(&complete_and_healthy));
+
+    // But a completed setup whose extension has since vanished must be able to
+    // re-prompt; previously the stale .setup-complete marker suppressed the
+    // installer forever (#602).
+    let complete_but_dead = BrowserStatus {
+        setup_complete: true,
+        responding: false,
         ..incomplete
     };
-    assert!(!should_prompt_extension_install(&complete));
+    assert!(should_prompt_extension_install(&complete_but_dead));
 }
 
 #[test]
@@ -209,4 +221,105 @@ fn ensure_browser_session_does_not_pass_unsupported_bind_window_flag() {
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+// Regression coverage for #602.
+//
+// Bug A: the bridge ping had no timeout. The browser CLI round-trips to the
+// Firefox extension over ws://127.0.0.1:8766, so when the extension is missing
+// the CLI never returns and `browser status` / `browser setup` hang for
+// minutes (measured: 2m14s and a full 3-minute cap).
+//
+// Bug B: once ~/.jcode/browser/.setup-complete existed, setup could never
+// reinstall a vanished extension.
+
+#[cfg(unix)]
+fn write_executable(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, script).expect("write script");
+    let mut perms = std::fs::metadata(path).expect("stat script").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).expect("chmod script");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hanging_browser_cli_times_out_instead_of_blocking_forever() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bin = temp.path().join("browser");
+    // Stands in for a CLI waiting on a bridge that will never answer.
+    write_executable(&bin, "#!/bin/sh\nsleep 600\n");
+
+    let started = std::time::Instant::now();
+    let result = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_millis(300))
+        .await
+        .expect("capped call should not error");
+    let elapsed = started.elapsed();
+
+    assert!(result.is_none(), "a hanging CLI must report a timeout");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "must fail fast, took {elapsed:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn responsive_browser_cli_still_returns_its_output() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bin = temp.path().join("browser");
+    write_executable(&bin, "#!/bin/sh\necho pong\n");
+
+    let output = run_browser_cli_capped(&bin, &["ping"], std::time::Duration::from_secs(5))
+        .await
+        .expect("capped call should not error")
+        .expect("a responsive CLI must not report a timeout");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("pong"));
+}
+
+fn status_fixture(setup_complete: bool, binary_installed: bool, responding: bool) -> BrowserStatus {
+    BrowserStatus {
+        backend: "test",
+        browser: "firefox",
+        setup_complete,
+        binary_installed,
+        responding,
+        compatible: true,
+        missing_actions: Vec::new(),
+        ready: setup_complete && binary_installed && responding,
+    }
+}
+
+#[test]
+fn setup_prompts_on_a_first_run() {
+    assert!(should_prompt_extension_install(&status_fixture(
+        false, false, false
+    )));
+}
+
+#[test]
+fn stale_marker_no_longer_blocks_reinstall_when_the_bridge_is_dead() {
+    // The #602 shape: marker present from a past setup, binary installed, but
+    // the extension is gone from the live profile so nothing answers.
+    assert!(should_prompt_extension_install(&status_fixture(
+        true, true, false
+    )));
+}
+
+#[test]
+fn healthy_bridge_stays_inert() {
+    assert!(!should_prompt_extension_install(&status_fixture(
+        true, true, true
+    )));
+}
+
+#[test]
+fn completed_setup_without_the_binary_does_not_prompt() {
+    // Nothing to talk to yet; the binary install path handles this, so the
+    // extension prompt must not fire spuriously.
+    assert!(!should_prompt_extension_install(&status_fixture(
+        true, false, false
+    )));
 }

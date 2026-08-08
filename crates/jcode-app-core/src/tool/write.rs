@@ -103,24 +103,34 @@ impl Tool for WriteTool {
             detail,
         }));
 
-        if existed {
-            Ok(ToolOutput::new(format!(
+        let mut body = if existed {
+            format!(
                 "Updated {} ({} lines){}\n{}",
                 params.file_path,
                 line_count,
                 if diff.is_empty() { "" } else { ":" },
                 diff
-            ))
-            .with_title(params.file_path.clone()))
+            )
         } else {
             // For new files, show all lines as additions
             let diff = generate_diff_summary("", &params.content);
-            Ok(ToolOutput::new(format!(
+            format!(
                 "Created {} ({} lines):\n{}",
                 params.file_path, line_count, diff
-            ))
-            .with_title(params.file_path.clone()))
-        }
+            )
+        };
+
+        // A write that lands on the active config.toml states exactly which
+        // settings changed and whether they are live, so neither the agent nor
+        // the user has to guess whether the edit took effect.
+        super::config_edit_notice::append_config_edit_notice(
+            &mut body,
+            &path,
+            old_content.as_deref().unwrap_or(""),
+            &params.content,
+        );
+
+        Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
     }
 }
 

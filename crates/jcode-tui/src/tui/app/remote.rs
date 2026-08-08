@@ -54,8 +54,8 @@ use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 pub(super) use input_dispatch::{
     apply_remote_transcript_event, apply_transcript_event, begin_remote_send,
     begin_remote_split_launch, finish_remote_split_launch, history_matches_pending_startup_prompt,
-    route_prepared_input_to_new_remote_session, submit_prepared_remote_input,
-    submit_remote_slash_input,
+    route_prepared_input_to_new_remote_session, stage_turn_for_remote_tick_loop,
+    submit_prepared_remote_input, submit_remote_slash_input,
 };
 pub(super) use key_handling::{
     handle_remote_char_input, handle_remote_key, handle_remote_key_event, send_interleave_now,
@@ -64,6 +64,22 @@ pub(super) use server_events::handle_server_event;
 
 const CONNECTION_MESSAGE_TITLE: &str = "Connection";
 const RELOAD_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+
+fn handle_ctrl_kill_to_end(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    // Match the local draft semantics before remote navigation can claim Ctrl+K.
+    // Ctrl+Shift+K remains reserved for scrolling.
+    if modifiers.contains(KeyModifiers::CONTROL)
+        && !modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(code, KeyCode::Char('k'))
+        && !app.input.is_empty()
+    {
+        input::delete_input_to_end(app);
+        return true;
+    }
+
+    false
+}
+
 pub(super) enum RemoteEventOutcome {
     Continue,
     Reconnect,
@@ -113,11 +129,13 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
 
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
+    needs_redraw |= app.refresh_pinned_todos_if_needed();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
 
@@ -302,6 +320,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     detect_and_cancel_stall(app, remote).await;
     needs_redraw |= recover_stuck_remote_history(app, remote).await;
     needs_redraw |= detect_starved_queued_followup(app);
+    needs_redraw |= app.maybe_finish_background_client_reload();
     needs_redraw
 }
 
@@ -332,6 +351,30 @@ async fn forward_pending_reasoning_effort(app: &mut App, remote: &mut RemoteConn
 
 pub(super) async fn handle_terminal_event(
     app: &mut App,
+    terminal: &mut DefaultTerminal,
+    remote: &mut RemoteConnection,
+    event: Option<std::result::Result<Event, std::io::Error>>,
+) -> Result<bool> {
+    let mut needs_redraw = apply_terminal_event(app, terminal, remote, event).await?;
+    // Coalesce bursts of already-buffered input (fast typing, key repeat,
+    // scroll wheels) into a single frame instead of paying one full render per
+    // event. Without this, typing faster than the frame rate queues events and
+    // each one costs handle + full draw serially, which reads as input-line
+    // lag. Mirrors the identical drain in `local::handle_terminal_event`.
+    const MAX_DRAINED_EVENTS_PER_WAKE: usize = 32;
+    for _ in 0..MAX_DRAINED_EVENTS_PER_WAKE {
+        if !crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+            break;
+        }
+        if let Ok(event) = crossterm::event::read() {
+            needs_redraw |= apply_terminal_event(app, terminal, remote, Some(Ok(event))).await?;
+        }
+    }
+    Ok(needs_redraw)
+}
+
+async fn apply_terminal_event(
+    app: &mut App,
     _terminal: &mut DefaultTerminal,
     remote: &mut RemoteConnection,
     event: Option<std::result::Result<Event, std::io::Error>>,
@@ -356,6 +399,9 @@ pub(super) async fn handle_terminal_event(
             app.set_client_focused(false);
         }
         Some(Ok(Event::Key(key))) => {
+            // Start the key-to-paint clock at the moment the key is read, which is
+            // the only point that corresponds to the user's press.
+            crate::tui::ui::note_key_event_read();
             input_attribution.event = Some(format!("key:{:?}:{:?}", key.code, key.kind));
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
@@ -1342,8 +1388,12 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         if let Some(interleave_msg) = app.interleave_message.take()
             && !interleave_msg.trim().is_empty()
         {
+            let interleave_images = std::mem::take(&mut app.interleave_images);
             let msg_clone = interleave_msg.clone();
-            match remote.soft_interrupt(interleave_msg, false).await {
+            match remote
+                .soft_interrupt(interleave_msg, interleave_images, false)
+                .await
+            {
                 Err(e) => {
                     app.push_display_message(DisplayMessage::error(format!(
                         "Failed to queue soft interrupt: {}",
@@ -1359,6 +1409,10 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     }
 
     if let Some(interleave_msg) = app.interleave_message.take() {
+        // Carry the staged attachments through. A local revert of #627 had this
+        // passing `vec![]`, which silently dropped every image on an interleaved
+        // send while still compiling, so the comment marks why the take matters.
+        let interleave_images = std::mem::take(&mut app.interleave_images);
         if !interleave_msg.trim().is_empty() {
             app.push_display_message(DisplayMessage {
                 role: "user".to_string(),
@@ -1368,8 +1422,17 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
                 title: None,
                 tool_data: None,
             });
-            if let Err(e) =
-                begin_remote_send(app, remote, interleave_msg, vec![], false, None, false, 0).await
+            if let Err(e) = begin_remote_send(
+                app,
+                remote,
+                interleave_msg,
+                interleave_images,
+                false,
+                None,
+                false,
+                0,
+            )
+            .await
             {
                 app.push_display_message(DisplayMessage::error(format!(
                     "Failed to send message: {}",
@@ -1707,24 +1770,7 @@ async fn parse_and_inject_key(
 }
 
 fn handle_disconnected_local_command(app: &mut App, trimmed: &str) -> bool {
-    let handled = super::commands::handle_help_command(app, trimmed)
-        || super::commands::handle_keys_command(app, trimmed)
-        || super::commands::handle_session_command(app, trimmed)
-        || super::commands::handle_test_command(app, trimmed)
-        || super::commands::handle_disabled_mission_command(app, trimmed)
-        || super::commands::handle_goals_command(app, trimmed)
-        || super::commands::handle_config_command(app, trimmed)
-        || super::commands::handle_log_command(app, trimmed)
-        || super::commands::handle_diff_command(app, trimmed)
-        || super::commands::handle_debug_command(app, trimmed)
-        || super::commands::handle_model_command(app, trimmed)
-        || super::commands::handle_usage_command(app, trimmed)
-        || super::commands::handle_feedback_command(app, trimmed)
-        || super::commands::handle_telemetry_command(app, trimmed)
-        || super::support::handle_support_command(app, trimmed)
-        || super::state_ui::handle_info_command(app, trimmed)
-        || super::auth::handle_auth_command(app, trimmed)
-        || super::commands::handle_dev_command(app, trimmed);
+    let handled = super::commands_dispatch::dispatch_local_command(app, trimmed);
 
     if handled {
         if trimmed.starts_with('/') {
@@ -1794,6 +1840,10 @@ fn handle_disconnected_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
+        return Ok(());
+    }
+
     if input::handle_navigation_shortcuts(app, code, modifiers) {
         return Ok(());
     }
@@ -1805,8 +1855,7 @@ fn handle_disconnected_key_internal(
                 return Ok(());
             }
             KeyCode::Char('l') if !app.diff_pane_visible() => {
-                app.clear_display_messages();
-                app.queued_messages.clear();
+                app.clear_view_terminal_style();
                 return Ok(());
             }
             _ => {
@@ -1854,11 +1903,17 @@ fn handle_disconnected_key_internal(
                 app.paste_from_clipboard();
                 return Ok(());
             }
+            // Cmd+L mirrors Ctrl+L: terminal-style clear (blank spacer
+            // pushes the transcript up into scrollback).
+            KeyCode::Char('l') => {
+                app.clear_view_terminal_style();
+                return Ok(());
+            }
             _ => {}
         }
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+    if input::is_alternate_enter(code, modifiers) {
         queue_message_for_reconnect(app);
         return Ok(());
     }
@@ -1873,8 +1928,7 @@ fn handle_disconnected_key_internal(
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-        input::insert_input_text(app, "\n");
+    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }
 

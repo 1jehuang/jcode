@@ -4,167 +4,21 @@ use jcode_message_types::{
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Normalize a tool `parameters` JSON schema for strict OpenAI-compatible
-/// endpoints (issue #446).
+/// Normalize a tool `parameters` JSON schema for whichever upstream OpenRouter
+/// routes the model to.
 ///
-/// Some backends (LM Studio being the prominent example) validate
-/// `tools[].function.parameters` strictly and reject any object schema that
-/// lacks a `properties` field with HTTP 400. MCP servers commonly declare
-/// no-argument tools as a bare `{"type": "object"}`, and because the full tool
-/// array is sent on every request, one such tool makes the provider unusable.
+/// OpenRouter forwards to Anthropic, Vertex, Bedrock, LM Studio and others, so
+/// it must satisfy the strictest of them: object schemas need a `properties` key
+/// (LM Studio, #446) and top-level combiners are rejected by the
+/// Anthropic-family backends (#495).
 ///
-/// This recursively inserts an empty `properties: {}` into every
-/// object-typed schema node that is missing it. The rewrite is semantically a
-/// no-op per JSON Schema, so it is safe to apply for every OpenAI-compatible
-/// endpoint rather than allow-listing strict ones.
+/// The subset, the recursion, and the structural rewrites live in
+/// `jcode-schema-dialect` so every provider shares one implementation and one
+/// set of regression tests. Delegating here also strips constructs the previous
+/// hand-written version forwarded (`propertyNames`, `uniqueItems`), which the
+/// same upstreams reject when they reach them.
 pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
-    fn walk(node: &mut Value) {
-        let Some(obj) = node.as_object_mut() else {
-            if let Some(items) = node.as_array_mut() {
-                for item in items {
-                    walk(item);
-                }
-            }
-            return;
-        };
-
-        let is_object_type = match obj.get("type") {
-            Some(Value::String(ty)) => ty == "object",
-            Some(Value::Array(types)) => types.iter().any(|ty| ty.as_str() == Some("object")),
-            _ => false,
-        };
-        if is_object_type {
-            obj.entry("properties")
-                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        }
-
-        for (key, value) in obj.iter_mut() {
-            match key.as_str() {
-                // Schema maps: each value is a schema.
-                "properties" | "patternProperties" | "$defs" | "definitions" => {
-                    if let Some(map) = value.as_object_mut() {
-                        for sub in map.values_mut() {
-                            walk(sub);
-                        }
-                    }
-                }
-                // Direct sub-schemas (or arrays of schemas).
-                "items"
-                | "additionalProperties"
-                | "anyOf"
-                | "oneOf"
-                | "allOf"
-                | "not"
-                | "if"
-                | "then"
-                | "else"
-                | "prefixItems"
-                | "contains" => walk(value),
-                _ => {}
-            }
-        }
-    }
-
-    // A bare `{}` / non-object parameters value is also rejected by strict
-    // validators; OpenAI's spec models "no parameters" as an empty object
-    // schema.
-    let mut sanitized = if schema.is_object() {
-        schema.clone()
-    } else {
-        serde_json::json!({ "type": "object" })
-    };
-    if let Some(obj) = sanitized.as_object_mut()
-        && obj.is_empty()
-    {
-        obj.insert("type".to_string(), Value::String("object".to_string()));
-    }
-    flatten_top_level_combinators(&mut sanitized);
-    walk(&mut sanitized);
-    sanitized
-}
-
-/// Flatten `oneOf`/`anyOf`/`allOf` at the top level of a tool parameters
-/// schema into a single object schema (issue #495).
-///
-/// OpenRouter forwards tool schemas to whichever upstream serves the model,
-/// and Anthropic-family backends (Anthropic, Google Vertex, Amazon Bedrock)
-/// reject `input_schema` combinators at the top level with HTTP 400
-/// ("input_schema does not support oneOf, allOf, or anyOf at the top level").
-/// One such tool bricks every request, so first-time OpenRouter logins fail on
-/// their first message when the registry contains a multi-action tool that
-/// models its action branches with top-level `anyOf`.
-///
-/// Mirror the direct Anthropic provider's `anthropic_input_schema`: keep the
-/// common object shape, merge branch `properties` in as optional fields, and
-/// only promote `required` from `allOf` branches (whose constraints all
-/// apply). Runtime tool deserialization remains the authority for
-/// action-specific constraints. Nested combinators inside properties are left
-/// untouched; upstreams accept those.
-fn flatten_top_level_combinators(schema: &mut Value) {
-    let Some(output) = schema.as_object_mut() else {
-        return;
-    };
-
-    let mut merged_properties = output
-        .get("properties")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let mut all_of_required = Vec::new();
-    let mut saw_combinator = false;
-
-    for keyword in ["oneOf", "anyOf", "allOf"] {
-        let Some(branches) = output
-            .remove(keyword)
-            .and_then(|value| value.as_array().cloned())
-        else {
-            continue;
-        };
-        saw_combinator = true;
-        for branch in branches {
-            let Some(branch) = branch.as_object() else {
-                continue;
-            };
-            if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
-                for (name, property) in properties {
-                    merged_properties
-                        .entry(name.clone())
-                        .or_insert_with(|| property.clone());
-                }
-            }
-            if keyword == "allOf"
-                && let Some(required) = branch.get("required").and_then(Value::as_array)
-            {
-                for name in required.iter().filter_map(Value::as_str) {
-                    if !all_of_required.iter().any(|existing| existing == name) {
-                        all_of_required.push(name.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    if !saw_combinator {
-        return;
-    }
-
-    output.insert("type".to_string(), Value::String("object".to_string()));
-    output.insert("properties".to_string(), Value::Object(merged_properties));
-    if !all_of_required.is_empty() {
-        let required = output
-            .entry("required".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Value::Array(required) = required {
-            for name in all_of_required {
-                if !required
-                    .iter()
-                    .any(|existing| existing.as_str() == Some(&name))
-                {
-                    required.push(Value::String(name));
-                }
-            }
-        }
-    }
+    jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENROUTER)
 }
 
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.

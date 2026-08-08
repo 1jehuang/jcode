@@ -71,7 +71,11 @@ fn test_plan_command_is_plan_only_and_presents_plan_card() {
         .display_messages()
         .last()
         .expect("missing plan launch notice");
-    assert!(display.content.contains("Planning add a compact message mode"));
+    assert!(
+        display
+            .content
+            .contains("Planning add a compact message mode")
+    );
 }
 
 #[test]
@@ -134,7 +138,7 @@ fn test_refactor_status_summarizes_current_todos() {
                     priority: "high".to_string(),
                     blocked_by: Vec::new(),
                     assigned_to: None,
-                    confidence: Some(76),
+                    confidence: Some(crate::todo::ConfidenceState::from_legacy_score(76)),
                     completion_confidence: None,
                     confidence_history: Vec::new(),
                 },
@@ -168,7 +172,7 @@ fn test_refactor_status_summarizes_current_todos() {
                 .contains("1 incomplete · 1 completed · 0 cancelled")
         );
         assert!(msg.content.contains("Split giant module"));
-        assert!(msg.content.contains("confidence 76%"));
+        assert!(msg.content.contains("confidence plausible"));
     });
 }
 

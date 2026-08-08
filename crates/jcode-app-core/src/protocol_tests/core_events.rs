@@ -5,6 +5,7 @@ fn test_request_roundtrip() -> Result<()> {
         content: "hello".to_string(),
         images: vec![],
         system_reminder: None,
+        no_reply: false,
     };
     let json = serde_json::to_string(&req)?;
     let decoded = parse_request_json(&json)?;
@@ -68,6 +69,19 @@ fn test_event_roundtrip() -> Result<()> {
         return Err(anyhow!("wrong event type"));
     };
     assert_eq!(text, "hello");
+    Ok(())
+}
+
+#[test]
+fn test_context_message_added_event_roundtrip() -> Result<()> {
+    let event = ServerEvent::ContextMessageAdded { id: 42 };
+    let json = encode_event(&event);
+    assert!(json.contains("\"type\":\"context_message_added\""));
+    let decoded = parse_event_json(json.trim())?;
+    let ServerEvent::ContextMessageAdded { id } = decoded else {
+        return Err(anyhow!("wrong event type"));
+    };
+    assert_eq!(id, 42);
     Ok(())
 }
 

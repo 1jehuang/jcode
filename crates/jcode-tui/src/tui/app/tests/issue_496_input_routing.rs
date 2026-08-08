@@ -61,6 +61,46 @@ fn test_stop_command_processing_requests_interrupt() {
     assert!(app.cancel_requested, "'/stop' must interrupt like /cancel");
 }
 
+#[test]
+fn test_cancel_and_stop_clear_pending_rate_limit_retry() {
+    for command in ["/cancel", "/stop"] {
+        let mut app = create_test_app();
+        let retry_at = Instant::now() + Duration::from_secs(30);
+        app.rate_limit_reset = Some(retry_at);
+        app.rate_limit_pending_message = Some(PendingRemoteMessage {
+            content: "retry me".to_string(),
+            images: vec![],
+            is_system: false,
+            system_reminder: None,
+            auto_retry: false,
+            retry_attempts: 0,
+            retry_at: Some(retry_at),
+        });
+
+        app.set_input_for_test(command);
+        app.submit_input();
+
+        assert!(
+            app.rate_limit_reset.is_none(),
+            "{command} must disarm the retry timer"
+        );
+        assert!(
+            app.rate_limit_pending_message.is_none(),
+            "{command} must discard the pending retry payload"
+        );
+        assert!(
+            !app.cancel_requested,
+            "{command} must not leak cancellation into the next turn"
+        );
+        assert_eq!(
+            app.status_notice
+                .as_ref()
+                .map(|(message, _)| message.as_str()),
+            Some("Pending retry cancelled")
+        );
+    }
+}
+
 fn pending_api_key_login() -> crate::tui::app::PendingLogin {
     crate::tui::app::PendingLogin::ApiKeyProfile {
         provider_id: "openrouter".to_string(),

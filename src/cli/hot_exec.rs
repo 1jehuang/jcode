@@ -276,6 +276,26 @@ pub fn check_for_updates() -> Option<bool> {
     }
 }
 
+/// True when the source checkout has local commits that upstream lacks, so a
+/// fast-forward pull (and therefore auto-update) can never succeed. Returns
+/// `None` when the repo or upstream cannot be inspected.
+pub fn local_commits_ahead_of_upstream() -> Option<bool> {
+    let repo_dir = get_repo_dir()?;
+    let ahead = ProcessCommand::new("git")
+        .args(["rev-list", "--count", "@{u}..HEAD"])
+        .current_dir(&repo_dir)
+        .output()
+        .ok()?;
+    if !ahead.status.success() {
+        return None;
+    }
+    let count: u32 = String::from_utf8_lossy(&ahead.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    Some(count > 0)
+}
+
 pub fn run_auto_update() -> Result<()> {
     use crate::bus::{Bus, BusEvent, UpdateStatus};
 
@@ -315,6 +335,26 @@ pub fn run_auto_update() -> Result<()> {
     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installed {
         version: version.clone(),
     }));
+
+    // With a live TUI session, let the app reload gracefully (input line
+    // saved, current turn finished, session resumed) instead of exec-ing over
+    // the running interface, which visibly resets the screen.
+    if let Some(session_id) = crate::get_current_session() {
+        use crate::bus::{ClientMaintenanceAction, SessionUpdateStatus};
+        crate::logging::info(&format!(
+            "Updated to {}. Requesting graceful session reload...",
+            version
+        ));
+        Bus::global().publish(BusEvent::SessionUpdateStatus(
+            SessionUpdateStatus::ReadyToReload {
+                session_id,
+                action: ClientMaintenanceAction::Update,
+                version,
+            },
+        ));
+        return Ok(());
+    }
+
     crate::logging::info(&format!("Updated to {}. Restarting...", version));
     std::thread::sleep(std::time::Duration::from_millis(250));
 

@@ -60,8 +60,16 @@ impl Provider for OpenRouterProvider {
                 None
             }
         });
-        let allow_reasoning = (self.supports_provider_features || kimi_coding_endpoint)
-            && thinking_enabled != Some(false);
+        // DeepSeek-family models served through a direct OpenAI-compatible
+        // profile can run thinking mode server-side. Their follow-up requests
+        // must replay the `reasoning_content` returned with an assistant tool
+        // call even though the route has no OpenRouter provider features
+        // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
+        // not synthesize the field when the prior turn did not return one.
+        let deepseek_model = Self::model_is_deepseek_family(&model);
+        let allow_reasoning =
+            (self.supports_provider_features || kimi_coding_endpoint || deepseek_model)
+                && thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
             || kimi_coding_endpoint;
@@ -118,6 +126,12 @@ impl Provider for OpenRouterProvider {
             "messages": api_messages,
             "stream": true,
         });
+
+        if !self.supports_provider_features {
+            request["stream_options"] = serde_json::json!({
+                "include_usage": true,
+            });
+        }
 
         if let Some(max_tokens) = self.max_tokens {
             request["max_tokens"] = serde_json::json!(max_tokens);
@@ -725,6 +739,20 @@ impl Provider for OpenRouterProvider {
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
+        // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
+        // default 4096) and silently truncates anything longer, so a model's
+        // advertised trained window is not a safe budget. Until the native-API
+        // probe populates the catalog above, assume the conservative server
+        // default rather than over-budgeting and losing conversation history.
+        //
+        // This must outrank the static open-weight family table below: that
+        // table is what reported 262K for `qwen3:*` on Ollama while the server
+        // was actually serving 4K. It stays *below* the live catalog and the
+        // user's explicit per-model `context_window`, both of which are real
+        // evidence about this endpoint.
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+            return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
+        }
         if let Some(profile_id) = self.profile_id.as_deref()
             && let Some(limit) =
                 jcode_base::provider_catalog::openai_compatible_profile_context_limit(
@@ -772,6 +800,46 @@ impl Provider for OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// The disk-cache namespace this provider's *foreground* catalog reads and
+    /// writes should use.
+    ///
+    /// Every `new_named_openai_compatible()` constructor sets the process-global
+    /// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named
+    /// profiles in one process the last one constructed wins and all profiles
+    /// collide on a single `<last-profile>_models.json`. The background refresh
+    /// path already passes an explicit namespace; the foreground paths did not.
+    /// See issue #607.
+    ///
+    /// Standard/direct OpenRouter and built-in profiles keep the existing
+    /// env-var-driven `cache_path()` semantics.
+    pub(crate) fn foreground_cache_namespace(&self) -> Option<String> {
+        self.is_user_named_profile()
+            .then(|| self.profile_id.clone())
+            .flatten()
+    }
+
+    /// The disk cache entry usable for this provider, i.e. its own namespace
+    /// (#607) and a `source_api_base` that matches this endpoint.
+    pub(crate) fn load_usable_model_disk_cache_entry(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        self.load_disk_cache_entry_for_this_profile()
+            .filter(|entry| self.model_disk_cache_source_matches(entry))
+    }
+
+    /// Load this provider's own model disk cache, ignoring the process-global
+    /// namespace env var for user-named profiles (#607).
+    pub(crate) fn load_disk_cache_entry_for_this_profile(
+        &self,
+    ) -> Option<jcode_provider_openrouter::DiskCache> {
+        match self.foreground_cache_namespace() {
+            Some(namespace) => {
+                jcode_provider_openrouter::load_disk_cache_entry_for_namespace(&namespace)
+            }
+            None => jcode_provider_openrouter::load_disk_cache_entry(),
+        }
+    }
+
     /// True when this instance was built from a user-declared
     /// `[providers.<name>]` profile in config.toml rather than a built-in
     /// OpenAI-compatible profile (Cerebras, NVIDIA NIM, ...).

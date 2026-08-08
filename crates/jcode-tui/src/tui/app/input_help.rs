@@ -22,6 +22,9 @@ impl App {
             "clear" => {
                 "/clear\nClear current conversation, queue, and display; starts a fresh session."
             }
+            "cls" | "clear-view" => {
+                "/cls\nClear the rendered view only. The model keeps its full context; nothing is sent or forgotten. (Ctrl+L clears the screen but keeps history in scrollback.)"
+            }
             "model" => {
                 "/model\nOpen model picker.\n\n/model <name>\nSwitch model.\n\n/model <name>@<provider>\nPin OpenRouter routing (@auto clears pin)."
             }
@@ -47,7 +50,7 @@ impl App {
                 "/observe\nToggle transient observe mode for the side panel.\n\n/observe on\nEnable observe mode and focus the observe page.\n\n/observe off\nDisable observe mode.\n\n/observe status\nShow whether observe mode is enabled.\n\nObserve mode shows only the latest tool call or tool result added to context, and it is not persisted to disk."
             }
             "todos" | "todo" => {
-                "/todos\nShow the current session's todo list as an inline card in the chat (press again, or the todo-card hotkey, to dismiss the trailing card). The card live-updates as the todo list changes.\n\n/todos panel\nToggle the legacy dedicated todo screen in the side panel.\n\n/todos on\nEnable the side-panel todo screen and focus it.\n\n/todos off\nDisable the side-panel todo screen.\n\n/todos status\nShow todo card/panel status."
+                "/todos\nShow the current session's todo list as an inline card in the chat (press again, or the todo-card hotkey, to dismiss the trailing card). The card live-updates as the todo list changes.\n\n/todos panel\nToggle the legacy dedicated todo screen in the side panel.\n\n/todos pin\nToggle pinning the full todo list to the top of the chat transcript while it scrolls (saved to config as display.pin_todos, off by default).\n\n/todos on\nEnable the side-panel todo screen and focus it.\n\n/todos off\nDisable the side-panel todo screen.\n\n/todos status\nShow todo card/panel/pin status."
             }
             "splitview" | "split-view" => {
                 "/splitview\nToggle a transient split view that mirrors the current chat in the side panel.\n\n/splitview on\nEnable split view and focus the mirrored chat page.\n\n/splitview off\nDisable split view.\n\n/splitview status\nShow whether split view is enabled.\n\nThis gives the side panel its own scroll position for the same conversation so you can read older context while keeping the main composer active."
@@ -66,6 +69,9 @@ impl App {
             }
             "fast-release" | "cut-release" | "commit-push-release" => {
                 "/fast-release\nSame as /commit-push, then publish the release as quickly as possible from the local Linux machine.\n\nThe agent picks the semver bump and first runs scripts/quick-release.sh --prepare-fast before changing Cargo.toml. This refreshes and records the warm target/selfdev Linux binary without invalidating the cache for a version change. The agent then makes one release-metadata commit containing Cargo.toml, Cargo.lock, and the changelog, pushes it, and runs scripts/quick-release.sh --fast-local. That command wraps the prepared binary with the release identity, publishes Linux and the GitHub release immediately, and lets CI replace it with the portable Linux build while adding every other platform and final signoff assets. /cut-release is a compatibility alias."
+            }
+            "fast-macos-release" => {
+                "/fast-macos-release\nSame as /commit-push, but prepare and publish macOS arm64 as quickly as possible from the local Linux machine.\n\nThe agent first runs scripts/quick-release.sh --prepare-fast-macos before changing Cargo.toml. This cross-builds macOS arm64 with the future release identity and records its source commit and checksum. After the release-metadata commit, scripts/quick-release.sh --fast-macos-local validates and publishes that asset immediately. CI then replaces it with the signoff build and adds macOS Intel and every other platform. Requires osxcross."
             }
             "remote-release" => {
                 "/remote-release\nSame as /commit-push, then push the release tag without running any local build.\n\nThe agent picks the semver bump, updates Cargo.toml/Cargo.lock and the changelog, commits and pushes, then runs scripts/quick-release.sh --remote. GitHub Actions builds, signs, checksums, and publishes every platform; the release remains a draft until the remote gates pass."
@@ -117,6 +123,7 @@ impl App {
             "poke" => {
                 "/poke [on|off|status]\nPoke the model to resume when it has stopped with incomplete todos.\n\n\
                 Auto-poke now starts enabled by default, and Ctrl+P toggles it on/off.\n\
+                Set auto_poke = false under [features] in ~/.jcode/config.toml to start with it disabled.\n\
                 /poke or /poke on arms auto-poke and immediately pokes if work remains.\n\
                 /poke off disarms auto-poke and clears any queued poke follow-ups.\n\
                 /poke status shows whether auto-poke is currently armed.\n\
@@ -162,10 +169,10 @@ impl App {
                 "/usage\nFetch and display usage limits for connected providers. This command only reports real connected-provider usage windows and reset times."
             }
             "subscription" => {
-                "/subscription\nShow curated jcode subscription status for this session, including router config, runtime mode, curated models, and planned tier budget scaffolding."
+                "/subscription\nCompatibility alias for /hosted status. Shows hosted-model usage, your monthly spending limit, billing status, and router configuration."
             }
-            "subscribe" => {
-                "/subscribe\nWhy subscribe to jcode: more tokens on curated frontier models, one browser sign-in with no API keys, failover routing, and funding open-source development. Lists plans and prices, then start with /login jcode."
+            "subscribe" | "hosted" => {
+                "/hosted\nUse Jcode hosted models without a subscription: choose a monthly spending limit, receive milestone warnings without throttling, and pay in progressively larger tranches. Sign in once with /login jcode.\n\n/hosted status\nShow usage and your current spending limit.\n\n/subscribe\nCompatibility alias for /hosted."
             }
             "version" => "/version\nShow jcode version/build details.",
             "changelog" => "/changelog\nShow recent changes embedded in this build.",
@@ -186,7 +193,7 @@ impl App {
                 "/tool-call-details\nShow whether the dimmed technical detail (command, path, args) renders next to the model-provided intent on tool rows.\n\n/tool-call-details on\nShow the technical detail after the intent, e.g. `bash · Run tests · $ cargo test`.\n\n/tool-call-details off\nShow only the intent on tool rows that have one. Rows without an intent still show the technical detail, and error summaries always render."
             }
             "auth" | "login" => {
-                "/auth\nShow authentication status for all providers.\n\n/login\nInteractive provider selection - pick a provider to log into.\n\n/login <provider>\nStart login flow directly for any provider shown by /login or the /login completions.\n\nUse /login jcode for curated jcode subscription access via your router, not OpenRouter BYOK."
+                "/auth\nShow authentication status for all providers.\n\n/login\nInteractive provider selection - pick a provider to log into.\n\n/login <provider>\nStart login flow directly for any provider shown by /login or the /login completions.\n\nUse /login jcode for pay-as-you-go hosted models through the Jcode router. Set a monthly spending limit in the browser; no API key is pasted into the terminal."
             }
             "account" | "accounts" => {
                 "/account\nOpen the inline account picker showing both Claude and OpenAI accounts together. It lists saved accounts plus new/replace actions for each provider.\n\n/account claude  or  /account openai\nOpen the inline picker filtered to that provider.\n\n/account <provider> settings\nShow provider-specific account/settings details.\n\n/account <provider> login\nStart or refresh credentials for a provider.\n\n/account claude add  or  /account openai add\nCreate the next numbered OAuth account directly.\n\n/account <provider> switch <label>\nSwitch the active account for multi-account providers.\n\n/account <provider> remove <label>\nRemove a saved account.\n\n/account default-provider <provider|auto>\nSet the preferred default provider for future sessions.\n\n/account default-model <model|clear>\nSet the preferred default model for future sessions.\n\nOpenAI-specific settings:\n  /account openai transport ...\n  /account openai effort ...\n  /account openai fast on|off\n\nCustom provider settings:\n  /account openai-compatible api-base ...\n  /account openai-compatible api-key-name ...\n  /account openai-compatible env-file ...\n  /account openai-compatible default-model ..."
@@ -218,6 +225,11 @@ impl App {
             None => String::new(),
         };
         let help = help.replace("{resume_shortcut}", &resume_shortcut);
+        // Mac keyboards have no "Alt" key; show the ⌥ keycap instead.
+        let help = help.replace(
+            "Alt+",
+            &format!("{}+", jcode_tui_core::keybind::alt_label()),
+        );
         Some(help)
     }
 }

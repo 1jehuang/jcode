@@ -512,7 +512,8 @@ impl RelayClient {
                 queue,
                 stop_signal,
             );
-            if !control.queue_soft_interrupt(interrupt, true, SoftInterruptSource::User) {
+            if !control.queue_soft_interrupt(interrupt, Vec::new(), true, SoftInterruptSource::User)
+            {
                 anyhow::bail!(
                     "session '{}' could not accept cancel interrupt",
                     self.config.session_id

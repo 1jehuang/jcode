@@ -366,6 +366,13 @@ fn config_file_path() -> Result<PathBuf> {
 pub fn cursor_auth_file_path() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        // Keep private SDK/test instances private on Windows too. Without this
+        // branch, APPDATA points at the real user profile even when JCODE_HOME
+        // is set, unlike every other external credential lookup.
+        if std::env::var_os("JCODE_HOME").is_some() {
+            return crate::storage::user_home_path("AppData/Roaming/Cursor/auth.json")
+                .context("No home directory found for Cursor auth.json");
+        }
         let appdata = std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .or_else(|| crate::storage::user_home_path("AppData/Roaming").ok())
@@ -611,14 +618,9 @@ async fn refresh_direct_access_token(
     }
     .await;
 
-    match &result {
-        Ok(_) => {
-            let _ = crate::auth::refresh_state::record_success("cursor");
-        }
-        Err(err) => {
-            let _ = crate::auth::refresh_state::record_failure("cursor", err.to_string());
-        }
-    }
+    // Shared recorder: a permanently rejected refresh token becomes terminal
+    // so background sweeps stop retrying it; transient failures stay retryable.
+    crate::auth::refresh_state::record_refresh_outcome("cursor", refresh_token, &result);
 
     result
 }

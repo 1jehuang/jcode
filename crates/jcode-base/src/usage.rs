@@ -118,6 +118,19 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
             .as_ref()
             .and_then(|w| w.utilization)
             .map(usage_percent_to_ratio),
+        model_scoped: data
+            .limits
+            .into_iter()
+            .filter(|limit| limit.kind.as_deref() == Some("weekly_scoped"))
+            .filter_map(|limit| {
+                let model_name = limit.scope?.model?.display_name?;
+                Some(ModelScopedUsageWindow {
+                    model_name,
+                    utilization: usage_percent_to_ratio(limit.percent?),
+                    resets_at: limit.resets_at,
+                })
+            })
+            .collect(),
         extra_usage_enabled: data
             .extra_usage
             .as_ref()

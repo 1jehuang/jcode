@@ -256,6 +256,72 @@ fn max_and_swarm_efforts_are_preserved_at_the_strongest_api_level() {
     assert_eq!(request["reasoning"]["summary"], serde_json::json!("auto"));
 }
 
+/// GPT-5.6 Sol is jcode's default OpenAI model and defaults to `low`
+/// reasoning effort when the user has not configured one. The default must
+/// surface in `reasoning_effort()` (status/UI), resolve per-model (other
+/// models keep their API-side default), and land in the request payload.
+#[test]
+fn gpt_5_6_sol_defaults_to_low_reasoning_effort() {
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6-sol").as_deref(),
+        Some("low"),
+    );
+    // Long-context and cased variants resolve through canonicalization.
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("GPT-5.6-Sol").as_deref(),
+        Some("low"),
+    );
+    // Other models keep the model's own default (no forced effort).
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.5"),
+        None
+    );
+    assert_eq!(
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6"),
+        None,
+        "the clean 5.6 release is not the Sol quality profile"
+    );
+
+    // With no stored effort, the surfaced status reflects the Sol default.
+    let _guard = jcode_base::storage::lock_test_env();
+    jcode_base::auth::codex::set_active_account_override(Some("sol-low-default-test".to_string()));
+    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
+    let provider = OpenAIProvider::new(CodexCredentials {
+        access_token: "test".to_string(),
+        refresh_token: String::new(),
+        id_token: None,
+        account_id: None,
+        expires_at: None,
+    });
+    provider.set_model("gpt-5.6-sol").unwrap();
+    *provider
+        .reasoning_effort
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("low"));
+
+    // An explicit user override still wins over the Sol default.
+    provider.set_reasoning_effort("high").unwrap();
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("high"));
+    jcode_base::auth::codex::set_active_account_override(None);
+
+    // The default drives the request payload.
+    let request = OpenAIProvider::build_response_request(
+        "gpt-5.6-sol",
+        "system".to_string(),
+        &[],
+        &[],
+        false,
+        Some(DEFAULT_MAX_OUTPUT_TOKENS),
+        OpenAIProvider::default_reasoning_effort_for_model("gpt-5.6-sol").as_deref(),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(request["reasoning"]["effort"], serde_json::json!("low"));
+}
+
 /// Regression guard for issue #203: prompt overlays (`AGENTS.md`,
 /// `.jcode/prompt-overlay.md`) were silently dropped in ChatGPT/Codex OAuth
 /// mode because the provider replaced the caller's fully-built system prompt

@@ -462,7 +462,7 @@ impl Tool for BgTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background tasks. Prefer action='wait' over polling or sleeping. Use action='tail' or output with tail_lines for logs, action='delivery' to change notify/wake behavior, and JCODE_CHECKPOINT/JCODE_PROGRESS from background commands for reliable wakeups."
+        "Manage background tasks. Prefer action='wait' over polling or sleeping."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -474,7 +474,7 @@ impl Tool for BgTool {
                 "action": {
                     "type": "string",
                     "enum": ["list", "status", "output", "tail", "cancel", "cleanup", "watch", "delivery", "subscribe", "wait"],
-                    "description": "Action. Prefer wait for blocking until completion/checkpoints; watch is a compatibility alias for delivery."
+                    "description": "Action. Prefer wait over polling; watch is an alias for delivery."
                 },
                 "task_id": { "type": "string", "description": "Task ID." },
                 "task_ids": { "type": "array", "items": {"type":"string"}, "description": "Task IDs for multi-task wait/status." },
@@ -491,8 +491,8 @@ impl Tool for BgTool {
                 "dry_run": { "type": "boolean", "description": "For cleanup, report what would be removed without deleting." },
                 "notify": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to notify on completion. Defaults to true." },
                 "wake": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to wake on completion. Defaults to true." },
-                "max_wait_seconds": { "type": "integer", "description": "When using wait, maximum seconds to block before returning. Defaults to 60, capped at 3600. Use 0 for an immediate check." },
-                "return_on_progress": { "type": "boolean", "description": "When using wait, return as soon as the task emits a progress/checkpoint event instead of only completion or timeout. Defaults to true." },
+                "max_wait_seconds": { "type": "integer", "description": "For wait: max seconds to block. Default 60, cap 3600, 0 = immediate check." },
+                "return_on_progress": { "type": "boolean", "description": "For wait: return on the first progress/checkpoint event too. Defaults to true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "For multi-task wait, return on any completion, all completions, or first failure. Defaults to any." },
                 "tail_lines": { "type": "integer", "description": "Return only the last N output lines for output/tail/wait preview." },
                 "lines": { "type": "integer", "description": "Alias for tail_lines." },

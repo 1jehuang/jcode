@@ -67,6 +67,10 @@ impl TextAttrs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StyledSpan {
     pub text: String,
+    /// Original TeX for an inline-math span. Text front-ends render `text` as a
+    /// readable fallback; graphical front-ends use this source for native math.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latex: Option<String>,
     pub role: StyleRole,
     pub fill: FillRole,
     pub attrs: TextAttrs,
@@ -76,6 +80,7 @@ impl StyledSpan {
     pub fn new(text: impl Into<String>, role: StyleRole) -> Self {
         Self {
             text: text.into(),
+            latex: None,
             role,
             fill: FillRole::None,
             attrs: TextAttrs::none(),
@@ -187,10 +192,32 @@ pub enum BlockKind {
 pub struct Block {
     pub kind: BlockKind,
     pub lines: Vec<StyledLine>,
+    /// Original TeX for a display-math block. Text front-ends use `lines` as a
+    /// readable fallback; graphical front-ends use this source for real math
+    /// typesetting instead of trying to reconstruct TeX from the fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latex: Option<String>,
     /// Raw table cells (row-major, first row is the header). Only populated for
     /// [`BlockKind::Table`]; layout is deferred to the front-end adapter.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub table: Vec<Vec<String>>,
+    /// Per-column alignment from a GFM delimiter row (`|:--|:-:|--:|`), one
+    /// entry per column. Only populated for [`BlockKind::Table`]. Carried here
+    /// rather than dropped because a numeric column that is right-aligned in
+    /// the source and left-aligned on screen misreads: the alignment *is* the
+    /// author saying what the column means.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alignments: Vec<Alignment>,
+    /// How many lists enclose this block: 0 when it is not inside a list, 1
+    /// inside a top-level list, and so on. A fenced code block or a quote written under a list item belongs
+    /// *to* that item, and a front-end that indents only [`BlockKind::ListItem`]
+    /// pulls it back out to the margin, breaking the list open.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub list_depth: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 impl Block {
@@ -198,7 +225,10 @@ impl Block {
         Self {
             kind,
             lines,
+            latex: None,
             table: Vec::new(),
+            alignments: Vec::new(),
+            list_depth: 0,
         }
     }
 
@@ -207,7 +237,25 @@ impl Block {
         Self {
             kind: BlockKind::Table,
             lines: Vec::new(),
+            latex: None,
             table: rows,
+            alignments: Vec::new(),
+            list_depth: 0,
+        }
+    }
+
+    /// This block, marked as sitting inside a list at `depth`.
+    #[must_use]
+    pub fn in_list(mut self, depth: usize) -> Self {
+        self.list_depth = depth;
+        self
+    }
+
+    /// As [`Block::table`], with the delimiter row's per-column alignments.
+    pub fn aligned_table(rows: Vec<Vec<String>>, alignments: Vec<Alignment>) -> Self {
+        Self {
+            alignments,
+            ..Self::table(rows)
         }
     }
 }

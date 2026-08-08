@@ -2,6 +2,14 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn description_includes_parallel_tool_call_example() {
+    assert!(BATCH_DESCRIPTION.contains("Run independent tool calls in parallel"));
+    assert!(BATCH_DESCRIPTION.contains(r#""tool_calls": ["#));
+    assert!(BATCH_DESCRIPTION.contains(r#""tool": "read""#));
+    assert!(BATCH_DESCRIPTION.contains(r#""tool": "agentgrep""#));
+}
+
+#[test]
 fn test_normalize_flat_params() {
     let input = json!({
         "tool_calls": [
@@ -162,4 +170,44 @@ fn test_schema_keeps_flat_generic_subcall_shape() {
         Some(2)
     );
     assert!(schema["properties"]["tool_calls"]["items"]["oneOf"].is_null());
+}
+
+#[test]
+fn subcall_level_accept_large_output_is_forwarded_into_parameters() {
+    // Models place the flag beside `tool` rather than inside `parameters`, the
+    // same mistake they already make with `intent`. The guard runs per sub-call
+    // on that sub-call's parameters, so a flag left at the wrong level is
+    // silently dropped and the sub-call withheld again.
+    let input = serde_json::json!({
+        "tool_calls": [{
+            "tool": "agentgrep",
+            "accept_large_output": true,
+            "parameters": { "query": "x" },
+        }]
+    });
+    let out = super::normalize_batch_input(input);
+    assert_eq!(
+        out["tool_calls"][0]["parameters"][jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY],
+        serde_json::json!(true),
+        "flag beside `tool` must reach the sub-call parameters"
+    );
+}
+
+#[test]
+fn subcall_level_accept_large_output_does_not_override_an_explicit_value() {
+    // An explicit `false` inside parameters is a deliberate choice for that one
+    // sub-call and must win over a blanket flag beside `tool`.
+    let input = serde_json::json!({
+        "tool_calls": [{
+            "tool": "agentgrep",
+            "accept_large_output": true,
+            "parameters": { "query": "x", "accept_large_output": false },
+        }]
+    });
+    let out = super::normalize_batch_input(input);
+    assert_eq!(
+        out["tool_calls"][0]["parameters"][jcode_tool_core::ACCEPT_LARGE_OUTPUT_KEY],
+        serde_json::json!(false),
+        "explicit per-subcall value must win"
+    );
 }

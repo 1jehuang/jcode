@@ -1,7 +1,7 @@
 use super::{
     build_resume_command, effort_display_label, extract_bracketed_system_message,
     format_countdown_until, gather_ambient_info_inner, inferred_reasoning_efforts,
-    partition_queued_messages, resume_invocation_args,
+    partition_queued_messages, resume_invocation_args, resumed_window_title,
 };
 use crate::ambient::{AmbientManager, Priority, ScheduleRequest, ScheduleTarget};
 use crate::terminal_launch::{detected_resume_terminal, shell_command};
@@ -191,6 +191,82 @@ fn shell_command_quotes_single_quotes_for_handterm_exec() {
     assert_eq!(
         command,
         "'/tmp/jcode binary' '--resume' 'session'\"'\"'quote'"
+    );
+}
+
+/// #715: `spawn_in_new_terminal` was `#[cfg(not(unix))] -> Ok(false)`, so every
+/// in-app spawn (`/judge`, `/fork`, `/review`, `/transfer`, crash-restore)
+/// silently printed "No terminal found" on Windows while the launcher below it
+/// was already Windows-capable.
+///
+/// A cfg'd-out stub cannot be caught by a test that only runs on the platform
+/// where it is absent, so this asserts the property that actually matters and
+/// is checkable everywhere: the function is compiled on every platform, and
+/// the arguments it hands the launcher are platform-independent.
+#[test]
+fn resume_spawn_is_compiled_on_every_platform_with_platform_neutral_args() {
+    // Referencing the item is the assertion: if it were cfg'd out for any
+    // target, that target would fail to build this test.
+    let _: fn(&std::path::Path, &str, &std::path::Path, Option<&str>) -> anyhow::Result<bool> =
+        super::spawn_in_new_terminal;
+
+    // The invocation it forwards must not vary by platform, so Windows gets
+    // exactly what macOS/Linux get.
+    let args = resume_invocation_args("ses_715", None);
+    assert!(
+        args.iter().any(|a| a == "--resume"),
+        "resume invocation lost its --resume flag: {args:?}"
+    );
+    assert!(
+        args.iter().any(|a| a == "ses_715"),
+        "resume invocation lost the session id: {args:?}"
+    );
+    assert!(
+        args.iter().all(|a| !a.contains('\\')),
+        "resume args must not embed platform-specific separators: {args:?}"
+    );
+}
+
+/// #715, the behavioral half. The compile-time guard above proves
+/// `spawn_in_new_terminal` exists on every target; this proves the invocation
+/// it builds actually reaches a launcher and gets spawned.
+///
+/// Drives `spawn_command_in_new_terminal_with`, the injectable seam the real
+/// path bottoms out in, and records what the spawner was handed. Using the
+/// injected closure rather than the configured spawn hook keeps this
+/// deterministic: the hook is read through the process-wide cached config, so a
+/// hook-based test passes or fails depending on whether config was already
+/// loaded by an earlier test in the same binary.
+#[test]
+fn resume_invocation_reaches_the_launcher_and_reports_success() {
+    let args = resume_invocation_args("ses_715_behavioral", None);
+    let command = crate::terminal_launch::TerminalCommand::new(
+        std::path::Path::new("/usr/bin/true"),
+        args.clone(),
+    )
+    .title(resumed_window_title("ses_715_behavioral"));
+
+    let mut spawned: Vec<String> = Vec::new();
+    let result = crate::terminal_launch::spawn_command_in_new_terminal_with(
+        &command,
+        std::path::Path::new("/tmp"),
+        |cmd| {
+            spawned.push(cmd.get_program().to_string_lossy().into_owned());
+            for arg in cmd.get_args() {
+                spawned.push(arg.to_string_lossy().into_owned());
+            }
+            Ok(())
+        },
+    );
+
+    assert!(
+        matches!(result, Ok(true)),
+        "launcher reported no terminal for the resume invocation: {result:?}"
+    );
+    let joined = spawned.join(" ");
+    assert!(
+        joined.contains("--resume") && joined.contains("ses_715_behavioral"),
+        "launcher never received the resume invocation, got: {joined:?}"
     );
 }
 

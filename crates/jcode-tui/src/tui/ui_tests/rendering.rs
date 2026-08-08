@@ -626,3 +626,99 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
         "expected to verify a meaningful number of glyph cells, got {checked}"
     );
 }
+
+/// End-to-end proof that `[display.colors]` reaches a real rendered frame.
+///
+/// The unit tests in `jcode-tui-style` cover the substitution in isolation, but
+/// the thing a user actually cares about is whether configuring a color changes
+/// what the TUI paints. This renders a real frame through `ui::draw`, so it also
+/// guards the hook's presence and its ordering relative to the light/dark pass.
+#[test]
+fn test_configured_palette_recolors_a_real_rendered_frame() {
+    fn render() -> ratatui::buffer::Buffer {
+        let messages = vec![
+            DisplayMessage {
+                role: "user".into(),
+                content: "hello there".into(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+            DisplayMessage {
+                role: "assistant".into(),
+                content: "hi! *bold* and `code`".into(),
+                tool_calls: vec![],
+                duration_secs: None,
+                title: None,
+                tool_data: None,
+            },
+        ];
+        let state = TestState {
+            display_messages: messages,
+            input: "next question".into(),
+            ..Default::default()
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    // The palette is process-global, so always restore it, even on failure.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
+        }
+    }
+    let _restore = Restore;
+
+    jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
+    let baseline = render();
+
+    // Recolor the user role to a color nothing in the default palette is near.
+    let mut palette = jcode_tui_style::Palette::default();
+    palette.set(jcode_tui_style::Role::User, (250, 40, 200));
+    jcode_tui_style::set_palette(palette);
+    let configured = render();
+
+    assert_ne!(
+        baseline
+            .content
+            .iter()
+            .map(|cell| cell.fg)
+            .collect::<Vec<_>>(),
+        configured
+            .content
+            .iter()
+            .map(|cell| cell.fg)
+            .collect::<Vec<_>>(),
+        "configuring a color role should change the rendered frame"
+    );
+
+    // Text content must be untouched: this is a recolor, not a relayout.
+    let text_of = |buffer: &ratatui::buffer::Buffer| {
+        buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        text_of(&baseline),
+        text_of(&configured),
+        "recoloring must not change any rendered text"
+    );
+
+    // And the default palette must render identically to no palette at all,
+    // which is what keeps existing users' terminals looking the same.
+    jcode_tui_style::set_palette(jcode_tui_style::Palette::default());
+    assert_eq!(
+        baseline,
+        render(),
+        "the default palette must be a no-op on the rendered frame"
+    );
+}

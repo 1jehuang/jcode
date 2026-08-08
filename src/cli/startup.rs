@@ -276,30 +276,51 @@ fn spawn_background_update_check(args: &Args) {
     }
 
     if update::is_release_build() {
-        std::thread::spawn(move || match update::check_and_maybe_update(auto_update) {
-            update::UpdateCheckResult::UpdateAvailable {
-                current, latest, ..
-            } => {
-                logging::info(&format!("Update available: {} -> {}", current, latest));
+        std::thread::spawn(move || {
+            use crate::bus::{Bus, BusEvent, ClientMaintenanceAction, SessionUpdateStatus};
+            match update::check_and_maybe_update(auto_update) {
+                update::UpdateCheckResult::UpdateAvailable {
+                    current, latest, ..
+                } => {
+                    logging::info(&format!("Update available: {} -> {}", current, latest));
+                }
+                update::UpdateCheckResult::UpdateInstalled { version, path } => {
+                    // When an interactive TUI session is running, hand the switch
+                    // to the app's graceful reload path (saves the input line,
+                    // waits for the current turn, resumes the session) instead of
+                    // exec-ing over the live UI, which visibly resets the screen.
+                    if let Some(session_id) = terminal::get_current_session() {
+                        logging::info(&format!(
+                            "Updated to {}. Requesting graceful session reload...",
+                            version
+                        ));
+                        Bus::global().publish(BusEvent::SessionUpdateStatus(
+                            SessionUpdateStatus::ReadyToReload {
+                                session_id,
+                                action: ClientMaintenanceAction::Update,
+                                version,
+                            },
+                        ));
+                        return;
+                    }
+                    logging::info(&format!("Updated to {}. Restarting...", version));
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let args: Vec<String> = std::env::args().skip(1).collect();
+                    let exec_path = build::client_update_candidate(false)
+                        .map(|(p, _)| p)
+                        .unwrap_or(path);
+                    let err = crate::platform::replace_process(
+                        ProcessCommand::new(&exec_path)
+                            .args(&args)
+                            .arg("--no-update"),
+                    );
+                    eprintln!("Failed to exec new binary: {}", err);
+                }
+                update::UpdateCheckResult::Error(e) => {
+                    logging::info(&format!("Update check failed: {}", e));
+                }
+                update::UpdateCheckResult::NoUpdate => {}
             }
-            update::UpdateCheckResult::UpdateInstalled { version, path } => {
-                logging::info(&format!("Updated to {}. Restarting...", version));
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                let args: Vec<String> = std::env::args().skip(1).collect();
-                let exec_path = build::client_update_candidate(false)
-                    .map(|(p, _)| p)
-                    .unwrap_or(path);
-                let err = crate::platform::replace_process(
-                    ProcessCommand::new(&exec_path)
-                        .args(&args)
-                        .arg("--no-update"),
-                );
-                eprintln!("Failed to exec new binary: {}", err);
-            }
-            update::UpdateCheckResult::Error(e) => {
-                logging::info(&format!("Update check failed: {}", e));
-            }
-            update::UpdateCheckResult::NoUpdate => {}
         });
     } else {
         std::thread::spawn(move || {
@@ -310,25 +331,41 @@ fn spawn_background_update_check(args: &Args) {
             if let Some(update_available) = hot_exec::check_for_updates()
                 && update_available
             {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                    current: jcode_build_meta::version().to_string(),
-                    latest: "latest source".to_string(),
-                }));
-                if auto_update {
-                    logging::info("Update available - auto-updating...");
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
-                        version: "latest source".to_string(),
-                    }));
-                    if let Err(e) = hot_exec::run_auto_update() {
-                        Bus::global()
-                            .publish(BusEvent::UpdateStatus(UpdateStatus::Error(e.to_string())));
-                        logging::error(&format!(
-                            "Auto-update failed: {}. Continuing with current version.",
-                            e
-                        ));
-                    }
+                // A checkout with local commits can never fast-forward, so the
+                // pull below would always fail and surface a noisy "Update
+                // diverged. Press Ctrl+Y..." card in every new session.
+                // Developers with local work expect divergence; log it once
+                // and stay quiet in the UI (no Available/Error cards).
+                if hot_exec::local_commits_ahead_of_upstream() == Some(true) {
+                    logging::info(
+                        "Auto-update skipped: local commits are ahead of upstream (diverged). \
+                         Merge or rebase manually when ready.",
+                    );
+                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
                 } else {
-                    logging::info("Update available! Run `jcode update` or `/reload` to update.");
+                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
+                        current: jcode_build_meta::version().to_string(),
+                        latest: "latest source".to_string(),
+                    }));
+                    if auto_update {
+                        logging::info("Update available - auto-updating...");
+                        Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
+                            version: "latest source".to_string(),
+                        }));
+                        if let Err(e) = hot_exec::run_auto_update() {
+                            Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Error(
+                                e.to_string(),
+                            )));
+                            logging::error(&format!(
+                                "Auto-update failed: {}. Continuing with current version.",
+                                e
+                            ));
+                        }
+                    } else {
+                        logging::info(
+                            "Update available! Run `jcode update` or `/reload` to update.",
+                        );
+                    }
                 }
             } else {
                 Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));

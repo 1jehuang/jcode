@@ -15,9 +15,9 @@
 //!
 //! Correctness guards:
 //! - Each server's cached entry is keyed by a fingerprint of its *config*
-//!   (command + args + env + shared). If the config changes, the fingerprint
-//!   changes and the stale entry is ignored, so we never advertise tools for a
-//!   server that has been reconfigured.
+//!   (command + args + env + transport + URL + headers + shared). If the config
+//!   changes, the fingerprint changes and the stale entry is ignored, so we
+//!   never advertise tools for a server that has been reconfigured.
 //! - The cache is a hint, not truth. On a real connection we replace the entry
 //!   with the live schemas; if they drift, the tool registry reconciles and the
 //!   one-shot late-registration rebuild (#206) surfaces the corrected set.
@@ -75,6 +75,14 @@ pub fn fingerprint_config(config: &McpServerConfig) -> String {
     }
     let sorted_env: SortedMap<&String, &String> = config.env.iter().collect();
     for (k, v) in sorted_env {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
+        0u8.hash(&mut hasher);
+    }
+    config.transport.hash(&mut hasher);
+    config.url.hash(&mut hasher);
+    let sorted_headers: SortedMap<&String, &String> = config.headers.iter().collect();
+    for (k, v) in sorted_headers {
         k.hash(&mut hasher);
         v.hash(&mut hasher);
         0u8.hash(&mut hasher);

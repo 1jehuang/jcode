@@ -1,8 +1,8 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development without collecting prompts or code.
+jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. **We do not collect your prompts, your code, or your conversation transcripts.**
 
-Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, and schema v5 agent-time / autonomy / pain-attribution metrics.
+Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, schema v5 agent-time / autonomy / pain-attribution metrics, and numeric-only todo progress aggregates.
 
 ## What We Collect
 
@@ -88,6 +88,53 @@ The benchmark runner sets `JCODE_DISCOVERY_BENCHMARK=1`. Discovery requests then
 carry `x-jcode-discovery-benchmark: 1`, and the corresponding telemetry event has
 `benchmark_run: true`.
 
+When telemetry is enabled, discovery API requests also carry
+`x-jcode-session-correlation-id`. It is a fresh random UUID for the current
+runtime session, is not derived from the persistent telemetry ID, and is never
+reused across sessions. The same UUID appears on the numeric-only Todo Session
+event below. When telemetry is disabled, this header is omitted.
+
+### Todo Session Event
+
+This does not replace the todo counters added in migration 0021. Those live on
+`session_details` / `turn_details` and count how often todo gates fired
+(`tool_cat_todo`, `feature_todo_used`, `todo_gate_*_count`). This event is the
+complement: the lifecycle outcome of the list and the score values themselves,
+plus the per-session join key. Read 0021 for "how often did gates fire" and this
+event for "did the work finish, and how confident was the agent".
+
+One aggregate event is sent when an active session ends. Its `id` and
+`correlation_id` fields are the same fresh per-session UUID. The persistent
+telemetry ID, account ID, internal session ID, todo IDs, and all user/model text
+are absent, so the event is joinable to discovery requests from that session but
+not to an install, account, or another session.
+
+That join is not yet possible in practice. The discovery service stores its rows
+in the `jcode-subscriptions` D1 while this event lands in `jcode-telemetry`, and
+nothing on the receiving side reads
+`x-jcode-session-correlation-id` yet, so the header is currently sent and
+discarded. The correlation design is what makes the join possible later; it does
+not by itself make the number available.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `event` | `"todo_session"` | Event type |
+| `id` / `correlation_id` | UUID strings | Same random, single-session join key; never the persistent telemetry ID |
+| `session_end_reason` | enum string | Coarse lifecycle end reason |
+| `todos_created` / `todos_completed` / `todos_abandoned` | non-negative integers | Todo lifecycle transitions and items ending non-complete |
+| `todo_updates` | non-negative integer | Number of todo tool calls |
+| `groups_completed` / `groups_total` | non-negative integers | Final coherent-goal completion summary |
+| `max_todo_list_size` | non-negative integer | Todo list high-water mark |
+| `confidence_min` / `confidence_mean` / `confidence_count` | number / number / integer | Distribution-safe current confidence summary |
+| `completion_confidence_min` / `completion_confidence_mean` / `completion_confidence_count` | number / number / integer | Distribution-safe completion-confidence summary |
+| `understands_user_intent_min` / `understands_user_intent_mean` / `understands_user_intent_count` | number / number / integer | Distribution-safe plan-level intent-understanding summary; count is 0 or 1 |
+| `closed_feedback_loop_min` / `closed_feedback_loop_mean` / `closed_feedback_loop_count` | number / number / integer | Distribution-safe per-goal feedback-loop score summary |
+| `end_to_end_ownership_min` / `end_to_end_ownership_mean` / `end_to_end_ownership_count` | number / number / integer | Distribution-safe per-goal ownership summary |
+| `schema_version` / `version` / `os` / `arch` / build flags | numbers, booleans, and enum/identifier strings | Compatibility and coarse release filtering |
+
+Todo content, goal labels, feedback-loop text, user-intention text, task content,
+file paths, code, prompts, item IDs, and per-item rows are **never sent**.
+
 ### Session Start Event
 
 | Field | Example | Purpose |
@@ -148,7 +195,7 @@ carry `x-jcode-discovery-benchmark: 1`, and the corresponding telemetry event ha
 | `total_tokens` | `23223` | Sum of input, output, cache-read, and cache-creation tokens |
 | `feature_*_used` | `true/false` | Whether a feature family was used (memory, swarm, web, email, MCP, side panel, goals, todos, selfdev, background, subagents) |
 | `tool_cat_*` | `0..N` | Coarse tool category counts (read/search, write, shell, web, memory, subagent, swarm, email, side-panel, goal, todo, MCP, other) |
-| `todo_gate_*_count` | `0..N` | How often todo quality gates fired in-session (end-to-end ownership, hill-climbability, completion confidence, confidence spike) |
+| `todo_gate_*_count` | `0..N` | How often todo quality gates fired in-session (end-to-end ownership, closed feedback loop, completion confidence, confidence spike) |
 | `command_*_used` | `true/false` | Whether a slash-command family was used in-session |
 | `workflow_*_used` | `true/false` | Whether the session looked like coding, research, testing, background, subagent, or swarm work |
 | `unique_mcp_servers` | `2` | Count of distinct MCP servers touched in-session |
@@ -234,16 +281,47 @@ Most events also carry a few coarse quality / cleanup fields:
 
 ## What We Do NOT Collect
 
+- **No conversation transcripts, prompts, code, or LLM responses**, except text you explicitly submit with `/feedback ...`
 - No file paths, project names, or directory structures
-- No code, prompts, or LLM responses, except text explicitly submitted with `/feedback ...`
 - No tool inputs or tool outputs
 - No MCP server names or configurations
-- No IP addresses (Cloudflare Workers don't log these by default)
+- No IP addresses (the worker never reads or stores the client IP)
+- No city, region, coordinates, postal code, or timezone
 - No personal information of any kind
 - No error messages or stack traces in telemetry (only coarse categories and end reasons)
 - No exact wall-clock timestamps beyond coarse hour-of-day / weekday buckets
 
+### Coarse Geography (added by the receiving worker, not the client)
+
+The telemetry worker records a single **2-letter country code**, resolved by
+Cloudflare at the edge from the connection (`request.cf.country`). jcode itself
+never collects, computes, or sends location data, and the value cannot be set or
+spoofed by the client.
+
+| Field | Example | Purpose |
+|-------|---------|----------|
+| `country` | `"DE"` | Aggregate "which countries do users come from" reporting |
+
+Only the country is kept: the IP address, city, region, coordinates, postal
+code, and timezone are never read or stored. It is stored as a per-day
+aggregate (`country_daily` counts) plus a `last_country` column on the daily
+active-user rollup. Unknown (`XX`) and Tor (`T1`) codes are discarded.
+
 The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id`. It is not derived from your machine, username, email, or any identifiable information.
+
+## How We Use and Share Data
+
+Telemetry is used to operate, debug, secure, and improve jcode, and for product and
+retention analytics. We may publish or share **aggregate** statistics (for example
+install counts, OS/provider distribution, version adoption) and we share data with the
+infrastructure providers needed to run the pipeline, currently Cloudflare.
+
+We do **not** sell event-level telemetry, and we do not collect conversation content to
+sell or to train models. If that ever changes, it will be a separate, clearly disclosed,
+**opt-in** program rather than a silent change to this document.
+
+We do not attempt to re-identify users from telemetry, and the client does not link
+telemetry to account identity.
 
 ## How It Works
 
@@ -258,6 +336,12 @@ The UUID is randomly generated on first run and stored at `~/.jcode/telemetry_id
 9. If a request fails (offline, firewall, etc.), jcode silently continues - no retries, no queuing
 
 The telemetry endpoint is a Cloudflare Worker that stores events in a D1 database. The source code for the worker is in [`telemetry-worker/`](./telemetry-worker/).
+
+## Changes to This Policy
+
+The version of this document in the repository is the current policy. If we ever want to
+collect conversation content, or to share or sell anything beyond aggregate statistics,
+that will require a separate opt-in rather than a quiet edit here.
 
 ### Schema v5 deployment note
 
@@ -286,6 +370,6 @@ This is open source. The entire telemetry implementation is in [`src/telemetry.r
 
 ## Data Retention
 
-Telemetry data is used in aggregate only (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
+Telemetry data is used in aggregate (install count, active users, provider distribution, session success/crash rates, feature-level counts). Individual event records are retained for up to 12 months and then deleted.
 
 High-volume raw events are pruned earlier on a nightly schedule, after their aggregate signal has been captured in a compact daily-activity rollup: per-turn and per-session-start records and onboarding-step records are kept for about 30 days, upgrade records for about 60 days, and auth-success records for about 180 days. Session summary records (the per-session aggregate counts described above) are kept for up to 12 months.

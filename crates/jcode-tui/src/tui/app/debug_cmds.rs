@@ -173,7 +173,7 @@ impl App {
                 }
                 SendAction::Interleave => {
                     let prepared = input::take_prepared_input(self);
-                    input::stage_local_interleave(self, prepared.expanded);
+                    input::stage_local_interleave(self, prepared.expanded, prepared.images);
                     self.debug_trace
                         .record("message", format!("interleave:{}", msg));
                     format!("OK: interleave message '{}' (injecting now)", msg)
@@ -634,12 +634,14 @@ impl App {
                 .unwrap_or_else(|_| "render-stats: no frames captured".to_string()),
             }
         } else if cmd == "draw-stats" {
-            let payload = crate::tui::ui::debug_draw_call_history(32);
+            let mut payload = crate::tui::ui::debug_draw_call_history(32);
+            attach_redraw_schedule_debug(&mut payload, self);
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         } else if cmd.starts_with("draw-stats ") {
             let raw_limit = cmd.strip_prefix("draw-stats ").unwrap_or("32").trim();
             let limit = raw_limit.parse::<usize>().unwrap_or(32);
-            let payload = crate::tui::ui::debug_draw_call_history(limit);
+            let mut payload = crate::tui::ui::debug_draw_call_history(limit);
+            attach_redraw_schedule_debug(&mut payload, self);
             serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
         } else if cmd == "render-order" {
             use crate::tui::visual_debug;
@@ -1118,4 +1120,49 @@ impl App {
         }
         false
     }
+}
+
+/// Attach the live redraw-schedule decision to a `draw-stats` payload.
+///
+/// Frame cost alone cannot explain a choppy animation: a screen can render each
+/// frame in 4ms and still look laggy because the scheduler only asks for a few
+/// frames per second. Reporting the resolved interval and the policy FPS next
+/// to the measured draw rate makes that distinction obvious.
+fn attach_redraw_schedule_debug(payload: &mut serde_json::Value, app: &App) {
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    let policy = crate::perf::tui_policy();
+    map.insert(
+        "redraw_schedule".to_string(),
+        serde_json::json!({
+            "interval_ms": crate::tui::redraw_interval(app).as_millis() as u64,
+            "animation_fps": policy.animation_fps,
+            "redraw_fps": policy.redraw_fps,
+            "tier": format!("{:?}", policy.tier),
+            "decorative_animations": policy.enable_decorative_animations,
+            "idle_animation_active": crate::tui::idle_donut_active(app),
+            "idle_animation_area": crate::tui::ui::last_idle_animation_area()
+                .map(|a| serde_json::json!([a.x, a.y, a.width, a.height])),
+            "client_focused": crate::tui::TuiState::client_focused(app),
+            "periodic_redraw_required": crate::tui::periodic_redraw_required(app),
+            // Unlike `idle_animation.last_full_frame_reason`, which is sticky,
+            // this is evaluated against current state, so an expired notice
+            // cannot masquerade as the thing pinning the loop at animation
+            // cadence. Diagnosing the fresh-spawn lag needed exactly this
+            // distinction, and the field had been dropped while the function
+            // it calls stayed behind as dead code.
+            "current_full_frame_reason": crate::tui::current_full_frame_redraw_reason(app),
+            // Latency the user actually feels: key read -> frame flushed. Reported
+            // here because render/flush timings only cover work inside a draw and
+            // say nothing about a keystroke waiting for one to start.
+            "key_to_paint": crate::tui::ui::key_to_paint_debug_json(),
+            // The notice text/age, so a notice that keeps re-arming (and so keeps
+            // the loop at animation cadence) is identifiable rather than anonymous.
+            "status_notice": crate::tui::TuiState::status_notice(app),
+            "learn_hint": crate::tui::TuiState::learn_hint(app),
+            "has_notification": crate::tui::TuiState::has_notification(app),
+            "is_processing": crate::tui::TuiState::is_processing(app),
+        }),
+    );
 }

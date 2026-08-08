@@ -230,9 +230,10 @@ mod widget_render;
 
 pub use cache_render::{
     RenderResult, debug_bump_deferred_render_epoch_for_tests, deferred_render_epoch,
-    evict_render_cache_for_content, get_cached_path, is_mermaid_lang, render_mermaid,
-    render_mermaid_deferred, render_mermaid_deferred_with_registration,
-    render_mermaid_deferred_with_stream_scope, render_mermaid_sized, render_mermaid_untracked,
+    evict_render_cache_for_content, get_cached_path, is_mermaid_lang,
+    notify_deferred_render_completed, render_mermaid, render_mermaid_deferred,
+    render_mermaid_deferred_with_registration, render_mermaid_deferred_with_stream_scope,
+    render_mermaid_sized, render_mermaid_untracked,
 };
 #[cfg(feature = "renderer")]
 pub use content_render::terminal_theme;
@@ -252,9 +253,9 @@ pub use inline_image::{
 pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
-    is_video_export_mode, native_image_protocol_available, protocol_type, register_external_image,
-    register_inline_image, set_video_export_mode, uses_text_image_fallback,
-    with_image_protocol_override,
+    is_video_export_mode, native_image_protocol_available, protocol_type,
+    rediscover_external_image, register_external_image, register_inline_image,
+    set_video_export_mode, uses_text_image_fallback, with_image_protocol_override,
 };
 pub use viewport_render::{
     InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,

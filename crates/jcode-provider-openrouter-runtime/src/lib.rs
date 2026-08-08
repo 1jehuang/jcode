@@ -35,10 +35,11 @@ pub use jcode_provider_openrouter::{
 };
 use jcode_provider_openrouter::{
     KIMI_FALLBACK_PROVIDERS, ModelCatalogRefreshState, ModelsCache, ParsedProvider, PinSource,
-    ProviderPin, current_unix_secs, known_providers, load_disk_cache_entry,
-    load_endpoints_disk_cache, parse_model_spec, save_disk_cache_with_source,
-    save_disk_cache_with_source_for_namespace, save_endpoints_disk_cache,
+    ProviderPin, current_unix_secs, known_providers, load_endpoints_disk_cache, parse_model_spec,
+    save_disk_cache_with_source, save_disk_cache_with_source_for_namespace,
+    save_endpoints_disk_cache,
 };
+use models_catalog_parse::parse_openai_compatible_models_response;
 use reqwest::Client;
 use reqwest::header::HeaderName;
 use serde::Deserialize;
@@ -543,7 +544,7 @@ async fn fetch_models_from_api(
         .text()
         .await
         .with_context(|| format!("Failed to read model catalog response body from {}", url))?;
-    let models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
+    let mut models = parse_openai_compatible_models_response(&raw_body).with_context(|| {
             format!(
                 "Failed to parse OpenAI-compatible model catalog response\n  endpoint: {}\n  auth: {}\n  expected: JSON object with a `data` or `models` array, or a top-level array, with model objects containing at least `id` or `name`\n  response: {}",
                 url,
@@ -552,7 +553,9 @@ async fn fetch_models_from_api(
             )
         })?;
 
-    if let Some(namespace) = cache_namespace.as_deref() {
+    let ns = cache_namespace.as_deref();
+    ollama_context::maybe_enrich(&client, &api_base, ns, &mut models).await;
+    if let Some(namespace) = ns {
         save_disk_cache_with_source_for_namespace(namespace, &models, Some(&api_base));
     } else {
         save_disk_cache_with_source(&models, Some(&api_base));
@@ -570,121 +573,6 @@ async fn fetch_models_from_api(
     }
 
     Ok(models)
-}
-
-fn parse_openai_compatible_models_response(raw_body: &str) -> Result<Vec<ModelInfo>> {
-    let value: Value = serde_json::from_str(raw_body)?;
-    let items = match &value {
-        Value::Array(items) => items,
-        Value::Object(object) => object
-            .get("data")
-            .or_else(|| object.get("models"))
-            .and_then(Value::as_array)
-            .context("missing model array")?,
-        _ => anyhow::bail!("model catalog response must be an object or array"),
-    };
-
-    let mut models = Vec::new();
-    for item in items {
-        if let Some(model) = parse_model_info_value(item) {
-            models.push(model);
-        }
-    }
-
-    if models.is_empty() {
-        anyhow::bail!("model catalog response did not contain any valid model objects");
-    }
-
-    Ok(models)
-}
-
-fn parse_model_info_value(value: &Value) -> Option<ModelInfo> {
-    let object = value.as_object()?;
-    let id = object
-        .get("id")
-        .and_then(Value::as_str)
-        .or_else(|| object.get("name").and_then(Value::as_str))?
-        .to_string();
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .or_else(|| object.get("display_name").and_then(Value::as_str))
-        .or_else(|| object.get("displayName").and_then(Value::as_str))
-        .unwrap_or("")
-        .to_string();
-
-    Some(ModelInfo {
-        id,
-        name,
-        context_length: first_u64_field(
-            object,
-            &[
-                "context_length",
-                "contextLength",
-                "max_context_length",
-                "maxModelLength",
-                "max_model_len",
-                "trainingContextLength",
-            ],
-        )
-        // llama.cpp's /v1/models reports the serving context only inside
-        // `meta` (`n_ctx`, with `n_ctx_train` as the trained maximum). Without
-        // this, local llama.cpp models fall back to the generic 200K default
-        // and the context gauge overstates the real window (issue #447).
-        .or_else(|| {
-            object
-                .get("meta")
-                .and_then(Value::as_object)
-                .and_then(|meta| first_u64_field(meta, &["n_ctx", "n_ctx_train"]))
-        }),
-        pricing: parse_model_pricing(object.get("pricing")),
-        created: object.get("created").and_then(value_as_u64),
-    })
-}
-
-fn first_u64_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| object.get(*key).and_then(value_as_u64))
-}
-
-fn value_as_u64(value: &Value) -> Option<u64> {
-    match value {
-        Value::Number(number) => number.as_u64(),
-        Value::String(text) => text.parse::<u64>().ok(),
-        _ => None,
-    }
-}
-
-fn value_as_pricing_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }
-}
-
-fn parse_model_pricing(value: Option<&Value>) -> ModelPricing {
-    let Some(Value::Object(object)) = value else {
-        return ModelPricing::default();
-    };
-
-    ModelPricing {
-        prompt: object
-            .get("prompt")
-            .or_else(|| object.get("input"))
-            .and_then(value_as_pricing_string),
-        completion: object
-            .get("completion")
-            .or_else(|| object.get("output"))
-            .and_then(value_as_pricing_string),
-        input_cache_read: object
-            .get("input_cache_read")
-            .or_else(|| object.get("cached_input"))
-            .and_then(value_as_pricing_string),
-        input_cache_write: object
-            .get("input_cache_write")
-            .and_then(value_as_pricing_string),
-    }
 }
 
 fn models_fingerprint(models: &[ModelInfo]) -> String {
@@ -713,6 +601,11 @@ fn global_endpoint_refresh() -> &'static Mutex<EndpointRefreshTracker> {
 struct ProfileCatalogRefreshTracker {
     in_flight: HashSet<String>,
     last_attempt_unix: HashMap<String, u64>,
+    /// Consecutive failed refresh attempts per profile. Used to back off so a
+    /// permanently unreachable profile (no credentials, dead endpoint, local
+    /// Ollama that is not running) does not re-attempt every
+    /// `MODEL_CATALOG_REFRESH_RETRY_SECS` for the lifetime of the process.
+    consecutive_failures: HashMap<String, u32>,
 }
 
 static GLOBAL_PROFILE_CATALOG_REFRESH: OnceLock<Mutex<ProfileCatalogRefreshTracker>> =
@@ -743,7 +636,14 @@ fn begin_profile_catalog_refresh(profile_id: &str) -> bool {
         return false;
     }
     if let Some(last) = state.last_attempt_unix.get(profile_id)
-        && now.saturating_sub(*last) < MODEL_CATALOG_REFRESH_RETRY_SECS
+        && now.saturating_sub(*last)
+            < profile_catalog_retry_delay_secs(
+                state
+                    .consecutive_failures
+                    .get(profile_id)
+                    .copied()
+                    .unwrap_or(0),
+            )
     {
         return false;
     }
@@ -755,6 +655,31 @@ fn begin_profile_catalog_refresh(profile_id: &str) -> bool {
 fn finish_profile_catalog_refresh(profile_id: &str) {
     if let Ok(mut state) = global_profile_catalog_refresh().lock() {
         state.in_flight.remove(profile_id);
+    }
+}
+
+/// Exponential backoff for repeatedly failing catalog refreshes: 60s, 2m, 4m,
+/// ... capped at one hour. A single success resets the profile to the base
+/// retry interval.
+fn profile_catalog_retry_delay_secs(consecutive_failures: u32) -> u64 {
+    const MAX_RETRY_SECS: u64 = 60 * 60;
+    MODEL_CATALOG_REFRESH_RETRY_SECS
+        .saturating_mul(1u64 << consecutive_failures.min(8))
+        .min(MAX_RETRY_SECS)
+}
+
+fn finish_profile_catalog_refresh_with_outcome(profile_id: &str, succeeded: bool) {
+    if let Ok(mut state) = global_profile_catalog_refresh().lock() {
+        state.in_flight.remove(profile_id);
+        if succeeded {
+            state.consecutive_failures.remove(profile_id);
+        } else {
+            let entry = state
+                .consecutive_failures
+                .entry(profile_id.to_string())
+                .or_insert(0);
+            *entry = entry.saturating_add(1);
+        }
     }
 }
 
@@ -800,15 +725,16 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        match fetch_models_from_api(
+        let result = fetch_models_from_api(
             jcode_provider_core::shared_http_client(),
             api_base,
             auth,
             models_cache,
             Some(profile_id.clone()),
         )
-        .await
-        {
+        .await;
+        let succeeded = result.is_ok();
+        match result {
             Ok(models) => {
                 let updated = models_fingerprint(&models) != previous_fingerprint;
                 if updated {
@@ -833,7 +759,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
                 context, display_name, error
             )),
         }
-        finish_profile_catalog_refresh(&profile_id);
+        finish_profile_catalog_refresh_with_outcome(&profile_id, succeeded);
     });
 
     true
@@ -907,15 +833,16 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
             .unwrap_or_default();
     handle.spawn(async move {
         let models_cache = Arc::new(RwLock::new(ModelsCache::default()));
-        match fetch_models_from_api(
+        let result = fetch_models_from_api(
             jcode_provider_core::shared_http_client(),
             api_base,
             auth,
             models_cache,
             Some(namespace.to_string()),
         )
-        .await
-        {
+        .await;
+        let succeeded = result.is_ok();
+        match result {
             Ok(models) => {
                 let updated = models_fingerprint(&models) != previous_fingerprint;
                 if updated {
@@ -938,7 +865,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
                 context, error
             )),
         }
-        finish_profile_catalog_refresh(namespace);
+        finish_profile_catalog_refresh_with_outcome(namespace, succeeded);
     });
 
     true
@@ -1155,7 +1082,7 @@ impl OpenRouterProvider {
         }
     }
 
-    fn configured_max_tokens(profile_id: Option<&str>) -> Option<u32> {
+    fn configured_max_tokens(_profile_id: Option<&str>) -> Option<u32> {
         if let Ok(raw) = std::env::var("JCODE_OPENROUTER_MAX_TOKENS") {
             let trimmed = raw.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
@@ -1169,14 +1096,6 @@ impl OpenRouterProvider {
                     raw
                 )),
             }
-        }
-
-        // Celeris rejects `max_tokens` values that are not a positive multiple
-        // of 256, and requires prompt + max_tokens <= 8,192. Its own default
-        // (2,048) leaves only ~6K of prompt room, so ask for a smaller
-        // completion budget to keep more of the context window usable.
-        if profile_id.is_some_and(|id| id.eq_ignore_ascii_case("celeris")) {
-            return Some(1_024);
         }
 
         None
@@ -1823,12 +1742,6 @@ impl OpenRouterProvider {
         source_api_base == self.api_base
     }
 
-    pub(crate) fn load_usable_model_disk_cache_entry(
-        &self,
-    ) -> Option<jcode_provider_openrouter::DiskCache> {
-        load_disk_cache_entry().filter(|entry| self.model_disk_cache_source_matches(entry))
-    }
-
     fn begin_background_model_catalog_refresh(&self) -> bool {
         let Some(now) = current_unix_secs() else {
             return false;
@@ -2027,9 +1940,9 @@ impl OpenRouterProvider {
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
-
+        let ns = self.foreground_cache_namespace();
         handle.spawn(async move {
-            match fetch_models_from_api(client, api_base, auth, models_cache, None).await {
+            match fetch_models_from_api(client, api_base, auth, models_cache, ns).await {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
                     if updated {
@@ -2508,7 +2421,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }
@@ -2520,7 +2433,7 @@ impl OpenRouterProvider {
             self.api_base.clone(),
             self.auth.clone(),
             Arc::clone(&self.models_cache),
-            None,
+            self.foreground_cache_namespace(),
         )
         .await
     }
@@ -2662,11 +2575,16 @@ impl OpenRouterProvider {
     }
 
     async fn model_pricing(&self, model_id: &str) -> Option<ModelPricing> {
-        let cache = self.models_cache.read().await;
-        if cache.fetched
-            && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+        // Scope the read guard: `fetch_models()` below takes a write guard on the
+        // same `RwLock`, and tokio's writers block new/holding readers, so holding
+        // this guard across the fetch deadlocks on a cold catalog (issue #649).
         {
-            return Some(model.pricing.clone());
+            let cache = self.models_cache.read().await;
+            if cache.fetched
+                && let Some(model) = cache.models.iter().find(|m| m.id == model_id)
+            {
+                return Some(model.pricing.clone());
+            }
         }
 
         if let Some(cache_entry) = self.load_usable_model_disk_cache_entry() {
@@ -2737,6 +2655,8 @@ impl OpenRouterProvider {
     }
 }
 
+mod models_catalog_parse;
+mod ollama_context;
 #[path = "openrouter_provider_impl.rs"]
 mod openrouter_provider_impl;
 #[path = "openrouter_sse_stream.rs"]
@@ -2748,5 +2668,40 @@ mod openrouter_sse_stream;
 mod tests;
 
 #[cfg(test)]
+#[path = "ollama_context_tests.rs"]
+mod ollama_context_tests;
+
+#[cfg(test)]
 #[path = "openrouter_catalog_merge_tests.rs"]
 mod openrouter_catalog_merge_tests;
+
+#[cfg(test)]
+#[path = "openrouter_pricing_deadlock_tests.rs"]
+mod openrouter_pricing_deadlock_tests;
+
+#[cfg(test)]
+mod profile_catalog_backoff_tests {
+    use super::{MODEL_CATALOG_REFRESH_RETRY_SECS, profile_catalog_retry_delay_secs};
+
+    #[test]
+    fn healthy_profile_uses_base_retry_interval() {
+        assert_eq!(
+            profile_catalog_retry_delay_secs(0),
+            MODEL_CATALOG_REFRESH_RETRY_SECS
+        );
+    }
+
+    #[test]
+    fn repeated_failures_back_off_exponentially_and_cap() {
+        assert_eq!(
+            profile_catalog_retry_delay_secs(1),
+            MODEL_CATALOG_REFRESH_RETRY_SECS * 2
+        );
+        assert_eq!(
+            profile_catalog_retry_delay_secs(3),
+            MODEL_CATALOG_REFRESH_RETRY_SECS * 8
+        );
+        // Capped at one hour no matter how many failures accumulate.
+        assert_eq!(profile_catalog_retry_delay_secs(20), 60 * 60);
+    }
+}

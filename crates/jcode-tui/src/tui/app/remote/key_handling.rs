@@ -10,13 +10,14 @@ pub(in crate::tui::app) fn handle_remote_char_input(app: &mut App, c: char) {
 pub(in crate::tui::app) async fn send_interleave_now(
     app: &mut App,
     content: String,
+    images: Vec<(String, String)>,
     remote: &mut RemoteConnection,
 ) {
     if content.trim().is_empty() {
         return;
     }
     let msg_clone = content.clone();
-    match remote.soft_interrupt(content, false).await {
+    match remote.soft_interrupt(content, images, false).await {
         Err(e) => {
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to send interleave: {}",
@@ -288,6 +289,11 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.prompt_history_search.is_some() {
+        app.handle_prompt_history_search_key(code, modifiers);
+        return Ok(());
+    }
+
     if app.changelog_scroll.is_some() {
         return app.handle_changelog_key(code);
     }
@@ -398,10 +404,10 @@ async fn handle_remote_key_internal(
                 app.set_status_notice("Swarm view closed");
             }
             app_mod::tui_state::SwarmPanelView::Controls => {
-                app.set_status_notice("Swarm: alt+n full page · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_view_hint("full page"));
             }
             app_mod::tui_state::SwarmPanelView::FullPage => {
-                app.set_status_notice("Swarm page: alt+n chat · alt+↑/↓ select · alt+o open · esc");
+                app.set_status_notice(crate::tui::keybind::swarm_page_hint());
             }
         }
         return Ok(());
@@ -526,11 +532,21 @@ async fn handle_remote_key_internal(
                 app.paste_from_clipboard();
                 return Ok(());
             }
+            // Cmd+L mirrors Ctrl+L: terminal-style clear (blank spacer
+            // pushes the transcript up into scrollback).
+            KeyCode::Char('l') => {
+                app.clear_view_terminal_style();
+                return Ok(());
+            }
             _ => {}
         }
     }
 
     if app.handle_command_suggestion_key(code, modifiers) {
+        return Ok(());
+    }
+
+    if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());
     }
 
@@ -609,6 +625,9 @@ async fn handle_remote_key_internal(
                 }
                 return Ok(());
             }
+            KeyCode::Char('d') if input::try_ctrl_d_forward_delete(app) => {
+                return Ok(());
+            }
             KeyCode::Char('c') | KeyCode::Char('d') => {
                 if app.is_processing {
                     remote.cancel_with_reason("keyboard_ctrl_c_or_d").await?;
@@ -619,10 +638,16 @@ async fn handle_remote_key_internal(
                 return Ok(());
             }
             KeyCode::Char('r') => {
-                app.recover_session_without_tools();
+                app.open_prompt_history_search();
                 return Ok(());
             }
             KeyCode::Char('l') => {
+                // Terminal-style clear: a viewport-height blank spacer pushes
+                // the transcript up into scrollback, leaving a clean prompt.
+                // Nothing is deleted; /cls does the actual view wipe. The
+                // diagram/diff focus handler above wins while a pane is
+                // available.
+                app.clear_view_terminal_style();
                 return Ok(());
             }
             KeyCode::Char('u') => {
@@ -750,10 +775,7 @@ async fn handle_remote_key_internal(
         }
     }
 
-    if code == KeyCode::Enter
-        && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
-        && !app.input.trim().starts_with('/')
-    {
+    if input::is_alternate_enter(code, modifiers) && !app.input.trim().starts_with('/') {
         if app.activate_picker_from_preview() {
             return Ok(());
         }
@@ -772,15 +794,15 @@ async fn handle_remote_key_internal(
                     app.queued_messages.push(prepared.expanded);
                 }
                 SendAction::Interleave => {
-                    app.send_interleave_now(prepared.expanded, remote).await;
+                    app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                        .await;
                 }
             }
         }
         return Ok(());
     }
 
-    if code == KeyCode::Enter && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-        input::insert_input_text(app, "\n");
+    if crate::tui::app::input::newline::enter_inserts_newline(app, code, modifiers) {
         return Ok(());
     }
 
@@ -1640,11 +1662,11 @@ async fn handle_remote_key_internal(
                     app.pending_images.clear();
                     app.clear_streaming_render_state();
                     app.clear_live_usage_state();
-                    // Full transcript discard: every registered diagram is
-                    // orphaned, so re-scope the process-global registry too
-                    // (same rationale as reset_current_session in
-                    // commands_review.rs).
+                    // Full transcript discard: diagrams and side panel pages
+                    // are both orphaned (same rationale as
+                    // reset_current_session; side panel is #605).
                     crate::tui::mermaid::clear_active_diagrams();
+                    super::super::commands_review::clear_side_panel_for_new_session(app);
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;
                     app.set_status_notice("Session cleared");
@@ -1876,7 +1898,10 @@ async fn handle_remote_key_internal(
                     if app.is_processing {
                         let pause_message = app_mod::commands::transfer_pause_message();
                         let pause_display = pause_message.clone();
-                        match remote.soft_interrupt(pause_message, false).await {
+                        match remote
+                            .soft_interrupt(pause_message, Vec::new(), false)
+                            .await
+                        {
                             Ok(request_id) => {
                                 app.track_pending_soft_interrupt(request_id, pause_display);
                                 app.pending_transfer_request = true;
@@ -1921,6 +1946,7 @@ async fn handle_remote_key_internal(
                     || trimmed == "/commit-push"
                     || trimmed == "/commit-and-push"
                     || trimmed == "/fast-release"
+                    || trimmed == "/fast-macos-release"
                     || trimmed == "/remote-release"
                     || trimmed == "/cut-release"
                     || trimmed == "/commit-push-release"
@@ -1933,11 +1959,14 @@ async fn handle_remote_key_internal(
                         "/fast-release" | "/cut-release" | "/commit-push-release"
                     );
                     let is_remote_release = trimmed == "/remote-release";
+                    let is_fast_macos_release = trimmed == "/fast-macos-release";
                     let is_push = trimmed != "/commit";
                     let prompt = if is_triage {
                         app_mod::commands::build_triage_prompt(
                             trimmed.strip_prefix("/triage").unwrap_or_default(),
                         )
+                    } else if is_fast_macos_release {
+                        app_mod::commands::build_fast_macos_release_prompt()
                     } else if is_fast_release {
                         app_mod::commands::build_fast_release_prompt()
                     } else if is_remote_release {
@@ -1950,6 +1979,8 @@ async fn handle_remote_key_internal(
                     let launch_notice = |interrupted: bool| {
                         if is_triage {
                             app_mod::commands::triage_launch_notice(interrupted)
+                        } else if is_fast_macos_release {
+                            app_mod::commands::fast_macos_release_launch_notice(interrupted)
                         } else if is_fast_release {
                             app_mod::commands::fast_release_launch_notice(interrupted)
                         } else if is_remote_release {
@@ -1962,6 +1993,8 @@ async fn handle_remote_key_internal(
                     };
                     let cmd_label = if is_triage {
                         "/triage"
+                    } else if is_fast_macos_release {
+                        "/fast-macos-release"
                     } else if is_fast_release {
                         "/fast-release"
                     } else if is_remote_release {
@@ -1973,7 +2006,10 @@ async fn handle_remote_key_internal(
                     };
                     if app.is_processing {
                         app.push_display_message(DisplayMessage::system(launch_notice(true)));
-                        match remote.soft_interrupt(prompt.clone(), false).await {
+                        match remote
+                            .soft_interrupt(prompt.clone(), Vec::new(), false)
+                            .await
+                        {
                             Ok(request_id) => {
                                 app.track_pending_soft_interrupt(request_id, prompt);
                                 app.set_status_notice(format!("Interrupting for {}...", cmd_label));
@@ -2552,7 +2588,8 @@ async fn handle_remote_key_internal(
                         app.queued_messages.push(prepared.expanded);
                     }
                     SendAction::Interleave => {
-                        app.send_interleave_now(prepared.expanded, remote).await;
+                        app.send_interleave_now(prepared.expanded, prepared.images, remote)
+                            .await;
                     }
                 }
             }

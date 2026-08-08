@@ -40,6 +40,17 @@ fn session_candidate_window(scan_limit: usize) -> usize {
         .clamp(scan_limit.max(1), 20_000)
 }
 
+/// Whether the picker lists transcripts discovered from other agent CLIs.
+///
+/// On by default (they can be resumed or imported), but it clutters the picker
+/// for users who only ever want jcode's own sessions, so `[display]
+/// external_sessions = false` (or `JCODE_EXTERNAL_SESSIONS=0`) opts out
+/// (issue #674). Checked before spawning the scan threads so opting out also
+/// skips the filesystem work.
+fn include_external_sessions() -> bool {
+    crate::config::config().display.external_sessions
+}
+
 fn include_old_saved_sessions_on_initial_load() -> bool {
     std::env::var("JCODE_SESSION_PICKER_INCLUDE_OLD_SAVED")
         .ok()
@@ -128,6 +139,10 @@ struct SessionListCacheEntry {
     loaded_at: Instant,
     sessions_dir: PathBuf,
     scan_limit: usize,
+    /// Part of the cache key: toggling `display.external_sessions` must not
+    /// serve a stale list that still contains (or still omits) other CLIs'
+    /// transcripts.
+    external_sessions: bool,
     sessions: Vec<SessionInfo>,
 }
 
@@ -138,8 +153,17 @@ struct GroupedSessionListDiskCache {
     sessions_dir: PathBuf,
     scan_limit: usize,
     include_old_saved_sessions: bool,
+    /// Part of the cache key for the same reason as
+    /// `SessionListCacheEntry::external_sessions`. Defaulted so an older cache
+    /// file stays readable (it was written with externals on).
+    #[serde(default = "crate::tui::session_picker::loading::default_true")]
+    external_sessions: bool,
     server_groups: Vec<ServerGroup>,
     orphan_sessions: Vec<SessionInfo>,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 fn session_list_cache() -> &'static Mutex<Option<SessionListCacheEntry>> {
@@ -161,11 +185,13 @@ fn session_list_disk_cache_is_usable(
     cache: &GroupedSessionListDiskCache,
     sessions_dir: &Path,
     scan_limit: usize,
+    want_external: bool,
 ) -> bool {
     cache.version == SESSION_LIST_DISK_CACHE_VERSION
         && cache.sessions_dir == sessions_dir
         && cache.scan_limit == scan_limit
         && cache.include_old_saved_sessions == include_old_saved_sessions_on_initial_load()
+        && cache.external_sessions == want_external
         && chrono::Utc::now()
             .signed_duration_since(cache.generated_at)
             .num_seconds()
@@ -187,6 +213,7 @@ fn write_grouped_session_list_disk_cache(
         sessions_dir: sessions_dir.to_path_buf(),
         scan_limit,
         include_old_saved_sessions: include_old_saved_sessions_on_initial_load(),
+        external_sessions: include_external_sessions(),
         server_groups: server_groups.to_vec(),
         orphan_sessions: orphan_sessions.to_vec(),
     };
@@ -204,7 +231,12 @@ pub fn load_cached_sessions_grouped() -> Option<(Vec<ServerGroup>, Vec<SessionIn
     let scan_limit = session_scan_limit();
     let path = session_list_disk_cache_path().ok()?;
     let cache: GroupedSessionListDiskCache = storage::read_json(&path).ok()?;
-    if !session_list_disk_cache_is_usable(&cache, &sessions_dir, scan_limit) {
+    if !session_list_disk_cache_is_usable(
+        &cache,
+        &sessions_dir,
+        scan_limit,
+        include_external_sessions(),
+    ) {
         return None;
     }
     Some((cache.server_groups, cache.orphan_sessions))
@@ -1684,11 +1716,13 @@ fn parse_jcode_session_info(
 pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     let scan_limit = session_scan_limit();
+    let want_external = include_external_sessions();
 
     if let Ok(cache) = session_list_cache().lock()
         && let Some(entry) = cache.as_ref()
         && entry.sessions_dir == sessions_dir
         && entry.scan_limit == scan_limit
+        && entry.external_sessions == want_external
         && entry.loaded_at.elapsed() <= SESSION_LIST_CACHE_TTL
     {
         return Ok(entry.sessions.clone());
@@ -1721,11 +1755,11 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
     let catchup_ref = &catchup_seen;
 
     let (mut sessions, external_sessions) = std::thread::scope(|scope| {
-        let claude_handle = scope.spawn(|| load_external_claude_code_sessions(scan_limit));
-        let codex_handle = scope.spawn(|| load_external_codex_sessions(scan_limit));
-        let pi_handle = scope.spawn(|| load_external_pi_sessions(scan_limit));
-        let opencode_handle = scope.spawn(|| load_external_opencode_sessions(scan_limit));
-        let cursor_handle = scope.spawn(|| load_external_cursor_sessions(scan_limit));
+        // One handle for all five external scans (they fan out internally), so
+        // the opt-out is a single branch and external work still overlaps the
+        // jcode session parsing below.
+        let external_handle =
+            scope.spawn(move || load_external_sessions(want_external, scan_limit));
 
         // Phase 1: walk the recency-ordered candidates in parallel windows until
         // we have collected `scan_limit` non-empty sessions. `boundary` marks the
@@ -1792,13 +1826,7 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             sessions.extend(saved_sessions.into_iter().flatten());
         }
 
-        let mut external = Vec::new();
-        external.extend(claude_handle.join().unwrap_or_default());
-        external.extend(codex_handle.join().unwrap_or_default());
-        external.extend(pi_handle.join().unwrap_or_default());
-        external.extend(opencode_handle.join().unwrap_or_default());
-        external.extend(cursor_handle.join().unwrap_or_default());
-        (sessions, external)
+        (sessions, external_handle.join().unwrap_or_default())
     });
     sessions.extend(external_sessions);
 
@@ -1809,11 +1837,34 @@ pub fn load_sessions() -> Result<Vec<SessionInfo>> {
             loaded_at: Instant::now(),
             sessions_dir,
             scan_limit,
+            external_sessions: want_external,
             sessions: sessions.clone(),
         });
     }
 
     Ok(sessions)
+}
+
+/// Scan every supported foreign agent CLI in parallel, or nothing at all when
+/// the user opted out via `display.external_sessions` (issue #674). Returning
+/// early skips the filesystem work entirely rather than filtering afterwards.
+fn load_external_sessions(enabled: bool, scan_limit: usize) -> Vec<SessionInfo> {
+    if !enabled {
+        return Vec::new();
+    }
+    std::thread::scope(|scope| {
+        let claude = scope.spawn(|| load_external_claude_code_sessions(scan_limit));
+        let codex = scope.spawn(|| load_external_codex_sessions(scan_limit));
+        let pi = scope.spawn(|| load_external_pi_sessions(scan_limit));
+        let opencode = scope.spawn(|| load_external_opencode_sessions(scan_limit));
+        let cursor = scope.spawn(|| load_external_cursor_sessions(scan_limit));
+
+        let mut external = Vec::new();
+        for handle in [claude, codex, pi, opencode, cursor] {
+            external.extend(handle.join().unwrap_or_default());
+        }
+        external
+    })
 }
 
 fn load_external_claude_code_sessions(scan_limit: usize) -> Vec<SessionInfo> {

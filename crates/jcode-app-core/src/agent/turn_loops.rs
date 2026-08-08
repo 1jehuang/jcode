@@ -13,6 +13,20 @@ impl Agent {
     /// task half-done. The counter is per turn-loop, so a genuinely finished
     /// agent still exits promptly.
     pub(crate) const MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS: u32 = 5;
+    const SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE: u32 = 3;
+    const BATCH_NUDGE: &str = "<system-reminder>Several tool calls have been made one at a time. If the next independent operations can run concurrently, use the batch tool instead of making more sequential calls. Keep sequential calls when one result is required to decide the next operation.</system-reminder>";
+
+    fn update_sequential_tool_rounds(current: u32, tool_count: usize, used_batch: bool) -> u32 {
+        if tool_count == 1 && !used_batch {
+            current.saturating_add(1)
+        } else {
+            0
+        }
+    }
+
+    fn should_inject_batch_nudge(pending: bool, batch_available: bool) -> bool {
+        pending && batch_available
+    }
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
@@ -31,8 +45,18 @@ impl Agent {
         let mut context_limit_retries = 0u32;
         let mut incomplete_continuations = 0u32;
         let mut empty_post_tool_continuations = 0u32;
+        let mut fable_guardrail_reconsiderations = 0u32;
+        let mut sequential_single_tool_rounds = 0u32;
+        let mut batch_nudge_pending = false;
 
         loop {
+            // Do not start another provider request once a cancel has been
+            // observed; the loop is re-entered by several recovery paths
+            // (issue #732, regression of #428).
+            if self.is_graceful_shutdown() {
+                logging::info("Cancel observed at turn-loop head - not starting another request");
+                break;
+            }
             let repaired = self.repair_missing_tool_outputs();
             if repaired > 0 {
                 logging::warn(&format!(
@@ -89,6 +113,14 @@ impl Agent {
                 ));
                 let (memory_msg, _persisted) = self.prepare_memory_injection_message(memory);
                 messages_with_memory.push(memory_msg);
+            }
+            if Self::should_inject_batch_nudge(
+                batch_nudge_pending,
+                tools.iter().any(|tool| tool.name == "batch"),
+            ) {
+                messages_with_memory.push(Message::user(Self::BATCH_NUDGE));
+                batch_nudge_pending = false;
+                sequential_single_tool_rounds = 0;
             }
 
             logging::info(&format!(
@@ -797,25 +829,18 @@ impl Agent {
 
             // If no tool calls, we're done
             if tool_calls.is_empty() {
-                if visible_text_is_empty
-                    && prompt_has_recent_tool_result
-                    && empty_post_tool_continuations
-                        < Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
-                {
-                    empty_post_tool_continuations += 1;
-                    logging::warn(&format!(
-                        "Provider returned whitespace-only final response after tool results; requesting final answer continuation (attempt {}/{})",
-                        empty_post_tool_continuations,
-                        Self::MAX_EMPTY_POST_TOOL_CONTINUATION_ATTEMPTS
-                    ));
-                    self.add_message(
-                        Role::User,
-                        vec![ContentBlock::Text {
-                            text: "The previous provider response was empty after tool results. Please provide the final answer to the user's last request using the tool results above. Do not call more tools unless absolutely necessary.".to_string(),
-                            cache_control: None,
-                        }],
-                    );
-                    self.session.save()?;
+                if self.maybe_reconsider_fable_guardrail(
+                    stop_reason.as_deref(),
+                    &mut fable_guardrail_reconsiderations,
+                )? {
+                    continue;
+                }
+                if self.maybe_continue_empty_post_tool_response(
+                    visible_text_is_empty,
+                    prompt_has_recent_tool_result,
+                    stop_reason.as_deref(),
+                    &mut empty_post_tool_continuations,
+                )? {
                     continue;
                 }
                 if self.maybe_continue_incomplete_response(
@@ -832,7 +857,8 @@ impl Agent {
                     !reasoning_content.trim().is_empty(),
                 ) {
                     logging::warn(&format!(
-                        "PROVIDER_GUARDRAIL: turn ended with no visible output (stop_reason={:?})",
+                        "{}: turn ended with no visible output (stop_reason={:?})",
+                        Self::empty_turn_log_event(stop_reason.as_deref()),
                         stop_reason
                     ));
                     if print_output {
@@ -873,6 +899,16 @@ impl Agent {
                     break;
                 }
                 logging::info("Provider handles tools internally - executing native tools locally");
+            }
+
+            let used_batch = tool_calls.iter().any(|tc| tc.name == "batch");
+            sequential_single_tool_rounds = Self::update_sequential_tool_rounds(
+                sequential_single_tool_rounds,
+                tool_calls.len(),
+                used_batch,
+            );
+            if sequential_single_tool_rounds >= Self::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE {
+                batch_nudge_pending = true;
             }
 
             // Execute tools and add results
@@ -1118,7 +1154,7 @@ impl Agent {
         Ok(final_text)
     }
 
-    fn messages_end_with_tool_result(messages: &[Message]) -> bool {
+    pub(super) fn messages_end_with_tool_result(messages: &[Message]) -> bool {
         messages.iter().rev().any(|message| {
             if !matches!(message.role, Role::User) {
                 return false;
@@ -1194,5 +1230,31 @@ mod tests {
         let messages = vec![user_text("hello")];
 
         assert!(!Agent::messages_end_with_tool_result(&messages));
+    }
+
+    #[test]
+    fn sequential_tool_rounds_trigger_after_three_single_calls() {
+        let mut rounds = 0;
+        for _ in 0..3 {
+            rounds = Agent::update_sequential_tool_rounds(rounds, 1, false);
+        }
+
+        assert_eq!(rounds, Agent::SEQUENTIAL_TOOL_ROUNDS_BEFORE_BATCH_NUDGE);
+    }
+
+    #[test]
+    fn parallel_or_batch_calls_reset_sequential_tool_rounds() {
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 2, false), 0);
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 1, true), 0);
+        assert_eq!(Agent::update_sequential_tool_rounds(2, 0, false), 0);
+    }
+
+    #[test]
+    fn pending_nudge_is_injected_only_when_batch_is_available() {
+        assert!(Agent::should_inject_batch_nudge(true, true));
+        assert!(!Agent::should_inject_batch_nudge(false, true));
+        assert!(!Agent::should_inject_batch_nudge(true, false));
+        assert!(Agent::BATCH_NUDGE.contains("use the batch tool"));
+        assert!(Agent::BATCH_NUDGE.contains("result is required"));
     }
 }

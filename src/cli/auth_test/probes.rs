@@ -52,6 +52,22 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
     }
 }
 
+/// Name the probe target the way the user selected it.
+///
+/// Named profiles run on the generic openai-compatible runtime, so the builtin
+/// descriptor's display name describes the slot rather than the profile. Saying
+/// "openai-compatible" for a profile the user named explicitly is what made
+/// #712 so hard to diagnose.
+fn probe_display_name(provider: crate::provider_catalog::LoginProviderDescriptor) -> String {
+    if let Ok(profile) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        && !profile.trim().is_empty()
+        && provider.id == "openai-compatible"
+    {
+        return profile.trim().to_string();
+    }
+    provider.display_name.to_string()
+}
+
 fn probe_generic_provider_auth(
     provider: crate::provider_catalog::LoginProviderDescriptor,
     report: &mut AuthTestProviderReport,
@@ -66,7 +82,7 @@ fn probe_generic_provider_auth(
         assessment.is_available(),
         format!(
             "{} auth status is {} ({}).",
-            provider.display_name,
+            probe_display_name(provider),
             auth_state_label(assessment.state),
             assessment.method_detail,
         ),

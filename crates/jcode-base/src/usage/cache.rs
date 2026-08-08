@@ -1,5 +1,8 @@
 use super::openai_helpers::{classify_openai_limits, usage_percent_to_ratio};
-use super::{AccountUsageSnapshot, OpenAIUsageData, ProviderUsage, UsageData, UsageLimit};
+use super::{
+    AccountUsageSnapshot, ModelScopedUsageWindow, OpenAIUsageData, ProviderUsage, UsageData,
+    UsageLimit,
+};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -142,6 +145,13 @@ pub(super) fn provider_report_from_usage_data(
             resets_at: data.seven_day_resets_at.clone(),
         });
     }
+    for window in &data.model_scoped {
+        limits.push(UsageLimit {
+            name: format!("7-day {} window", window.model_name),
+            usage_percent: window.utilization * 100.0,
+            resets_at: window.resets_at.clone(),
+        });
+    }
 
     let mut extra_info = Vec::new();
     extra_info.push((
@@ -184,6 +194,21 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
         .limits
         .iter()
         .find(|limit| limit.name == "7-day Opus window");
+    let model_scoped = report
+        .limits
+        .iter()
+        .filter_map(|limit| {
+            let model_name = limit.name.strip_prefix("7-day ")?.strip_suffix(" window")?;
+            if model_name == "Opus" {
+                return None;
+            }
+            Some(ModelScopedUsageWindow {
+                model_name: model_name.to_string(),
+                utilization: usage_percent_to_ratio(limit.usage_percent),
+                resets_at: limit.resets_at.clone(),
+            })
+        })
+        .collect();
     let extra_usage_enabled = report.extra_info.iter().find_map(|(key, value)| {
         if key == "Extra usage (long context)" {
             Some(value == "enabled")
@@ -202,6 +227,7 @@ pub(super) fn usage_data_from_provider_report(report: &ProviderUsage) -> UsageDa
             .unwrap_or(0.0),
         seven_day_resets_at: seven_day.and_then(|limit| limit.resets_at.clone()),
         seven_day_opus: seven_day_opus.map(|limit| usage_percent_to_ratio(limit.usage_percent)),
+        model_scoped,
         extra_usage_enabled: extra_usage_enabled.unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,

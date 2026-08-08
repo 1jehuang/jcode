@@ -583,7 +583,7 @@ impl PermissionsApp {
             }
         };
 
-        ratatui::restore();
+        jcode_tui_style::restore_terminal_quietly();
         result
     }
 }

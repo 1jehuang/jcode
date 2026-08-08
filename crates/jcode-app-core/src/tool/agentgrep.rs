@@ -76,6 +76,14 @@ struct AgentGrepInput {
     paths_only: Option<bool>,
 }
 
+/// Default cap on rendered grep matches.
+///
+/// Generous enough that ordinary code searches are unaffected (most return far
+/// fewer), while bounding the pathological case of a common string inside large
+/// data files. The match header always reports the true total, so a caller who
+/// needs more can raise `max_regions` knowing what they are asking for.
+const DEFAULT_GREP_MAX_REGIONS: usize = 200;
+
 fn default_agentgrep_mode() -> String {
     "grep".to_string()
 }
@@ -188,32 +196,32 @@ impl Tool for AgentGrepTool {
                 "mode": {
                     "type": "string",
                     "enum": ["grep", "find", "outline", "trace"],
-                    "description": "Optional search mode. Defaults to grep. Use grep for normal code/text search, find for file-name/path search, outline to summarize one file, and trace for DSL-based relationship search."
+                    "description": "Mode: grep (default), find (file names), outline (one file), trace (relationship DSL)."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Search query. Required for grep. For find, provide query terms to rank matching file paths, or omit query when path, glob, or type already narrows the file list. Grep treats query as literal text unless regex=true."
+                    "description": "Search query. Required for grep (literal unless regex=true); optional ranking terms for find."
                 },
                 "file": {
                     "type": "string",
-                    "description": "Single file to inspect. Required for outline. For grep/find of a single file, path may also point directly to the file."
+                    "description": "Single file to inspect. Required for outline."
                 },
                 "terms": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Trace DSL terms, for example [\"subject:auth_status\", \"relation:rendered\", \"support:ui\"]. Do not use this for normal grep/find searches; use query instead."
+                    "description": "Trace DSL terms, e.g. [\"subject:auth_status\", \"relation:rendered\"]. Not for grep/find; use query."
                 },
                 "regex": {
                     "type": "boolean",
-                    "description": "When true in grep mode, interpret query as a regular expression. Defaults to false, which is safer for literal searches."
+                    "description": "In grep mode, treat query as a regex. Defaults to false (literal)."
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory or file to search, relative to the workspace unless absolute. If this is a file, agentgrep searches only that file. Omit to search the workspace."
+                    "description": "Directory or file to search, relative to the workspace. Omit to search the whole workspace."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "Optional file glob filter such as **/*.rs. Do not set glob to **/* just to search everything; omit it instead."
+                    "description": "Optional file glob filter such as **/*.rs. Omit to search everything."
                 },
                 "type": {
                     "type": "string",
@@ -312,8 +320,16 @@ fn execute_linked_agentgrep(
                 run_grep(&root, &args).map_err(anyhow::Error::msg)?,
                 exact_file.as_deref(),
             );
+            // Bound the rendered matches by default. `find` and `outline` already
+            // default to 5 files / 6 regions, but grep passed `None` straight
+            // through, so one unscoped query over a repo containing large data
+            // files rendered every match: a search for a common key across 2,027
+            // benchmark transcripts produced 923k chars in a single call. The
+            // header still reports the true total, so the caller sees that more
+            // matches exist and can raise the cap deliberately.
+            let max_regions = params.max_regions.or(Some(DEFAULT_GREP_MAX_REGIONS));
             Ok(
-                ToolOutput::new(render_grep_output(&result, &args, params.max_regions))
+                ToolOutput::new(render_grep_output(&result, &args, max_regions))
                     .with_title("agentgrep grep"),
             )
         }

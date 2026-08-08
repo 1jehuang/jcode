@@ -143,8 +143,12 @@ impl McpClient {
             name, config.command, config.args, working_dir
         ));
 
-        let mut env: HashMap<String, String> = std::env::vars().collect();
-        env.extend(config.env.clone());
+        // Credentials must be opted into an MCP server explicitly through its
+        // config. The long-lived jcode daemon contains provider credentials in
+        // its process environment, and blindly inheriting them exposes those
+        // credentials to every configured MCP executable (issue #771).
+        let inherited: HashMap<String, String> = std::env::vars().collect();
+        let env = mcp_child_env(inherited, &config.env);
 
         let mut command = Command::new(&config.command);
         command
@@ -312,7 +316,7 @@ impl McpClient {
         }
 
         // Send initialized notification
-        let notif = JsonRpcRequest::new(0, "notifications/initialized", None);
+        let notif = JsonRpcNotification::new("notifications/initialized", None);
         let msg = serde_json::to_string(&notif)? + "\n";
         self.handle.writer_tx.send(msg).await?;
 
@@ -364,6 +368,34 @@ impl McpClient {
     }
 }
 
+/// Secrets that an MCP child must not receive merely because jcode has them.
+///
+/// This intentionally applies only to inherited values. A server can still be
+/// given any of these names through `McpServerConfig::env`.
+fn is_sensitive_inherited_env_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.ends_with("_API_KEY")
+        || key.ends_with("_ACCESS_TOKEN")
+        || key.ends_with("_AUTH_TOKEN")
+        || matches!(
+            key.as_str(),
+            "AWS_ACCESS_KEY_ID"
+                | "AWS_SECRET_ACCESS_KEY"
+                | "AWS_SESSION_TOKEN"
+                | "AZURE_CLIENT_SECRET"
+                | "GOOGLE_APPLICATION_CREDENTIALS"
+        )
+}
+
+fn mcp_child_env(
+    mut inherited: HashMap<String, String>,
+    explicit: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    inherited.retain(|key, _| !is_sensitive_inherited_env_key(key));
+    inherited.extend(explicit.clone());
+    inherited
+}
+
 impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -372,8 +404,45 @@ impl Drop for McpClient {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::McpClient;
+    use super::{McpClient, is_sensitive_inherited_env_key, mcp_child_env};
     use crate::mcp::protocol::McpServerConfig;
+    use std::collections::HashMap;
+
+    #[test]
+    fn inherited_mcp_env_scrubs_provider_credentials() {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "openai_api_key",
+            "CURSOR_ACCESS_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+        ] {
+            assert!(is_sensitive_inherited_env_key(key), "must scrub {key}");
+        }
+        for key in ["PATH", "HOME", "RUST_LOG", "JCODE_OPENROUTER_API_KEY_NAME"] {
+            assert!(!is_sensitive_inherited_env_key(key), "must preserve {key}");
+        }
+    }
+
+    #[test]
+    fn explicit_mcp_env_can_opt_a_credential_back_in() {
+        let inherited = HashMap::from([
+            ("PATH".to_string(), "/bin".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "daemon-secret".to_string()),
+        ]);
+        let explicit = HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "server-specific-secret".to_string(),
+        )]);
+
+        let env = mcp_child_env(inherited, &explicit);
+        assert_eq!(env.get("PATH").map(String::as_str), Some("/bin"));
+        assert_eq!(
+            env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("server-specific-secret")
+        );
+    }
 
     /// A minimal fake stdio MCP server (shell script) that reports its own
     /// process cwd as the serverInfo name.
@@ -397,6 +466,7 @@ done
             shared: false,
             transport: None,
             url: None,
+            headers: std::collections::HashMap::new(),
             enabled: None,
             disabled: None,
         }

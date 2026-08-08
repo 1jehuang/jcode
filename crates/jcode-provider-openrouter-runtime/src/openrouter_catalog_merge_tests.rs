@@ -175,3 +175,91 @@ context_window = 128000
         "live catalog models must still be offered: {models:?}"
     );
 }
+
+/// Regression test for issue #607.
+///
+/// Every `new_named_openai_compatible()` constructor sets the process-global
+/// `JCODE_OPENROUTER_CACHE_NAMESPACE` env var, so with several named profiles
+/// in one process the last one constructed wins and every profile's foreground
+/// cache read/write collides on a single `<last-profile>_models.json`. The
+/// picker then shows another provider's catalog, or refetches and clobbers it,
+/// which is why the model list did not survive a relaunch.
+#[test]
+fn named_profiles_keep_distinct_disk_cache_namespaces() {
+    let _lock = ENV_LOCK.lock();
+    let temp = tempfile::tempdir().expect("temp jcode home");
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path().to_str().expect("utf8 temp path"));
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    let _key = EnvVarGuard::set("TEST_NS_KEY", "test-key");
+
+    let make_profile = |base_url: &str| jcode_base::config::NamedProviderConfig {
+        base_url: base_url.to_string(),
+        api_key_env: Some("TEST_NS_KEY".to_string()),
+        model_catalog: true,
+        ..Default::default()
+    };
+
+    // Construct "first" then "second"; the env var now points at "second".
+    let first = OpenRouterProvider::new_named_openai_compatible(
+        "first",
+        &make_profile("https://first.models.test/v1"),
+    )
+    .expect("first profile");
+    let second = OpenRouterProvider::new_named_openai_compatible(
+        "second",
+        &make_profile("https://second.models.test/v1"),
+    )
+    .expect("second profile");
+
+    assert!(first.is_user_named_profile());
+    assert!(second.is_user_named_profile());
+    assert_eq!(
+        first.foreground_cache_namespace().as_deref(),
+        Some("first"),
+        "each named profile must use its own namespace, not the env var winner"
+    );
+    assert_eq!(
+        second.foreground_cache_namespace().as_deref(),
+        Some("second")
+    );
+
+    // Write a distinct on-disk cache for each namespace.
+    let cache_dir = temp.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    for (namespace, api_base, model_id) in [
+        ("first", "https://first.models.test/v1", "first-only-model"),
+        (
+            "second",
+            "https://second.models.test/v1",
+            "second-only-model",
+        ),
+    ] {
+        let cache = serde_json::json!({
+            "cached_at": now,
+            "source_api_base": api_base,
+            "models": [{ "id": model_id }],
+        });
+        std::fs::write(
+            cache_dir.join(format!("{namespace}_models.json")),
+            serde_json::to_string(&cache).expect("serialize cache"),
+        )
+        .expect("write cache");
+    }
+
+    // Each provider must read only its own cache, even though the env var
+    // points at "second".
+    let first_entry = first
+        .load_usable_model_disk_cache_entry()
+        .expect("first profile should find its own cache");
+    assert_eq!(first_entry.models.len(), 1);
+    assert_eq!(first_entry.models[0].id, "first-only-model");
+
+    let second_entry = second
+        .load_usable_model_disk_cache_entry()
+        .expect("second profile should find its own cache");
+    assert_eq!(second_entry.models[0].id, "second-only-model");
+}

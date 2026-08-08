@@ -1,3 +1,4 @@
+use super::available_models_dedup::available_models_dedup_key;
 use super::client_actions::{
     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
     handle_notify_session, handle_rename_session, handle_run_subagent, handle_set_feature,
@@ -95,6 +96,13 @@ fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<Strin
         _ => Err(
             "Client must Subscribe with a working_dir before sending stateful requests".to_string(),
         ),
+    }
+}
+
+fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
+    match request {
+        Request::Subscribe { terminal_env, .. } => terminal_env.clone(),
+        _ => Vec::new(),
     }
 }
 
@@ -224,6 +232,23 @@ fn reject_if_agent_busy_for_request(
         return false;
     }
 
+    send_agent_busy_error(
+        request_id,
+        request_kind,
+        client_session_id,
+        client_is_processing,
+        client_event_tx,
+    );
+    true
+}
+
+fn send_agent_busy_error(
+    request_id: u64,
+    request_kind: &'static str,
+    client_session_id: &str,
+    client_is_processing: bool,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
     crate::logging::event_warn(
         "SERVER_REQUEST_BUSY_AGENT_REJECTED",
         vec![
@@ -241,7 +266,6 @@ fn reject_if_agent_busy_for_request(
         ),
         retry_after_secs: Some(1),
     });
-    true
 }
 
 fn server_reload_starting() -> bool {
@@ -451,6 +475,7 @@ pub(super) async fn handle_client(
             return Ok(());
         }
     };
+    let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     // Per-client state
     let mut client_is_processing = false;
@@ -476,11 +501,15 @@ pub(super) async fn handle_client(
 
     // Create a new session for this client
     let t0 = std::time::Instant::now();
-    let mut new_agent = Agent::new_with_initial_working_dir(
-        Arc::clone(&provider),
-        registry.clone(),
-        Some(&initial_working_dir),
-    );
+    let mut new_agent =
+        crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
+            Agent::new_with_initial_working_dir(
+                Arc::clone(&provider),
+                registry.clone(),
+                Some(&initial_working_dir),
+            )
+        })
+        .await;
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
@@ -508,7 +537,7 @@ pub(super) async fn handle_client(
                 last_seen: connected_at,
                 is_processing: false,
                 current_tool_name: None,
-                terminal_env: Vec::new(),
+                terminal_env: active_terminal_env.clone(),
                 disconnect_tx: disconnect_tx.clone(),
             },
         );
@@ -796,11 +825,16 @@ pub(super) async fn handle_client(
                             ));
                             continue;
                         };
-                        let encoded_event = crate::protocol::encode_event(&event);
-                        if last_available_models_snapshot.as_ref() == Some(&encoded_event) {
+                        // Compare on an age-insensitive key: route details carry
+                        // cosmetic "12m ago" cache ages that tick on their own,
+                        // and a raw byte compare treated that drift as a real
+                        // catalog change, fanning a full repaint out to every
+                        // connected client.
+                        let dedup_key = available_models_dedup_key(&event);
+                        if last_available_models_snapshot.as_ref() == Some(&dedup_key) {
                             continue;
                         }
-                        let encoded_len = encoded_event.len();
+                        let encoded_len = crate::protocol::encode_event(&event).len();
                         if encoded_len > MAX_LIVE_AVAILABLE_MODELS_UPDATE_BYTES {
                             // Don't drop the catalog update entirely: clients still
                             // need fresh model names for the picker. Strip the heavy
@@ -829,11 +863,11 @@ pub(super) async fn handle_client(
                                     ));
                                 }
                             }
-                            last_available_models_snapshot = Some(encoded_event);
+                            last_available_models_snapshot = Some(dedup_key);
                             continue;
                         }
                         let _ = client_event_tx.send(event);
-                        last_available_models_snapshot = Some(encoded_event);
+                        last_available_models_snapshot = Some(dedup_key);
                     }
                     Ok(BusEvent::BatchProgress(progress)) => {
                         if progress.session_id == client_session_id {
@@ -1071,7 +1105,21 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 system_reminder,
+                no_reply,
             } => {
+                if no_reply {
+                    append_context_message(
+                        id,
+                        &content,
+                        images,
+                        &client_session_id,
+                        client_is_processing,
+                        &agent,
+                        &client_event_tx,
+                    )
+                    .await;
+                    continue;
+                }
                 if !client_is_processing {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
@@ -1096,6 +1144,7 @@ pub(super) async fn handle_client(
                     &agent,
                     &client_event_tx,
                     &processing_done_tx,
+                    active_terminal_env.clone(),
                     &SwarmStatusRefs {
                         members: &swarm_members,
                         swarms_by_id: &swarms_by_id,
@@ -1140,11 +1189,13 @@ pub(super) async fn handle_client(
             Request::SoftInterrupt {
                 id,
                 content,
+                images,
                 urgent,
             } => {
                 queue_soft_interrupt(
                     id,
                     content,
+                    images,
                     urgent,
                     SoftInterruptSource::User,
                     &session_control,
@@ -1171,28 +1222,31 @@ pub(super) async fn handle_client(
                 ) {
                     continue;
                 }
-                handle_clear_session(
-                    id,
-                    client_selfdev,
-                    &mut client_session_id,
-                    &client_connection_id,
-                    &agent,
-                    &provider,
-                    &registry,
-                    &sessions,
-                    &shutdown_signals,
-                    &soft_interrupt_queues,
-                    &client_connections,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &file_touch,
-                    &channel_subscriptions,
-                    &channel_subscriptions_by_session,
-                    &swarm_plans,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
-                    &client_event_tx,
+                crate::hooks::with_client_terminal_env(
+                    active_terminal_env.clone(),
+                    handle_clear_session(
+                        id,
+                        client_selfdev,
+                        &mut client_session_id,
+                        &client_connection_id,
+                        &agent,
+                        &provider,
+                        &registry,
+                        &sessions,
+                        &shutdown_signals,
+                        &soft_interrupt_queues,
+                        &client_connections,
+                        &swarm_members,
+                        &swarms_by_id,
+                        &file_touch,
+                        &channel_subscriptions,
+                        &channel_subscriptions_by_session,
+                        &swarm_plans,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                        &client_event_tx,
+                    ),
                 )
                 .await;
                 session_control = refresh_session_control_handle(
@@ -1366,57 +1420,58 @@ pub(super) async fn handle_client(
                     });
                     continue;
                 }
+                // Every Subscribe carries an authoritative snapshot. An empty
+                // snapshot must clear terminal vars inherited by the daemon
+                // rather than retaining a prior pane's values.
+                active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.client_instance_id = client_instance_id.clone();
-                        // Record the client's terminal env so spawn/focus hooks
-                        // target the client's terminal, not the server's stale
-                        // startup env (#405). Only overwrite when the client sent
-                        // something, so reconnects without env don't clobber it.
-                        if !terminal_env.is_empty() {
-                            info.terminal_env = terminal_env.clone();
-                        }
+                        info.terminal_env = active_terminal_env.clone();
                     }
                 }
                 if let Some(target_session_id) = target_session_id {
                     if crate::session::session_exists(&target_session_id) {
                         let pre_resume_session_id = client_session_id.clone();
-                        agent = handle_resume_session(
-                            id,
-                            target_session_id.clone(),
-                            subscribe_working_dir.as_deref(),
-                            client_instance_id.as_deref(),
-                            client_has_local_history,
-                            allow_session_takeover,
-                            &mut client_selfdev,
-                            &mut client_session_id,
-                            &client_connection_id,
-                            &agent,
-                            &provider,
-                            &registry,
-                            &sessions,
-                            &shutdown_signals,
-                            &soft_interrupt_queues,
-                            &client_connections,
-                            &client_debug_state,
-                            &swarm_members,
-                            &swarms_by_id,
-                            &file_touch,
-                            &channel_subscriptions,
-                            &channel_subscriptions_by_session,
-                            &swarm_plans,
-                            &swarm_coordinators,
-                            &client_count,
-                            &writer,
-                            &server_name,
-                            &server_icon,
-                            &client_event_tx,
-                            &mcp_pool,
-                            &event_history,
-                            &event_counter,
-                            &swarm_event_tx,
+                        agent = crate::hooks::with_client_terminal_env(
+                            active_terminal_env.clone(),
+                            handle_resume_session(
+                                id,
+                                target_session_id.clone(),
+                                subscribe_working_dir.as_deref(),
+                                client_instance_id.as_deref(),
+                                client_has_local_history,
+                                allow_session_takeover,
+                                &mut client_selfdev,
+                                &mut client_session_id,
+                                &client_connection_id,
+                                &agent,
+                                &provider,
+                                &registry,
+                                &sessions,
+                                &shutdown_signals,
+                                &soft_interrupt_queues,
+                                &client_connections,
+                                &client_debug_state,
+                                &swarm_members,
+                                &swarms_by_id,
+                                &file_touch,
+                                &channel_subscriptions,
+                                &channel_subscriptions_by_session,
+                                &swarm_plans,
+                                &swarm_coordinators,
+                                &client_count,
+                                &writer,
+                                &server_name,
+                                &server_icon,
+                                &client_event_tx,
+                                &mcp_pool,
+                                &event_history,
+                                &event_counter,
+                                &swarm_event_tx,
+                            ),
                         )
                         .await?;
                         session_control = refresh_session_control_handle(
@@ -1621,40 +1676,43 @@ pub(super) async fn handle_client(
                         info.client_instance_id = client_instance_id.clone();
                     }
                 }
-                agent = handle_resume_session(
-                    id,
-                    session_id,
-                    resume_working_dir.as_deref(),
-                    client_instance_id.as_deref(),
-                    client_has_local_history,
-                    allow_session_takeover,
-                    &mut client_selfdev,
-                    &mut client_session_id,
-                    &client_connection_id,
-                    &agent,
-                    &provider,
-                    &registry,
-                    &sessions,
-                    &shutdown_signals,
-                    &soft_interrupt_queues,
-                    &client_connections,
-                    &client_debug_state,
-                    &swarm_members,
-                    &swarms_by_id,
-                    &file_touch,
-                    &channel_subscriptions,
-                    &channel_subscriptions_by_session,
-                    &swarm_plans,
-                    &swarm_coordinators,
-                    &client_count,
-                    &writer,
-                    &server_name,
-                    &server_icon,
-                    &client_event_tx,
-                    &mcp_pool,
-                    &event_history,
-                    &event_counter,
-                    &swarm_event_tx,
+                agent = crate::hooks::with_client_terminal_env(
+                    active_terminal_env.clone(),
+                    handle_resume_session(
+                        id,
+                        session_id,
+                        resume_working_dir.as_deref(),
+                        client_instance_id.as_deref(),
+                        client_has_local_history,
+                        allow_session_takeover,
+                        &mut client_selfdev,
+                        &mut client_session_id,
+                        &client_connection_id,
+                        &agent,
+                        &provider,
+                        &registry,
+                        &sessions,
+                        &shutdown_signals,
+                        &soft_interrupt_queues,
+                        &client_connections,
+                        &client_debug_state,
+                        &swarm_members,
+                        &swarms_by_id,
+                        &file_touch,
+                        &channel_subscriptions,
+                        &channel_subscriptions_by_session,
+                        &swarm_plans,
+                        &swarm_coordinators,
+                        &client_count,
+                        &writer,
+                        &server_name,
+                        &server_icon,
+                        &client_event_tx,
+                        &mcp_pool,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                    ),
                 )
                 .await?;
                 session_control = refresh_session_control_handle(
@@ -2715,33 +2773,68 @@ pub(super) async fn handle_client(
         }
     }
 
-    cleanup_client_connection(
-        &sessions,
-        &client_session_id,
-        client_is_processing,
-        &mut processing_task,
-        event_handle,
-        &swarm_members,
-        &swarms_by_id,
-        &swarm_coordinators,
-        &swarm_plans,
-        &file_touch,
-        &channel_subscriptions,
-        &channel_subscriptions_by_session,
-        &client_debug_state,
-        &client_debug_id,
-        &client_connections,
-        &client_connection_id,
-        &shutdown_signals,
-        &soft_interrupt_queues,
-        &event_history,
-        &event_counter,
-        &swarm_event_tx,
+    crate::hooks::with_client_terminal_env(
+        active_terminal_env,
+        cleanup_client_connection(
+            &sessions,
+            &client_session_id,
+            client_is_processing,
+            &mut processing_task,
+            event_handle,
+            &swarm_members,
+            &swarms_by_id,
+            &swarm_coordinators,
+            &swarm_plans,
+            &file_touch,
+            &channel_subscriptions,
+            &channel_subscriptions_by_session,
+            &client_debug_state,
+            &client_debug_id,
+            &client_connections,
+            &client_connection_id,
+            &shutdown_signals,
+            &soft_interrupt_queues,
+            &event_history,
+            &event_counter,
+            &swarm_event_tx,
+        ),
     )
     .await?;
     Ok(())
 }
 
+async fn append_context_message(
+    id: u64,
+    content: &str,
+    images: Vec<(String, String)>,
+    client_session_id: &str,
+    client_is_processing: bool,
+    agent: &Arc<Mutex<Agent>>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    let Ok(mut agent) = agent.try_lock() else {
+        send_agent_busy_error(
+            id,
+            "context_message",
+            client_session_id,
+            client_is_processing,
+            client_event_tx,
+        );
+        return;
+    };
+    let result = agent.append_user_context_message(content, images);
+    let event = match result {
+        Ok(()) => ServerEvent::ContextMessageAdded { id },
+        Err(error) => ServerEvent::Error {
+            id,
+            message: crate::util::format_error_chain(&error),
+            retry_after_secs: None,
+        },
+    };
+    let _ = client_event_tx.send(event);
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
@@ -2749,6 +2842,7 @@ async fn start_processing_message(
     agent: &Arc<Mutex<Agent>>,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
     processing_done_tx: &mpsc::UnboundedSender<(u64, Result<()>, Option<String>)>,
+    client_terminal_env: Vec<(String, String)>,
     swarm: &SwarmStatusRefs<'_>,
 ) {
     let ProcessingMessage {
@@ -2819,12 +2913,9 @@ async fn start_processing_message(
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = Some(tokio::spawn(async move {
         let event_tx = tx.clone();
-        let result = match std::panic::AssertUnwindSafe(process_message_streaming_mpsc(
-            agent,
-            &content,
-            images,
-            system_reminder,
-            event_tx,
+        let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
+            client_terminal_env,
+            process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
         ))
         .catch_unwind()
         .await
@@ -2994,6 +3085,25 @@ async fn cancel_processing_message(
             *state.client_is_processing,
             *state.message_id
         ));
+        // Nothing is running anywhere for this session, so there is no turn to
+        // interrupt and arming the signal can only harm the *next* one: the
+        // deferred reset below runs 500ms later, and a message sent inside
+        // that window starts with the cancel flag already set and dies
+        // immediately, with no reply and no error. Report the interrupt and
+        // stop. Sessions whose turn is owned by another connection still take
+        // the signalling path, since the registry sees those turns.
+        if !crate::turn_cancel_registry::has_active_turn(&session_control.session_id) {
+            crate::logging::info(&format!(
+                "SERVER_INTERRUPT_CANCEL_IDLE_NOOP request_id={:?} session={}",
+                request_id, session_label
+            ));
+            *state.client_is_processing = false;
+            let _ = client_event_tx.send(ServerEvent::Interrupted);
+            if let Some(message_id) = state.message_id.take() {
+                let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
+            }
+            return;
+        }
         let cancel_epoch = session_control.request_cancel();
         let reset_control = session_control.clone();
         tokio::spawn(async move {
@@ -3045,7 +3155,7 @@ async fn cancel_processing_message(
 
 fn try_available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> Option<String> {
     let event = try_available_models_updated_event(agent)?;
-    Some(crate::protocol::encode_event(&event))
+    Some(available_models_dedup_key(&event))
 }
 
 /// Build a names-only copy of an `AvailableModelsUpdated` event by dropping the
@@ -3072,6 +3182,7 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
 fn queue_soft_interrupt(
     id: u64,
     content: String,
+    images: Vec<(String, String)>,
     urgent: bool,
     source: SoftInterruptSource,
     session_control: &SessionControlHandle,
@@ -3083,7 +3194,7 @@ fn queue_soft_interrupt(
         "SERVER_SOFT_INTERRUPT_QUEUE_REQUEST id={} session={} source={:?} urgent={} content_bytes={} content_chars={}",
         id, session_control.session_id, source, urgent, content_bytes, content_chars
     ));
-    let queued = session_control.queue_soft_interrupt(content, urgent, source);
+    let queued = session_control.queue_soft_interrupt(content, images, urgent, source);
     let ack_queued = client_event_tx.send(ServerEvent::Ack { id }).is_ok();
     crate::logging::info(&format!(
         "SERVER_SOFT_INTERRUPT_QUEUE_RESULT id={} session={} queued={} ack_queued={}",

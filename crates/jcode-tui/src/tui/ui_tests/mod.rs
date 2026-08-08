@@ -4,7 +4,7 @@ use crate::tui::ui::tools_ui;
 
 /// Delegates to the single shared render-state lock so viewport-snapshot tests
 /// serialize against every other rendering test, not just each other (#593).
-fn viewport_snapshot_test_lock() -> std::sync::MutexGuard<'static, ()> {
+fn viewport_snapshot_test_lock() -> crate::tui::ui::RenderStateTestGuard {
     crate::tui::ui::render_state_test_lock()
 }
 
@@ -145,6 +145,7 @@ struct TestState {
     chat_overscroll_active: bool,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
     status_notice: Option<String>,
+    time_since_user_interaction: Option<Duration>,
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
     transcript_swarm_members: Option<Vec<crate::protocol::SwarmMemberStatus>>,
     swarm_panel_selected: usize,
@@ -308,6 +309,9 @@ impl crate::tui::TuiState for TestState {
     }
     fn status_notice(&self) -> Option<String> {
         self.status_notice.clone()
+    }
+    fn time_since_user_interaction(&self) -> Option<Duration> {
+        self.time_since_user_interaction
     }
     fn inline_swarm_gallery_active(&self) -> bool {
         !self.swarm_members.is_empty()
@@ -516,6 +520,8 @@ mod diagrams;
 mod inline_picker;
 #[path = "onboarding.rs"]
 mod onboarding;
+#[path = "palette_topology.rs"]
+mod palette_topology;
 #[path = "prepare.rs"]
 mod prepared_messages_tests;
 #[path = "rendering.rs"]

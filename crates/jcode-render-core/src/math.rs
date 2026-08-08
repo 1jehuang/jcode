@@ -414,7 +414,11 @@ impl<'a> Parser<'a> {
             _ => {
                 let mut rendered =
                     command_symbol(&command).unwrap_or_else(|| format!("\\{command}"));
-                if had_separator && (is_named_operator(&command) || rendered.starts_with('\\')) {
+                // The whitespace after a word command terminates the command
+                // name in TeX, but readers expect `\alpha \leq \pi` to keep
+                // its spacing, so preserve the separator in the output. Skip
+                // it before scripts so `\alpha ^2` still reads as α².
+                if had_separator && !matches!(self.peek(), Some('^' | '_')) {
                     rendered.push(' ');
                 }
                 Expr::Text(rendered)
@@ -862,27 +866,6 @@ fn command_symbol(command: &str) -> Option<String> {
     Some(symbol.to_string())
 }
 
-fn is_named_operator(command: &str) -> bool {
-    matches!(
-        command,
-        "sin"
-            | "cos"
-            | "tan"
-            | "sec"
-            | "csc"
-            | "cot"
-            | "log"
-            | "ln"
-            | "exp"
-            | "lim"
-            | "min"
-            | "max"
-            | "det"
-            | "gcd"
-            | "mod"
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MathLayout {
     lines: Vec<String>,
@@ -1105,7 +1088,8 @@ mod tests {
     #[test]
     fn renders_common_inline_notation() {
         assert_eq!(render_inline_latex(r"E = mc^2"), "E = mc²");
-        assert_eq!(render_inline_latex(r"\alpha + \beta \leq \pi"), "α+ β≤π");
+        assert_eq!(render_inline_latex(r"\alpha + \beta \leq \pi"), "α + β ≤ π");
+        assert_eq!(render_inline_latex(r"\alpha ^2 + \beta _1"), "α² + β₁");
         assert_eq!(render_inline_latex(r"x_{10}"), "x₁₀");
         assert_eq!(render_inline_latex(r"x_i^2"), "xᵢ²");
         assert_eq!(render_inline_latex(r"x^2^3"), "x²³");

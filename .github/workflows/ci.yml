@@ -39,6 +39,19 @@ jobs:
           key: quality-ubuntu
           cache-all-crates: "true"
 
+      - name: Install system dependencies
+        # jcode-desktop2 pulls yeslogic-fontconfig-sys, whose build script hard
+        # fails without fontconfig.pc. Without this the "Enforce desktop2 frame
+        # budget" step cannot even build, and `cargo check --all-targets
+        # --all-features` above is affected the same way.
+        run: sudo apt-get update && sudo apt-get install -y -qq libfontconfig1-dev
+
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -81,9 +94,29 @@ jobs:
         shell: bash
         run: python3 scripts/check_dependency_boundaries.py
 
+      - name: Enforce Rust and TypeScript SDK surface parity
+        shell: bash
+        run: cargo test -p jcode-sdk parity -- --nocapture
+
       - name: Enforce wildcard re-export ratchet
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
+
+      # Frame-cost gate for desktop2. `build_scene` is a pure function of its
+      # model and `states::NODES` enumerates the app's visual states, so frame
+      # cost is something CI can evaluate rather than something a person has to
+      # notice by using the app and reporting that it feels slow.
+      #
+      # The decisive assertion is about work, not time: an unchanged frame must
+      # not lay the transcript out again. That is exact, so it fires on a
+      # contended CI runner exactly as it does locally, unlike a wall-clock
+      # budget which has to carry enough slack to hide real regressions.
+      #
+      # Runs on the default profile so it reuses this job's existing build
+      # artifacts rather than compiling a second dependency tree.
+      - name: Enforce desktop2 frame budget
+        shell: bash
+        run: "cargo test -p jcode-desktop2 profile:: -- --test-threads=1"
 
       - name: Enforce no unused dependencies
         shell: bash
@@ -107,7 +140,13 @@ jobs:
   build:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    # 35 minutes covers a normal push (~12 min with a warm Swatinem cache) but
+    # not a *rerun*, where the cache is cold: three consecutive reruns of a
+    # known-good commit were cancelled at the cap, each getting further through
+    # the same green steps (#693). A rerun is exactly what you reach for after a
+    # concurrency cancellation, so the old cap made healthy commits look red.
+    # 75 still bounds a genuinely hung job well under the windows job's 150.
+    timeout-minutes: 75
     # Some dependencies (e.g. convert_case 0.10.0 via derive_more/crossterm, and
     # proc-macro2/quote) accidentally ship a `rust-toolchain.toml` *inside their
     # published crate*. When cargo builds such a crate its CWD is that crate dir,
@@ -201,6 +240,85 @@ jobs:
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-app-core --lib retention_readiness -- --nocapture
 
+      - name: Run secret-input pty cohort (all platforms with a pty)
+        if: runner.os != 'Windows'
+        shell: bash
+        # `jcode-base --lib` is never executed on Linux CI: the only jcode-base
+        # test invocation anywhere in this workflow is a Windows-only
+        # `power_inhibit::tests::windows_` filter. So the masking fix for #660 had
+        # a test that was compiled and never run, which is the same
+        # looks-green-but-never-ran shape as the warning budget and the stdin
+        # detector (#651). These tests fork a pty, so they cannot run on the
+        # Windows runner; everywhere else they take about a second.
+        #
+        # 600s, not 300s: the budget is dominated by cold-compiling the
+        # jcode-base lib test harness, which exceeded 300s on a hosted macOS
+        # runner (run 30591536707) while the cohort itself runs in a second.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-base --lib secret_input -- --nocapture
+
+      - name: Run embedding numeric-stability cohort (Linux only)
+        if: runner.os == 'Linux'
+        shell: bash
+        # `minilm_embedding_is_numerically_stable_across_inference_engines` pins
+        # the model's actual output, which is the only thing that can catch an
+        # inference-engine upgrade silently changing embeddings: persisted
+        # memories are keyed by model_id, which does not change across a tract
+        # bump, so the stale-embedding filter cannot notice (#657).
+        #
+        # That test skips itself when the model is absent, and jcode-embedding
+        # tests are not otherwise run here at all, so without this step it would
+        # never execute. Fetch the model first (~87MB) so the cohort is real
+        # rather than a silent skip.
+        run: |
+          set -euo pipefail
+          model_dir="$HOME/.jcode/models/all-MiniLM-L6-v2"
+          mkdir -p "$model_dir"
+          base="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
+          curl -sSfL --retry 3 -o "$model_dir/model.onnx" "$base/onnx/model.onnx"
+          curl -sSfL --retry 3 -o "$model_dir/tokenizer.json" "$base/tokenizer.json"
+          # Fail loudly if the fetch produced something unusable, so this cannot
+          # degrade back into a silent skip.
+          test -s "$model_dir/model.onnx"
+          test -s "$model_dir/tokenizer.json"
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-embedding --lib -- --nocapture \
+            | tee /tmp/embedding-cohort.log
+          # The test is present and the harness ran it (rather than the binary
+          # failing to build).
+          grep -q "minilm_embedding_is_numerically_stable_across_inference_engines ... ok" \
+            /tmp/embedding-cohort.log
+          # This is the check that matters. A skipped test still reports "ok",
+          # so the reported result alone cannot distinguish "verified" from
+          # "silently did nothing"; only the skip message can.
+          if grep -q "skip: MiniLM model not present" /tmp/embedding-cohort.log; then
+            echo "::error::embedding cohort skipped despite fetching the model"
+            exit 1
+          fi
+
+      - name: Run stdin-forwarding cohort (all platforms)
+        shell: bash
+        # These tests exercise the per-platform stdin detector, whose
+        # implementations are entirely separate (`/proc/PID/syscall` on Linux,
+        # `proc_pidinfo` + thread state on macOS). They were never gated: the
+        # only `jcode-app-core --lib` run above is filtered to
+        # `retention_readiness`, and the broader suite is Linux-only, so the
+        # macOS detector had no coverage at all. `TH_STATE_WAITING` was defined
+        # as 2 (`TH_STATE_STOPPED`) rather than 3, which silently disabled
+        # macOS stdin forwarding entirely until #651.
+        #
+        # Deliberately not Linux-gated: running this on both Unix platforms is
+        # the whole point. Windows is a separate job and is not covered here,
+        # because these tests drive `head -n1`, which stock Windows does not
+        # provide; the Windows detector still has no test coverage.
+        run: |
+          python3 .github/scripts/run_with_timeout.py 600 \
+            "$(rustup which cargo)" test --target ${{ matrix.target }} \
+            -p jcode-app-core --lib tool::bash::tests::test_stdin_forwarding -- --nocapture
+
       - name: Run TUI library tests (Linux only)
         if: runner.os == 'Linux'
         shell: bash
@@ -216,16 +334,26 @@ jobs:
         # in #592; until then serial execution is the honest signal, and costs
         # ~30s once the target is already built above.
         #
-        # Skip the tests that need a real desktop environment: the copy-badge
-        # tests drive an actual clipboard ("Failed to copy" on a headless
-        # runner) and two render tests depend on terminal color support. They
-        # are covered locally; excluding them keeps the gate honest instead of
-        # permanently red. Tracked in #592.
+        # Two render tests depend on terminal color support and are still
+        # skipped. The copy-badge cohort no longer is: every one of those tests
+        # now installs the in-process `CapturedClipboard` sink and asserts the
+        # copied text through it, so they never touch the OS clipboard and pass
+        # on a headless runner (verified with DISPLAY/WAYLAND_DISPLAY unset).
+        # They were the tests most worth running, since they cover the copy path
+        # end to end. Tracked in #592.
+        #
+        # COLORTERM: the runner's headless shell advertises no color support,
+        # so capability detection falls back to 256-color and every RGB cell
+        # quantizes to `Indexed`. The palette-topology measurement identifies
+        # roles by their rendered RGB, and quantization error pushes some roles
+        # outside the matcher's family radius ("got 4 edges", run 30617961697).
+        # Declaring truecolor tests the code path users overwhelmingly run.
+        env:
+          COLORTERM: truecolor
         run: |
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
             -p jcode-tui --lib -- --test-threads=1 \
-            --skip copy_badge_shortcut \
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
 
@@ -453,8 +581,46 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Check module declarations resolve
+        # A `mod x;` with no file makes rustfmt fail with "Error writing files:
+        # failed to resolve mod", which reads like a formatting problem and hides
+        # every gate behind it. Naming the real cause first (221159294).
+        run: python3 scripts/check_module_files.py
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  typescript-sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      # The SDK mirrors crates/jcode-harness-api by hand. Without this job the
+      # only guard that runs on a change is the Rust-side variant check, and a
+      # typo in the TypeScript itself (or a broken client) reaches consumers.
+      - name: Install
+        run: npm ci --no-audit --no-fund
+        working-directory: sdk/typescript
+
+      - name: Typecheck, build, and test
+        run: npm run check
+        working-directory: sdk/typescript
+
+      # `npm run check` proves the source compiles; it says nothing about what
+      # a consumer actually receives. The published tarball is a separate
+      # artifact (`files`, `exports`, `prepack`), and getting it wrong ships a
+      # package that installs but cannot be imported. Install it as a real
+      # dependency and import it the way a consumer would.
+      - name: Published tarball installs and imports
+        run: bash scripts/test_sdk_package.sh
 
   setup-friction:
     name: Setup Friction Eval (Linux installer)

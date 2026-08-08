@@ -18,6 +18,7 @@ include!("tests/remote_startup_input_03/part_01.rs");
 include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");
 include!("tests/image_placeholder_commands.rs");
+include!("tests/interleave_images_guard.rs");
 include!("tests/remote_events_reload_01/part_01.rs");
 include!("tests/remote_events_reload_01/part_02.rs");
 include!("tests/remote_events_reload_02/part_01.rs");
@@ -44,9 +45,15 @@ include!("tests/hotkey_feedback_e2e.rs");
 include!("tests/todo_card.rs");
 include!("tests/issue_496_input_routing.rs");
 include!("tests/issue_544_paste_enter.rs");
+include!("tests/keybinding_hot_reload.rs");
+include!("tests/terminal_setup_command.rs");
 include!("tests/issue_497_copy_ctrl_c.rs");
+include!("tests/issue_699_ctrl_d_delete.rs");
+include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/spinner_slash_commands.rs");
-
+include!("tests/command_suggestions_cache.rs");
+include!("tests/skill_invocation_multi_word.rs");
+include!("tests/prompt_history_cross_session.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![

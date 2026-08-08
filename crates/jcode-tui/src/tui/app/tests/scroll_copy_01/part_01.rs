@@ -255,8 +255,35 @@ fn prompt_up_key(app: &App) -> (KeyCode, KeyModifiers) {
 
 /// Delegates to the single shared render-state lock so scroll/render tests
 /// serialize against viewport-snapshot tests too, not just each other (#593).
-fn scroll_render_test_lock() -> std::sync::MutexGuard<'static, ()> {
+fn scroll_render_test_lock() -> crate::tui::ui::RenderStateTestGuard {
     crate::tui::ui::render_state_test_lock()
+}
+
+/// RAII guard that routes clipboard writes into an in-process sink for the
+/// duration of a test.
+///
+/// Copy tests assert shortcut wiring, not that the host has a working
+/// clipboard. On a headless runner every real clipboard path fails correctly
+/// (no Wayland socket, no X11 display, non-terminal stdout), so without this
+/// the tests report "Failed to copy" for an environment reason (refs #596).
+struct CapturedClipboard;
+
+impl CapturedClipboard {
+    fn new() -> Self {
+        crate::tui::app::helpers::capture_clipboard_for_tests();
+        Self
+    }
+
+    /// The text most recently copied while this guard was active.
+    fn text(&self) -> Option<String> {
+        crate::tui::app::helpers::captured_clipboard_for_tests()
+    }
+}
+
+impl Drop for CapturedClipboard {
+    fn drop(&mut self) {
+        crate::tui::app::helpers::stop_capturing_clipboard_for_tests();
+    }
 }
 
 /// Whether wall-clock performance budgets should be asserted rather than merely

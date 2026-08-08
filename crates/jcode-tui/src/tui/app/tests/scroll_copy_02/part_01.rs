@@ -1,6 +1,7 @@
 #[test]
 fn test_local_error_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_error_copy_test_app();
 
     let initial = render_and_snap(&app, &mut terminal);
@@ -14,6 +15,12 @@ fn test_local_error_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied error".to_string()));
+    // The badge and notice can both appear while the clipboard write silently
+    // failed, so assert the text that actually reached the clipboard.
+    assert_eq!(
+        clipboard.text().as_deref(),
+        Some("permission denied while opening ~/.jcode/config.toml"),
+    );
 
     let text = render_and_snap(&app, &mut terminal);
     assert!(
@@ -26,6 +33,7 @@ fn test_local_error_copy_badge_shortcut_supported() {
 #[test]
 fn test_local_tool_error_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_tool_error_copy_test_app();
 
     let initial = render_and_snap(&app, &mut terminal);
@@ -39,6 +47,11 @@ fn test_local_tool_error_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied error".to_string()));
+    let copied = clipboard.text().expect("tool error should reach the clipboard");
+    assert!(
+        copied.contains("permission denied"),
+        "clipboard should carry the tool error: {copied:?}"
+    );
 
     let text = render_and_snap(&app, &mut terminal);
     assert!(
@@ -51,6 +64,7 @@ fn test_local_tool_error_copy_badge_shortcut_supported() {
 #[test]
 fn test_local_tool_failed_output_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_tool_failed_output_copy_test_app();
 
     let initial = render_and_snap(&app, &mut terminal);
@@ -64,6 +78,13 @@ fn test_local_tool_failed_output_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied output".to_string()));
+    let copied = clipboard
+        .text()
+        .expect("failed tool output should reach the clipboard");
+    assert!(
+        copied.contains("cat: /root/secret: Permission denied"),
+        "clipboard should carry the failed tool output: {copied:?}"
+    );
 
     let text = render_and_snap(&app, &mut terminal);
     assert!(
@@ -76,6 +97,7 @@ fn test_local_tool_failed_output_copy_badge_shortcut_supported() {
 #[test]
 fn test_local_blockquote_copy_badge_shortcut_supported() {
     let _render_lock = scroll_render_test_lock();
+    let clipboard = CapturedClipboard::new();
     let (mut app, mut terminal) = create_blockquote_copy_test_app();
 
     let initial = render_and_snap(&app, &mut terminal);
@@ -89,6 +111,11 @@ fn test_local_blockquote_copy_badge_shortcut_supported() {
         .unwrap();
 
     assert_eq!(app.status_notice(), Some("Copied quote".to_string()));
+    let copied = clipboard.text().expect("blockquote should reach the clipboard");
+    assert!(
+        copied.contains("the quick brown fox") && copied.contains("jumps over the lazy dog"),
+        "clipboard should carry the quoted lines: {copied:?}"
+    );
 
     let text = render_and_snap(&app, &mut terminal);
     assert!(
