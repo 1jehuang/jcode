@@ -396,7 +396,10 @@ fn render_background_task_progress_message_uses_borderless_segmented_row() {
         .join("\n");
 
     assert_eq!(lines.len(), 1);
-    assert!(plain.trim_start().starts_with("bash ⏳ ▪▪▪▫▫▫▫ 42%"), "{plain}");
+    assert!(
+        plain.trim_start().starts_with("bash ⏳ ▪▪▪▫▫▫▫ 42%"),
+        "{plain}"
+    );
     assert!(plain.contains("Running tests"));
     assert!(plain.ends_with("· background"));
     assert!(!plain.contains('╭'));

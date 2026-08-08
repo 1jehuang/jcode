@@ -880,7 +880,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
 }
 
 #[test]
-fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
+fn test_background_task_markdown_renders_compact_row_even_if_role_was_lost() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
@@ -894,15 +894,11 @@ fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
     let text = render_and_snap(&app, &mut terminal);
 
     assert!(
-        text.contains("╭") && text.contains("╰"),
-        "expected inferred background-task card rendering, got:\n{}",
+        text.contains("Run jcode library tests afte × · failed · 1.0s · background"),
+        "expected compact background-task row, got:\n{}",
         text
     );
-    assert!(
-        text.contains("✗ bg Run jcode library tests afte failed · 594967sj63"),
-        "expected background-task card title, got:\n{}",
-        text
-    );
+    assert!(!text.contains("594967sj63"), "task id should stay hidden:\n{text}");
     assert!(
         !text.contains("**Background task**"),
         "raw markdown should not be shown when the background-task role is inferred:\n{}",
