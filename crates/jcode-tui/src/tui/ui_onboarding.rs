@@ -684,7 +684,7 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
 
     // The title/hint block is dropped first when the area is short so the
     // phase body (the actionable part) always fits.
-    let show_title_block = area.height >= telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2 + 1;
+    let show_title_block = area.height > telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2;
 
     let used = if show_title_block {
         telemetry_h + GAP + TITLE_H + HINT_H + GAP + body_h

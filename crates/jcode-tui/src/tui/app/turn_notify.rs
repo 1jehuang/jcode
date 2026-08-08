@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Desktop notification for completed long agent turns.
 //!
 //! When a turn finishes after a configurable duration (lower threshold when

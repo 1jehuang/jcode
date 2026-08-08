@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! The onboarding state-space graph, as data.
 //!
 //! Onboarding is not one flow: it is a product of independent state spaces (UI

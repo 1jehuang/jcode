@@ -2834,6 +2834,7 @@ async fn append_context_message(
     let _ = client_event_tx.send(event);
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_processing_message(
     message: ProcessingMessage,
     client_session_id: &str,
