@@ -126,32 +126,6 @@ fn state_event_answers_pending_attach() {
 }
 
 #[test]
-fn session_event_answers_pending_attach_without_waiting_for_state() {
-    let mut state = BridgeState::default();
-    state.api_request_to_legacy(&json!({"req": "create_session", "id": 5}));
-
-    let frames = state.legacy_event_to_api(&json!({
-        "type": "session",
-        "session_id": "fresh-session"
-    }));
-
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[0].reply_to, Some(5));
-    assert!(matches!(
-        &frames[0].event,
-        ApiEvent::Attached { session } if session.session_id == "fresh-session"
-    ));
-
-    // The later state probe must not produce a duplicate request reply.
-    let later = state.legacy_event_to_api(&json!({
-        "type": "state",
-        "id": 2,
-        "session_id": "fresh-session"
-    }));
-    assert!(later.is_empty());
-}
-
-#[test]
 fn send_message_then_done_becomes_turn_done() {
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(

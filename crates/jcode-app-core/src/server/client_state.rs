@@ -81,10 +81,12 @@ pub(super) async fn handle_get_state(
     sessions: &SessionAgents,
     writer: &Arc<Mutex<WriteHalf>>,
 ) -> Result<()> {
-    let session_count = {
-        let sessions_guard = sessions.read().await;
-        sessions_guard.len()
-    };
+    // A subscribe may hold the sessions write lock while a newly-created agent
+    // finishes startup. State is a lightweight acknowledgement used by API
+    // clients to complete create_session, so it must not queue behind that
+    // potentially slow work and trip their request timeout. The count is only
+    // advisory; report zero while the registry is busy.
+    let session_count = sessions.try_read().map_or(0, |guard| guard.len());
 
     write_event(
         writer,

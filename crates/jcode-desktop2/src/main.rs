@@ -27,6 +27,7 @@ mod harness;
 mod hints;
 mod icons;
 mod input;
+mod interaction;
 mod keymap;
 mod layout;
 mod math;
@@ -159,6 +160,8 @@ struct App {
     click_streak: select::ClickStreak,
     /// Current mouse pointer shape, tracked so it is only set when it changes.
     cursor_icon: winit::window::CursorIcon,
+    /// Declarative pointer targets and their shared hover animation.
+    interaction: interaction::Registry,
     /// Window size and position, persisted so the app reopens as it was left.
     geometry: window_state::Geometry,
     /// When the geometry was last written, and what was written, so resizing
@@ -207,6 +210,7 @@ impl Default for App {
             last_click: None,
             click_streak: select::ClickStreak::default(),
             cursor_icon: winit::window::CursorIcon::Default,
+            interaction: interaction::Registry::default(),
             geometry: window_state::Geometry::default(),
             geometry_saved: None,
             last_frame: None,
@@ -1171,6 +1175,13 @@ impl App {
             return;
         }
         let (pointer_x, pointer_y) = self.focused_pointer();
+        if self.interaction.sync(
+            interaction::targets(&self.frame, &self.model),
+            (pointer_x, pointer_y),
+            std::time::Instant::now(),
+        ) {
+            self.request_redraw();
+        }
         if self.model_picker_hover(pointer_x, pointer_y) {
             self.request_redraw();
         }
@@ -1289,6 +1300,7 @@ impl App {
                     })
                     .flatten()
             });
+        let interaction = self.interaction.next_frame_at(now);
         // The overview is the one animation that must run whether or not the
         // window thinks it is focused: a compositor that steals focus while
         // Super is held would otherwise freeze the field mid-zoom.
@@ -1358,6 +1370,7 @@ impl App {
                 boot,
                 progress,
                 attachment,
+                interaction,
             ]
             .into_iter()
             .flatten()
@@ -1413,6 +1426,7 @@ impl App {
             ack,
             progress,
             attachment,
+            interaction,
         ]
         .into_iter()
         .flatten()
@@ -2141,9 +2155,19 @@ impl ApplicationHandler for App {
                 // (the frame was just measured through it), so this is a
                 // lookup rather than a relayout.
                 self.observe_stream_growth();
+                let pointer = self.focused_pointer();
                 if let Some(state) = self.state.as_mut() {
                     let size = state.size();
                     build_workspace_scene(&mut scene, &mut self.painter, &self.model, size, scale);
+                    // Re-resolve targets after layout, then paint one shared hover
+                    // treatment above the active page. Retained workspace neighbors
+                    // stay inert because their controls are not registered here.
+                    self.interaction.sync(
+                        interaction::targets(&self.frame, &self.model),
+                        pointer,
+                        std::time::Instant::now(),
+                    );
+                    interaction::draw(&mut scene, &self.interaction, &self.model.theme, scale);
                     self.frame_meter.end_build();
                     if let Err(error) = state.render(&scene, &mut self.frame_meter) {
                         eprintln!("render error: {error:#}");
