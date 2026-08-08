@@ -50,13 +50,14 @@ impl JcodeTier {
 
     /// Provider-price inference included with the monthly plan. The included
     /// portion is billed at 50%, so every subscription dollar buys two dollars
-    /// of inference. Usage after this allowance is billed at provider API price.
+    /// of inference. Usage after this allowance is billed at 90% of provider API
+    /// price (a 10% discount).
     pub fn included_inference_usd(self) -> f64 {
         self.usable_budget_usd()
     }
 
     pub fn overage_api_price_multiplier(self) -> f64 {
-        1.0
+        0.9
     }
 
     pub fn display_name(self) -> &'static str {
@@ -166,8 +167,8 @@ pub const CURATED_MODELS: &[CuratedModel] = &[
         aliases: &["claude-fable-5", "fable-5", "fable 5", "claude fable 5"],
         default_enabled: false,
         routing_policy: UpstreamRoutingPolicy::ServerManaged,
-        min_tier: JcodeTier::Ultra,
-        note: "Ultra-tier model; routed server-side to Anthropic by the jcode router.",
+        min_tier: JcodeTier::Plus,
+        note: "Frontier model; routed server-side to Anthropic by the jcode router.",
     },
     CuratedModel {
         id: "gpt-5.6-sol",
@@ -527,6 +528,7 @@ mod tests {
         "claude-opus-5",
         "claude-sonnet-4-6",
         "gpt-5.5",
+        "claude-fable-5",
         "gpt-5.6-sol",
         "qwen3-coder-next",
         "devstral-2-123b",
@@ -605,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn curated_catalog_has_exact_paid_and_ultra_sets() {
+    fn curated_catalog_has_exact_hosted_set_without_legacy_model_gates() {
         assert_eq!(
             CURATED_MODELS
                 .iter()
@@ -620,7 +622,7 @@ mod tests {
                 .filter(|model| model.min_tier == JcodeTier::Ultra)
                 .map(|model| model.id)
                 .collect::<Vec<_>>(),
-            vec!["claude-fable-5"]
+            Vec::<&str>::new()
         );
         assert!(
             CURATED_MODELS
@@ -652,7 +654,7 @@ mod tests {
             assert_eq!(tier.retail_price_usd(), retail_price);
             assert_eq!(tier.usable_budget_usd(), usable_budget);
             assert_eq!(tier.included_inference_usd(), usable_budget);
-            assert_eq!(tier.overage_api_price_multiplier(), 1.0);
+            assert_eq!(tier.overage_api_price_multiplier(), 0.9);
         }
     }
 
@@ -686,22 +688,15 @@ mod tests {
     }
 
     #[test]
-    fn model_entitlements_match_paid_tiers() {
+    fn every_hosted_model_is_available_from_the_base_subscription() {
         for model in CURATED_MODELS {
-            match model.id {
-                "claude-fable-5" => assert_eq!(model.min_tier, JcodeTier::Ultra),
-                _ => assert_eq!(model.min_tier, JcodeTier::Plus),
-            }
+            assert_eq!(model.min_tier, JcodeTier::Plus, "{}", model.id);
         }
 
         for tier in JcodeTier::ALL {
             for model in EXPECTED_PLUS_MODELS {
                 assert!(tier.allows(find_curated_model(model).unwrap().min_tier));
             }
-            assert_eq!(
-                tier.allows(find_curated_model("claude-fable-5").unwrap().min_tier),
-                matches!(tier, JcodeTier::Ultra | JcodeTier::Flagship)
-            );
         }
     }
 
