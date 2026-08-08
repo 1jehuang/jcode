@@ -409,8 +409,16 @@ fn pinned_todo_overflow_badge_expands_and_collapses_the_band() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let collapsed = render_and_snap(&app, &mut terminal);
     assert!(
-        collapsed.contains("▸ +"),
-        "overflow badge missing:\n{collapsed}"
+        collapsed.contains("… +"),
+        "original overflow text missing:\n{collapsed}"
+    );
+    assert!(
+        collapsed.contains("more (todo)"),
+        "original todo suffix missing:\n{collapsed}"
+    );
+    assert!(
+        collapsed.contains("[expand]"),
+        "expand badge missing:\n{collapsed}"
     );
     assert!(
         !collapsed.contains("todo item 11"),
@@ -423,7 +431,7 @@ fn pinned_todo_overflow_badge_expands_and_collapses_the_band() {
         let text = (0..area.width)
             .map(|col| buf[(col, row)].symbol())
             .collect::<String>();
-        text.find("▸ +")
+        text.find("[expand]")
             .map(|byte| (text[..byte].chars().count() as u16, row))
     });
     let (col, row) = badge.expect("badge should be present in the frame");
@@ -435,18 +443,18 @@ fn pinned_todo_overflow_badge_expands_and_collapses_the_band() {
         "expanded band should show all todos:\n{expanded}"
     );
     assert!(
-        expanded.contains("▾ collapse"),
+        expanded.contains("[collapse]"),
         "collapse badge missing:\n{expanded}"
     );
-    assert!(
-        app.try_toggle_pinned_todos_at(
-            col + 1,
-            expanded
-                .lines()
-                .position(|line| line.contains("▾ collapse"))
-                .unwrap() as u16
-        )
-    );
+    let collapse = expanded
+        .lines()
+        .enumerate()
+        .find_map(|(row, line)| {
+            line.find("[collapse]")
+                .map(|byte| (line[..byte].chars().count() as u16, row as u16))
+        })
+        .expect("collapse badge should be present in the frame");
+    assert!(app.try_toggle_pinned_todos_at(collapse.0 + 1, collapse.1));
     assert!(!app.pinned_todos_expanded);
 
     let _ = crate::todo::save_todos(&session_id, &[]);

@@ -1155,14 +1155,16 @@ pub(super) fn draw_messages(
     }
 
     if pinned_todo_lines > 0 {
-        let badge_width = pinned_todo_band.last().and_then(|line| {
+        let badge_geometry = pinned_todo_band.last().and_then(|line| {
             let text: String = line
                 .spans
                 .iter()
                 .map(|span| span.content.as_ref())
                 .collect();
-            (text.starts_with("  ▸ ") || text.starts_with("  ▾ "))
-                .then(|| text.width().saturating_sub(2) as u16)
+            ["[expand]", "[collapse]"].iter().find_map(|badge| {
+                let prefix = text.strip_suffix(badge)?;
+                Some((prefix.width() as u16, badge.width() as u16))
+            })
         });
         let band_area = Rect {
             x: content_area.x,
@@ -1172,8 +1174,8 @@ pub(super) fn draw_messages(
         };
         clear_area(frame, band_area);
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
-        let badge_area = badge_width.map(|width| Rect {
-            x: band_area.x.saturating_add(2),
+        let badge_area = badge_geometry.map(|(offset, width)| Rect {
+            x: band_area.x.saturating_add(offset),
             y: band_area
                 .y
                 .saturating_add(band_area.height)
@@ -1367,21 +1369,31 @@ fn pinned_todo_band_lines(
         let shown = content_budget.saturating_sub(1);
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
-        lines.push(Line::from(Span::styled(
-            if app.pinned_todos_expanded() {
-                format!("  ▾ collapse (+{} hidden)", hidden)
-            } else {
-                format!("  ▸ +{} more", hidden)
-            },
-            Style::default().fg(dim_color()).reversed(),
-        )));
+        let mut overflow = Line::from(Span::styled(
+            format!("  … +{} more (todo)", hidden),
+            Style::default().fg(dim_color()),
+        ));
+        let badge = if app.pinned_todos_expanded() {
+            "[collapse]"
+        } else {
+            "[expand]"
+        };
+        truncate_line_for_copy_badge(
+            &mut overflow,
+            (width as usize).saturating_sub(1 + badge.width()),
+        );
+        overflow.spans.push(Span::raw(" "));
+        overflow
+            .spans
+            .push(Span::styled(badge, Style::default().fg(dim_color())));
+        lines.push(overflow);
     } else {
         lines.extend(card_lines);
         if app.pinned_todos_expanded() {
-            lines.push(Line::from(Span::styled(
-                "  ▾ collapse",
-                Style::default().fg(dim_color()).reversed(),
-            )));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("[collapse]", Style::default().fg(dim_color())),
+            ]));
         }
     }
     lines
