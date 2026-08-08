@@ -79,6 +79,25 @@ fn sessions_sits_at_the_top_left_of_the_page() {
 }
 
 #[test]
+fn clicking_the_new_session_control_starts_a_session() {
+    let mut app = app();
+    let button = app.frame.new_session();
+    assert!(click(&mut app, button.center().x, button.center().y));
+    assert_eq!(
+        app.model.notice.as_deref(),
+        Some("not connected: cannot start a session")
+    );
+}
+
+#[test]
+fn new_session_control_sits_immediately_left_of_settings() {
+    let app = app();
+    let button = app.frame.new_session();
+    assert!(button.x1 < app.frame.gear().x0);
+    assert!(button.x0 > app.frame.left);
+}
+
+#[test]
 fn a_click_off_the_panel_only_dismisses_it() {
     // A dismiss that also acted on whatever was underneath would mean the
     // safest way to close a menu is not safe: aiming at the paper to shut it

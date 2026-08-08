@@ -14,6 +14,10 @@ impl App {
     /// composer, the transcript, the donut) only runs when the gear did not
     /// take the click.
     pub(crate) fn settings_press(&mut self, x: f64, y: f64) -> bool {
+        if !self.model.panel.is_open() && self.frame.hits_new_session(x, y) {
+            self.apply(crate::keymap::Action::SessionNew, None);
+            return true;
+        }
         if self.frame.hits_gear(x, y) {
             self.model.panel.toggle();
             self.request_redraw();

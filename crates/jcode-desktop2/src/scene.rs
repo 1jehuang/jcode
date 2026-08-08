@@ -1516,6 +1516,41 @@ pub fn build_scene(
         scale,
     );
 
+    // Keep the primary creation action visible rather than hiding it in the
+    // session overview. The shortcut is printed directly under the plus so the
+    // button teaches the faster path every time it is seen.
+    let new_session = frame.new_session();
+    let cx = (new_session.x0 + new_session.x1) / 2.0;
+    let plus_y = new_session.y0 + 7.0;
+    let plus_stroke = vello::kurbo::Stroke::new(1.6)
+        .with_caps(vello::kurbo::Cap::Round);
+    for line in [
+        vello::kurbo::Line::new((cx - 5.0, plus_y), (cx + 5.0, plus_y)),
+        vello::kurbo::Line::new((cx, plus_y - 5.0), (cx, plus_y + 5.0)),
+    ] {
+        scene.stroke(
+            &plus_stroke,
+            Affine::scale(scale),
+            theme.text,
+            None,
+            &line,
+        );
+    }
+    text.draw_paragraph_scaled(
+        scene,
+        "Ctrl ⇧ N",
+        (new_session.x0, new_session.y0 + 17.0),
+        new_session.width() as f32,
+        ParagraphStyle {
+            font_size: 8.5,
+            color: theme.muted,
+            align: text::Align::Center,
+            line_height: 1.0,
+            ..Default::default()
+        },
+        scale,
+    );
+
     // Composer: a real input field. Paper fill plus a hairline border, rather
     // than a grey slab: a filled block reads as disabled or as a code block,
     // while an outlined field reads as somewhere to type. The border thickens

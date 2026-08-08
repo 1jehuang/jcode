@@ -1094,6 +1094,7 @@ impl App {
         }
         let wanted = if self.frame.hits_gear(x, y)
             || self.frame.hits_sessions(x, y)
+            || self.frame.hits_new_session(x, y)
             || (self.model.model_picker.is_open()
                 && self
                     .frame

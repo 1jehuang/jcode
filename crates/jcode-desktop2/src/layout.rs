@@ -107,6 +107,9 @@ pub const DONUT_MIN_SIDE: f64 = 100.0;
 pub const GEAR_SIZE: f64 = 18.0;
 /// Sessions button size.
 pub const SESSIONS_SIZE: f64 = GEAR_SIZE;
+/// New-session control: a generous hit target for the plus and its shortcut.
+pub const NEW_SESSION_WIDTH: f64 = 62.0;
+pub const NEW_SESSION_HEIGHT: f64 = 34.0;
 /// Radius of the gear's body, as a fraction of its box. The teeth and the hub
 /// are drawn around this, so the whole mark scales from one number.
 pub const GEAR_RADIUS: f64 = 0.30;
@@ -564,6 +567,23 @@ impl Frame {
             self.left + SESSIONS_SIZE,
             gear.y0 + SESSIONS_SIZE,
         )
+    }
+
+    /// The primary new-session action, immediately beside the secondary gear.
+    pub fn new_session(&self) -> vello::kurbo::Rect {
+        let gear = self.gear();
+        let y0 = (self.body_top / 2.0 - NEW_SESSION_HEIGHT / 2.0).max(0.0);
+        vello::kurbo::Rect::new(
+            gear.x0 - NEW_SESSION_WIDTH - 12.0,
+            y0,
+            gear.x0 - 12.0,
+            y0 + NEW_SESSION_HEIGHT,
+        )
+    }
+
+    pub fn hits_new_session(&self, x: f64, y: f64) -> bool {
+        self.new_session()
+            .contains(vello::kurbo::Point::new(x, y))
     }
 
     pub fn hits_sessions(&self, x: f64, y: f64) -> bool {
