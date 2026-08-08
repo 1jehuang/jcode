@@ -40,8 +40,19 @@ impl App {
                     // rather than waiting forever.
                     turn_ended = true;
                     let queued = self.model.transcript.has_queued();
-                    self.state_graph
-                        .apply(crate::state_graph::Event::TurnFinished { queued });
+                    if self.state_graph.state().session
+                        == crate::state_graph::SessionState::Attached
+                    {
+                        self.state_graph
+                            .apply(crate::state_graph::Event::TurnFinished { queued });
+                    } else {
+                        // Before an attach, a harness failure is a connection
+                        // failure rather than a failed turn. Recording that
+                        // distinction prevents startup from remaining stuck in
+                        // Connecting forever.
+                        self.state_graph
+                            .apply(crate::state_graph::Event::ConnectionFailed);
+                    }
                 }
                 harness::HarnessUpdate::Attached {
                     session_id,

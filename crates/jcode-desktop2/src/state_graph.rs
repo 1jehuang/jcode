@@ -203,12 +203,14 @@ impl Graph {
     /// Cross-axis invariants that define reachable product states.
     pub fn validate(&self) -> Result<(), &'static str> {
         let state = self.state;
-        if state.window == WindowState::Closed
-            && (state.connection != ConnectionState::Offline
-                || state.turn != TurnState::Idle
-                || state.motion != MotionState::Settled)
-        {
-            return Err("closed window retained live runtime state");
+        if state.window != WindowState::Open {
+            let expected = State {
+                window: state.window,
+                ..State::default()
+            };
+            if state != expected {
+                return Err("inactive window retained product state");
+            }
         }
         if matches!(
             state.turn,
@@ -284,7 +286,10 @@ mod tests {
     use super::*;
     use std::collections::{HashSet, VecDeque};
 
-    const ALL_EVENTS: [Event; 27] = [
+    // Concrete representatives of every Event variant and every finite payload
+    // value. Keep this adjacent to Event so additions cannot be overlooked in
+    // review without also making this count and the exhaustive test conspicuous.
+    const ALL_EVENTS: [Event; 28] = [
         Event::WindowOpened,
         Event::WindowClosed,
         Event::ConnectStarted,
@@ -312,6 +317,7 @@ mod tests {
         Event::Move(Direction::Right),
         Event::Move(Direction::Up),
         Event::Move(Direction::Down),
+        Event::MotionSettled,
     ];
 
     #[test]
@@ -393,7 +399,7 @@ mod tests {
         let mut checked_edges = 0usize;
 
         while let Some(state) = pending.pop_front() {
-            for event in ALL_EVENTS.into_iter().chain([Event::MotionSettled]) {
+            for event in ALL_EVENTS {
                 let mut graph = Graph {
                     state,
                     transitions: 0,
@@ -411,6 +417,23 @@ mod tests {
         }
 
         assert!(seen.len() > 1_000, "exploration was unexpectedly shallow");
-        assert_eq!(checked_edges, seen.len() * (ALL_EVENTS.len() + 1));
+        assert_eq!(checked_edges, seen.len() * ALL_EVENTS.len());
+    }
+
+    #[test]
+    fn every_motion_edge_converges_when_settled() {
+        let mut graph = Graph::default();
+        graph.apply(Event::WindowOpened);
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            graph.apply(Event::Move(direction));
+            assert_eq!(graph.state().motion.direction(), Some(direction));
+            graph.apply(Event::MotionSettled);
+            assert_eq!(graph.state().motion, MotionState::Settled);
+        }
     }
 }
