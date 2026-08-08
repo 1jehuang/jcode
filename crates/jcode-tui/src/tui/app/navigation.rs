@@ -212,6 +212,14 @@ impl App {
         self.toggle_swarm_message_expand(msg_idx)
     }
 
+    pub(super) fn try_toggle_pinned_todos_at(&mut self, column: u16, row: u16) -> bool {
+        if !super::super::ui::pinned_todo_expand_badge_contains(column, row) {
+            return false;
+        }
+        self.toggle_pinned_todos_expanded();
+        true
+    }
+
     /// Toggle the collapsed/expanded state of the swarm notification at
     /// transcript index `msg_idx`. Returns `true` when the message was a
     /// collapsible swarm card and its state changed.
@@ -1562,6 +1570,12 @@ impl App {
             && self.try_cycle_image_expand_at(mouse.column, mouse.row)
         {
             finish_mouse_event!(false, "cycle_image_expand");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && self.try_toggle_pinned_todos_at(mouse.column, mouse.row)
+        {
+            finish_mouse_event!(false, "toggle_pinned_todos");
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))

@@ -132,6 +132,15 @@ impl App {
         self.refresh_pinned_todos_if_needed();
     }
 
+    pub(super) fn toggle_pinned_todos_expanded(&mut self) {
+        self.pinned_todos_expanded = !self.pinned_todos_expanded;
+        self.set_status_notice(if self.pinned_todos_expanded {
+            "Pinned todos expanded"
+        } else {
+            "Pinned todos collapsed"
+        });
+    }
+
     pub(super) fn set_todos_view_enabled(&mut self, enabled: bool, focus: bool) {
         self.todos_view_enabled = enabled;
         if enabled {

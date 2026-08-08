@@ -353,7 +353,10 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     app.auto_scroll_paused = true;
     let top_text = render_and_snap(&app, &mut terminal);
     assert!(
-        top_text.lines().take(6).any(|row| row.contains("pinned band item")),
+        top_text
+            .lines()
+            .take(6)
+            .any(|row| row.contains("pinned band item")),
         "pinned todo should remain visible at the top of scrollback, got:\n{}",
         top_text
     );
@@ -380,6 +383,71 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
         "pinned todo band should not render a horizontal separator, got:\n{}",
         text
     );
+
+    let _ = crate::todo::save_todos(&session_id, &[]);
+}
+
+#[test]
+fn pinned_todo_overflow_badge_expands_and_collapses_the_band() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
+    let _pin = PinTodosEnvGuard::enable();
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    let todos = (0..12)
+        .map(|idx| pinned_band_todo(&format!("t{idx}"), &format!("todo item {idx}"), "pending"))
+        .collect::<Vec<_>>();
+    crate::todo::save_todos(&session_id, &todos).unwrap();
+    app.refresh_pinned_todos_now();
+    app.display_messages = vec![DisplayMessage::assistant(App::build_scroll_test_content(
+        0, 30, None,
+    ))];
+    app.bump_display_messages_version();
+    app.session.short_name = Some("test".to_string());
+
+    let backend = ratatui::backend::TestBackend::new(70, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let collapsed = render_and_snap(&app, &mut terminal);
+    assert!(
+        collapsed.contains("▸ +"),
+        "overflow badge missing:\n{collapsed}"
+    );
+    assert!(
+        !collapsed.contains("todo item 11"),
+        "last item should start hidden"
+    );
+
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    let badge = (0..area.height).find_map(|row| {
+        let text = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        text.find("▸ +")
+            .map(|byte| (text[..byte].chars().count() as u16, row))
+    });
+    let (col, row) = badge.expect("badge should be present in the frame");
+    assert!(app.try_toggle_pinned_todos_at(col + 1, row));
+
+    let expanded = render_and_snap(&app, &mut terminal);
+    assert!(
+        expanded.contains("todo item 11"),
+        "expanded band should show all todos:\n{expanded}"
+    );
+    assert!(
+        expanded.contains("▾ collapse"),
+        "collapse badge missing:\n{expanded}"
+    );
+    assert!(
+        app.try_toggle_pinned_todos_at(
+            col + 1,
+            expanded
+                .lines()
+                .position(|line| line.contains("▾ collapse"))
+                .unwrap() as u16
+        )
+    );
+    assert!(!app.pinned_todos_expanded);
 
     let _ = crate::todo::save_todos(&session_id, &[]);
 }

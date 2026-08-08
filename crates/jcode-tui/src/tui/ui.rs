@@ -157,6 +157,21 @@ use transitions::inline_ui_gap_height;
 #[cfg(test)]
 use viewport::compute_visible_margins;
 use viewport::draw_messages;
+
+static PINNED_TODO_EXPAND_BADGE: Mutex<Option<Rect>> = Mutex::new(None);
+
+pub(crate) fn record_pinned_todo_expand_badge(area: Option<Rect>) {
+    *PINNED_TODO_EXPAND_BADGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = area;
+}
+
+pub(crate) fn pinned_todo_expand_badge_contains(column: u16, row: u16) -> bool {
+    PINNED_TODO_EXPAND_BADGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some_and(|area| crate::tui::layout_utils::point_in_rect(column, row, area))
+}
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use viewport::{

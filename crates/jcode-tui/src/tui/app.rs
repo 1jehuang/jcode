@@ -1337,6 +1337,8 @@ pub struct App {
     /// they are allowed to be unread until it does.
     #[allow(dead_code)]
     pinned_todos_payload: Option<String>,
+    /// Whether the pinned todo band is temporarily expanded to show all rows.
+    pinned_todos_expanded: bool,
     /// Hash of the todo payload behind `pinned_todos_payload`, used to skip
     /// re-serializing when nothing changed between ticks.
     #[allow(dead_code)]

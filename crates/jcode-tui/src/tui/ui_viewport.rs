@@ -1155,6 +1155,15 @@ pub(super) fn draw_messages(
     }
 
     if pinned_todo_lines > 0 {
+        let badge_width = pinned_todo_band.last().and_then(|line| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            (text.starts_with("  ▸ ") || text.starts_with("  ▾ "))
+                .then(|| text.width().saturating_sub(2) as u16)
+        });
         let band_area = Rect {
             x: content_area.x,
             y: render_area.y.saturating_add(prompt_preview_lines),
@@ -1163,6 +1172,18 @@ pub(super) fn draw_messages(
         };
         clear_area(frame, band_area);
         frame.render_widget(Paragraph::new(pinned_todo_band), band_area);
+        let badge_area = badge_width.map(|width| Rect {
+            x: band_area.x.saturating_add(2),
+            y: band_area
+                .y
+                .saturating_add(band_area.height)
+                .saturating_sub(1),
+            width,
+            height: 1,
+        });
+        super::record_pinned_todo_expand_badge(badge_area);
+    } else {
+        super::record_pinned_todo_expand_badge(None);
     }
 
     if crate::config::config().display.prompt_preview && scroll > 0 {
@@ -1334,20 +1355,34 @@ fn pinned_todo_band_lines(
     if card_lines.is_empty() {
         return Vec::new();
     }
-    // Band budget: about a third of the viewport.
-    let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget;
+    // Collapsed bands stay compact. Expanded bands may use the viewport while
+    // retaining at least two transcript rows.
+    let content_budget = if app.pinned_todos_expanded() {
+        (viewport_height as usize).saturating_sub(2).max(2)
+    } else {
+        ((viewport_height as usize) / 3).clamp(2, 12)
+    };
     let mut lines: Vec<Line<'static>> = Vec::new();
     if card_lines.len() > content_budget {
         let shown = content_budget.saturating_sub(1);
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
         lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
-            Style::default().fg(dim_color()),
+            if app.pinned_todos_expanded() {
+                format!("  ▾ collapse (+{} hidden)", hidden)
+            } else {
+                format!("  ▸ +{} more", hidden)
+            },
+            Style::default().fg(dim_color()).reversed(),
         )));
     } else {
         lines.extend(card_lines);
+        if app.pinned_todos_expanded() {
+            lines.push(Line::from(Span::styled(
+                "  ▾ collapse",
+                Style::default().fg(dim_color()).reversed(),
+            )));
+        }
     }
     lines
 }

@@ -207,6 +207,9 @@ pub trait TuiState {
     fn pinned_todos_payload(&self) -> Option<&str> {
         None
     }
+    fn pinned_todos_expanded(&self) -> bool {
+        false
+    }
 
     // ---- Input ----
     fn input(&self) -> &str;

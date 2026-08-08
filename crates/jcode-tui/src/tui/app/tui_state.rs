@@ -589,6 +589,10 @@ impl crate::tui::TuiState for App {
         self.pinned_todos_payload_ref()
     }
 
+    fn pinned_todos_expanded(&self) -> bool {
+        self.pinned_todos_expanded
+    }
+
     fn input(&self) -> &str {
         &self.input
     }
