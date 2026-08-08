@@ -1780,9 +1780,18 @@ fn render_system_message_uses_minimal_inline_style_for_reload_title() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(!plain.contains('╭'), "unexpected reload card border: {plain}");
-    assert!(!plain.contains('╰'), "unexpected reload card border: {plain}");
-    assert!(!plain.contains("⚡ reload"), "unexpected reload card title: {plain}");
+    assert!(
+        !plain.contains('╭'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains('╰'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains("⚡ reload"),
+        "unexpected reload card title: {plain}"
+    );
     assert!(plain.contains("Reloading server with newer binary"));
 }
 

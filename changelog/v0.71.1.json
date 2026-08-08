@@ -1,0 +1,16 @@
+{
+  "version": "0.71.1",
+  "date": "2026-08-08",
+  "title": "TypeScript SDK reliability and runtime refresh",
+  "highlights": [
+    "The TypeScript SDK now ships current jcode runtimes instead of the v0.67.1 runtime",
+    "Launched SDK sessions shut down reliably even when daemon registration is delayed"
+  ],
+  "improvements": [
+    "Platform runtime packages are refreshed together at SDK version 1.2.0"
+  ],
+  "fixes": [
+    "Linux ARM64 release builds use the platform-native C character type for terminal lookup",
+    "Anthropic OAuth sessions use a runtime that tolerates unavailable usage reporting while preserving inference"
+  ]
+}
