@@ -111,6 +111,16 @@ impl Graph {
     /// duplicates (two activity packets, a repeated attach acknowledgement)
     /// are harmless self-edges rather than panics.
     pub fn apply(&mut self, event: Event) -> State {
+        // Runtime callbacks may be duplicated or arrive after teardown. Keep
+        // the reducer total by treating events outside an open window as
+        // harmless self-edges. Opening and closing remain idempotent.
+        if self.state.window != WindowState::Open
+            && !matches!(event, Event::WindowOpened | Event::WindowClosed)
+        {
+            self.transitions = self.transitions.saturating_add(1);
+            return self.state;
+        }
+
         let mut next = self.state;
         match event {
             Event::WindowOpened => {
@@ -127,29 +137,51 @@ impl Graph {
                 next.booting = false;
                 next.motion = MotionState::Settled;
             }
-            Event::ConnectStarted => next.connection = ConnectionState::Connecting,
+            Event::ConnectStarted => {
+                next.connection = ConnectionState::Connecting;
+                next.session = SessionState::Detached;
+                next.turn = TurnState::Idle;
+            }
             Event::Connected => next.connection = ConnectionState::Online,
-            Event::ConnectionFailed => next.connection = ConnectionState::Failed,
-            Event::NewSessionRequested => next.session = SessionState::Creating,
-            Event::AttachRequested => next.session = SessionState::Attaching,
+            Event::ConnectionFailed => {
+                next.connection = ConnectionState::Failed;
+                next.session = SessionState::Detached;
+                next.turn = TurnState::Idle;
+            }
+            Event::NewSessionRequested => {
+                next.session = SessionState::Creating;
+                next.turn = TurnState::Idle;
+            }
+            Event::AttachRequested => {
+                next.session = SessionState::Attaching;
+                next.turn = TurnState::Idle;
+            }
             Event::SessionAttached => {
                 next.connection = ConnectionState::Online;
                 next.session = SessionState::Attached;
             }
-            Event::PromptSubmitted => next.turn = TurnState::Sending,
-            Event::PromptQueued => next.turn = TurnState::WorkingQueued,
+            Event::PromptSubmitted if next.session == SessionState::Attached => {
+                next.turn = TurnState::Sending;
+            }
+            Event::PromptQueued if next.session == SessionState::Attached => {
+                next.turn = TurnState::WorkingQueued;
+            }
             Event::PromptAccepted | Event::AgentActivity => {
-                next.turn = match next.turn {
-                    TurnState::WorkingQueued => TurnState::WorkingQueued,
-                    _ => TurnState::Working,
-                };
+                if next.session == SessionState::Attached {
+                    next.turn = match next.turn {
+                        TurnState::WorkingQueued => TurnState::WorkingQueued,
+                        _ => TurnState::Working,
+                    };
+                }
             }
             Event::TurnFinished { queued } => {
-                next.turn = if queued {
-                    TurnState::Sending
-                } else {
-                    TurnState::Idle
-                };
+                if next.session == SessionState::Attached {
+                    next.turn = if queued {
+                        TurnState::Sending
+                    } else {
+                        TurnState::Idle
+                    };
+                }
             }
             Event::SurfaceOpened(surface) => next.surface = surface,
             Event::SurfaceClosed => next.surface = SurfaceState::Conversation,
@@ -161,6 +193,7 @@ impl Graph {
             Event::MotionSettled => {
                 next.motion = next.motion.next(MotionEvent::Settle);
             }
+            Event::PromptSubmitted | Event::PromptQueued => {}
         }
         self.state = next;
         self.transitions = self.transitions.saturating_add(1);
@@ -249,6 +282,37 @@ impl crate::App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashSet, VecDeque};
+
+    const ALL_EVENTS: [Event; 27] = [
+        Event::WindowOpened,
+        Event::WindowClosed,
+        Event::ConnectStarted,
+        Event::Connected,
+        Event::ConnectionFailed,
+        Event::NewSessionRequested,
+        Event::AttachRequested,
+        Event::SessionAttached,
+        Event::PromptSubmitted,
+        Event::PromptQueued,
+        Event::PromptAccepted,
+        Event::AgentActivity,
+        Event::TurnFinished { queued: false },
+        Event::TurnFinished { queued: true },
+        Event::SurfaceOpened(SurfaceState::Conversation),
+        Event::SurfaceOpened(SurfaceState::Overview),
+        Event::SurfaceOpened(SurfaceState::Resume),
+        Event::SurfaceOpened(SurfaceState::ModelPicker),
+        Event::SurfaceClosed,
+        Event::SettingsChanged(false),
+        Event::SettingsChanged(true),
+        Event::BootChanged(false),
+        Event::BootChanged(true),
+        Event::Move(Direction::Left),
+        Event::Move(Direction::Right),
+        Event::Move(Direction::Up),
+        Event::Move(Direction::Down),
+    ];
 
     #[test]
     fn complete_user_journey_is_a_valid_path() {
@@ -313,10 +377,40 @@ mod tests {
     #[test]
     fn invalid_cross_axis_nodes_are_rejected() {
         let mut graph = Graph::default();
-        graph.apply(Event::PromptSubmitted);
+        graph.state.window = WindowState::Open;
+        graph.state.turn = TurnState::Sending;
         assert_eq!(
             graph.validate(),
             Err("turn exists without an attached session")
         );
+    }
+
+    #[test]
+    fn every_reachable_node_and_edge_is_total_and_valid() {
+        let initial = Graph::default();
+        let mut seen = HashSet::from([initial.state()]);
+        let mut pending = VecDeque::from([initial.state()]);
+        let mut checked_edges = 0usize;
+
+        while let Some(state) = pending.pop_front() {
+            for event in ALL_EVENTS.into_iter().chain([Event::MotionSettled]) {
+                let mut graph = Graph {
+                    state,
+                    transitions: 0,
+                };
+                let next = graph.apply(event);
+                assert_eq!(graph.transitions(), 1, "event was not a total edge");
+                graph.validate().unwrap_or_else(|error| {
+                    panic!("invalid reachable edge {state:?} --{event:?}--> {next:?}: {error}")
+                });
+                checked_edges += 1;
+                if seen.insert(next) {
+                    pending.push_back(next);
+                }
+            }
+        }
+
+        assert!(seen.len() > 1_000, "exploration was unexpectedly shallow");
+        assert_eq!(checked_edges, seen.len() * (ALL_EVENTS.len() + 1));
     }
 }
