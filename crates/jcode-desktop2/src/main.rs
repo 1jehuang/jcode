@@ -52,6 +52,7 @@ mod scroll_profile;
 mod select;
 mod selfdev_reload;
 mod settings;
+mod state_graph;
 mod states;
 mod stream;
 mod stream_bench;
@@ -99,6 +100,9 @@ struct App {
     state: Option<render::RenderState>,
     painter: paint::Painter,
     model: Model,
+    /// Executable product-lifecycle graph, advanced by the same events that
+    /// mutate the render model.
+    state_graph: state_graph::Graph,
     harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
@@ -195,6 +199,7 @@ impl Default for App {
             state: None,
             painter: paint::Painter::default(),
             model: Model::default(),
+            state_graph: state_graph::Graph::default(),
             harness: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             super_held_since: None,
@@ -686,6 +691,11 @@ impl App {
         // the transcript in the queued tone, and the turn ending is what
         // sends it (see `flush_queued_message`).
         let queued = self.model.busy;
+        self.state_graph.apply(if queued {
+            state_graph::Event::PromptQueued
+        } else {
+            state_graph::Event::PromptSubmitted
+        });
         self.model.transcript.push(match queued {
             true => transcript::Message::queued(content.clone()),
             false => transcript::Message::sent(content.clone()),
@@ -1917,6 +1927,8 @@ impl ApplicationHandler for App {
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
         self.state = Some(state);
+        self.state_graph.apply(state_graph::Event::WindowOpened);
+        self.state_graph.apply(state_graph::Event::ConnectStarted);
         // Start the reveal at the moment the surface exists, not at process
         // start: GPU init takes long enough that timing it from `main` would
         // spend the whole sequence before the first frame is presented.
@@ -1934,6 +1946,7 @@ impl ApplicationHandler for App {
         }
         match event {
             WindowEvent::CloseRequested => {
+                self.state_graph.apply(state_graph::Event::WindowClosed);
                 self.save_geometry(true);
                 event_loop.exit();
             }
@@ -2136,6 +2149,7 @@ impl ApplicationHandler for App {
                 self.model.boot.advance(std::time::Instant::now());
                 self.model.stream.advance(std::time::Instant::now());
                 self.model.smooth.advance(std::time::Instant::now());
+                self.reconcile_state_graph();
                 // A fling coasts on the frame clock, not on event arrival, so
                 // the travel stays smooth after the fingers leave the pad.
                 if self.model.has_momentum() {

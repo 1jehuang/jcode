@@ -39,6 +39,9 @@ impl App {
                     // queued behind the failed turn gets its chance now
                     // rather than waiting forever.
                     turn_ended = true;
+                    let queued = self.model.transcript.has_queued();
+                    self.state_graph
+                        .apply(crate::state_graph::Event::TurnFinished { queued });
                 }
                 harness::HarnessUpdate::Attached {
                     session_id,
@@ -59,6 +62,8 @@ impl App {
                         self.model.set_notice("reconnected");
                     }
                     self.retitle();
+                    self.state_graph
+                        .apply(crate::state_graph::Event::SessionAttached);
                 }
                 harness::HarnessUpdate::Model { provider, model } => {
                     self.model.model = Some(ModelId { provider, model });
@@ -70,6 +75,8 @@ impl App {
                     self.model.model_picker.mark_selected(model);
                 }
                 harness::HarnessUpdate::Text(text) => {
+                    self.state_graph
+                        .apply(crate::state_graph::Event::AgentActivity);
                     self.model.transcript.append_assistant(&text);
                     // Chase the new length rather than jumping to it: the
                     // reveal is what turns a burst of tokens into a sweep.
@@ -79,6 +86,8 @@ impl App {
                     );
                 }
                 harness::HarnessUpdate::Reasoning(text) => {
+                    self.state_graph
+                        .apply(crate::state_graph::Event::AgentActivity);
                     self.model.transcript.append_reasoning(&text);
                     // Reasoning is revealed by the same sweep as the reply, so
                     // a thought does not appear as an instant wall of text
@@ -89,12 +98,16 @@ impl App {
                     );
                 }
                 harness::HarnessUpdate::Activity(label) => {
+                    self.state_graph
+                        .apply(crate::state_graph::Event::AgentActivity);
                     self.model.busy = true;
                     self.model
                         .activity
                         .set_label(label, std::time::Instant::now());
                 }
                 harness::HarnessUpdate::Tool { call_id, label } => {
+                    self.state_graph
+                        .apply(crate::state_graph::Event::AgentActivity);
                     // Progress belongs in the transcript, not only in the
                     // composer's activity line: the call running right now is
                     // one card at the tail that refines in place as its
@@ -122,6 +135,8 @@ impl App {
                     self.model.stream.reveal_all();
                 }
                 harness::HarnessUpdate::MessageAccepted => {
+                    self.state_graph
+                        .apply(crate::state_graph::Event::PromptAccepted);
                     // The agent has the oldest message still in flight. Marking
                     // it here rather than on the first token is the point of
                     // the whole mechanism: "received" and "answered" are
@@ -177,6 +192,9 @@ impl App {
                     // waiting on it, and its own completion event is what
                     // retires the bar.
                     turn_ended = true;
+                    let queued = self.model.transcript.has_queued();
+                    self.state_graph
+                        .apply(crate::state_graph::Event::TurnFinished { queued });
                 }
                 harness::HarnessUpdate::Peek {
                     session_id,
@@ -252,6 +270,8 @@ impl App {
             self.model.notice = Some("not connected: cannot start a session".into());
             return;
         }
+        self.state_graph
+            .apply(crate::state_graph::Event::NewSessionRequested);
         self.clear_for_session_change();
         self.model.session_id = None;
         self.model.working_dir = None;
@@ -280,6 +300,8 @@ impl App {
                 .peeks
                 .insert(&current, self.model.transcript.clone());
         }
+        self.state_graph
+            .apply(crate::state_graph::Event::AttachRequested);
         self.clear_for_session_change();
         self.model.status = format!("attaching: {target}");
         self.model.session_id = Some(target.clone());

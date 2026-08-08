@@ -582,8 +582,7 @@ impl Frame {
     }
 
     pub fn hits_new_session(&self, x: f64, y: f64) -> bool {
-        self.new_session()
-            .contains(vello::kurbo::Point::new(x, y))
+        self.new_session().contains(vello::kurbo::Point::new(x, y))
     }
 
     pub fn hits_sessions(&self, x: f64, y: f64) -> bool {

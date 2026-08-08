@@ -1522,19 +1522,12 @@ pub fn build_scene(
     let new_session = frame.new_session();
     let cx = (new_session.x0 + new_session.x1) / 2.0;
     let plus_y = new_session.y0 + 7.0;
-    let plus_stroke = vello::kurbo::Stroke::new(1.6)
-        .with_caps(vello::kurbo::Cap::Round);
+    let plus_stroke = vello::kurbo::Stroke::new(1.6).with_caps(vello::kurbo::Cap::Round);
     for line in [
         vello::kurbo::Line::new((cx - 5.0, plus_y), (cx + 5.0, plus_y)),
         vello::kurbo::Line::new((cx, plus_y - 5.0), (cx, plus_y + 5.0)),
     ] {
-        scene.stroke(
-            &plus_stroke,
-            Affine::scale(scale),
-            theme.text,
-            None,
-            &line,
-        );
+        scene.stroke(&plus_stroke, Affine::scale(scale), theme.text, None, &line);
     }
     text.draw_paragraph_scaled(
         scene,

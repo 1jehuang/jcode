@@ -189,14 +189,19 @@ mod tests {
         let mut registry = Registry::default();
         registry.sync(vec![Target::glow(Id::Settings, rect)], (10.0, 10.0), start);
 
-        assert_eq!(registry.hovered_at(start).map(|(_, amount)| amount), Some(0.0));
+        assert_eq!(
+            registry.hovered_at(start).map(|(_, amount)| amount),
+            Some(0.0)
+        );
         let halfway = registry
             .hovered_at(start + HOVER_TIME / 2)
             .map(|(_, amount)| amount)
             .unwrap();
         assert!(halfway > 0.0 && halfway < 1.0);
         assert_eq!(
-            registry.hovered_at(start + HOVER_TIME).map(|(_, amount)| amount),
+            registry
+                .hovered_at(start + HOVER_TIME)
+                .map(|(_, amount)| amount),
             Some(1.0)
         );
         assert!(registry.next_frame_at(start + HOVER_TIME).is_none());

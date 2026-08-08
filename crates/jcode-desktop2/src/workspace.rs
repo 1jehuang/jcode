@@ -31,7 +31,7 @@ pub const TRANSITION_SECONDS: f32 = 0.18;
 pub const ROW_TRANSITION_SECONDS: f32 = 0.22;
 const PHASE_MAX: u16 = 1000;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Direction {
     Left,
     #[default]
@@ -50,6 +50,53 @@ impl Direction {
 
     pub fn is_horizontal(self) -> bool {
         matches!(self, Self::Left | Self::Right)
+    }
+}
+
+/// Observable nodes in the niri-style camera's state-space graph.
+///
+/// Keeping this separate from animation time makes the topology explicit: the
+/// clock may move within a node, while navigation and settling are the only
+/// operations that cross an edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MotionState {
+    #[default]
+    Settled,
+    ColumnLeft,
+    ColumnRight,
+    RowUp,
+    RowDown,
+}
+
+/// Inputs accepted by every node in [`MotionState`]. The graph is total: a
+/// directional input always starts (or interrupts with) that motion, and
+/// `Settle` always returns to rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MotionEvent {
+    Move(Direction),
+    Settle,
+}
+
+impl MotionState {
+    /// The complete transition function for the camera state-space graph.
+    pub const fn next(self, event: MotionEvent) -> Self {
+        match event {
+            MotionEvent::Settle => Self::Settled,
+            MotionEvent::Move(Direction::Left) => Self::ColumnLeft,
+            MotionEvent::Move(Direction::Right) => Self::ColumnRight,
+            MotionEvent::Move(Direction::Up) => Self::RowUp,
+            MotionEvent::Move(Direction::Down) => Self::RowDown,
+        }
+    }
+
+    pub const fn direction(self) -> Option<Direction> {
+        match self {
+            Self::Settled => None,
+            Self::ColumnLeft => Some(Direction::Left),
+            Self::ColumnRight => Some(Direction::Right),
+            Self::RowUp => Some(Direction::Up),
+            Self::RowDown => Some(Direction::Down),
+        }
     }
 }
 
@@ -126,6 +173,34 @@ impl Column {
 }
 
 impl Workspace {
+    /// Current graph node. Animation phase is deliberately not part of the
+    /// node, so callers can assert lifecycle behavior without depending on a
+    /// frame cadence.
+    pub fn state(&self) -> MotionState {
+        self.transition.map_or(MotionState::Settled, |transition| {
+            MotionState::Settled.next(MotionEvent::Move(transition.direction))
+        })
+    }
+
+    fn apply_motion_event(&mut self, event: MotionEvent) {
+        let next = self.state().next(event);
+        let Some(direction) = next.direction() else {
+            self.transition = None;
+            self.prev_row.clear();
+            return;
+        };
+        let duration = if direction.is_horizontal() {
+            TRANSITION_SECONDS
+        } else {
+            ROW_TRANSITION_SECONDS
+        };
+        self.transition = Some(Transition {
+            direction,
+            phase: 0,
+            duration_ms: (duration * 1000.0) as u16,
+        });
+    }
+
     /// Start a horizontal camera move after the strip has moved focus to its
     /// destination. At phase zero the old neighbor is still centered and the
     /// new focused page starts one pitch away; the offset then eases to zero.
@@ -135,11 +210,7 @@ impl Workspace {
         }
         self.side_bias = direction;
         self.prev_row.clear();
-        self.transition = Some(Transition {
-            direction,
-            phase: 0,
-            duration_ms: (TRANSITION_SECONDS * 1000.0) as u16,
-        });
+        self.apply_motion_event(MotionEvent::Move(direction));
     }
 
     /// Start a vertical row slide after the strip has moved focus to another
@@ -158,11 +229,7 @@ impl Workspace {
         }
         self.prev_row = prev_row;
         self.prev_focused = prev_focused;
-        self.transition = Some(Transition {
-            direction,
-            phase: 0,
-            duration_ms: (ROW_TRANSITION_SECONDS * 1000.0) as u16,
-        });
+        self.apply_motion_event(MotionEvent::Move(direction));
     }
 
     pub fn is_animating(&self) -> bool {
@@ -190,9 +257,9 @@ impl Workspace {
         let seconds = (f32::from(transition.duration_ms) / 1000.0).max(0.01);
         let step = (dt.max(0.0) / seconds * f32::from(PHASE_MAX)).max(1.0) as u16;
         transition.phase = transition.phase.saturating_add(step).min(PHASE_MAX);
-        if transition.phase == PHASE_MAX {
-            self.transition = None;
-            self.prev_row.clear();
+        let settled = transition.phase == PHASE_MAX;
+        if settled {
+            self.apply_motion_event(MotionEvent::Settle);
         }
         true
     }
@@ -393,6 +460,59 @@ mod tests {
             focused_pos,
             column_width: WIDTH,
         }
+    }
+
+    #[test]
+    fn motion_graph_is_total_for_every_state_and_event() {
+        let states = [
+            MotionState::Settled,
+            MotionState::ColumnLeft,
+            MotionState::ColumnRight,
+            MotionState::RowUp,
+            MotionState::RowDown,
+        ];
+        let moves = [
+            (Direction::Left, MotionState::ColumnLeft),
+            (Direction::Right, MotionState::ColumnRight),
+            (Direction::Up, MotionState::RowUp),
+            (Direction::Down, MotionState::RowDown),
+        ];
+
+        for state in states {
+            assert_eq!(state.next(MotionEvent::Settle), MotionState::Settled);
+            for (direction, expected) in moves {
+                assert_eq!(
+                    state.next(MotionEvent::Move(direction)),
+                    expected,
+                    "missing edge from {state:?} on {direction:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_follows_the_graph_through_interruptions_and_settling() {
+        let mut workspace = Workspace::default();
+        assert_eq!(workspace.state(), MotionState::Settled);
+
+        workspace.begin(Direction::Right);
+        assert_eq!(workspace.state(), MotionState::ColumnRight);
+
+        workspace.begin_row_change(Direction::Down, vec!["old".into()], 0);
+        assert_eq!(workspace.state(), MotionState::RowDown);
+        assert_eq!(workspace.prev_row().0, ["old"]);
+
+        workspace.begin_row_change(Direction::Up, vec!["newer".into()], 0);
+        assert_eq!(workspace.state(), MotionState::RowUp);
+        assert_eq!(workspace.prev_row().0, ["newer"]);
+
+        workspace.begin(Direction::Left);
+        assert_eq!(workspace.state(), MotionState::ColumnLeft);
+        assert!(workspace.prev_row().0.is_empty());
+
+        workspace.advance(TRANSITION_SECONDS * 2.0);
+        assert_eq!(workspace.state(), MotionState::Settled);
+        assert!(!workspace.is_animating());
     }
 
     #[test]

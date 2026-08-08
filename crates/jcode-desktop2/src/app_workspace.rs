@@ -7,6 +7,8 @@ impl App {
     /// focused.
     pub(crate) fn begin_workspace_transition(&mut self, direction: workspace::Direction) {
         self.model.workspace.begin(direction);
+        self.state_graph
+            .apply(crate::state_graph::Event::Move(direction));
         self.workspace_frame = Some(std::time::Instant::now());
         self.request_redraw();
     }
@@ -23,6 +25,8 @@ impl App {
         self.model
             .workspace
             .begin_row_change(direction, prev_row, prev_focused);
+        self.state_graph
+            .apply(crate::state_graph::Event::Move(direction));
         self.workspace_frame = Some(std::time::Instant::now());
         self.request_redraw();
     }
@@ -41,6 +45,8 @@ impl App {
             self.request_redraw();
         }
         if !self.model.workspace.is_animating() {
+            self.state_graph
+                .apply(crate::state_graph::Event::MotionSettled);
             self.workspace_frame = None;
         }
     }
