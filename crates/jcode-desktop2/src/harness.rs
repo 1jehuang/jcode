@@ -268,6 +268,11 @@ fn run(
     set_stage(Stage::Connecting);
     let client = JcodeClient::connect(ConnectOptions {
         client_name: concat!("jcode-desktop2/", env!("CARGO_PKG_VERSION")).to_string(),
+        // Creating or restoring an agent may include provider discovery and
+        // checkout initialization. The generic SDK's 30-second timeout is too
+        // short for that real startup path and turns a slow attach into a
+        // reconnect loop that makes recovery even slower.
+        request_timeout: Some(Duration::from_secs(120)),
         // The runtime is already up; a second check would only cost a dial.
         ensure_runtime: false,
         ..Default::default()
