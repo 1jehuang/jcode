@@ -243,7 +243,7 @@ fn test_subscription_command_shows_jcode_status_scaffold() {
 }
 
 #[test]
-fn test_subscribe_command_shows_pitch_with_plans_and_next_step() {
+fn test_subscribe_command_shows_hosted_pitch_and_next_step() {
     let mut app = create_test_app();
     app.input = "/subscribe".to_string();
     app.submit_input();
@@ -253,12 +253,13 @@ fn test_subscribe_command_shows_pitch_with_plans_and_next_step() {
         .last()
         .expect("missing /subscribe response");
     assert_eq!(msg.role, "system");
-    assert!(msg.content.contains("Subscribe to jcode"));
-    assert!(msg.content.contains("Get more tokens"));
+    assert!(msg.content.contains("Jcode hosted models"));
+    assert!(msg.content.contains("No subscription"));
+    assert!(msg.content.contains("monthly spending limit"));
     assert!(msg.content.contains("open source"));
     assert!(msg.content.contains("/login jcode"));
-    assert!(msg.content.contains("/subscription"));
-    assert!(msg.content.contains("$20/mo"));
+    assert!(msg.content.contains("/usage"));
+    assert!(msg.content.contains("$20 of usage"));
 }
 
 #[test]

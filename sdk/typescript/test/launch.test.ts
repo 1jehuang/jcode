@@ -61,6 +61,24 @@ test("cleanup refuses arbitrary directories even when asked directly", async () 
   fs.rmSync(arbitrary, { recursive: true, force: true });
 });
 
+test("daemon shutdown lookup waits for a delayed registry entry", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-daemon-race-test-"));
+  const runtimeDir = path.join(home, "run");
+  fs.mkdirSync(runtimeDir);
+  const { waitForDaemonPidForTest } = await import("../dist/launch.js");
+
+  const lookup = waitForDaemonPidForTest(home, runtimeDir, 1000);
+  setTimeout(() => {
+    fs.writeFileSync(
+      path.join(home, "servers.json"),
+      JSON.stringify({ instance: { socket: path.join(runtimeDir, "jcode.sock"), pid: 4242 } }),
+    );
+  }, 100);
+
+  assert.equal(await lookup, 4242);
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 /** Inheriting must share rotating credentials, not copy them. */
 test("rotating credentials are shared so token refresh stays coherent", () => {
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-inherit-test-"));

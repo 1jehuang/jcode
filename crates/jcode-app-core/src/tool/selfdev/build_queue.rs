@@ -530,6 +530,21 @@ export -f cargo
                 stdout.trim()
             );
         }
+        if binary_name.starts_with("jcode-desktop2") {
+            let output = std::process::Command::new(&binary)
+                .arg("--check-connect")
+                .env("JCODE_NON_INTERACTIVE", "1")
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Desktop2 connection smoke test failed for {} with exit code {:?}: {}{}",
+                    binary.display(),
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
         Ok(())
     }
 

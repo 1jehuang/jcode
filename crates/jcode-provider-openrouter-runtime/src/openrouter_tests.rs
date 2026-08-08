@@ -713,6 +713,106 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
     );
 }
 
+/// Regression for issue #815: DeepSeek-family models on direct
+/// OpenAI-compatible profiles require the reasoning returned alongside an
+/// assistant tool call to be replayed on the next request. These routes do not
+/// enable OpenRouter provider features, so model-family detection must unlock
+/// the stored `reasoning_content` without adding a top-level thinking config.
+#[test]
+fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
+    let _lock = ENV_LOCK.lock();
+    let _thinking = EnvVarGuard::remove("JCODE_OPENROUTER_THINKING");
+    let (api_base, request_rx) = spawn_single_response_chat_server();
+    let provider = OpenRouterProvider {
+        api_base,
+        profile_id: Some("opencode-zen".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        model: Arc::new(RwLock::new("deepseek-v4-flash-free".to_string())),
+        ..make_custom_compatible_provider()
+    };
+
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "list the files".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Reasoning {
+                    text: "I should inspect the workspace first.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                    thought_signature: None,
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "a.txt\nb.txt".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut stream = provider
+            .complete(&messages, &[], "", None)
+            .await
+            .expect("fake chat request should start");
+        while let Some(event) = stream.next().await {
+            if event.is_err() {
+                break;
+            }
+        }
+    });
+
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("capture fake provider request");
+    let body = parse_captured_request_body(&request);
+    let assistant = body["messages"]
+        .as_array()
+        .expect("request should contain messages array")
+        .iter()
+        .find(|message| {
+            message.get("role").and_then(|value| value.as_str()) == Some("assistant")
+                && message.get("tool_calls").is_some()
+        })
+        .expect("request should retain the assistant tool-call turn");
+
+    assert_eq!(
+        assistant
+            .get("reasoning_content")
+            .and_then(|value| value.as_str()),
+        Some("I should inspect the workspace first."),
+        "direct DeepSeek request must replay stored reasoning_content (issue #815): {assistant}"
+    );
+    assert!(
+        body.get("thinking").is_none(),
+        "server-managed thinking must not add OpenRouter's top-level thinking field: {body}"
+    );
+}
+
 #[test]
 fn minimax_profile_exposes_static_models_before_catalog_refresh() {
     let models = jcode_base::provider_catalog::openai_compatible_profile_static_models(
@@ -789,6 +889,7 @@ fn openai_compatible_profiles_with_unverified_live_catalogs_have_static_fallback
             "accounts/fireworks/routers/kimi-k2p5-turbo",
         ),
         (jcode_provider_metadata::XIAOMI_MIMO_PROFILE, "mimo-v2.5"),
+        (jcode_provider_metadata::META_MUSE_PROFILE, "muse-spark-1.2"),
         (
             jcode_provider_metadata::ALIBABA_CODING_PLAN_PROFILE,
             "qwen3-coder-plus",
@@ -2340,13 +2441,13 @@ fn jcode_subscription_runtime_has_explicit_display_and_route_identity() {
     );
 
     let provider = OpenRouterProvider::new().expect("build jcode subscription runtime");
-    assert_eq!(provider.runtime_display_name(), "Jcode Hosted Models");
-    assert_eq!(Provider::display_name(&provider), "Jcode Hosted Models");
+    assert_eq!(provider.runtime_display_name(), "Jcode Subscription");
+    assert_eq!(Provider::display_name(&provider), "Jcode Subscription");
     assert_eq!(Provider::name(&provider), "openrouter");
     assert_eq!(
         provider.direct_openai_compatible_route_parts(),
         Some((
-            "Jcode Hosted Models".to_string(),
+            "Jcode Subscription".to_string(),
             "jcode-subscription".to_string(),
             jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.to_string(),
         ))

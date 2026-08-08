@@ -20,12 +20,22 @@ impl Agent {
     }
 
     pub async fn run_once_capture(&mut self, user_message: &str) -> Result<String> {
-        self.add_message(
+        self.run_once_capture_with_display_role(user_message, None)
+            .await
+    }
+
+    pub(crate) async fn run_once_capture_with_display_role(
+        &mut self,
+        user_message: &str,
+        display_role: Option<crate::session::StoredDisplayRole>,
+    ) -> Result<String> {
+        self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
+            display_role,
         );
         self.session.save()?;
         if trace_enabled() {
@@ -41,6 +51,24 @@ impl Agent {
         images: Vec<(String, String)>,
         system_reminder: Option<String>,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
+    ) -> Result<()> {
+        self.run_once_streaming_mpsc_with_display_role(
+            user_message,
+            images,
+            system_reminder,
+            event_tx,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_once_streaming_mpsc_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        system_reminder: Option<String>,
+        event_tx: mpsc::UnboundedSender<ServerEvent>,
+        display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
         // Inject any pending notifications before the user message
         let alerts = self.take_alerts();
@@ -62,7 +90,7 @@ impl Agent {
         self.current_turn_system_reminder =
             system_reminder.filter(|value| !value.trim().is_empty());
 
-        self.append_user_context_message(user_message, images)?;
+        self.append_user_context_message_with_display_role(user_message, images, display_role)?;
         crate::telemetry::record_turn();
         let turn_started_at = Instant::now();
         let start_message_index = self.message_count();
@@ -78,6 +106,15 @@ impl Agent {
         &mut self,
         user_message: &str,
         images: Vec<(String, String)>,
+    ) -> Result<()> {
+        self.append_user_context_message_with_display_role(user_message, images, None)
+    }
+
+    fn append_user_context_message_with_display_role(
+        &mut self,
+        user_message: &str,
+        images: Vec<(String, String)>,
+        display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<()> {
         let mut blocks: Vec<ContentBlock> = images
             .into_iter()
@@ -95,7 +132,7 @@ impl Agent {
             ));
         }
 
-        self.add_message(Role::User, blocks);
+        self.add_message_with_display_role(Role::User, blocks, display_role);
         self.session.save()
     }
 

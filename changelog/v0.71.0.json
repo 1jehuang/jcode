@@ -1,0 +1,20 @@
+{
+  "version": "0.71.0",
+  "date": "2026-08-06",
+  "title": "Subscription onboarding and broader model support",
+  "highlights": [
+    "Onboarding now defaults to the Jcode subscription, with clearer hosted-model pricing and a direct path to subscription details",
+    "OpenAI users can choose the full GPT-5.6 family, including Terra, and Meta Model API users can configure Muse and DeepSeek passback models"
+  ],
+  "improvements": [
+    "Todo quality feedback now distinguishes synthetic validation and tracks requirement-to-check traceability",
+    "Cargo commands report action durations to make slow build and test steps easier to identify"
+  ],
+  "fixes": [
+    "Scheduled turns no longer leak into user prompt history",
+    "Empty transcript checkpoints are prevented so session history remains usable",
+    "Terminal launches fall back cleanly when spawn hooks reject a launch",
+    "The TypeScript SDK waits for daemon registration before closing launched sessions",
+    "Permanent memory sidecar failures are distinguished from transient failures and use the current Claude model"
+  ]
+}

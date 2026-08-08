@@ -496,6 +496,12 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("mimo-v2-flash");
             push("mimo-v2-omni");
         }
+        // Meta's catalog is authenticated, so expose the documented Muse Spark
+        // models immediately after login while the live refresh completes.
+        "meta-muse" => {
+            push("muse-spark-1.2");
+            push("muse-spark-1.1");
+        }
         // MiniMax's `/models` endpoint is authenticated and live, but post-login
         // model activation should not depend on the catalog refresh completing
         // before the picker/routes are rebuilt. Keep the documented text models

@@ -59,10 +59,10 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // ---------------------------------------------------------------------------
 // Self-defense against the D1 size cap.
 //
-// D1 hard-caps database size (500 MB class on the free plan). When the cap is
-// hit, every insert fails and telemetry silently stops being recorded (this
-// happened in June 2026; ~3 days of events were lost and the file was left at
-// its ~491.5 MB high-water mark). SQLite files never shrink on DELETE - the
+// D1 hard-caps each database at 10 GB on the Workers Paid plan (500 MB on the
+// free plan). When the old free-plan cap was hit, every insert failed and
+// telemetry silently stopped being recorded (June 2026; ~3 days of events were
+// lost). SQLite files never shrink on DELETE - the
 // nightly prune frees pages *inside* the file and the day's inserts recycle
 // them - so the steady state is "file at high-water mark, internal free-page
 // pool cycling". Two triggers defend the pool:
@@ -76,7 +76,11 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // Emergency prunes use halved retention windows and are rate-limited per
 // isolate.
 // ---------------------------------------------------------------------------
-const D1_SOFT_LIMIT_BYTES = 493_000_000;
+// Keep the database below the paid plan's first 5 GB of included account-wide
+// storage, leaving 500 MB for the account's other D1 databases and growth while
+// an emergency prune catches up. This is a budget guardrail, not D1's 10 GB
+// per-database hard cap.
+const D1_SOFT_LIMIT_BYTES = 4_500_000_000;
 const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // Best-effort per-isolate state (resets on isolate recycle, which is fine:
 // the next request re-observes the size from its own insert result).
@@ -536,11 +540,9 @@ export default {
     return jsonResponse({ ok: true, durable: durableOk, firehose: firehoseOk }, 200, cors);
   },
 
-  // Nightly retention pruning. D1 hard-caps databases at 500 MB; without this
-  // the raw events table eventually fills the cap and every insert starts
-  // returning 500s (which silently drops all telemetry). High-volume raw rows
-  // are pruned on a schedule while aggregate signal is preserved in the
-  // daily_active_users rollup and in long-retention lifecycle events.
+  // Nightly retention pruning bounds durable raw-history growth and keeps the
+  // database inside its paid-plan storage budget. Aggregate signal is preserved
+  // in the daily_active_users rollup and in long-retention lifecycle events.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {

@@ -2297,11 +2297,12 @@ fn runtime_display_name_tracks_active_openai_compatible_profile() {
 /// match none of the built-in model-name heuristics and fell through to the
 /// active provider.
 #[test]
-fn bare_openai_compatible_model_id_routes_to_its_profile_not_the_active_provider() {
+fn bare_openai_compatible_model_ids_route_to_their_profile_not_the_active_provider() {
     with_clean_provider_test_env(|| {
         let rt = enter_test_runtime();
         let _runtime_guard = rt.enter();
         crate::env::set_var("CELERIS_API_KEY", "test-celeris-key");
+        crate::env::set_var("META_MUSE_API_KEY", "test-meta-key");
         let provider = MultiProvider {
             claude: RwLock::new(None),
             anthropic: RwLock::new(None),
@@ -2323,6 +2324,18 @@ fn bare_openai_compatible_model_id_routes_to_its_profile_not_the_active_provider
             routes_memo: std::sync::Mutex::new(None),
             post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
+
+        provider
+            .set_model("muse-spark-1.2")
+            .expect("bare Muse model id should resolve to the Meta Model API profile");
+        assert_eq!(provider.model(), "muse-spark-1.2");
+        assert_eq!(provider.active_provider(), ActiveProvider::OpenRouter);
+        assert_eq!(
+            provider.fork_model_switch_request(provider.active_provider(), &provider.model()),
+            "meta-muse:muse-spark-1.2"
+        );
+
+        provider.set_active_provider(ActiveProvider::Claude);
 
         provider
             .set_model("celeris-1")

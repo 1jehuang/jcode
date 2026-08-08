@@ -399,7 +399,7 @@ fn controlling_tty() -> Option<String> {
     use std::os::fd::AsRawFd;
 
     let fd = std::io::stdin().as_raw_fd();
-    let mut buffer = vec![0_i8; 1024];
+    let mut buffer = vec![0 as libc::c_char; 1024];
     // SAFETY: `buffer` is valid and writable for its full length and `fd` is a
     // live descriptor. `ttyname_r` writes a NUL-terminated string on success.
     let result = unsafe { libc::ttyname_r(fd, buffer.as_mut_ptr(), buffer.len()) };
@@ -452,7 +452,7 @@ pub fn send_macos_turn_notification(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (title, subtitle, body, sound);
-        return false;
+        false
     }
 
     #[cfg(target_os = "macos")]

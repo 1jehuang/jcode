@@ -396,7 +396,12 @@ impl AmbientRunnerHandle {
         agent.restore_session(session_id)?;
 
         let reminder = ambient::format_scheduled_session_message(item);
-        let _ = agent.run_once_capture(&reminder).await?;
+        let _ = agent
+            .run_once_capture_with_display_role(
+                &reminder,
+                Some(crate::session::StoredDisplayRole::System),
+            )
+            .await?;
         agent.mark_closed();
         Ok(())
     }
@@ -470,7 +475,12 @@ impl AmbientRunnerHandle {
         }
 
         let reminder = ambient::format_scheduled_session_message(item);
-        let _ = agent.run_once_capture(&reminder).await?;
+        let _ = agent
+            .run_once_capture_with_display_role(
+                &reminder,
+                Some(crate::session::StoredDisplayRole::System),
+            )
+            .await?;
         agent.mark_closed();
         Ok(child_session_id)
     }

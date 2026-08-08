@@ -542,9 +542,6 @@ pub(crate) fn render_system_message(
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
     if let Some(title) = msg.title.as_deref() {
-        if title == "Reload" {
-            return render_reload_system_message(msg, width);
-        }
         if title == "Connection" {
             return render_connection_system_message(msg, width);
         }
@@ -944,6 +941,14 @@ fn todo_score_color() -> Color {
     rgb(105, 205, 165)
 }
 
+fn todo_warning_color() -> Color {
+    rgb(225, 180, 80)
+}
+
+fn todo_failure_color() -> Color {
+    rgb(225, 105, 105)
+}
+
 fn todo_confidence_color() -> Color {
     rgb(135, 155, 180)
 }
@@ -1207,33 +1212,105 @@ fn todo_card_goal_for_group<'a>(
     })
 }
 
-fn todo_goal_score_spans(goal: Option<&crate::todo::TodoGoal>) -> Vec<Span<'static>> {
-    let Some(goal) = goal else {
-        return Vec::new();
-    };
+fn todo_goal_score_spans(goal: &crate::todo::TodoGoal) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    let mut states: Vec<(&str, String)> = Vec::new();
-    if let Some(state) = goal.closed_feedback_loop {
-        states.push(("Closed feedback loop", state.as_str().to_string()));
+    let mut states: Vec<(&str, String, Color)> = Vec::new();
+    if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
+        let (state, color) = goal.closed_feedback_loop.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state <= crate::todo::FeedbackLoopState::Weak {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Closed feedback loop", state, color));
     }
-    if let Some(state) = goal.feedback_loop_relevance {
-        states.push(("Relevance", state.as_str().to_string()));
+    if !crate::todo::feedback_loop_relevance_passes(goal) {
+        let (state, color) = goal.feedback_loop_relevance.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopRelevance::Indirect {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Relevance", state, color));
     }
-    if let Some(state) = goal.feedback_loop_coverage {
-        states.push(("Coverage", state.as_str().to_string()));
+    if !crate::todo::feedback_loop_coverage_passes(goal) {
+        let (state, color) = goal.feedback_loop_coverage.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopCoverage::Narrow {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Coverage", state, color));
     }
-    if let Some(state) = goal.delivery_state {
-        states.push(("Delivery", state.as_str().to_string()));
+    if !crate::todo::feedback_loop_traceability_passes(goal) {
+        let (state, color) = goal.feedback_loop_traceability.map_or_else(
+            || ("missing".to_string(), todo_failure_color()),
+            |state| {
+                let color = if state == crate::todo::FeedbackLoopTraceability::Unmapped {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                (state.as_str().to_string(), color)
+            },
+        );
+        states.push(("Traceability", state, color));
     }
-    for (label, state) in states {
-        if !spans.is_empty() {
+
+    if states.is_empty() {
+        spans.push(Span::styled(
+            "✓ All quality gates passing",
+            Style::default().fg(todo_score_color()),
+        ));
+    }
+
+    for (index, (label, state, color)) in states.into_iter().enumerate() {
+        if index > 0 {
             spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
         }
         spans.push(Span::styled(
             format!("{} ", label),
             Style::default().fg(todo_label_color()),
         ));
-        spans.push(Span::styled(state, Style::default().fg(todo_score_color())));
+        spans.push(Span::styled(state, Style::default().fg(color)));
+    }
+
+    // Delivery is progress toward the outcome, not a quality gate. Keep it
+    // visible and visually separate from failures so it cannot read as one.
+    if let Some(state) = goal.delivery_state {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", Style::default().fg(dim_color())));
+        }
+        spans.push(Span::styled(
+            "Delivery ",
+            Style::default().fg(todo_label_color()),
+        ));
+        let color = if state >= crate::todo::DeliveryState::WorkflowValidated {
+            todo_score_color()
+        } else if state == crate::todo::DeliveryState::Integrated {
+            todo_warning_color()
+        } else {
+            todo_failure_color()
+        };
+        spans.push(Span::styled(
+            state.as_str().to_string(),
+            Style::default().fg(color),
+        ));
     }
     spans
 }
@@ -1463,23 +1540,52 @@ fn push_todo_goal_details(
     let Some(goal) = goal else {
         return;
     };
-    let scores = todo_goal_score_spans(Some(goal));
+    let scores = todo_goal_score_spans(goal);
     if !scores.is_empty() {
         let score_width = Line::from(scores.clone()).width();
-        let score_count = usize::from(goal.closed_feedback_loop.is_some())
-            + usize::from(goal.feedback_loop_relevance.is_some())
-            + usize::from(goal.feedback_loop_coverage.is_some())
+        let score_count = usize::from(!crate::todo::feedback_loop_passes(
+            goal.closed_feedback_loop,
+        )) + usize::from(!crate::todo::feedback_loop_relevance_passes(goal))
+            + usize::from(!crate::todo::feedback_loop_coverage_passes(goal))
+            + usize::from(!crate::todo::feedback_loop_traceability_passes(goal))
             + usize::from(goal.delivery_state.is_some());
         if score_width > inner_width.saturating_sub(2) && score_count > 1 {
             let mut states: Vec<(&str, String)> = Vec::new();
-            if let Some(state) = goal.closed_feedback_loop {
-                states.push(("Closed feedback loop", state.as_str().to_string()));
+            if !crate::todo::feedback_loop_passes(goal.closed_feedback_loop) {
+                states.push((
+                    "Closed feedback loop",
+                    goal.closed_feedback_loop
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
             }
-            if let Some(state) = goal.feedback_loop_relevance {
-                states.push(("Relevance", state.as_str().to_string()));
+            if !crate::todo::feedback_loop_relevance_passes(goal) {
+                states.push((
+                    "Relevance",
+                    goal.feedback_loop_relevance
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
             }
-            if let Some(state) = goal.feedback_loop_coverage {
-                states.push(("Coverage", state.as_str().to_string()));
+            if !crate::todo::feedback_loop_coverage_passes(goal) {
+                states.push((
+                    "Coverage",
+                    goal.feedback_loop_coverage
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
+            }
+            if !crate::todo::feedback_loop_traceability_passes(goal) {
+                states.push((
+                    "Traceability",
+                    goal.feedback_loop_traceability
+                        .map(|state| state.as_str())
+                        .unwrap_or("missing")
+                        .to_string(),
+                ));
             }
             if let Some(state) = goal.delivery_state {
                 states.push(("Delivery", state.as_str().to_string()));
@@ -1490,7 +1596,23 @@ fn push_todo_goal_details(
                     format!("{} ", label),
                     Style::default().fg(todo_label_color()),
                 ));
-                spans.push(Span::styled(state, Style::default().fg(todo_score_color())));
+                let color = if label == "Delivery" {
+                    match crate::todo::DeliveryState::parse(&state) {
+                        Some(value) if value >= crate::todo::DeliveryState::WorkflowValidated => {
+                            todo_score_color()
+                        }
+                        Some(crate::todo::DeliveryState::Integrated) => todo_warning_color(),
+                        _ => todo_failure_color(),
+                    }
+                } else if matches!(
+                    state.as_str(),
+                    "missing" | "absent" | "weak" | "indirect" | "narrow" | "unmapped"
+                ) {
+                    todo_failure_color()
+                } else {
+                    todo_warning_color()
+                };
+                spans.push(Span::styled(state, Style::default().fg(color)));
                 lines.push(todo_card_line(spans, base_indent, inner_width));
             }
         } else {
@@ -1668,6 +1790,22 @@ fn render_todo_goal_updates(
                         .after
                         .as_ref()
                         .and_then(|goal| goal.feedback_loop_coverage)
+                        .map(|state| state.as_str().to_string()),
+                    base_indent,
+                    inner_width,
+                ),
+                crate::todo::TodoGoalField::FeedbackLoopTraceability => push_todo_score_update(
+                    &mut lines,
+                    "Feedback-loop traceability",
+                    update
+                        .before
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_traceability)
+                        .map(|state| state.as_str().to_string()),
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|goal| goal.feedback_loop_traceability)
                         .map(|state| state.as_str().to_string()),
                     base_indent,
                     inner_width,
@@ -2262,52 +2400,6 @@ fn render_scheduled_tool_message(msg: &DisplayMessage, width: u16) -> Option<Vec
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     Some(lines)
-}
-
-fn render_reload_system_message(msg: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
-    let centered = markdown::center_code_blocks();
-    let border_style = Style::default().fg(rgb(120, 180, 255));
-    let label_style = Style::default().fg(dim_color());
-    let text_style = Style::default().fg(rgb(220, 236, 255));
-    let max_box_width = if centered {
-        (width.saturating_sub(4) as usize).min(96)
-    } else {
-        (width.saturating_sub(2) as usize).min(88)
-    }
-    .max(20);
-    let inner_width = max_box_width.saturating_sub(4).max(1);
-
-    let mut box_content = Vec::new();
-    let mut non_empty_lines = msg
-        .content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .peekable();
-
-    if non_empty_lines.peek().is_none() {
-        box_content.push(Line::from(Span::styled("No reload details.", label_style)));
-    } else {
-        for (idx, line) in non_empty_lines.enumerate() {
-            if idx > 0 {
-                box_content.push(Line::from(""));
-            }
-            for chunk in split_by_display_width(line, inner_width) {
-                box_content.push(Line::from(Span::styled(chunk, text_style)));
-            }
-        }
-    }
-
-    let mut lines = render_rounded_box(
-        width_stable_system_title("⚡ reload", "reload"),
-        box_content,
-        max_box_width,
-        border_style,
-    );
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines
 }
 
 fn split_resume_hint(detail: &str) -> (&str, Option<&str>) {

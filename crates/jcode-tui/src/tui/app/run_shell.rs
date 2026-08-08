@@ -1,5 +1,23 @@
 use super::idle_animation_repaint::{copy_cells_in, idle_animation_partial_repaint_allowed};
 use super::*;
+
+fn report_reload_interaction_gap() {
+    let Ok(started) = std::env::var("JCODE_RELOAD_GAP_STARTED_MS") else {
+        return;
+    };
+    crate::env::remove_var("JCODE_RELOAD_GAP_STARTED_MS");
+    let Some(started_ms) = started.parse::<u128>().ok() else {
+        return;
+    };
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let gap_ms = now.as_millis().saturating_sub(started_ms);
+    crate::logging::info(&format!(
+        "client_reload_interaction_gap_ms={} milestone=first_frame",
+        gap_ms
+    ));
+}
 use crate::tui::TuiState;
 use crossterm::cursor::{RestorePosition, SavePosition};
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
@@ -610,6 +628,7 @@ impl App {
         let mut status_spinner_interval = status_spinner_interval();
         let mut status_spinner_renderer = StatusSpinnerRenderer::default();
         let mut needs_redraw = true;
+        let mut first_frame_reported = false;
         let mut handterm_native_scroll =
             super::handterm_native_scroll::HandtermNativeScrollClient::connect_from_env();
         // Subscribe to bus for background task completion notifications
@@ -637,6 +656,10 @@ impl App {
                     needs_redraw = false;
                 } else {
                     status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                    if !first_frame_reported {
+                        first_frame_reported = true;
+                        report_reload_interaction_gap();
+                    }
                     reset_status_spinner_interval(&mut status_spinner_interval, &self);
                     if let Some(native) = handterm_native_scroll.as_mut() {
                         native.sync_from_app(&self);
@@ -740,6 +763,7 @@ impl App {
         let mut status_spinner_interval = status_spinner_interval();
         let mut status_spinner_renderer = StatusSpinnerRenderer::default();
         let mut needs_redraw = true;
+        let mut first_frame_reported = false;
         // While unfocused and idle, redraws are throttled to this interval so a
         // backgrounded session does not repaint at full rate on shared-server bus
         // chatter. `None` means "no throttled frame drawn yet since losing focus".
@@ -760,6 +784,10 @@ impl App {
             }
             if needs_redraw {
                 status_spinner_renderer.draw_full(&mut self, &mut terminal)?;
+                if !first_frame_reported {
+                    first_frame_reported = true;
+                    report_reload_interaction_gap();
+                }
                 // Close the startup-profile gap: `pre_run_remote` is the last
                 // pre-loop mark, so the first completed paint here is the real
                 // process-to-first-frame point. Logged once via a static guard so

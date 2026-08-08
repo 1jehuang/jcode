@@ -1,6 +1,6 @@
 {
   "name": "@1jehuang/jcode-darwin-arm64",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Jcode runtime binary for darwin arm64",
   "license": "MIT",
   "os": [

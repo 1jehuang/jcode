@@ -1361,7 +1361,7 @@ mod tests {
             ("openai", "openai", "OpenAI"),
             ("openai-key", "openai-api", "OpenAI API"),
             ("openrouter", "openrouter", "OpenRouter"),
-            ("subscription", "jcode", "Jcode Hosted Models"),
+            ("subscription", "jcode", "Jcode Subscription"),
             ("bedrock", "bedrock", "AWS Bedrock"),
             ("cursor", "cursor", "Cursor"),
             ("copilot", "copilot", "GitHub Copilot"),
@@ -1616,7 +1616,7 @@ mod tests {
     fn jcode_auth_lifecycle_matches_only_managed_subscription_routes() {
         let activation = AuthActivationResult {
             provider_id: Some("jcode".to_string()),
-            provider_label: Some("Jcode Hosted Models".to_string()),
+            provider_label: Some("Jcode Subscription".to_string()),
             activated_model: Some("gpt-5.5".to_string()),
             expected_runtime: Some("jcode-subscription".to_string()),
             expected_catalog_namespace: Some("jcode-subscription".to_string()),
@@ -1625,7 +1625,7 @@ mod tests {
             route("gpt-5.5", "OpenRouter", "openrouter", true),
             route(
                 "gpt-5.5",
-                "Jcode Hosted Models",
+                "Jcode Subscription",
                 crate::subscription_catalog::JCODE_ROUTE_API_METHOD,
                 true,
             ),
@@ -1645,7 +1645,7 @@ mod tests {
             )]
         );
         assert_eq!(
-            activation.model_switch_request("Jcode Hosted Models", "gpt-5.5"),
+            activation.model_switch_request("Jcode Subscription", "gpt-5.5"),
             "gpt-5.5"
         );
     }
