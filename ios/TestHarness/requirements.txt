@@ -1,0 +1,5 @@
+# Python dependencies for the iOS UX reward harness (TestHarness/reward).
+# Not needed to build or ship the app; required by check_production.sh's
+# determinism gates and by scoreboard/ui_matrix runs.
+numpy>=1.26
+pillow>=10.0

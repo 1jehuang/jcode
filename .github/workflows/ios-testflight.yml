@@ -45,6 +45,10 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      # The reward-harness determinism gates import numpy/pillow.
+      - name: Install harness Python dependencies
+        run: python3 -m pip install --break-system-packages -r ios/TestHarness/requirements.txt
+
       # Fails the build if any App Store requirement regresses: Info.plist
       # keys, privacy manifest, opaque icon, the reviewer-facing demo path,
       # and a clean simulator compile.

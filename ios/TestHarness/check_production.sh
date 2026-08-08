@@ -9,10 +9,15 @@ pass=0
 fail=0
 check() { # check <name> <cmd...>
     local name="$1"; shift
-    if "$@" >/dev/null 2>&1; then
+    local output status
+    output=$("$@" 2>&1); status=$?
+    if [ "$status" -eq 0 ]; then
         echo "PASS  $name"; pass=$((pass + 1))
     else
         echo "FAIL  $name"; fail=$((fail + 1))
+        # Echo the tail of the failure so CI logs explain themselves instead
+        # of just naming the gate that broke.
+        printf '%s\n' "$output" | tail -15 | sed 's/^/        /'
     fi
 }
 
