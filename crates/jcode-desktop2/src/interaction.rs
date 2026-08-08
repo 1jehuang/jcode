@@ -67,9 +67,13 @@ impl Registry {
     }
 
     pub fn hovered(&self) -> Option<(Target, f64)> {
+        self.hovered_at(Instant::now())
+    }
+
+    fn hovered_at(&self, now: Instant) -> Option<(Target, f64)> {
         let id = self.hovered?;
         let target = *self.targets.iter().find(|target| target.id == id)?;
-        let elapsed = self.entered?.elapsed().as_secs_f64();
+        let elapsed = now.duration_since(self.entered?).as_secs_f64();
         let t = (elapsed / HOVER_TIME.as_secs_f64()).clamp(0.0, 1.0);
         // Smoothstep avoids a hard start or stop without maintaining a timer per control.
         Some((target, t * t * (3.0 - 2.0 * t)))
@@ -176,5 +180,32 @@ mod tests {
         let mut registry = Registry::default();
         registry.sync(targets(&frame, &model), (-1.0, -1.0), Instant::now());
         assert_eq!(registry.audit(), Vec::<Id>::new());
+    }
+
+    #[test]
+    fn hover_animates_to_completion_and_clears_on_exit() {
+        let start = Instant::now();
+        let rect = Rect::new(0.0, 0.0, 20.0, 20.0);
+        let mut registry = Registry::default();
+        registry.sync(vec![Target::glow(Id::Settings, rect)], (10.0, 10.0), start);
+
+        assert_eq!(registry.hovered_at(start).map(|(_, amount)| amount), Some(0.0));
+        let halfway = registry
+            .hovered_at(start + HOVER_TIME / 2)
+            .map(|(_, amount)| amount)
+            .unwrap();
+        assert!(halfway > 0.0 && halfway < 1.0);
+        assert_eq!(
+            registry.hovered_at(start + HOVER_TIME).map(|(_, amount)| amount),
+            Some(1.0)
+        );
+        assert!(registry.next_frame_at(start + HOVER_TIME).is_none());
+
+        assert!(registry.sync(
+            vec![Target::glow(Id::Settings, rect)],
+            (30.0, 30.0),
+            start + HOVER_TIME,
+        ));
+        assert!(registry.hovered_at(start + HOVER_TIME).is_none());
     }
 }
