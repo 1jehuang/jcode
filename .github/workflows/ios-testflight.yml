@@ -35,6 +35,23 @@ jobs:
         working-directory: ios
         run: swift test
 
+  production-gate:
+    name: App Store readiness gate
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Fails the build if any App Store requirement regresses: Info.plist
+      # keys, privacy manifest, opaque icon, the reviewer-facing demo path,
+      # and a clean simulator compile.
+      - name: Run production checklist
+        working-directory: ios
+        run: ./TestHarness/check_production.sh
+
   compile-check:
     name: xcodebuild (simulator, unsigned)
     runs-on: macos-latest
@@ -63,7 +80,7 @@ jobs:
 
   build-and-upload:
     name: Build, sign, upload to TestFlight
-    needs: [test, compile-check]
+    needs: [test, compile-check, production-gate]
     runs-on: macos-latest
     timeout-minutes: 60
     steps:

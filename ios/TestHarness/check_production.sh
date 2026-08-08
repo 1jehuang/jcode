@@ -16,6 +16,13 @@ check() { # check <name> <cmd...>
     fi
 }
 
+# The 1024pt marketing icon is rejected if it has an alpha channel.
+icon_opaque() {
+    local icon
+    icon=$(find Sources/JCodeMobile/Assets.xcassets/AppIcon.appiconset -name "*.png" | head -1)
+    [ -n "$icon" ] && sips -g hasAlpha "$icon" | grep -q "hasAlpha: no"
+}
+
 plist_has() { # plist_has <key>
     /usr/libexec/PlistBuddy -c "Print :$1" Sources/JCodeMobile/Info.plist
 }
@@ -39,6 +46,30 @@ check "app icon set" test -d Sources/JCodeMobile/Assets.xcassets/AppIcon.appicon
 check "foreground reconnect handler" grep -q "scenePhase" Sources/JCodeMobile/JCodeMobileApp.swift
 check "privacy manifest in app sources dir (auto-included by xcodegen)" \
     test -f Sources/JCodeMobile/PrivacyInfo.xcprivacy
+check "bundle id is com.jcode.mobile" \
+    grep -q "PRODUCT_BUNDLE_IDENTIFIER: com.jcode.mobile" project.yml
+check "marketing version set" grep -q "MARKETING_VERSION:" project.yml
+check "1024pt marketing icon has no alpha" icon_opaque
+check "supports iPhone and iPad" grep -q 'TARGETED_DEVICE_FAMILY: "1,2"' project.yml
+
+echo "== reviewer can use the app without a server =="
+# Guideline 2.1: App Review has no jcode server, so a demo path that needs no
+# pairing is what keeps the app from looking non-functional.
+check "demo transport exists" test -f Sources/JCodeKit/DemoTransport.swift
+check "demo entry point on the pairing screen" \
+    grep -q "startDemo()" Sources/JCodeMobile/Views/PairingView.swift
+check "demo mode is disclosed in the UI" \
+    grep -q "Demo mode" Sources/JCodeMobile/Views/ConnectionBanner.swift
+check "demo mode has an exit to pairing" \
+    grep -q "exitDemo()" Sources/JCodeMobile/Views/ChatView.swift
+check "app review notes checked in" test -f AppStore/REVIEW_NOTES.md
+check "store metadata checked in" test -f AppStore/METADATA.md
+
+echo "== app target compiles =="
+check "xcodegen project generates" xcodegen generate
+check "app target builds for simulator" xcodebuild build \
+    -project JCodeMobile.xcodeproj -scheme JCodeMobile -configuration Debug \
+    -destination "generic/platform=iOS Simulator" CODE_SIGNING_ALLOWED=NO
 
 echo
 echo "passed: $pass  failed: $fail"

@@ -15,8 +15,6 @@ struct Composer: View {
     let onSend: () -> Void
     let onInterrupt: () -> Void
 
-    @FocusState private var isFocused: Bool
-
     var body: some View {
         HStack(alignment: .bottom, spacing: 10) {
             TextField(

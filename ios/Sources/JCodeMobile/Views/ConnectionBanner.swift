@@ -35,6 +35,28 @@ struct ConnectionBanner: View {
     }
 }
 
+/// Persistent banner shown in offline demo mode.
+///
+/// It has to be unmissable: the responses below it are scripted, and a user
+/// (or a reviewer) must never mistake the demo for a live session.
+struct DemoBanner: View {
+    let onExit: () -> Void
+
+    var body: some View {
+        BannerStrip(
+            icon: "play.circle.fill",
+            tint: Theme.mint,
+            message: "Demo mode: scripted replies, no server connected",
+            lineLimit: 2
+        ) {
+            InlineActionButton(title: "Pair", tint: Theme.mint, action: onExit)
+                .accessibilityLabel("Exit demo and pair a server")
+                .accessibilityHint("Leaves the demo and opens pairing")
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
 /// Chip shown above the composer while soft-interrupt messages wait to be
 /// injected into the running turn, with a cancel affordance.
 struct QueuedInterruptChip: View {

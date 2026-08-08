@@ -36,17 +36,23 @@ public actor Connection {
         public var maxReconnectAttempts: Int?
         /// Base backoff delay in seconds, doubled per attempt and capped at 30s.
         public var baseBackoffSeconds: Double
+        /// Absolute working directory to subscribe against, as advertised by the
+        /// server in its `/pair` or `/health` response. The server rejects a
+        /// subscribe without one, and a phone cannot invent a host path.
+        public var workingDir: String?
 
         public init(
             gateway: Gateway,
             authToken: String,
             maxReconnectAttempts: Int? = nil,
-            baseBackoffSeconds: Double = 1.0
+            baseBackoffSeconds: Double = 1.0,
+            workingDir: String? = nil
         ) {
             self.gateway = gateway
             self.authToken = authToken
             self.maxReconnectAttempts = maxReconnectAttempts
             self.baseBackoffSeconds = baseBackoffSeconds
+            self.workingDir = workingDir
         }
     }
 
@@ -175,7 +181,11 @@ public actor Connection {
 
     private func subscribeAndSync() async throws {
         let sessionID = targetSessionID
-        try await send { .subscribe(id: $0, targetSessionID: sessionID) }
+        try await send {
+            .subscribe(
+                id: $0, targetSessionID: sessionID,
+                workingDir: configuration.workingDir)
+        }
         try await send { .getHistory(id: $0) }
     }
 

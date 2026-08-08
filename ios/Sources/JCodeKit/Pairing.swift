@@ -6,11 +6,19 @@ public struct PairingClient: Sendable {
         public var token: String
         public var serverName: String
         public var serverVersion: String
+        /// Absolute directory the server wants remote clients to subscribe
+        /// against. Older servers omit it; the client then falls back to
+        /// probing `/health`, and finally to no directory at all.
+        public var workingDir: String?
 
-        public init(token: String, serverName: String, serverVersion: String) {
+        public init(
+            token: String, serverName: String, serverVersion: String,
+            workingDir: String? = nil
+        ) {
             self.token = token
             self.serverName = serverName
             self.serverVersion = serverVersion
+            self.workingDir = workingDir
         }
     }
 
@@ -61,17 +69,27 @@ public struct PairingClient: Sendable {
         return Response(
             token: token,
             serverName: object["server_name"] as? String ?? "jcode",
-            serverVersion: object["server_version"] as? String ?? "unknown"
+            serverVersion: object["server_version"] as? String ?? "unknown",
+            workingDir: (object["working_dir"] as? String).flatMap {
+                $0.isEmpty ? nil : $0
+            }
         )
     }
 
     /// Probes `GET /health`. Returns true when the gateway is reachable.
     public func checkHealth(gateway: Gateway) async -> Bool {
+        await health(gateway: gateway) != nil
+    }
+
+    /// Probes `GET /health` and returns the parsed body, which carries the
+    /// working directory remote clients must subscribe against. Used to recover
+    /// that directory for credentials paired before the field existed.
+    public func health(gateway: Gateway) async -> [String: Any]? {
         var request = URLRequest(url: gateway.healthURL)
         request.timeoutInterval = 5
-        guard let (_, response) = try? await session.data(for: request),
-            let http = response as? HTTPURLResponse
-        else { return false }
-        return http.statusCode == 200
+        guard let (data, response) = try? await session.data(for: request),
+            let http = response as? HTTPURLResponse, http.statusCode == 200
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
     }
 }

@@ -10,7 +10,7 @@ struct RootView: View {
         GeometryReader { proxy in
             ZStack {
                 Theme.background.ignoresSafeArea()
-                if model.activeServer == nil {
+                if model.activeServer == nil && !model.isDemo {
                     PairingView()
                 } else {
                     ChatView()
@@ -19,6 +19,27 @@ struct RootView: View {
             .environment(\.compactEdgePads, CompactEdgePads(safeArea: proxy.safeAreaInsets))
         }
         .task {
+            // `-jcodeDemo YES` starts in demo mode. Screenshot and E2E tooling
+            // uses it to reach the reviewer's exact first-run path without a
+            // UI driver; it changes nothing for a normal launch.
+            if UserDefaults.standard.bool(forKey: "jcodeDemo"), !model.isDemo {
+                model.startDemo()
+                // `-jcodeDemoPrompt "..."` additionally sends one message, so
+                // screenshot runs land on a rendered conversation instead of
+                // an empty transcript.
+                if let prompt = UserDefaults.standard.string(forKey: "jcodeDemoPrompt"),
+                    !prompt.isEmpty
+                {
+                    // Wait for the scripted socket to report connected, since
+                    // the composer refuses to send while offline.
+                    for _ in 0..<50 where !model.isConnected {
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    model.draft = prompt
+                    model.sendDraft()
+                }
+                return
+            }
             // Auto-connect to the most recent server on launch.
             if let server = model.activeServer, !model.isConnected {
                 model.connect(to: server)

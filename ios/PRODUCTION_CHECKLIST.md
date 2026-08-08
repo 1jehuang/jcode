@@ -15,6 +15,10 @@ to evaluate everything that can be checked locally.
 | 6 | UX reward at or above baseline (88.7), worst cell >= 83 | `reward.aggregate --baseline --candidate` non-negative delta | PASS |
 | 7 | Foreground reconnect | scenePhase handler in JCodeMobileApp.swift | PASS |
 | 8 | Unauthorized (revoked token) stops reconnect loop, prompts re-pair | `unauthorizedStopsReconnectingAndAsksForRePair` test | PASS |
+| 8a | App target actually compiles | `xcodebuild ... -destination "generic/platform=iOS Simulator"` exit 0 | PASS |
+| 8b | Offline demo mode (Guideline 2.1) | `DemoTransportTests` + demo entry/banner/exit greps | PASS |
+| 8c | Optimistic send survives a racing history payload | `OptimisticHistoryTests` | PASS |
+| 8d | Readable column on iPad (universal app) | `readableColumn()` applied; iPad screenshots reviewed | PASS |
 
 ## App Store submission requirements
 
@@ -28,6 +32,10 @@ to evaluate everything that can be checked locally.
 | 14 | Launch screen | `UILaunchScreen` dict + LaunchBackground colorset | PASS |
 | 15 | ATS exception justified | `NSAllowsArbitraryLoads=true` documented below | PASS (documented) |
 | 16 | Version/build numbers | MARKETING_VERSION set; build number injected by CI from run number | PASS |
+| 16a | App Review notes written | `AppStore/REVIEW_NOTES.md` | PASS |
+| 16b | Store metadata written | `AppStore/METADATA.md` | PASS |
+| 16c | Privacy policy published | `AppStore/PRIVACY.md` (URL must be reachable before submit) | PASS |
+| 16d | Screenshots reproducible | `./TestHarness/capture_screenshots.sh` | PASS |
 
 ### ATS justification (App Review note)
 
@@ -44,7 +52,17 @@ connects to any host the user did not explicitly pair with. This is why
 |---|------|----------------|--------|
 | 17 | swift test job | `.github/workflows/ios-testflight.yml` test job green | PASS |
 | 18 | Simulator compile check | compile-check job green | PASS |
+| 18a | Production gate in CI | `production-gate` job runs `check_production.sh` | PASS |
 | 19 | TestFlight upload | build-and-upload job green | **BLOCKED: cloud signing permission error (see below)** |
+
+## Guideline 2.1 mitigation (why review can exercise the app)
+
+App Review has no `jcode` server, so without a demo path the app is a pairing
+form that can never succeed. "Try the offline demo" on the pairing screen runs a
+scripted server (`JCodeKit/DemoTransport.swift`) through the real `Connection`
+and `SessionReducer`, entirely on device, with a persistent disclosure banner
+and a one-tap exit to pairing. `REVIEW_NOTES.md` tells the reviewer exactly
+where to tap.
 
 ## Account-holder-only items (exact instructions)
 

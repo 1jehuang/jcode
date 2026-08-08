@@ -47,12 +47,23 @@ private func encodedObject(_ request: Request) throws -> [String: Any] {
 }
 
 @Test func encodesSubscribeWithTargetSession() throws {
-    let object = try encodedObject(.subscribe(id: 1, targetSessionID: "sess_abc"))
+    let object = try encodedObject(
+        .subscribe(id: 1, targetSessionID: "sess_abc", workingDir: "/Users/dev/proj"))
     #expect(object["type"] as? String == "subscribe")
     #expect(object["target_session_id"] as? String == "sess_abc")
+    #expect(object["working_dir"] as? String == "/Users/dev/proj")
 
-    let bare = try encodedObject(.subscribe(id: 2, targetSessionID: nil))
+    let bare = try encodedObject(.subscribe(id: 2, targetSessionID: nil, workingDir: nil))
     #expect(bare["target_session_id"] == nil)
+    #expect(bare["working_dir"] == nil)
+}
+
+/// The real server rejects a subscribe whose working_dir is absent or empty
+/// ("Subscribe requires the client's working directory"), so an empty string
+/// must be omitted rather than sent through as "".
+@Test func omitsEmptyWorkingDirOnSubscribe() throws {
+    let object = try encodedObject(.subscribe(id: 3, targetSessionID: nil, workingDir: ""))
+    #expect(object["working_dir"] == nil)
 }
 
 @Test func encodesControlRequests() throws {

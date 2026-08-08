@@ -16,6 +16,11 @@ final class AppModel {
     private(set) var servers: [ServerCredential] = []
     var activeServer: ServerCredential?
 
+    /// True while the app is driving the offline scripted server instead of a
+    /// real one. Demo mode exists so the app is fully explorable with no
+    /// `jcode` server on the network (first launch, App Review, kicking tires).
+    private(set) var isDemo = false
+
     /// Composer draft.
     var draft = ""
 
@@ -35,6 +40,43 @@ final class AppModel {
         session.phase == .connected
     }
 
+    // MARK: - Demo mode
+
+    /// Synthetic credential representing the offline demo server. It is never
+    /// persisted, so leaving demo mode returns the user to pairing.
+    static let demoCredential = ServerCredential(
+        host: DemoTransport.host,
+        port: Gateway.defaultPort,
+        token: "demo",
+        serverName: "Demo server",
+        serverVersion: "demo",
+        workingDir: "/demo"
+    )
+
+    /// Enters offline demo mode: same UI, same protocol, scripted local server.
+    func startDemo() {
+        isDemo = true
+        session = SessionState()
+        openConnection(
+            credential: Self.demoCredential,
+            sessionID: nil,
+            makeTransport: { DemoTransport() }
+        )
+    }
+
+    /// Leaves demo mode and returns to the previously active real server, or
+    /// to pairing when there is none.
+    func exitDemo() {
+        guard isDemo else { return }
+        isDemo = false
+        disconnect()
+        session = SessionState()
+        activeServer = servers.last
+        if let server = activeServer {
+            connect(to: server)
+        }
+    }
+
     // MARK: - Pairing
 
     func pair(gateway: Gateway, code: String, deviceName: String) async throws {
@@ -50,7 +92,8 @@ final class AppModel {
             port: gateway.port,
             token: response.token,
             serverName: response.serverName,
-            serverVersion: response.serverVersion
+            serverVersion: response.serverVersion,
+            workingDir: response.workingDir
         )
         store.save(credential)
         servers = store.loadAll()
@@ -70,26 +113,79 @@ final class AppModel {
     // MARK: - Connection lifecycle
 
     func connect(to credential: ServerCredential, sessionID: String? = nil) {
+        isDemo = false
         session = SessionState()
         open(credential, sessionID: sessionID)
+    }
+
+    /// Backfills `workingDir` for a credential paired before the server
+    /// advertised it. Subscribe fails without an absolute directory, so a
+    /// pre-existing credential would otherwise never connect again.
+    func backfillWorkingDirIfNeeded(for credential: ServerCredential) async {
+        guard credential.workingDir == nil else { return }
+        guard let body = await PairingClient().health(gateway: credential.gateway),
+            let dir = body["working_dir"] as? String, !dir.isEmpty
+        else { return }
+        var updated = credential
+        updated.workingDir = dir
+        store.save(updated)
+        servers = store.loadAll()
+        if activeServer?.id == updated.id {
+            activeServer = updated
+        }
     }
 
     /// Reconnects to the active server without discarding the rendered
     /// transcript; the history resync replaces it once the socket is back.
     func retryConnection() {
+        // Demo mode has no server to reach; restart the scripted one instead
+        // so the retry affordance still does something sensible.
+        if isDemo {
+            startDemo()
+            return
+        }
         guard let activeServer else { return }
         open(activeServer, sessionID: session.sessionID)
     }
 
     private func open(_ credential: ServerCredential, sessionID: String?) {
+        // A credential paired before the server advertised its working dir
+        // cannot subscribe. Recover it from /health first, then connect.
+        if credential.workingDir == nil {
+            Task { [weak self] in
+                await self?.backfillWorkingDirIfNeeded(for: credential)
+                guard let self, let refreshed = self.servers.first(where: { $0.id == credential.id })
+                else { return }
+                if refreshed.workingDir != nil {
+                    self.openResolved(refreshed, sessionID: sessionID)
+                } else {
+                    self.openResolved(credential, sessionID: sessionID)
+                }
+            }
+            return
+        }
+        openResolved(credential, sessionID: sessionID)
+    }
+
+    private func openResolved(_ credential: ServerCredential, sessionID: String?) {
+        openConnection(credential: credential, sessionID: sessionID, makeTransport: nil)
+    }
+
+    private func openConnection(
+        credential: ServerCredential,
+        sessionID: String?,
+        makeTransport: (@Sendable () -> any WebSocketTransport)?
+    ) {
         disconnect()
         activeServer = credential
-        let connection = Connection(
-            configuration: .init(
-                gateway: credential.gateway,
-                authToken: credential.token
-            )
+        let configuration = Connection.Configuration(
+            gateway: credential.gateway,
+            authToken: credential.token,
+            workingDir: credential.workingDir
         )
+        let connection =
+            makeTransport.map { Connection(configuration: configuration, makeTransport: $0) }
+            ?? Connection(configuration: configuration)
         self.connection = connection
         pumpTask = Task { [weak self] in
             let stream = await connection.start(resumeSessionID: sessionID)

@@ -89,6 +89,29 @@ extension EnvironmentValues {
     @Entry var compactEdgePads = CompactEdgePads()
 }
 
+/// Caps a reading column on wide screens.
+///
+/// The app is universal, and a chat transcript stretched across a 13" iPad is
+/// unreadable (and looks unfinished to a reviewer). Content is centered in a
+/// measured column instead, matching how every mail/chat app handles regular
+/// width. Narrow devices are unaffected.
+struct ReadableColumn: ViewModifier {
+    static let maxWidth: CGFloat = 720
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: Self.maxWidth)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+extension View {
+    /// Centers this view in a reading-width column on wide screens.
+    func readableColumn() -> some View {
+        modifier(ReadableColumn())
+    }
+}
+
 /// Card container used across screens.
 struct Card<Content: View>: View {
     @ViewBuilder var content: Content

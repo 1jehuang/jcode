@@ -14,10 +14,17 @@ struct ChatView: View {
         VStack(spacing: 0) {
             header
 
+            if model.isDemo {
+                DemoBanner { model.exitDemo() }
+                    .readableColumn()
+                    .padding(.bottom, 8)
+            }
+
             if showConnectionBanner {
                 ConnectionBanner(phase: model.session.phase) {
                     model.retryConnection()
                 }
+                .readableColumn()
                 .padding(.bottom, 8)
             }
 
@@ -25,6 +32,7 @@ struct ChatView: View {
                 ErrorBanner(message: banner) {
                     model.dismissError()
                 }
+                .readableColumn()
                 .padding(.bottom, 8)
             }
 
@@ -33,6 +41,7 @@ struct ChatView: View {
                     notices: model.session.notices,
                     onDismiss: { model.dismissNotice($0) }
                 )
+                .readableColumn()
                 .padding(.bottom, 8)
             }
 
@@ -41,11 +50,13 @@ struct ChatView: View {
                 isReasoning: model.session.isReasoning,
                 onSuggestion: { model.draft = $0 }
             )
+            .readableColumn()
 
             if model.session.hasPendingInterrupts {
                 QueuedInterruptChip(count: model.session.pendingInterrupts.count) {
                     model.cancelQueuedInterrupts()
                 }
+                .readableColumn()
                 .padding(.bottom, 8)
             }
 
@@ -59,6 +70,7 @@ struct ChatView: View {
                 },
                 onInterrupt: { model.interrupt() }
             )
+            .readableColumn()
         }
         .sheet(isPresented: $showSessions) {
             SessionsView()
@@ -147,6 +159,7 @@ struct ChatView: View {
             StatusPill(phase: model.session.phase)
         }
         .padding(.horizontal, 16)
+        .readableColumn()
         .padding(.vertical, 6)
         .padding(.top, edgePads.top)
         .background(alignment: .bottom) {
@@ -157,15 +170,6 @@ struct ChatView: View {
             }
             .ignoresSafeArea(edges: .top)
         }
-    }
-
-    /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")
-    /// so the header shows the model, not plumbing.
-    private func shortModelName(_ name: String) -> String {
-        if let idx = name.firstIndex(of: ":"), idx != name.startIndex {
-            return String(name[name.index(after: idx)...])
-        }
-        return name
     }
 
     /// Strips the auth-route prefix ("claude-api:claude-fable-5" -> "claude-fable-5")

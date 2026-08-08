@@ -89,8 +89,43 @@ struct PairingView: View {
                 Text("Run `jcode pair` on your machine, then scan the QR code or enter the code manually. Traffic stays on your tailnet.")
                     .font(.footnote)
                     .foregroundStyle(Theme.textTertiary)
+
+                // No server yet? The app would otherwise be an unusable form.
+                // Demo mode runs a scripted session entirely on-device so the
+                // whole interface can be explored before pairing anything.
+                VStack(alignment: .leading, spacing: 8) {
+                    Divider().overlay(Theme.border)
+                    Button {
+                        model.startDemo()
+                    } label: {
+                        Label("Try the offline demo", systemImage: "play.circle")
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 14)
+                            .background(Theme.surface)
+                            .foregroundStyle(Theme.mint)
+                            .clipShape(
+                                RoundedRectangle(
+                                    cornerRadius: Theme.Radius.medium, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(
+                                    cornerRadius: Theme.Radius.medium, style: .continuous
+                                )
+                                .stroke(Theme.border, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(PressableButtonStyle(scale: 0.98))
+                    .accessibilityLabel("Try the offline demo")
+                    .accessibilityHint("Explores the app with a scripted session, no server needed")
+                    Text("No server required. Runs entirely on this device.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .padding(.top, 4)
             }
             .padding(16)
+            .readableColumn()
         }
         .scrollDismissesKeyboard(.interactively)
         .dynamicTypeSize(.large ... .accessibility3)
