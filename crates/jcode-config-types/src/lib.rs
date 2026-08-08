@@ -1527,6 +1527,58 @@ pub struct LaunchHotkeysConfig {
 }
 
 #[cfg(test)]
+mod cloud_relay_alias_tests {
+    use super::*;
+
+    /// Existing configs written before the rename use `jade_relay_*` keys.
+    /// The serde aliases must keep them working.
+    #[test]
+    fn legacy_jade_relay_keys_deserialize_into_cloud_relay_fields() {
+        let json = serde_json::json!({
+            "jade_relay_enabled": true,
+            "jade_relay_api_base": "https://example.com/api",
+            "jade_relay_token": "tok",
+            "jade_relay_token_id": "alice-token",
+            "jade_relay_user_id": "alice",
+            "jade_relay_session_id": "sess-1",
+            "jade_relay_reply_enabled": true,
+            "jade_relay_launch_enabled": true,
+            "jade_relay_launch_working_dir": "/tmp/project",
+        });
+        let cfg: SafetyConfig = serde_json::from_value(json).expect("legacy keys must parse");
+        assert!(cfg.cloud_relay_enabled);
+        assert_eq!(
+            cfg.cloud_relay_api_base.as_deref(),
+            Some("https://example.com/api")
+        );
+        assert_eq!(cfg.cloud_relay_token.as_deref(), Some("tok"));
+        assert_eq!(cfg.cloud_relay_token_id.as_deref(), Some("alice-token"));
+        assert_eq!(cfg.cloud_relay_user_id.as_deref(), Some("alice"));
+        assert_eq!(cfg.cloud_relay_session_id.as_deref(), Some("sess-1"));
+        assert!(cfg.cloud_relay_reply_enabled);
+        assert!(cfg.cloud_relay_launch_enabled);
+        assert_eq!(
+            cfg.cloud_relay_launch_working_dir.as_deref(),
+            Some("/tmp/project")
+        );
+    }
+
+    #[test]
+    fn new_cloud_relay_keys_also_deserialize() {
+        let json = serde_json::json!({
+            "cloud_relay_enabled": true,
+            "cloud_relay_api_base": "https://example.com/api",
+        });
+        let cfg: SafetyConfig = serde_json::from_value(json).expect("new keys must parse");
+        assert!(cfg.cloud_relay_enabled);
+        assert_eq!(
+            cfg.cloud_relay_api_base.as_deref(),
+            Some("https://example.com/api")
+        );
+    }
+}
+
+#[cfg(test)]
 mod reasoning_display_defaults_tests {
     use super::*;
 
