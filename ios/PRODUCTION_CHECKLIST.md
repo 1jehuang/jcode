@@ -53,7 +53,21 @@ connects to any host the user did not explicitly pair with. This is why
 | 17 | swift test job | `.github/workflows/ios-testflight.yml` test job green | PASS |
 | 18 | Simulator compile check | compile-check job green | PASS |
 | 18a | Production gate in CI | `production-gate` job runs `check_production.sh` | PASS |
-| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: cloud signing permission error (see below)** |
+| 19 | TestFlight upload | build-and-upload job green | **BLOCKED: Apple-account permission only (see below)** |
+
+Verified on run
+[31283473798](https://github.com/1jehuang/jcode/actions/runs/31283473798)
+(branch `ios/mobile-real-nav`, 2026-08-08): `swift test`, `compile-check`, and
+`production-gate` all green; `Archive` succeeds; the run fails only at
+`exportArchive` with:
+
+```
+error: exportArchive Cloud signing permission error
+error: exportArchive No profiles for 'com.jcode.mobile' were found
+```
+
+Nothing in this repository can fix that. It requires the four account-holder
+steps below.
 
 ## Guideline 2.1 mitigation (why review can exercise the app)
 
