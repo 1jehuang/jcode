@@ -1,6 +1,6 @@
 {
   "name": "@1jehuang/jcode-sdk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "TypeScript SDK for the jcode harness API (protocol v1)",
   "license": "MIT",
   "type": "module",
@@ -58,11 +58,11 @@
     "ajv": "^8.20.0"
   },
   "optionalDependencies": {
-    "@1jehuang/jcode-darwin-arm64": "1.1.0",
-    "@1jehuang/jcode-darwin-x64": "1.1.0",
-    "@1jehuang/jcode-linux-arm64": "1.1.0",
-    "@1jehuang/jcode-linux-x64": "1.1.0",
-    "@1jehuang/jcode-win32-arm64": "1.1.0",
-    "@1jehuang/jcode-win32-x64": "1.1.0"
+    "@1jehuang/jcode-darwin-arm64": "1.2.0",
+    "@1jehuang/jcode-darwin-x64": "1.2.0",
+    "@1jehuang/jcode-linux-arm64": "1.2.0",
+    "@1jehuang/jcode-linux-x64": "1.2.0",
+    "@1jehuang/jcode-win32-arm64": "1.2.0",
+    "@1jehuang/jcode-win32-x64": "1.2.0"
   }
 }

@@ -977,6 +977,45 @@ impl MultiProvider {
         self.set_model_on_provider_with_credential_modes(provider, model, None, None)
     }
 
+    /// Bind the shared OpenAI-compatible slot to the managed jcode endpoint.
+    ///
+    /// Subscription model ids intentionally overlap with direct Anthropic and
+    /// OpenAI ids. A picker selection therefore cannot be reduced to a bare
+    /// model name: doing so lets `set_model`'s family heuristic spend the
+    /// user's unrelated provider credentials instead of their subscription.
+    fn set_model_on_jcode_subscription(&self, model: &str) -> Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            anyhow::bail!("Model cannot be empty");
+        }
+        models::ensure_model_allowed_for_subscription(model)?;
+        crate::subscription_catalog::apply_runtime_env();
+        crate::provider::activation::ProviderActivation::jcode_subscription(model).apply_env()?;
+
+        // Always construct a fresh environment-derived runtime. Reusing the
+        // slot is unsafe because it may currently be OpenRouter or another
+        // OpenAI-compatible profile with different credentials and endpoint.
+        let runtime =
+            external::instantiate_openrouter_runtime(external::OpenRouterRuntimeSpec::Default)?;
+        runtime.set_model(model)?;
+        let identity = runtime.direct_openai_compatible_route_parts();
+        if !identity.as_ref().is_some_and(|(_, api_method, _)| {
+            ModelRouteApiMethod::parse(api_method) == ModelRouteApiMethod::JcodeSubscription
+        }) {
+            anyhow::bail!(
+                "Refusing to select jcode subscription: managed runtime identity was not established"
+            );
+        }
+
+        *self
+            .openrouter
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime);
+        self.clear_active_openai_compatible_profile();
+        self.set_active_provider(ActiveProvider::OpenRouter);
+        Ok(())
+    }
+
     fn set_model_on_provider_with_credential_modes(
         &self,
         provider: ActiveProvider,
@@ -1099,7 +1138,12 @@ impl MultiProvider {
                 let needs_rebind = match self.openrouter_provider().as_deref() {
                     None => true,
                     Some(provider) => {
-                        !provider.supports_provider_routing_features()
+                        provider.direct_openai_compatible_route_parts().is_some_and(
+                            |(_, api_method, _)| {
+                                ModelRouteApiMethod::parse(&api_method)
+                                    == ModelRouteApiMethod::JcodeSubscription
+                            },
+                        ) || (!provider.supports_provider_routing_features()
                             && provider
                                 .direct_openai_compatible_route_parts()
                                 .and_then(|(_provider, api_method, _detail)| {
@@ -1113,7 +1157,7 @@ impl MultiProvider {
                                 .map(|profile| {
                                     profile.id != crate::provider_catalog::OPENAI_COMPAT_PROFILE.id
                                 })
-                                .unwrap_or(false)
+                                .unwrap_or(false))
                     }
                 };
                 let (openrouter, install_openrouter) = if needs_rebind {
@@ -1928,6 +1972,13 @@ impl Provider for MultiProvider {
     fn set_route_selection(&self, selection: &RouteSelection) -> Result<()> {
         if selection.model.trim().is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        // The subscription is a distinct endpoint/auth runtime, not a model
+        // alias. Handle its structured identity before converting other routes
+        // back into their legacy string specs.
+        if selection.runtime_key == RuntimeKey::JcodeSubscription {
+            return self.set_model_on_jcode_subscription(&selection.model);
         }
 
         // Routing-prefix policy lives once in RouteSelection::routed_model_spec

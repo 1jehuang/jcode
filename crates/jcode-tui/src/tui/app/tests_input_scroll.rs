@@ -20,6 +20,17 @@ fn test_disconnected_key_handler_allows_typing_and_queueing() {
 }
 
 #[test]
+fn test_disconnected_command_enter_encoded_as_meta_queues_prompt() {
+    let mut app = create_test_app();
+    app.input = "queued with command".to_string();
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Enter, KeyModifiers::META).unwrap();
+
+    assert!(app.input.is_empty());
+    assert_eq!(app.queued_messages(), &["queued with command".to_string()]);
+}
+
+#[test]
 fn test_disconnected_shift_enter_inserts_newline() {
     let mut app = create_test_app();
 
@@ -347,4 +358,3 @@ fn test_remote_cmd_enter_queues_while_processing() {
     assert_eq!(app.queued_messages().len(), 1);
     assert_eq!(app.queued_messages()[0], "hi");
 }
-

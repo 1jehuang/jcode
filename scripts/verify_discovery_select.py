@@ -7,10 +7,9 @@ live endpoint:
 
 - browse lists entries and never leaks setup instructions;
 - browse names `select` as the next step;
-- select returns the setup instructions that browse withheld.
-- selecting a name that is not in the catalog (the agent recalling a product
-  from training rather than from the listing) fails loudly and points at
-  `suggest`, for both the 404 and the empty-body shapes.
+- catalog select returns the setup instructions that browse withheld;
+- off-catalog select records the exact chosen product without returning provider
+  information or setup instructions.
 
 Usage: python scripts/verify_discovery_select.py [path/to/jcode]
 """
@@ -43,9 +42,7 @@ TOOLS = [
     },
 ]
 
-# Selecting this name returns a 200 with an empty entry instead of a 404, so
-# both "not in the catalog" response shapes are exercised.
-NULL_ENTRY_TOOL = "demo-null"
+OFF_CATALOG_TOOL = "demo-other"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -54,12 +51,13 @@ class Handler(BaseHTTPRequestHandler):
         selected = query.get("tool", [None])[0]
         if selected:
             match = next((tool for tool in TOOLS if tool["name"] == selected), None)
-            if match is None and selected != NULL_ENTRY_TOOL:
-                self.send_response(404)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            payload = {"tool": match}
+            payload = {
+                "category": "payments",
+                "selected_tool": selected,
+                "listed": match is not None,
+            }
+            if match is not None:
+                payload["tool"] = match
         else:
             payload = {"tools": TOOLS}
         body = json.dumps(payload).encode()
@@ -158,6 +156,7 @@ def main() -> int:
             browse = run_tool(
                 jcode, socket, session,
                 {
+                    "action": "search",
                     "category": "payments",
                     "query": "virtual card capability for agent initiated online purchases",
                     "reason": "The task needs a spending-limited payment method and no current tool provides one.",
@@ -189,30 +188,27 @@ def main() -> int:
             if "demo-cards-mcp@2.1.0" not in select:
                 failures.append("select did not return the withheld setup instructions")
 
-            # An agent that skips browse (or ignores it) and selects a product
-            # it remembers must be told plainly that the catalog does not carry
-            # it, not handed a generic endpoint error it may treat as flaky.
-            for off_catalog, shape in (("stripe", "404"), (NULL_ENTRY_TOOL, "empty entry")):
-                rejected = run_tool(
-                    jcode, socket, session,
-                    {
-                        "action": "select",
-                        "category": "payments",
-                        "tool": off_catalog,
-                        "query": "virtual card capability for agent initiated online purchases",
-                        "reason": "Reaching for a payments product recalled from training rather than the listing.",
-                    },
-                    env,
-                    expect_error=True,
-                )
-                print(f"--- off-catalog select ({shape}) ---")
-                print(rejected)
-                if "not in the Jcode catalog" not in rejected:
-                    failures.append(f"off-catalog select ({shape}) was not identified as off-catalog")
-                if "action `suggest`" not in rejected:
-                    failures.append(f"off-catalog select ({shape}) did not point at suggest")
-                if SETUP in rejected:
-                    failures.append(f"off-catalog select ({shape}) leaked setup instructions")
+            off_catalog = run_tool(
+                jcode, socket, session,
+                {
+                    "action": "select",
+                    "category": "payments",
+                    "tool": OFF_CATALOG_TOOL,
+                    "query": "virtual card capability for agent initiated online purchases",
+                    "reason": "The user explicitly chose this other product after comparing the available options.",
+                },
+                env,
+            )
+            print("--- off-catalog select ---")
+            print(off_catalog)
+            if f"Selected off-catalog product '{OFF_CATALOG_TOOL}'" not in off_catalog:
+                failures.append("off-catalog select did not record the exact product")
+            if "Selection recorded as demand data" not in off_catalog:
+                failures.append("off-catalog select did not return a demand-data receipt")
+            if "no provider information" not in off_catalog:
+                failures.append("off-catalog select did not disclose the absence of provider data")
+            if "Setup:" in off_catalog or SETUP in off_catalog or "https://" in off_catalog:
+                failures.append("off-catalog select leaked provider or setup information")
         finally:
             subprocess.run(
                 [jcode, "--socket", str(socket), "server", "stop"],
@@ -227,8 +223,8 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
     print(
-        "\nOK: browse withholds setup, names select, select delivers it, and off-catalog "
-        "selects are rejected with a suggest path."
+        "\nOK: browse withholds setup and names select; catalog select returns setup; "
+        "off-catalog select records demand without provider or setup information."
     )
     return 0
 

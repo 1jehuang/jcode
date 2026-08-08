@@ -970,11 +970,13 @@ pub struct LoginImportPrompt {
     pub seconds_left: u64,
 }
 
-/// The three actions on the import summary screen, left to right.
+/// The actions on the import summary screen, left to right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSummaryPill {
     /// Import everything we detected (default).
     Continue,
+    /// Sign in with a Jcode subscription instead of importing.
+    Subscription,
     /// Open the per-login checkbox list to import fewer logins.
     ImportLess,
     /// Open the telemetry settings sub-page.

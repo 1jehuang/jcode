@@ -47,11 +47,11 @@ impl JcodeProvider {
     }
 
     fn entitled_models_for(
-        tier: crate::subscription_catalog::JcodeTier,
+        _tier: crate::subscription_catalog::JcodeTier,
     ) -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel> {
-        crate::subscription_catalog::curated_models()
-            .iter()
-            .filter(move |model| tier.allows(model.min_tier))
+        // Metered hosted billing has one model catalog. Keep accepting legacy
+        // tier metadata, but never let it hide a router-supported model.
+        crate::subscription_catalog::curated_models().iter()
     }
 
     fn entitled_models() -> impl Iterator<Item = &'static crate::subscription_catalog::CuratedModel>
@@ -320,7 +320,7 @@ mod tests {
 
         runtime.block_on(async {
             let provider = JcodeProvider::new();
-            assert_eq!(provider.name(), "Jcode Hosted Models");
+            assert_eq!(provider.name(), "Jcode Subscription");
             let model = provider.model();
             assert!(
                 crate::subscription_catalog::is_curated_model(&model),
@@ -363,6 +363,7 @@ mod tests {
             "claude-opus-5",
             "claude-sonnet-4-6",
             "gpt-5.5",
+            "claude-fable-5",
             "gpt-5.6-sol",
             "qwen3-coder-next",
             "devstral-2-123b",
@@ -388,7 +389,7 @@ mod tests {
             expected_models
         );
         assert!(plus_routes.iter().all(|route| {
-            route.provider == "Jcode Hosted Models"
+            route.provider == "Jcode Subscription"
                 && route.api_method == "jcode-subscription"
                 && route.available
         }));
@@ -407,7 +408,8 @@ mod tests {
             jcode_provider_core::RuntimeKey::JcodeSubscription
         );
         assert_eq!(route_selection.api_method, "jcode-subscription");
-        assert_eq!(route_selection.provider_label, "Jcode Hosted Models");
+        assert_eq!(route_selection.provider_label, "Jcode Subscription");
+        assert_eq!(plus_routes, flagship_routes);
         assert_eq!(flagship_routes.len(), 20);
         assert!(
             flagship_routes

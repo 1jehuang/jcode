@@ -11,6 +11,7 @@ use crate::auth;
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Fast/cheap OpenAI model used when Codex credentials are available.
 pub const SIDECAR_OPENAI_MODEL: &str = "gpt-5.6-luna";
@@ -19,7 +20,7 @@ const SIDECAR_OPENAI_OAUTH_FALLBACK_MODEL: &str = "gpt-5.4";
 const SIDECAR_OPENAI_OAUTH_FALLBACK_REASONING: &str = "low";
 
 /// Fast/cheap Claude model used when only Claude credentials are available.
-const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20241022";
+const SIDECAR_CLAUDE_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// OpenAI Responses API
 const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
@@ -45,6 +46,80 @@ const CLAUDE_CODE_JCODE_NOTICE: &str = "You are jcode, powered by Claude Code. Y
 
 /// Maximum tokens for sidecar responses (keep small for speed/cost)
 const DEFAULT_MAX_TOKENS: u32 = 1024;
+
+/// Whether retrying a failed sidecar request can reasonably succeed without a
+/// configuration or credential change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarErrorKind {
+    Transient,
+    Permanent,
+}
+
+#[derive(Debug)]
+struct SidecarHttpError {
+    provider: &'static str,
+    status: StatusCode,
+    body: String,
+}
+
+impl fmt::Display for SidecarHttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} API error ({}): {}",
+            self.provider, self.status, self.body
+        )
+    }
+}
+
+impl std::error::Error for SidecarHttpError {}
+
+/// Classify a sidecar failure for retry policy. HTTP client/auth/request errors
+/// are permanent; throttling, server failures, and transport failures are
+/// transient. Unknown provider errors retain the conservative retry behavior.
+pub fn classify_error(error: &anyhow::Error) -> SidecarErrorKind {
+    if let Some(error) = error.downcast_ref::<SidecarHttpError>() {
+        return classify_http_status(error.status);
+    }
+    for cause in error.chain() {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = error.status() {
+                return classify_http_status(status);
+            }
+            return SidecarErrorKind::Transient;
+        }
+    }
+
+    // Provider-backed sidecars may not expose a typed HTTP error yet.
+    let message = error.to_string().to_ascii_lowercase();
+    if [
+        "400",
+        "401",
+        "403",
+        "404",
+        "bad request",
+        "unauthorized",
+        "forbidden",
+        "not_found_error",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        SidecarErrorKind::Permanent
+    } else {
+        SidecarErrorKind::Transient
+    }
+}
+
+fn classify_http_status(status: StatusCode) -> SidecarErrorKind {
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        SidecarErrorKind::Transient
+    } else if status.is_client_error() {
+        SidecarErrorKind::Permanent
+    } else {
+        SidecarErrorKind::Transient
+    }
+}
 
 /// Which backend the sidecar is using
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -506,7 +581,12 @@ impl Sidecar {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Claude API error ({}): {}", status, error_text);
+            return Err(SidecarHttpError {
+                provider: "Claude",
+                status,
+                body: error_text,
+            }
+            .into());
         }
 
         let result: ClaudeMessagesResponse = response
@@ -788,9 +868,12 @@ impl OpenAiSidecarError {
 
     fn into_anyhow(self) -> anyhow::Error {
         match self {
-            Self::Api { status, body } => {
-                anyhow::anyhow!("OpenAI API error ({}): {}", status, body)
+            Self::Api { status, body } => SidecarHttpError {
+                provider: "OpenAI",
+                status,
+                body,
             }
+            .into(),
             Self::Other(err) => err,
         }
     }
@@ -1037,6 +1120,42 @@ mod tests {
     #[test]
     fn test_sidecar_fast_model() {
         assert_eq!(SIDECAR_FAST_MODEL, "gpt-5.6-luna");
+        assert_eq!(SIDECAR_CLAUDE_MODEL, "claude-haiku-4-5-20251001");
+    }
+
+    #[test]
+    fn sidecar_http_error_classifies_permanent_client_failures() {
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+        ] {
+            let error: anyhow::Error = SidecarHttpError {
+                provider: "test",
+                status,
+                body: "failure".to_string(),
+            }
+            .into();
+            assert_eq!(classify_error(&error), SidecarErrorKind::Permanent);
+        }
+    }
+
+    #[test]
+    fn sidecar_http_error_classifies_retryable_failures() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            let error: anyhow::Error = SidecarHttpError {
+                provider: "test",
+                status,
+                body: "failure".to_string(),
+            }
+            .into();
+            assert_eq!(classify_error(&error), SidecarErrorKind::Transient);
+        }
+        assert_eq!(
+            classify_error(&anyhow::anyhow!("connection reset")),
+            SidecarErrorKind::Transient
+        );
     }
 
     #[test]

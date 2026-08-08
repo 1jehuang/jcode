@@ -1290,6 +1290,23 @@ fn test_render_messages_honors_system_display_role_override() {
 }
 
 #[test]
+fn legacy_scheduled_task_message_renders_as_system() {
+    let mut session = Session::create(None, None);
+    session.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "[Scheduled task]\nA scheduled task for this session is now due.\n\nTask: check progress".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let rendered = render::render_messages(&session);
+    assert_eq!(rendered.len(), 1);
+    assert_eq!(rendered[0].role, "system");
+    assert_eq!(session.visible_conversation_message_count(), 0);
+}
+
+#[test]
 fn test_render_messages_shows_auto_poke_continuations_as_system_not_user() {
     // Regression: incomplete-todo and private-quality continuations are persisted as
     // Role::User so the model continues the turn, but the live UI hides them.

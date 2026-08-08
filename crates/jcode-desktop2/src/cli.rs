@@ -38,6 +38,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--capture") => Some(run_capture(&args[1..])),
         Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
+        Some("--check-connect") => Some(check_connect()),
         Some("--check-reconnect") => Some(check_reconnect()),
         Some("--check-resume-scan") => Some(check_resume_scan()),
         Some("--e2e") => Some(run_e2e(
@@ -47,6 +48,30 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// `--check-connect`: exercise the exact startup boundary used by the window.
+///
+/// `--version` only proves that the GUI executable can start. Desktop2 also
+/// requires the harness API bridge beside that executable (or on PATH), and a
+/// build missing that companion used to pass activation before every new window
+/// sat on "Connecting". Keep this check small enough to run after every self-dev
+/// build: start/locate the runtime, complete the protocol handshake, then exit.
+fn check_connect() -> Result<()> {
+    jcode_sdk::ensure_runtime(&jcode_sdk::LaunchOptions::default(), &|status| {
+        println!("[connect] {status}")
+    })?;
+    let client = jcode_sdk::JcodeClient::connect(jcode_sdk::ConnectOptions {
+        client_name: concat!("jcode-desktop2-check/", env!("CARGO_PKG_VERSION")).to_string(),
+        ensure_runtime: false,
+        ..Default::default()
+    })?;
+    println!(
+        "desktop2 connection ok: {} at {}",
+        client.server,
+        harness::api_socket_path().display()
+    );
+    Ok(())
 }
 
 /// `--check-clipboard-image`: prove Ctrl+V's image path against the *real*

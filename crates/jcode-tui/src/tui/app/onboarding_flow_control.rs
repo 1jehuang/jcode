@@ -536,10 +536,8 @@ impl App {
     /// Returns true if the key was consumed.
     ///
     /// The screen has two modes:
-    ///   * Summary (default): a read-only list of everything we detected, with
-    ///     two pills below it. "Continue" (preselected) imports everything;
-    ///     "Choose what to import" switches to the checkbox list. Arrows/Tab
-    ///     move between the pills, Enter/Space commit the focused pill.
+    ///   * Summary: detected logins plus Continue, Subscription, Import less,
+    ///     and Telemetry pills. Arrows/Tab move; Enter/Space commits.
     ///   * Choose (checkbox list): per-login Yes/No rows.
     ///     - Up / Down / k / j -> move the cursor between logins
     ///     - Left / h / y -> choose "Yes" (import) for the highlighted login
@@ -550,6 +548,9 @@ impl App {
         // `finished` means the user committed the import (so we kick it off
         // outside the borrow).
         let mut finished = false;
+        // Set when the user wants to learn about the hosted Jcode subscription
+        // instead of importing one of the detected third-party logins.
+        let mut open_pricing = false;
         // Set when the user committed a telemetry level, so we persist it
         // outside the review borrow.
         let mut telemetry_choice = None;
@@ -576,9 +577,8 @@ impl App {
                     _ => return false,
                 }
             } else if !review.choosing {
-                // Summary mode: three pills, "Continue" (preselected),
-                // "Import less", and "Telemetry settings". Left/Right (and
-                // Tab) move between them; Enter/Space commit the focused one.
+                // Summary: Continue, Subscription, Import less, and Telemetry pills.
+                // Arrows/Tab move; Enter/Space commits the focused one.
                 match code {
                     KeyCode::Left
                     | KeyCode::Up
@@ -599,6 +599,7 @@ impl App {
                     KeyCode::Char('y') | KeyCode::Char('Y') => finished = true,
                     KeyCode::Enter | KeyCode::Char(' ') => match review.summary_pill {
                         SummaryPill::Continue => finished = true,
+                        SummaryPill::Subscription => open_pricing = true,
                         SummaryPill::ImportLess => review.enter_choose_mode(),
                         SummaryPill::Telemetry => review.open_telemetry(),
                     },
@@ -629,6 +630,16 @@ impl App {
             level.persist();
             self.onboarding_telemetry_choice_made = true;
             self.set_status_notice(level.status_label().to_string());
+            return true;
+        }
+        if open_pricing {
+            self.onboarding_import_error = None;
+            let url = crate::subscription_catalog::JCODE_PRICING_URL;
+            if super::helpers::open_path_or_url_detached(url).is_ok() {
+                self.set_status_notice(format!("Opened Jcode pricing: {url}"));
+            } else {
+                self.set_status_notice(format!("Open Jcode pricing: {url}"));
+            }
             return true;
         }
         if finished {

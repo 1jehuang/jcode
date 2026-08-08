@@ -135,26 +135,28 @@ fn continue_pill_line(focused: bool, align: Alignment) -> Line<'static> {
     Line::from(lozenge_pill_spans("Continue", focused)).alignment(align)
 }
 
-/// The summary-screen action row: "Continue" (imports everything, preselected)
-/// next to "Import less" (opens the per-login checkbox list) and "Telemetry
-/// settings" (opens the telemetry sub-page).
+/// The summary-screen action row. A new user can import the logins we found or
+/// use a Jcode subscription, with secondary controls for a selective import and
+/// telemetry settings.
 fn import_summary_pills_line(
     focused: crate::tui::ImportSummaryPill,
     align: Alignment,
 ) -> Line<'static> {
     use crate::tui::ImportSummaryPill as Pill;
     let mut spans = Vec::new();
-    spans.extend(lozenge_pill_spans("Continue", focused == Pill::Continue));
+    spans.extend(lozenge_pill_spans("Import", focused == Pill::Continue));
+    spans.push(Span::raw("   "));
+    spans.extend(lozenge_pill_spans(
+        "Jcode subscription",
+        focused == Pill::Subscription,
+    ));
     spans.push(Span::raw("   "));
     spans.extend(lozenge_pill_spans(
         "Import less",
         focused == Pill::ImportLess,
     ));
     spans.push(Span::raw("   "));
-    spans.extend(lozenge_pill_spans(
-        "Telemetry settings",
-        focused == Pill::Telemetry,
-    ));
+    spans.extend(lozenge_pill_spans("Telemetry", focused == Pill::Telemetry));
     Line::from(spans).alignment(align)
 }
 
@@ -521,7 +523,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.push(
                         Line::from(Span::styled(
                             format!(
-                                "We found {found} existing login{}:",
+                                "Choose how to get started. We found {found} existing login{}:",
                                 if found == 1 { "" } else { "s" }
                             ),
                             Style::default()
@@ -534,6 +536,13 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.extend(import_summary_lines(&prompt));
                     lines.push(Line::from(""));
                     lines.push(import_summary_pills_line(prompt.summary_pill, align));
+                    lines.push(
+                        Line::from(Span::styled(
+                            "$10 → $20 inference, $20 → $40; then provider API prices. Scales through Solo.",
+                            Style::default().fg(dim_color()),
+                        ))
+                        .alignment(align),
+                    );
                 }
                 Some(prompt) => {
                     // Choose mode: a short "Import:" label, the Continue pill,
@@ -684,7 +693,7 @@ pub(super) fn draw_onboarding_welcome(frame: &mut Frame, app: &dyn TuiState, are
 
     // The title/hint block is dropped first when the area is short so the
     // phase body (the actionable part) always fits.
-    let show_title_block = area.height >= telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2 + 1;
+    let show_title_block = area.height > telemetry_h + TITLE_H + HINT_H + body_h + GAP * 2;
 
     let used = if show_title_block {
         telemetry_h + GAP + TITLE_H + HINT_H + GAP + body_h

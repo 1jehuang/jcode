@@ -85,7 +85,7 @@ mod platform {
                     })
                     .and_then(|value| serde_json::from_str(&value).ok());
                 if let Some(origin) = route {
-                    jcode::notifications::activate_macos_notification_origin(&origin);
+                    crate::notifications::activate_macos_notification_origin(&origin);
                 }
                 completion_handler.call(());
             }
@@ -171,7 +171,7 @@ mod platform {
     }
 
     fn recover_interrupted_submissions() {
-        let Some(inbox) = jcode::notifications::macos_notification_inbox_dir() else {
+        let Some(inbox) = crate::notifications::macos_notification_inbox_dir() else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(inbox) else {
@@ -189,7 +189,7 @@ mod platform {
     }
 
     fn drain_inbox(center: &UNUserNotificationCenter) {
-        let Some(inbox) = jcode::notifications::macos_notification_inbox_dir() else {
+        let Some(inbox) = crate::notifications::macos_notification_inbox_dir() else {
             return;
         };
         let Ok(entries) = std::fs::read_dir(inbox) else {
@@ -208,7 +208,7 @@ mod platform {
             let result = std::fs::read(&path)
                 .context("read queued notification")
                 .and_then(|bytes| {
-                    serde_json::from_slice::<jcode::notifications::MacosNotificationEnvelope>(
+                    serde_json::from_slice::<crate::notifications::MacosNotificationEnvelope>(
                         &bytes,
                     )
                     .context("decode queued notification")
@@ -219,7 +219,7 @@ mod platform {
                 // retry after this point.
                 Ok(()) => {}
                 Err(error) => {
-                    jcode::logging::warn(&format!(
+                    crate::logging::warn(&format!(
                         "macOS notification broker skipped {}: {error:#}",
                         path.display()
                     ));
@@ -240,17 +240,17 @@ mod platform {
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| value.get("schema_version")?.as_u64())
             .is_some_and(|version| {
-                version > jcode::notifications::MACOS_NOTIFICATION_SCHEMA_VERSION as u64
+                version > crate::notifications::MACOS_NOTIFICATION_SCHEMA_VERSION as u64
             })
     }
 
     fn submit(
         center: &UNUserNotificationCenter,
-        envelope: &jcode::notifications::MacosNotificationEnvelope,
+        envelope: &crate::notifications::MacosNotificationEnvelope,
         queued_path: &std::path::Path,
     ) -> Result<()> {
         anyhow::ensure!(
-            envelope.schema_version == jcode::notifications::MACOS_NOTIFICATION_SCHEMA_VERSION,
+            envelope.schema_version == crate::notifications::MACOS_NOTIFICATION_SCHEMA_VERSION,
             "unsupported notification schema {}",
             envelope.schema_version
         );
@@ -296,7 +296,7 @@ mod platform {
                 // Notification Center availability). Preserve the payload for
                 // the next timer pass or helper launch.
                 let _ = std::fs::rename(&submitting_path, &retry_path);
-                jcode::logging::warn("macOS Notification Center rejected a queued notification");
+                crate::logging::warn("macOS Notification Center rejected a queued notification");
             }
         });
         center.addNotificationRequest_withCompletionHandler(&request, Some(&completion));
