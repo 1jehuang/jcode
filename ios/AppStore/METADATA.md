@@ -72,6 +72,11 @@ coding,agent,terminal,developer,remote,ssh,tailscale,ai,cli,devtools,programming
 | Marketing URL | `https://github.com/1jehuang/jcode` |
 | Privacy Policy URL | `https://github.com/1jehuang/jcode/blob/master/ios/AppStore/PRIVACY.md` |
 
+> The privacy URL must resolve **before** you submit. It only does so once this
+> branch is merged to `master` (verified: the repo is public and its default
+> branch is `master`). If you submit from an unmerged branch, either merge
+> first or point the field at the branch URL.
+
 ## App Privacy questionnaire
 
 Answer **"No, we do not collect data from this app."** That is the complete
