@@ -477,6 +477,17 @@ fn run(
     let mut current_call = String::new();
 
     for event in events {
+        // `events(None)` follows every session visible to this connection. A
+        // turn may keep streaming after the user moves to another session, so
+        // never forward an old session's deltas into the newly attached page.
+        // Attach/New retarget `session_id` before their requests run, closing
+        // the race between the user's action and the daemon's reply.
+        if let Some(event_session) = event_session_id(&event) {
+            let focused = session_id.lock().map(|id| id.clone()).unwrap_or_default();
+            if event_session != focused {
+                continue;
+            }
+        }
         match event {
             ApiEvent::TextDelta { text, .. } => ui.send(HarnessUpdate::Text(text)),
             // Reasoning is not rendered as transcript text yet, but its
@@ -596,6 +607,37 @@ fn run(
     }
     // The event stream only ends when the connection does.
     Ok(())
+}
+
+/// Identity carried by unsolicited, session-scoped stream events.
+/// Request replies are consumed by `JcodeClient` and should not reach this
+/// loop, but returning `None` for them keeps this boundary forward-compatible.
+fn event_session_id(event: &ApiEvent) -> Option<&str> {
+    match event {
+        ApiEvent::TextDelta { session_id, .. }
+        | ApiEvent::ReasoningDelta { session_id, .. }
+        | ApiEvent::ReasoningDone { session_id, .. }
+        | ApiEvent::ToolStart { session_id, .. }
+        | ApiEvent::ToolInputDelta { session_id, .. }
+        | ApiEvent::ToolExec { session_id, .. }
+        | ApiEvent::ToolDone { session_id, .. }
+        | ApiEvent::TokenUsage { session_id, .. }
+        | ApiEvent::TurnDone { session_id }
+        | ApiEvent::BackgroundProgress { session_id, .. }
+        | ApiEvent::MessageAccepted { session_id }
+        | ApiEvent::PermissionRequest { session_id, .. }
+        | ApiEvent::SessionStatus { session_id, .. }
+        | ApiEvent::ModelInfo { session_id, .. }
+        | ApiEvent::Models { session_id, .. }
+        | ApiEvent::RuntimeInfo { session_id, .. }
+        | ApiEvent::FileContent { session_id, .. }
+        | ApiEvent::Files { session_id, .. }
+        | ApiEvent::TextMatches { session_id, .. }
+        | ApiEvent::FileStatus { session_id, .. }
+        | ApiEvent::Compacted { session_id, .. }
+        | ApiEvent::SessionRenamed { session_id, .. } => Some(session_id),
+        _ => None,
+    }
 }
 
 /// A session-list entry, sized for the overview.

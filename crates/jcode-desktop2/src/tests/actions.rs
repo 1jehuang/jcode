@@ -1465,6 +1465,14 @@ fn ctrl_shift_n_starts_a_new_session() {
         Some(Action::SessionNew),
         "plain Ctrl+N started a session"
     );
+    assert!(
+        !Action::SessionNew.accepts_repeat(),
+        "holding Ctrl+Shift+N would create more than one session"
+    );
+    assert!(
+        Action::SessionRight.accepts_repeat(),
+        "session movement should remain repeatable"
+    );
 }
 
 /// Starting a session clears the page it is leaving. A transcript carried

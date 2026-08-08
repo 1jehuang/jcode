@@ -173,6 +173,15 @@ pub enum Action {
 }
 
 impl Action {
+    /// Whether holding the chord may apply the action more than once.
+    ///
+    /// Session creation is a request, not navigation. Winit reports held keys
+    /// as repeated presses, and accepting those would create several sessions
+    /// before the first `Attached` reply can make the result visible.
+    pub(crate) fn accepts_repeat(self) -> bool {
+        !matches!(self, Self::SessionNew)
+    }
+
     /// Whether this action can leave a different selection behind.
     ///
     /// Auto-copy keys off this rather than off a diff of the editor state,

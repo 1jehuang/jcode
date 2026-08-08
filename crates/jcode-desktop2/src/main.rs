@@ -2081,10 +2081,21 @@ impl ApplicationHandler for App {
                         logical_key,
                         state: ElementState::Pressed,
                         text,
+                        repeat,
                         ..
                     },
                 ..
             } => {
+                // Creating a session is edge-triggered. A held Ctrl+Shift+N is
+                // otherwise delivered once per keyboard-repeat tick, queuing a
+                // trail of empty sessions and making the eventual focus appear
+                // to jump around. Navigation remains repeatable.
+                if repeat
+                    && keymap::resolve(&logical_key, self.modifiers)
+                        .is_some_and(|action| !action.accepts_repeat())
+                {
+                    return;
+                }
                 if std::env::var_os("JCODE_DESKTOP2_LOG_INPUT").is_some() {
                     eprintln!(
                         "[input] key {logical_key:?} mods {:?} overview_open {} visible {}",
