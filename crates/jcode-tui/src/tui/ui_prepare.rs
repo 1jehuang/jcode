@@ -2349,7 +2349,7 @@ fn prepare_streaming_cached(
     prepared
 }
 
-pub(super) fn prepare_body(
+pub(crate) fn prepare_body(
     app: &dyn TuiState,
     width: u16,
     include_streaming: bool,

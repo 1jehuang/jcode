@@ -262,6 +262,13 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
     let _env_lock = crate::storage::lock_test_env();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    crate::todo::save_todos(
+        &session_id,
+        &[pinned_band_todo("pinned", "PINNED_ONLY", "in_progress")],
+    )
+    .unwrap();
+    app.refresh_pinned_todos_now();
     app.display_messages = vec![
         DisplayMessage::tool(
             "duplicate todo transcript card",
@@ -286,12 +293,17 @@ fn pinned_todos_hide_todo_tool_messages_from_the_transcript() {
     ];
 
     app.bump_display_messages_version();
+    let prepared = crate::tui::ui::prepare::prepare_body(&app, 80, false);
+    let body = prepared.wrapped_plain_lines.join("\n");
+    assert!(!body.contains("duplicate todo transcript card"), "{body}");
+    assert!(body.contains("README.md"), "{body}");
+
     app.session.short_name = Some("test".to_string());
     let backend = ratatui::backend::TestBackend::new(80, 40);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let transcript = render_and_snap(&app, &mut terminal);
-    assert!(!transcript.contains("duplicate todo transcript card"));
-    assert!(transcript.contains("README.md"), "{transcript}");
+    assert!(transcript.contains("PINNED_ONLY"), "{transcript}");
+    let _ = crate::todo::save_todos(&session_id, &[]);
 }
 
 #[test]
