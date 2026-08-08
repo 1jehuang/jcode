@@ -728,6 +728,33 @@ impl BridgeState {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 self.session_id = Some(session_id.clone());
+                // `session` is the daemon's acknowledgement that subscribe has
+                // completed. Do not make create/attach depend on the following
+                // state probe: that probe may be delayed behind startup work,
+                // which previously left desktop clients waiting until their
+                // 30-second request timeout even though the session existed.
+                if let Some((_, api_id)) = self.pending_attach_id.take() {
+                    return vec![
+                        ServerFrame::reply(
+                            api_id,
+                            ApiEvent::Attached {
+                                session: SessionInfo {
+                                    transcript_bytes: Self::transcript_bytes(&session_id),
+                                    session_id: session_id.clone(),
+                                    working_dir: None,
+                                    title: None,
+                                    status: "idle".into(),
+                                    archived: false,
+                                    archived_at_ms: None,
+                                },
+                            },
+                        ),
+                        ServerFrame::event(ApiEvent::SessionStatus {
+                            session_id,
+                            status: "attached".into(),
+                        }),
+                    ];
+                }
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id,
                     status: "attached".into(),
