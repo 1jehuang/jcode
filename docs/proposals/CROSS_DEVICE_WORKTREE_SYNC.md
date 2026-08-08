@@ -29,7 +29,7 @@ single machine.
 | Auto-reload on newer binary | `server/util.rs::server_has_newer_binary`, `reload_exec_target` | Mtime-based channel scan. A peer-triggered local build that publishes to `builds/current` triggers the existing reload flow with zero changes. |
 | Pull → build → install → exec | `session_rebuild.rs` | Already implements the receiving side's pipeline shape. |
 | Network door, same protocol | `jcode-base/src/gateway.rs` (WS + plain HTTP on :7643) | Remote clients speak the identical newline-JSON protocol as Unix-socket clients. Plain HTTP handler (`/pair`, `/health`) is a natural place for `/peer/*` endpoints. |
-| NAT-friendly device event bus | `server/jade_relay.rs` | Device IDs, heartbeats, long-polled command events. Works when machines cannot reach each other directly. |
+| NAT-friendly device event bus | `server/cloud_relay.rs` | Device IDs, heartbeats, long-polled command events. Works when machines cannot reach each other directly. |
 | Server-side tool execution | server architecture | Tools (bash, edit) run in the server process; a remote client attaching to another machine's server gets the full multi-agent-one-worktree behavior, including conflict warnings. |
 | Remote build precedent | `scripts/remote_build.sh` | rsync + ssh + sync-back pattern. |
 
@@ -86,11 +86,11 @@ After a successful `selfdev build` + publish on machine X:
    full_hash, sync_ref, device, timestamp}`:
    - Fast path: HTTP POST to peer gateways (`/peer/version-beacon`) over
      Tailscale.
-   - Fallback: jade relay device event (works through NAT).
+   - Fallback: cloud relay device event (works through NAT).
    - Slow path: peer polls sync refs on the git remote.
 
 Machine Y's server runs a small peer-sync task (same shape as
-`jade_relay::spawn_if_configured`):
+`cloud_relay::spawn_if_configured`):
 
 1. Receives beacon; ignores if `version_label` matches what it already runs
    or recently applied (**echo suppression**, prevents rebuild ping-pong).

@@ -3046,7 +3046,7 @@ async fn cancel_processing_message(
                 }
             }
         }
-        // Only clear the cancel we fired: a newer cancel (repeated Esc, jade
+        // Only clear the cancel we fired: a newer cancel (repeated Esc, cloud
         // relay, another connection) must not be erased before its target
         // observes it (issue #428).
         session_control.reset_cancel_if_epoch(cancel_epoch);

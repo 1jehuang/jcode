@@ -113,14 +113,14 @@ fn model_list_subcommand_parses() {
                     output,
                     open,
                     with_view,
-                    jade,
+                    cloud,
                 },
         })) => {
             assert_eq!(limit, 10);
             assert!(output.is_none());
             assert!(open);
             assert!(with_view);
-            assert_eq!(jade.user_id, "jeremy");
+            assert_eq!(cloud.user_id, "jeremy");
         }
         other => panic!("unexpected command: {:?}", other),
     }
@@ -177,15 +177,15 @@ fn cloud_sessions_subcommands_parse() {
         "sessions",
         "configure",
         "--api-base",
-        "https://jade.example",
+        "https://cloud.example",
         "--api-token-env",
-        "JADE_TOKEN",
+        "CLOUD_TOKEN",
         "--api-token-id",
         "dev-admin",
         "--user-id",
         "jeremy",
         "--helper",
-        "/tmp/jade_sessions.py",
+        "/tmp/cloud_sessions.py",
     ])
     .unwrap();
 
@@ -202,11 +202,11 @@ fn cloud_sessions_subcommands_parse() {
                     ..
                 },
         })) => {
-            assert_eq!(api_base.as_deref(), Some("https://jade.example"));
-            assert_eq!(api_token_env.as_deref(), Some("JADE_TOKEN"));
+            assert_eq!(api_base.as_deref(), Some("https://cloud.example"));
+            assert_eq!(api_token_env.as_deref(), Some("CLOUD_TOKEN"));
             assert_eq!(api_token_id.as_deref(), Some("dev-admin"));
             assert_eq!(user_id.as_deref(), Some("jeremy"));
-            assert_eq!(helper.as_deref(), Some("/tmp/jade_sessions.py"));
+            assert_eq!(helper.as_deref(), Some("/tmp/cloud_sessions.py"));
             assert!(!clear);
         }
         other => panic!("unexpected command: {:?}", other),
@@ -242,14 +242,14 @@ fn cloud_sessions_subcommands_parse() {
                 CloudSessionsCommand::UploadLatest {
                     sessions_dir,
                     raw,
-                    jade,
+                    cloud,
                 },
         })) => {
             assert_eq!(sessions_dir, "/tmp/sessions");
             assert!(!raw);
-            assert_eq!(jade.user_id, "jeremy");
-            assert_eq!(jade.profile.as_deref(), Some("test-profile"));
-            assert_eq!(jade.region.as_deref(), Some("us-east-1"));
+            assert_eq!(cloud.user_id, "jeremy");
+            assert_eq!(cloud.profile.as_deref(), Some("test-profile"));
+            assert_eq!(cloud.region.as_deref(), Some("us-east-1"));
         }
         other => panic!("unexpected command: {:?}", other),
     }
@@ -311,7 +311,7 @@ fn cloud_sessions_subcommands_parse() {
                     dry_run,
                     force,
                     json,
-                    jade,
+                    cloud,
                 },
         })) => {
             assert!(sessions_dir.is_none());
@@ -323,7 +323,7 @@ fn cloud_sessions_subcommands_parse() {
             assert!(dry_run);
             assert!(!force);
             assert!(json);
-            assert_eq!(jade.user_id, "jeremy");
+            assert_eq!(cloud.user_id, "jeremy");
         }
         other => panic!("unexpected command: {:?}", other),
     }

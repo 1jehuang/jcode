@@ -624,42 +624,42 @@ impl Config {
                 self.safety.discord_reply_enabled = parsed;
             }
         }
-        // Jade cloud relay channel
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_API_BASE") {
-            self.safety.jade_relay_api_base = Some(v);
+        // Cloud relay channel
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_API_BASE") {
+            self.safety.cloud_relay_api_base = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_TOKEN") {
-            self.safety.jade_relay_token = Some(v);
-            self.safety.jade_relay_enabled = true;
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_TOKEN") {
+            self.safety.cloud_relay_token = Some(v);
+            self.safety.cloud_relay_enabled = true;
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_TOKEN_ID") {
-            self.safety.jade_relay_token_id = Some(v);
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_TOKEN_ID") {
+            self.safety.cloud_relay_token_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_USER_ID") {
-            self.safety.jade_relay_user_id = Some(v);
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_USER_ID") {
+            self.safety.cloud_relay_user_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_SESSION_ID") {
-            self.safety.jade_relay_session_id = Some(v);
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_SESSION_ID") {
+            self.safety.cloud_relay_session_id = Some(v);
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_ENABLED") {
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
-                self.safety.jade_relay_enabled = parsed;
+                self.safety.cloud_relay_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_REPLY_ENABLED") {
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_REPLY_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
-                self.safety.jade_relay_reply_enabled = parsed;
+                self.safety.cloud_relay_reply_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_LAUNCH_ENABLED") {
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_LAUNCH_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
-                self.safety.jade_relay_launch_enabled = parsed;
+                self.safety.cloud_relay_launch_enabled = parsed;
             }
         }
-        if let Ok(v) = std::env::var("JCODE_JADE_RELAY_LAUNCH_WORKING_DIR") {
+        if let Ok(v) = std::env::var("JCODE_CLOUD_RELAY_LAUNCH_WORKING_DIR") {
             let trimmed = v.trim();
             if !trimmed.is_empty() {
-                self.safety.jade_relay_launch_working_dir = Some(trimmed.to_string());
+                self.safety.cloud_relay_launch_working_dir = Some(trimmed.to_string());
             }
         }
         if let Ok(v) = std::env::var("JCODE_AMBIENT_VISIBLE") {

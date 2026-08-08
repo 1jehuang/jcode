@@ -1369,24 +1369,33 @@ pub struct SafetyConfig {
     pub discord_bot_user_id: Option<String>,
     /// Enable Discord reply → agent directive feature (default: false)
     pub discord_reply_enabled: bool,
-    /// Enable the Jade cloud relay channel (remote control via cloud mailbox, default: false)
-    pub jade_relay_enabled: bool,
-    /// Jade relay API base URL (e.g. https://...lambda-url.us-east-1.on.aws/)
-    pub jade_relay_api_base: Option<String>,
-    /// Jade relay bearer token (prefer JCODE_JADE_RELAY_TOKEN env var)
-    pub jade_relay_token: Option<String>,
-    /// Jade relay token id header (x-jade-token-id), used for fast token lookup
-    pub jade_relay_token_id: Option<String>,
-    /// Jade relay user id (channel scope; defaults to the token's user when omitted)
-    pub jade_relay_user_id: Option<String>,
-    /// Jade relay session id to bind this laptop's listener to (the channel = user_id/session_id)
-    pub jade_relay_session_id: Option<String>,
-    /// Enable Jade relay prompt → agent directive feature (default: false)
-    pub jade_relay_reply_enabled: bool,
-    /// Enable Jade relay device launch commands that open headed local sessions (default: false)
-    pub jade_relay_launch_enabled: bool,
+    /// Enable the cloud relay channel (remote control via cloud mailbox, default: false)
+    #[serde(alias = "jade_relay_enabled")]
+    pub cloud_relay_enabled: bool,
+    /// Cloud relay API base URL (e.g. https://...lambda-url.us-east-1.on.aws/)
+    #[serde(alias = "jade_relay_api_base")]
+    pub cloud_relay_api_base: Option<String>,
+    /// Cloud relay bearer token (prefer JCODE_CLOUD_RELAY_TOKEN env var)
+    #[serde(alias = "jade_relay_token")]
+    pub cloud_relay_token: Option<String>,
+    /// Cloud relay token id header (x-cloud-token-id), used for fast token lookup
+    #[serde(alias = "jade_relay_token_id")]
+    pub cloud_relay_token_id: Option<String>,
+    /// Cloud relay user id (channel scope; defaults to the token's user when omitted)
+    #[serde(alias = "jade_relay_user_id")]
+    pub cloud_relay_user_id: Option<String>,
+    /// Cloud relay session id to bind this laptop's listener to (the channel = user_id/session_id)
+    #[serde(alias = "jade_relay_session_id")]
+    pub cloud_relay_session_id: Option<String>,
+    /// Enable cloud relay prompt → agent directive feature (default: false)
+    #[serde(alias = "jade_relay_reply_enabled")]
+    pub cloud_relay_reply_enabled: bool,
+    /// Enable cloud relay device launch commands that open headed local sessions (default: false)
+    #[serde(alias = "jade_relay_launch_enabled")]
+    pub cloud_relay_launch_enabled: bool,
     /// Default working directory for remotely launched headed sessions
-    pub jade_relay_launch_working_dir: Option<String>,
+    #[serde(alias = "jade_relay_launch_working_dir")]
+    pub cloud_relay_launch_working_dir: Option<String>,
 }
 
 impl Default for SafetyConfig {
@@ -1413,15 +1422,15 @@ impl Default for SafetyConfig {
             discord_channel_id: None,
             discord_bot_user_id: None,
             discord_reply_enabled: false,
-            jade_relay_enabled: false,
-            jade_relay_api_base: None,
-            jade_relay_token: None,
-            jade_relay_token_id: None,
-            jade_relay_user_id: None,
-            jade_relay_session_id: None,
-            jade_relay_reply_enabled: false,
-            jade_relay_launch_enabled: false,
-            jade_relay_launch_working_dir: None,
+            cloud_relay_enabled: false,
+            cloud_relay_api_base: None,
+            cloud_relay_token: None,
+            cloud_relay_token_id: None,
+            cloud_relay_user_id: None,
+            cloud_relay_session_id: None,
+            cloud_relay_reply_enabled: false,
+            cloud_relay_launch_enabled: false,
+            cloud_relay_launch_working_dir: None,
         }
     }
 }

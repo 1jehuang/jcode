@@ -14,6 +14,7 @@ mod client_lightweight_control;
 mod client_session;
 mod client_state;
 mod client_writer;
+mod cloud_relay;
 mod comm_await;
 mod comm_control;
 mod comm_graph;
@@ -33,7 +34,6 @@ mod debug_swarm_write;
 mod debug_testers;
 mod durable_state;
 mod headless;
-mod jade_relay;
 mod lifecycle;
 mod live_turn;
 mod provider_control;
@@ -1425,10 +1425,10 @@ impl Server {
             });
         }
 
-        // Spawn the Jade cloud relay listener independently of ambient mode. The
+        // Spawn the Cloud relay listener independently of ambient mode. The
         // worker is strictly opt-in and requires an explicit API base, token,
         // session id, and reply-enabled flag before it makes any outbound calls.
-        jade_relay::spawn_if_configured(
+        cloud_relay::spawn_if_configured(
             &crate::config::config().safety,
             Arc::clone(&self.sessions),
             Arc::clone(&self.soft_interrupt_queues),

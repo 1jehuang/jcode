@@ -647,8 +647,8 @@ fn cli_provider_choice_filter_uses_typed_api_methods() {
 }
 
 #[test]
-fn cloud_sessions_args_match_jade_helper_contract() {
-    let args = build_jade_sessions_args(CloudSessionsSubcommand::UploadLatest {
+fn cloud_sessions_args_match_cloud_helper_contract() {
+    let args = build_cloud_sessions_args(CloudSessionsSubcommand::UploadLatest {
         sessions_dir: "/tmp/sessions".to_string(),
         raw: true,
         user_id: "jeremy".to_string(),
@@ -673,7 +673,7 @@ fn cloud_sessions_args_match_jade_helper_contract() {
         ]
     );
 
-    let args = build_jade_sessions_args(CloudSessionsSubcommand::View {
+    let args = build_cloud_sessions_args(CloudSessionsSubcommand::View {
         session_id: "session_123".to_string(),
         format: "html".to_string(),
         output: Some("/tmp/session.html".to_string()),
@@ -707,18 +707,18 @@ fn cloud_sessions_args_match_jade_helper_contract() {
 #[test]
 fn cloud_sessions_config_persists_secret_and_feeds_helper_env_without_args() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JADE_TOKEN_FOR_TEST"]);
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "CLOUD_TOKEN_FOR_TEST"]);
     let temp = tempfile::tempdir().expect("tempdir");
     crate::env::set_var("JCODE_HOME", temp.path());
-    crate::env::set_var("JADE_TOKEN_FOR_TEST", "secret-token-value");
+    crate::env::set_var("CLOUD_TOKEN_FOR_TEST", "secret-token-value");
 
     run_cloud_sessions_configure(
-        Some("https://jade.example".to_string()),
+        Some("https://cloud.example".to_string()),
         None,
-        Some("JADE_TOKEN_FOR_TEST".to_string()),
+        Some("CLOUD_TOKEN_FOR_TEST".to_string()),
         Some("dev-admin".to_string()),
         Some("alice".to_string()),
-        Some("/tmp/jade_sessions.py".to_string()),
+        Some("/tmp/cloud_sessions.py".to_string()),
         false,
     )
     .expect("configure");
@@ -734,18 +734,18 @@ fn cloud_sessions_config_persists_secret_and_feeds_helper_env_without_args() {
     let config = load_cloud_sessions_config()
         .expect("load config")
         .expect("config exists");
-    assert_eq!(config.api_base.as_deref(), Some("https://jade.example"));
+    assert_eq!(config.api_base.as_deref(), Some("https://cloud.example"));
     assert_eq!(config.api_token.as_deref(), Some("secret-token-value"));
     assert_eq!(config.api_token_id.as_deref(), Some("dev-admin"));
     assert_eq!(config.user_id.as_deref(), Some("alice"));
-    assert_eq!(config.helper.as_deref(), Some("/tmp/jade_sessions.py"));
+    assert_eq!(config.helper.as_deref(), Some("/tmp/cloud_sessions.py"));
 
     let env = cloud_sessions_helper_env(&config);
-    assert!(env.contains(&("JADE_API_BASE", "https://jade.example".to_string())));
-    assert!(env.contains(&("JADE_API_TOKEN", "secret-token-value".to_string())));
-    assert!(env.contains(&("JADE_API_TOKEN_ID", "dev-admin".to_string())));
+    assert!(env.contains(&("CLOUD_API_BASE", "https://cloud.example".to_string())));
+    assert!(env.contains(&("CLOUD_API_TOKEN", "secret-token-value".to_string())));
+    assert!(env.contains(&("CLOUD_API_TOKEN_ID", "dev-admin".to_string())));
 
-    let args = build_jade_sessions_args_with_config(
+    let args = build_cloud_sessions_args_with_config(
         CloudSessionsSubcommand::List {
             limit: 2,
             json: true,
@@ -797,7 +797,7 @@ fn collect_sync_candidates_picks_only_session_json() {
 #[test]
 fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_CLOUD_SESSIONS_HELPER"]);
     let temp = tempfile::tempdir().expect("tempdir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
@@ -809,7 +809,7 @@ fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
+    crate::env::set_var("JCODE_CLOUD_SESSIONS_HELPER", &helper);
 
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -840,7 +840,7 @@ fn cloud_sessions_sync_dry_run_reports_without_uploading_or_writing_state() {
 #[test]
 fn cloud_sessions_sync_respects_min_interval_throttle() {
     let _guard = crate::storage::lock_test_env();
-    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_JADE_SESSIONS_HELPER"]);
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_CLOUD_SESSIONS_HELPER"]);
     let temp = tempfile::tempdir().expect("tempdir");
     crate::env::set_var("JCODE_HOME", temp.path());
 
@@ -852,7 +852,7 @@ fn cloud_sessions_sync_respects_min_interval_throttle() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", &helper);
+    crate::env::set_var("JCODE_CLOUD_SESSIONS_HELPER", &helper);
 
     let sessions_dir = temp.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -900,7 +900,7 @@ fn render_cloud_sessions_dashboard_html_escapes_and_lists_rows() {
 
     let html =
         render_cloud_sessions_dashboard_html("alice", &items, &std::collections::BTreeMap::new());
-    assert!(html.contains("Jade Cloud Sessions"));
+    assert!(html.contains("Cloud Sessions"));
     assert!(html.contains("user: alice"));
     assert!(html.contains("2 session(s)"));
     assert!(html.contains("session_x"));
@@ -1006,16 +1006,16 @@ fn parse_cloud_session_list_json_rejects_unexpected_shapes() {
 }
 
 #[test]
-fn resolve_jade_sessions_helper_prefers_explicit_and_env_paths() {
-    let _saved = SavedEnv::capture(&["JCODE_JADE_SESSIONS_HELPER"]);
-    crate::env::set_var("JCODE_JADE_SESSIONS_HELPER", "/tmp/from-env.py");
+fn resolve_cloud_sessions_helper_prefers_explicit_and_env_paths() {
+    let _saved = SavedEnv::capture(&["JCODE_CLOUD_SESSIONS_HELPER"]);
+    crate::env::set_var("JCODE_CLOUD_SESSIONS_HELPER", "/tmp/from-env.py");
 
     assert_eq!(
-        resolve_jade_sessions_helper(Some("/tmp/explicit.py")).unwrap(),
+        resolve_cloud_sessions_helper(Some("/tmp/explicit.py")).unwrap(),
         std::path::PathBuf::from("/tmp/explicit.py")
     );
     assert_eq!(
-        resolve_jade_sessions_helper(None).unwrap(),
+        resolve_cloud_sessions_helper(None).unwrap(),
         std::path::PathBuf::from("/tmp/from-env.py")
     );
 }

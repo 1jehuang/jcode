@@ -61,35 +61,35 @@ impl ChannelRegistry {
             )));
         }
 
-        if config.jade_relay_enabled {
+        if config.cloud_relay_enabled {
             match (
-                config.jade_relay_api_base.clone(),
-                config.jade_relay_token.clone(),
-                config.jade_relay_session_id.clone(),
+                config.cloud_relay_api_base.clone(),
+                config.cloud_relay_token.clone(),
+                config.cloud_relay_session_id.clone(),
             ) {
                 (Some(api_base), Some(token), Some(session_id)) => {
                     // user_id defaults to the token id when not explicitly set.
                     let user_id = config
-                        .jade_relay_user_id
+                        .cloud_relay_user_id
                         .clone()
-                        .or_else(|| config.jade_relay_token_id.clone())
+                        .or_else(|| config.cloud_relay_token_id.clone())
                         .unwrap_or_else(|| "default".to_string());
                     logging::info(&format!(
-                        "registering jade relay channel user={} session={} reply_enabled={}",
-                        user_id, session_id, config.jade_relay_reply_enabled
+                        "registering cloud relay channel user={} session={} reply_enabled={}",
+                        user_id, session_id, config.cloud_relay_reply_enabled
                     ));
-                    channels.push(Arc::new(JadeRelayChannel::new(
+                    channels.push(Arc::new(CloudRelayChannel::new(
                         api_base,
                         token,
-                        config.jade_relay_token_id.clone(),
+                        config.cloud_relay_token_id.clone(),
                         user_id,
                         session_id,
-                        config.jade_relay_reply_enabled,
+                        config.cloud_relay_reply_enabled,
                     )));
                 }
                 _ => {
                     logging::warn(
-                        "jade_relay_enabled but api_base/token/session_id incomplete; skipping",
+                        "cloud_relay_enabled but api_base/token/session_id incomplete; skipping",
                     );
                 }
             }
@@ -490,16 +490,16 @@ impl MessageChannel for DiscordChannel {
 }
 
 // ---------------------------------------------------------------------------
-// Jade cloud relay channel
+// Cloud relay channel
 // ---------------------------------------------------------------------------
 
-/// Remote control via the Jade cloud relay (an append-only per-session event
+/// Remote control via the Cloud relay (an append-only per-session event
 /// log in AWS). Unlike the WebSocket gateway, nothing listens on this machine:
 /// the laptop only makes outbound long-poll requests, so there is no inbound
 /// port to attack. A cloud client posts `prompt` events; this channel injects
 /// them into the live session and posts the agent's reply back as a `response`
 /// event for the cloud client to read.
-pub struct JadeRelayChannel {
+pub struct CloudRelayChannel {
     /// API base URL, normalized to end with a single '/'.
     api_base: String,
     token: String,
@@ -510,7 +510,7 @@ pub struct JadeRelayChannel {
     client: reqwest::Client,
 }
 
-impl JadeRelayChannel {
+impl CloudRelayChannel {
     pub fn new(
         api_base: String,
         token: String,
@@ -542,7 +542,7 @@ impl JadeRelayChannel {
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut req = req.header("Authorization", format!("Bearer {}", self.token));
         if let Some(id) = &self.token_id {
-            req = req.header("x-jade-token-id", id);
+            req = req.header("x-cloud-token-id", id);
         }
         req
     }
@@ -557,7 +557,7 @@ impl JadeRelayChannel {
         });
         let req = self.auth(self.client.post(self.url("v1/devices")).json(&body));
         if let Err(e) = req.send().await {
-            logging::debug(&format!("jade relay heartbeat failed: {}", e));
+            logging::debug(&format!("cloud relay heartbeat failed: {}", e));
         }
     }
 
@@ -576,7 +576,7 @@ impl JadeRelayChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("jade relay poll error ({}): {}", status, body);
+            anyhow::bail!("cloud relay poll error ({}): {}", status, body);
         }
         let parsed: RelayEventsResponse = resp.json().await?;
         Ok((parsed.events, parsed.next_after))
@@ -603,7 +603,7 @@ impl JadeRelayChannel {
         if !resp.status().is_success() {
             let status = resp.status();
             let detail = resp.text().await.unwrap_or_default();
-            anyhow::bail!("jade relay post error ({}): {}", status, detail);
+            anyhow::bail!("cloud relay post error ({}): {}", status, detail);
         }
         Ok(())
     }
@@ -640,9 +640,9 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 #[async_trait]
-impl MessageChannel for JadeRelayChannel {
+impl MessageChannel for CloudRelayChannel {
     fn name(&self) -> &str {
-        "jade_relay"
+        "cloud_relay"
     }
 
     fn is_send_enabled(&self) -> bool {
@@ -650,7 +650,7 @@ impl MessageChannel for JadeRelayChannel {
     }
 
     fn is_reply_enabled(&self) -> bool {
-        // Inbound Jade relay prompts are delivered by server::jade_relay so they
+        // Inbound Cloud relay prompts are delivered by server::cloud_relay so they
         // work even when ambient mode is disabled and target the configured live
         // Jcode session directly. Keep this channel for outbound notifications
         // only; otherwise ambient mode would start a second poller.
@@ -670,14 +670,14 @@ impl MessageChannel for JadeRelayChannel {
             .unwrap_or_else(|_| "laptop".to_string());
         let device_id = format!("jcode-{}", host);
         logging::info(&format!(
-            "jade relay reply loop started channel={}/{}",
+            "cloud relay reply loop started channel={}/{}",
             self.user_id, self.session_id
         ));
         // Start after the latest existing prompt so we don't replay history.
         let mut after: i64 = match self.poll_prompts(0, 0).await {
             Ok((_, next)) => next,
             Err(e) => {
-                logging::error(&format!("jade relay init poll failed: {}", e));
+                logging::error(&format!("cloud relay init poll failed: {}", e));
                 0
             }
         };
@@ -705,11 +705,11 @@ impl MessageChannel for JadeRelayChannel {
                             if let Err(e) = crate::safety::record_permission_via_file(
                                 &req_id,
                                 approved,
-                                "jade_relay",
+                                "cloud_relay",
                                 message,
                             ) {
                                 logging::error(&format!(
-                                    "Failed to record permission from jade relay for {}: {}",
+                                    "Failed to record permission from cloud relay for {}: {}",
                                     req_id, e
                                 ));
                             } else {
@@ -726,9 +726,9 @@ impl MessageChannel for JadeRelayChannel {
                             }
                             continue;
                         }
-                        let injected = runner.inject_message(trimmed, "jade_relay").await;
+                        let injected = runner.inject_message(trimmed, "cloud_relay").await;
                         logging::info(&format!(
-                            "jade relay prompt injected seq={} injected={}",
+                            "cloud relay prompt injected seq={} injected={}",
                             ev.seq, injected
                         ));
                         let ack = if injected {
@@ -737,12 +737,12 @@ impl MessageChannel for JadeRelayChannel {
                             "Message queued; waking agent."
                         };
                         if let Err(e) = self.post_response(ack, ev.seq).await {
-                            logging::error(&format!("jade relay ack post failed: {}", e));
+                            logging::error(&format!("cloud relay ack post failed: {}", e));
                         }
                     }
                 }
                 Err(e) => {
-                    logging::error(&format!("jade relay poll error: {}", e));
+                    logging::error(&format!("cloud relay poll error: {}", e));
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 }
             }
@@ -811,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_relay_url_join() {
-        let ch = JadeRelayChannel::new(
+        let ch = CloudRelayChannel::new(
             "https://example.com/api".to_string(),
             "tok".to_string(),
             Some("jeremy".to_string()),
@@ -828,46 +828,46 @@ mod tests {
         // Disabled: not registered.
         let cfg = SafetyConfig::default();
         let reg = ChannelRegistry::from_config(&cfg);
-        assert!(!reg.channel_names().iter().any(|n| n == "jade_relay"));
+        assert!(!reg.channel_names().iter().any(|n| n == "cloud_relay"));
 
         // Enabled but incomplete: skipped with a warning.
         let mut cfg = SafetyConfig {
-            jade_relay_enabled: true,
+            cloud_relay_enabled: true,
             ..SafetyConfig::default()
         };
         let reg = ChannelRegistry::from_config(&cfg);
-        assert!(!reg.channel_names().iter().any(|n| n == "jade_relay"));
+        assert!(!reg.channel_names().iter().any(|n| n == "cloud_relay"));
 
         // Enabled and complete: registered.
-        cfg.jade_relay_api_base = Some("https://example.com/".to_string());
-        cfg.jade_relay_token = Some("tok".to_string());
-        cfg.jade_relay_session_id = Some("sess-1".to_string());
+        cfg.cloud_relay_api_base = Some("https://example.com/".to_string());
+        cfg.cloud_relay_token = Some("tok".to_string());
+        cfg.cloud_relay_session_id = Some("sess-1".to_string());
         let reg = ChannelRegistry::from_config(&cfg);
-        assert!(reg.channel_names().iter().any(|n| n == "jade_relay"));
+        assert!(reg.channel_names().iter().any(|n| n == "cloud_relay"));
     }
 
-    /// Live end-to-end test against the real Jade relay. Ignored by default;
+    /// Live end-to-end test against the real Cloud relay. Ignored by default;
     /// run with the relay env vars set:
-    ///   JADE_RELAY_API_BASE, JADE_RELAY_TOKEN, JADE_RELAY_TOKEN_ID,
-    ///   JADE_RELAY_USER_ID, JADE_RELAY_SESSION_ID
+    ///   CLOUD_RELAY_API_BASE, CLOUD_RELAY_TOKEN, CLOUD_RELAY_TOKEN_ID,
+    ///   CLOUD_RELAY_USER_ID, CLOUD_RELAY_SESSION_ID
     ///   cargo test -p jcode-app-core relay_live -- --ignored --nocapture
     #[tokio::test]
-    #[ignore = "requires live Jade relay credentials"]
+    #[ignore = "requires live Cloud relay credentials"]
     async fn test_relay_live_roundtrip() {
-        let api_base = match std::env::var("JADE_RELAY_API_BASE") {
+        let api_base = match std::env::var("CLOUD_RELAY_API_BASE") {
             Ok(v) => v,
             Err(_) => {
-                eprintln!("skipping: JADE_RELAY_API_BASE not set");
+                eprintln!("skipping: CLOUD_RELAY_API_BASE not set");
                 return;
             }
         };
-        let token = std::env::var("JADE_RELAY_TOKEN").expect("JADE_RELAY_TOKEN");
-        let token_id = std::env::var("JADE_RELAY_TOKEN_ID").ok();
-        let user_id = std::env::var("JADE_RELAY_USER_ID").unwrap_or_else(|_| "jeremy".to_string());
-        let session_id = std::env::var("JADE_RELAY_SESSION_ID")
+        let token = std::env::var("CLOUD_RELAY_TOKEN").expect("CLOUD_RELAY_TOKEN");
+        let token_id = std::env::var("CLOUD_RELAY_TOKEN_ID").ok();
+        let user_id = std::env::var("CLOUD_RELAY_USER_ID").unwrap_or_else(|_| "jeremy".to_string());
+        let session_id = std::env::var("CLOUD_RELAY_SESSION_ID")
             .unwrap_or_else(|_| format!("rust-live-{}", chrono::Utc::now().timestamp()));
 
-        let ch = JadeRelayChannel::new(
+        let ch = CloudRelayChannel::new(
             api_base,
             token,
             token_id.clone(),

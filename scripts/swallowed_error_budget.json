@@ -256,7 +256,7 @@
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
-    "crates/jcode-app-core/src/server/jade_relay.rs": {
+    "crates/jcode-app-core/src/server/cloud_relay.rs": {
       "dot_ok": 2,
       "let_underscore": 8,
       "unwrap_or_default": 3

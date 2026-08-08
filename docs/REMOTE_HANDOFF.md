@@ -32,7 +32,7 @@ Most of the value is in attach. Migration is the hard, rarer one.
 | SSH ControlMaster profiles | `app-core/src/ssh_remote.rs` | Named hosts, verified background control socket, headless reuse. |
 | Unix socket protocol | `server/socket.rs`, `client_api.rs` | Line-delimited JSON `Request`/`ServerEvent`. Transport-agnostic in shape, not in code. |
 | Reload handoff | `server/reload.rs`, `restart_snapshot.rs` | Already serializes live server state across a process swap. This is migration, minus the network. |
-| Relay | `server/jade_relay.rs` | Long-poll bridge to a remote control plane; the phone/web path. |
+| Relay | `server/cloud_relay.rs` | Long-poll bridge to a remote control plane; the phone/web path. |
 | Harness API | `jcode-harness-api{,-server}` | A second, more structured client surface. |
 
 The important observation: **reload already solves the state-transfer half of
@@ -49,7 +49,7 @@ Today clients dial `socket_path()`. Introduce a `SessionTransport` with three im
 - `Ssh(profile)` — `ssh -S <control-socket> <target> jcode serve --stdio`, framed over
   stdin/stdout. Reuses the existing verified ControlMaster, so no new auth surface and
   no credential handling in jcode.
-- `Relay` — existing jade relay framing, for hosts that cannot be SSH'd into.
+- `Relay` — existing cloud relay framing, for hosts that cannot be SSH'd into.
 
 Everything above this layer keeps speaking the same `Request`/`ServerEvent` JSON. This
 is the single change that makes the rest cheap.

@@ -34,16 +34,16 @@ struct RelayApiConfig {
 
 impl RelayApiConfig {
     fn from_safety(safety: &SafetyConfig) -> Option<Self> {
-        if !safety.jade_relay_enabled {
+        if !safety.cloud_relay_enabled {
             return None;
         }
-        let api_base = non_empty(safety.jade_relay_api_base.as_deref())?;
-        let token = non_empty(safety.jade_relay_token.as_deref())?;
+        let api_base = non_empty(safety.cloud_relay_api_base.as_deref())?;
+        let token = non_empty(safety.cloud_relay_token.as_deref())?;
         Some(Self {
             api_base: normalize_api_base(api_base),
             token: token.to_string(),
-            token_id: non_empty(safety.jade_relay_token_id.as_deref()).map(str::to_string),
-            user_id: non_empty(safety.jade_relay_user_id.as_deref()).map(str::to_string),
+            token_id: non_empty(safety.cloud_relay_token_id.as_deref()).map(str::to_string),
+            user_id: non_empty(safety.cloud_relay_user_id.as_deref()).map(str::to_string),
             device_id: default_device_id(),
         })
     }
@@ -55,7 +55,7 @@ impl RelayApiConfig {
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut req = req.header("Authorization", format!("Bearer {}", self.token));
         if let Some(token_id) = &self.token_id {
-            req = req.header("x-jade-token-id", token_id);
+            req = req.header("x-cloud-token-id", token_id);
         }
         req
     }
@@ -70,15 +70,15 @@ struct RelayListenerConfig {
 
 impl RelayListenerConfig {
     fn from_safety(safety: &SafetyConfig) -> Option<Self> {
-        if !safety.jade_relay_reply_enabled {
+        if !safety.cloud_relay_reply_enabled {
             return None;
         }
         let api = RelayApiConfig::from_safety(safety)?;
-        let session_id = non_empty(safety.jade_relay_session_id.as_deref())?;
+        let session_id = non_empty(safety.cloud_relay_session_id.as_deref())?;
         Some(Self {
             api,
             session_id: session_id.to_string(),
-            process_existing_prompts: env_flag("JCODE_JADE_RELAY_PROCESS_EXISTING_PROMPTS"),
+            process_existing_prompts: env_flag("JCODE_CLOUD_RELAY_PROCESS_EXISTING_PROMPTS"),
         })
     }
 }
@@ -91,12 +91,12 @@ struct RelayLaunchConfig {
 
 impl RelayLaunchConfig {
     fn from_safety(safety: &SafetyConfig) -> Option<Self> {
-        if !safety.jade_relay_launch_enabled {
+        if !safety.cloud_relay_launch_enabled {
             return None;
         }
         Some(Self {
             api: RelayApiConfig::from_safety(safety)?,
-            default_working_dir: non_empty(safety.jade_relay_launch_working_dir.as_deref())
+            default_working_dir: non_empty(safety.cloud_relay_launch_working_dir.as_deref())
                 .map(str::to_string),
         })
     }
@@ -130,7 +130,7 @@ fn session_command_event_types_param() -> String {
 }
 
 fn default_device_id() -> String {
-    if let Ok(value) = std::env::var("JCODE_JADE_RELAY_DEVICE_ID")
+    if let Ok(value) = std::env::var("JCODE_CLOUD_RELAY_DEVICE_ID")
         && !value.trim().is_empty()
     {
         return value.trim().to_string();
@@ -150,7 +150,7 @@ pub(super) fn spawn_if_configured(
 ) {
     if let Some(config) = RelayListenerConfig::from_safety(safety) {
         crate::logging::info(&format!(
-            "Starting Jade relay listener session={} user_id={}",
+            "Starting Cloud relay listener session={} user_id={}",
             config.session_id,
             config.api.user_id.as_deref().unwrap_or("<token-default>")
         ));
@@ -173,7 +173,7 @@ pub(super) fn spawn_if_configured(
 
     if let Some(config) = RelayLaunchConfig::from_safety(safety) {
         crate::logging::info(&format!(
-            "Starting Jade relay launch listener device={} user_id={}",
+            "Starting Cloud relay launch listener device={} user_id={}",
             config.api.device_id,
             config.api.user_id.as_deref().unwrap_or("<token-default>")
         ));
@@ -225,7 +225,7 @@ impl RelayClient {
             match self.poll_commands(0, 0).await {
                 Ok(response) => response.next_after,
                 Err(error) => {
-                    crate::logging::warn(&format!("Jade relay initial poll failed: {error:#}"));
+                    crate::logging::warn(&format!("Cloud relay initial poll failed: {error:#}"));
                     0
                 }
             }
@@ -255,7 +255,7 @@ impl RelayClient {
         loop {
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                 if let Err(error) = self.heartbeat().await {
-                    crate::logging::debug(&format!("Jade relay heartbeat failed: {error:#}"));
+                    crate::logging::debug(&format!("Cloud relay heartbeat failed: {error:#}"));
                 }
                 last_heartbeat = Instant::now();
             }
@@ -288,20 +288,20 @@ impl RelayClient {
                             }
                             other => {
                                 crate::logging::debug(&format!(
-                                    "Jade relay ignoring unsupported session event type={other}"
+                                    "Cloud relay ignoring unsupported session event type={other}"
                                 ));
                                 Ok(())
                             }
                         };
                         if let Err(error) = result {
                             crate::logging::warn(&format!(
-                                "Jade relay event handling failed: {error:#}"
+                                "Cloud relay event handling failed: {error:#}"
                             ));
                         }
                     }
                 }
                 Err(error) => {
-                    crate::logging::warn(&format!("Jade relay poll failed: {error:#}"));
+                    crate::logging::warn(&format!("Cloud relay poll failed: {error:#}"));
                     tokio::time::sleep(ERROR_BACKOFF).await;
                 }
             }
@@ -398,7 +398,7 @@ impl RelayClient {
             return Ok(());
         }
         crate::logging::info(&format!(
-            "Jade relay delivering prompt seq={} session={} chars={}",
+            "Cloud relay delivering prompt seq={} session={} chars={}",
             event.seq,
             self.config.session_id,
             text.chars().count()
@@ -407,7 +407,7 @@ impl RelayClient {
         let _ = self
             .post_relay_event(
                 "status",
-                "Jade relay prompt processing started",
+                "Cloud relay prompt processing started",
                 event.seq,
                 Some(serde_json::json!({
                     "phase": "running",
@@ -442,7 +442,7 @@ impl RelayClient {
                 let _ = self
                     .post_relay_event(
                         "status",
-                        "Jade relay prompt processing completed",
+                        "Cloud relay prompt processing completed",
                         event.seq,
                         Some(serde_json::json!({
                             "phase": "completed",
@@ -485,10 +485,10 @@ impl RelayClient {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("Cancel requested via Jade relay");
-        let interrupt = format!("[jade relay cancel] {reason}");
+            .unwrap_or("Cancel requested via Cloud relay");
+        let interrupt = format!("[cloud relay cancel] {reason}");
         crate::logging::info(&format!(
-            "Jade relay cancel requested seq={} session={}",
+            "Cloud relay cancel requested seq={} session={}",
             event.seq, self.config.session_id
         ));
 
@@ -567,7 +567,7 @@ impl RelayClient {
 
         self.post_relay_event(
             "status",
-            "Jade relay cancel requested",
+            "Cloud relay cancel requested",
             event.seq,
             Some(serde_json::json!({
                 "phase": "cancel_requested",
@@ -612,7 +612,9 @@ impl RelayLauncherClient {
         let mut after = match self.poll_launches(0, 0).await {
             Ok(response) => response.next_after,
             Err(error) => {
-                crate::logging::warn(&format!("Jade relay launch initial poll failed: {error:#}"));
+                crate::logging::warn(&format!(
+                    "Cloud relay launch initial poll failed: {error:#}"
+                ));
                 0
             }
         };
@@ -624,7 +626,7 @@ impl RelayLauncherClient {
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                 if let Err(error) = self.heartbeat().await {
                     crate::logging::debug(&format!(
-                        "Jade relay launch heartbeat failed: {error:#}"
+                        "Cloud relay launch heartbeat failed: {error:#}"
                     ));
                 }
                 last_heartbeat = Instant::now();
@@ -648,13 +650,13 @@ impl RelayLauncherClient {
                             .await
                         {
                             crate::logging::warn(&format!(
-                                "Jade relay launch handling failed: {error:#}"
+                                "Cloud relay launch handling failed: {error:#}"
                             ));
                         }
                     }
                 }
                 Err(error) => {
-                    crate::logging::warn(&format!("Jade relay launch poll failed: {error:#}"));
+                    crate::logging::warn(&format!("Cloud relay launch poll failed: {error:#}"));
                     tokio::time::sleep(ERROR_BACKOFF).await;
                 }
             }
@@ -794,7 +796,7 @@ impl RelayLauncherClient {
         let request =
             LaunchRequest::from_event(&event, self.config.default_working_dir.as_deref())?;
         crate::logging::info(&format!(
-            "Jade relay launching headed session for device command seq={} chars={}",
+            "Cloud relay launching headed session for device command seq={} chars={}",
             event.seq,
             request.text.chars().count()
         ));
@@ -869,7 +871,7 @@ impl RelayLauncherClient {
             .post_session_event(
                 &session_id,
                 "status",
-                "Jade relay launch prompt processing started",
+                "Cloud relay launch prompt processing started",
                 prompt_seq,
                 Some(serde_json::json!({
                     "phase": "running",
@@ -907,7 +909,7 @@ impl RelayLauncherClient {
                     .post_session_event(
                         &session_id,
                         "status",
-                        "Jade relay launch prompt processing completed",
+                        "Cloud relay launch prompt processing completed",
                         prompt_seq,
                         Some(serde_json::json!({
                             "phase": "completed",
@@ -997,7 +999,7 @@ impl RelayLauncherClient {
         let shutdown_signals = Arc::clone(shutdown_signals);
         tokio::spawn(async move {
             crate::logging::info(&format!(
-                "Starting Jade relay listener for launched session {session_id} after seq {after}"
+                "Starting Cloud relay listener for launched session {session_id} after seq {after}"
             ));
             let client = RelayClient::new(config);
             client
@@ -1019,7 +1021,7 @@ async fn ensure_success(response: reqwest::Response, action: &str) -> Result<req
         return Ok(response);
     }
     let body = response.text().await.unwrap_or_default();
-    anyhow::bail!("jade relay {action} failed ({status}): {body}")
+    anyhow::bail!("cloud relay {action} failed ({status}): {body}")
 }
 
 fn add_user_id(body: &mut serde_json::Value, user_id: Option<&str>) {
@@ -1118,7 +1120,7 @@ fn create_launch_session(request: &LaunchRequest) -> Result<(String, PathBuf)> {
         anyhow::bail!("launch working_dir is not a directory: {}", cwd.display());
     }
 
-    let mut session = Session::create(None, Some("Jade relay launch".to_string()));
+    let mut session = Session::create(None, Some("Cloud relay launch".to_string()));
     session.working_dir = Some(cwd.display().to_string());
     if let Some(model) = &request.model {
         session.model = Some(model.clone());
@@ -1143,7 +1145,7 @@ fn spawn_launch_window(
         .map(|(path, _label)| path)
         .or_else(|| std::env::current_exe().ok())
         .unwrap_or_else(|| PathBuf::from("jcode"));
-    let context = crate::session_launch::SessionSpawnContext::kind("jade-relay");
+    let context = crate::session_launch::SessionSpawnContext::kind("cloud-relay");
     if selfdev_requested {
         crate::session_launch::spawn_selfdev_in_new_terminal_with_context(
             &exe,
@@ -1201,7 +1203,7 @@ async fn deliver_to_session(
     if agent.try_lock().is_err() {
         let queued = queue_soft_interrupt_for_session(
             session_id,
-            format!("[jade relay message from user]\n{text}"),
+            format!("[cloud relay message from user]\n{text}"),
             false,
             SoftInterruptSource::User,
             soft_interrupt_queues,
@@ -1324,8 +1326,8 @@ mod tests {
         assert!(RelayListenerConfig::from_safety(&cfg).is_none());
 
         let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_reply_enabled: true,
+            cloud_relay_enabled: true,
+            cloud_relay_reply_enabled: true,
             ..SafetyConfig::default()
         };
         assert!(RelayListenerConfig::from_safety(&cfg).is_none());
@@ -1334,13 +1336,13 @@ mod tests {
     #[test]
     fn relay_listener_config_accepts_complete_opt_in_config() {
         let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_reply_enabled: true,
-            jade_relay_api_base: Some("https://example.com/api".to_string()),
-            jade_relay_token: Some("tok".to_string()),
-            jade_relay_token_id: Some("alice-token".to_string()),
-            jade_relay_user_id: Some("alice".to_string()),
-            jade_relay_session_id: Some("sess-1".to_string()),
+            cloud_relay_enabled: true,
+            cloud_relay_reply_enabled: true,
+            cloud_relay_api_base: Some("https://example.com/api".to_string()),
+            cloud_relay_token: Some("tok".to_string()),
+            cloud_relay_token_id: Some("alice-token".to_string()),
+            cloud_relay_user_id: Some("alice".to_string()),
+            cloud_relay_session_id: Some("sess-1".to_string()),
             ..SafetyConfig::default()
         };
         let parsed = RelayListenerConfig::from_safety(&cfg).expect("complete config");
@@ -1354,16 +1356,16 @@ mod tests {
     #[test]
     fn relay_launch_config_is_separately_opt_in() {
         let cfg = SafetyConfig {
-            jade_relay_enabled: true,
-            jade_relay_api_base: Some("https://example.com".to_string()),
-            jade_relay_token: Some("tok".to_string()),
+            cloud_relay_enabled: true,
+            cloud_relay_api_base: Some("https://example.com".to_string()),
+            cloud_relay_token: Some("tok".to_string()),
             ..SafetyConfig::default()
         };
         assert!(RelayLaunchConfig::from_safety(&cfg).is_none());
 
         let cfg = SafetyConfig {
-            jade_relay_launch_enabled: true,
-            jade_relay_launch_working_dir: Some("/tmp/project".to_string()),
+            cloud_relay_launch_enabled: true,
+            cloud_relay_launch_working_dir: Some("/tmp/project".to_string()),
             ..cfg
         };
         let parsed = RelayLaunchConfig::from_safety(&cfg).expect("launch opt-in config");
@@ -1415,7 +1417,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_url_encoding_matches_jade_api_expectations() {
+    fn relay_url_encoding_matches_cloud_api_expectations() {
         assert_eq!(urlencoding_encode("sess-relay-test"), "sess-relay-test");
         assert_eq!(urlencoding_encode("a/b c"), "a%2Fb%20c");
         assert_eq!(urlencoding_encode("user.name~1_2"), "user.name~1_2");

@@ -729,26 +729,26 @@ fn map_cloud_sessions_subcommand(
         CloudSessionsCommand::Upload {
             session_file,
             raw,
-            jade,
+            cloud,
         } => commands::CloudSessionsSubcommand::Upload {
             session_file,
             raw,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
+            user_id: cloud.user_id,
+            profile: cloud.profile,
+            region: cloud.region,
+            helper: cloud.helper,
         },
         CloudSessionsCommand::UploadLatest {
             sessions_dir,
             raw,
-            jade,
+            cloud,
         } => commands::CloudSessionsSubcommand::UploadLatest {
             sessions_dir,
             raw,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
+            user_id: cloud.user_id,
+            profile: cloud.profile,
+            region: cloud.region,
+            helper: cloud.helper,
         },
         CloudSessionsCommand::Sync {
             sessions_dir,
@@ -760,7 +760,7 @@ fn map_cloud_sessions_subcommand(
             dry_run,
             force,
             json,
-            jade,
+            cloud,
         } => commands::CloudSessionsSubcommand::Sync {
             sessions_dir,
             since_days,
@@ -771,28 +771,28 @@ fn map_cloud_sessions_subcommand(
             dry_run,
             force,
             json,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
+            user_id: cloud.user_id,
+            profile: cloud.profile,
+            region: cloud.region,
+            helper: cloud.helper,
         },
-        CloudSessionsCommand::List { limit, json, jade } => {
+        CloudSessionsCommand::List { limit, json, cloud } => {
             commands::CloudSessionsSubcommand::List {
                 limit,
                 json,
-                user_id: jade.user_id,
-                profile: jade.profile,
-                region: jade.region,
-                helper: jade.helper,
+                user_id: cloud.user_id,
+                profile: cloud.profile,
+                region: cloud.region,
+                helper: cloud.helper,
             }
         }
-        CloudSessionsCommand::Verify { session_id, jade } => {
+        CloudSessionsCommand::Verify { session_id, cloud } => {
             commands::CloudSessionsSubcommand::Verify {
                 session_id,
-                user_id: jade.user_id,
-                profile: jade.profile,
-                region: jade.region,
-                helper: jade.helper,
+                user_id: cloud.user_id,
+                profile: cloud.profile,
+                region: cloud.region,
+                helper: cloud.helper,
             }
         }
         CloudSessionsCommand::Dashboard {
@@ -800,32 +800,32 @@ fn map_cloud_sessions_subcommand(
             output,
             open,
             with_view,
-            jade,
+            cloud,
         } => commands::CloudSessionsSubcommand::Dashboard {
             limit,
             output,
             open,
             with_view,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
+            user_id: cloud.user_id,
+            profile: cloud.profile,
+            region: cloud.region,
+            helper: cloud.helper,
         },
         CloudSessionsCommand::View {
             session_id,
             format,
             output,
             open,
-            jade,
+            cloud,
         } => commands::CloudSessionsSubcommand::View {
             session_id,
             format: format.as_arg().to_string(),
             output,
             open,
-            user_id: jade.user_id,
-            profile: jade.profile,
-            region: jade.region,
-            helper: jade.helper,
+            user_id: cloud.user_id,
+            profile: cloud.profile,
+            region: cloud.region,
+            helper: cloud.helper,
         },
     }
 }

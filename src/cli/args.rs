@@ -305,7 +305,7 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Ambient(AmbientCommand),
 
-    /// Optional Jcode Cloud/Jade integration commands
+    /// Optional Jcode Cloud/Cloud integration commands
     #[command(subcommand)]
     Cloud(CloudCommand),
 
@@ -628,29 +628,29 @@ pub(crate) enum CloudCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum CloudSessionsCommand {
-    /// Configure Jade API defaults for cloud sessions on this machine
+    /// Configure Cloud API defaults for cloud sessions on this machine
     Configure {
-        /// Jade Session API base URL
+        /// Cloud Session API base URL
         #[arg(long)]
         api_base: Option<String>,
 
-        /// Jade Session API bearer token. Prefer --api-token-env to avoid shell history.
+        /// Cloud Session API bearer token. Prefer --api-token-env to avoid shell history.
         #[arg(long, conflicts_with = "api_token_env")]
         api_token: Option<String>,
 
-        /// Read the Jade Session API bearer token from this environment variable
+        /// Read the Cloud Session API bearer token from this environment variable
         #[arg(long, conflicts_with = "api_token")]
         api_token_env: Option<String>,
 
-        /// Optional Jade token id, e.g. dev-admin
+        /// Optional Cloud token id, e.g. dev-admin
         #[arg(long)]
         api_token_id: Option<String>,
 
-        /// Default Jade user id for commands that do not pass --user-id
+        /// Default Cloud user id for commands that do not pass --user-id
         #[arg(long)]
         user_id: Option<String>,
 
-        /// Default private Jade session helper path
+        /// Default private Cloud session helper path
         #[arg(long)]
         helper: Option<String>,
 
@@ -659,41 +659,41 @@ pub(crate) enum CloudSessionsCommand {
         clear: bool,
     },
 
-    /// Show saved Jade API defaults for cloud sessions without printing secrets
+    /// Show saved Cloud API defaults for cloud sessions without printing secrets
     Status {
         /// Emit JSON instead of human-readable text
         #[arg(long)]
         json: bool,
     },
 
-    /// Upload a specific local session JSON file to Jade cloud storage
+    /// Upload a specific local session JSON file to cloud storage
     Upload {
         /// Path to a local Jcode session JSON file
         session_file: String,
 
-        /// Upload without Jade's redaction pass
+        /// Upload without Cloud's redaction pass
         #[arg(long)]
         raw: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
-    /// Upload the newest local Jcode session to Jade cloud storage
+    /// Upload the newest local Jcode session to cloud storage
     UploadLatest {
         /// Directory containing local Jcode session JSON files
         #[arg(long, default_value = "~/.jcode/sessions")]
         sessions_dir: String,
 
-        /// Upload without Jade's redaction pass
+        /// Upload without Cloud's redaction pass
         #[arg(long)]
         raw: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
-    /// Sync new or changed local sessions to Jade cloud storage (idempotent; safe to schedule)
+    /// Sync new or changed local sessions to cloud storage (idempotent; safe to schedule)
     Sync {
         /// Directory containing local Jcode session JSON files (default: ~/.jcode/sessions)
         #[arg(long)]
@@ -715,7 +715,7 @@ pub(crate) enum CloudSessionsCommand {
         #[arg(long)]
         min_interval_mins: Option<u64>,
 
-        /// Upload without Jade's redaction pass
+        /// Upload without Cloud's redaction pass
         #[arg(long)]
         raw: bool,
 
@@ -732,10 +732,10 @@ pub(crate) enum CloudSessionsCommand {
         json: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
-    /// List cloud-uploaded sessions from the Jade index
+    /// List cloud-uploaded sessions from the Cloud index
     List {
         /// Maximum number of sessions to show
         #[arg(long, default_value_t = 25)]
@@ -746,7 +746,7 @@ pub(crate) enum CloudSessionsCommand {
         json: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
     /// Verify that cloud metadata and the S3 session blob both exist
@@ -755,10 +755,10 @@ pub(crate) enum CloudSessionsCommand {
         session_id: String,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
-    /// Render a local HTML dashboard of cloud-uploaded sessions from the Jade index
+    /// Render a local HTML dashboard of cloud-uploaded sessions from the Cloud index
     Dashboard {
         /// Maximum number of sessions to include
         #[arg(long, default_value_t = 100)]
@@ -777,7 +777,7 @@ pub(crate) enum CloudSessionsCommand {
         with_view: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 
     /// Download and view a cloud-uploaded session
@@ -798,25 +798,25 @@ pub(crate) enum CloudSessionsCommand {
         open: bool,
 
         #[command(flatten)]
-        jade: JadeCloudOptions,
+        cloud: CloudOptions,
     },
 }
 
 #[derive(Parser, Debug, Clone)]
-pub(crate) struct JadeCloudOptions {
-    /// Jade user id to pass to the dev helper
+pub(crate) struct CloudOptions {
+    /// Cloud user id to pass to the dev helper
     #[arg(long, default_value = "dev")]
     pub(crate) user_id: String,
 
-    /// AWS CLI profile used by the private dev Jade helper. If omitted, the helper decides.
+    /// AWS CLI profile used by the private dev Cloud helper. If omitted, the helper decides.
     #[arg(long)]
     pub(crate) profile: Option<String>,
 
-    /// AWS region used by the private dev Jade helper. If omitted, the helper decides.
+    /// AWS region used by the private dev Cloud helper. If omitted, the helper decides.
     #[arg(long)]
     pub(crate) region: Option<String>,
 
-    /// Path to the private Jade session helper. Defaults to $JCODE_JADE_SESSIONS_HELPER or ~/jade/scripts/jade_sessions.py.
+    /// Path to the private Cloud session helper. Defaults to $JCODE_CLOUD_SESSIONS_HELPER or ~/cloud/scripts/cloud_sessions.py.
     #[arg(long)]
     pub(crate) helper: Option<String>,
 }

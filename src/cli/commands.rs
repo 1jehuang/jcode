@@ -227,9 +227,9 @@ fn run_cloud_sessions_command(action: CloudSessionsSubcommand) -> Result<()> {
 fn run_cloud_sessions_helper_command(action: CloudSessionsSubcommand) -> Result<()> {
     let config = load_cloud_sessions_config()?.unwrap_or_default();
     let helper_override = cloud_sessions_helper_override(&action).or_else(|| config.helper.clone());
-    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper = resolve_cloud_sessions_helper(helper_override.as_deref())?;
     let helper_env = cloud_sessions_helper_env(&config);
-    let args = build_jade_sessions_args_with_config(action, &config);
+    let args = build_cloud_sessions_args_with_config(action, &config);
     let mut command = ProcessCommand::new(&helper);
     command
         .args(&args)
@@ -300,9 +300,9 @@ fn run_cloud_sessions_configure(
     let path = cloud_sessions_config_path()?;
     if clear {
         match std::fs::remove_file(&path) {
-            Ok(()) => println!("Removed Jade cloud sessions config at {}", path.display()),
+            Ok(()) => println!("Removed Cloud sessions config at {}", path.display()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                println!("No Jade cloud sessions config found at {}", path.display());
+                println!("No Cloud sessions config found at {}", path.display());
             }
             Err(err) => return Err(err.into()),
         }
@@ -346,7 +346,7 @@ fn run_cloud_sessions_configure(
     }
 
     let path = save_cloud_sessions_config(&config)?;
-    println!("Saved Jade cloud sessions config to {}", path.display());
+    println!("Saved Cloud sessions config to {}", path.display());
     println!("api_base: {}", configured_label(config.api_base.as_deref()));
     println!(
         "api_token: {}",
@@ -380,7 +380,7 @@ fn run_cloud_sessions_status(json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
     } else {
-        println!("Jade cloud sessions config: {}", status.path);
+        println!("Cloud sessions config: {}", status.path);
         println!("exists: {}", status.exists);
         println!("api_base: {}", configured_label(status.api_base.as_deref()));
         println!(
@@ -583,7 +583,7 @@ fn collect_sync_candidates(dir: &Path) -> Result<Vec<SyncCandidate>> {
     Ok(candidates)
 }
 
-fn run_jade_upload(
+fn run_cloud_upload(
     helper: &Path,
     helper_env: &[(&'static str, String)],
     file: &Path,
@@ -593,7 +593,7 @@ fn run_jade_upload(
     raw: bool,
 ) -> Result<()> {
     let mut args = vec!["upload".to_string()];
-    append_common_jade_args(
+    append_common_cloud_args(
         &mut args,
         user_id.to_string(),
         profile.map(ToOwned::to_owned),
@@ -658,14 +658,14 @@ fn run_cloud_sessions_sync(request: CloudSessionsSyncRequest) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
-                    "Jade cloud sessions sync skipped: last sync {elapsed_mins}m ago (< --min-interval-mins {min_interval})"
+                    "Cloud sessions sync skipped: last sync {elapsed_mins}m ago (< --min-interval-mins {min_interval})"
                 );
             }
             return Ok(());
         }
     }
 
-    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper = resolve_cloud_sessions_helper(helper_override.as_deref())?;
     let helper_env = cloud_sessions_helper_env(&config);
     let mut candidates = collect_sync_candidates(&sessions_dir)?;
 
@@ -734,7 +734,7 @@ fn run_cloud_sessions_sync(request: CloudSessionsSyncRequest) -> Result<()> {
             continue;
         }
 
-        match run_jade_upload(
+        match run_cloud_upload(
             &helper,
             &helper_env,
             &candidate.path,
@@ -792,7 +792,7 @@ fn run_cloud_sessions_sync(request: CloudSessionsSyncRequest) -> Result<()> {
         } else {
             "Uploaded"
         };
-        println!("Jade cloud sessions sync ({})", report.sessions_dir);
+        println!("Cloud sessions sync ({})", report.sessions_dir);
         println!(
             "scanned: {}  {}: {}  unchanged: {}  failed: {}",
             report.scanned, verb, report.uploaded, report.skipped_unchanged, report.failed
@@ -848,7 +848,7 @@ fn fetch_cloud_session_list_json(
     limit: usize,
 ) -> Result<Vec<CloudSessionListItem>> {
     let mut args = vec!["list".to_string()];
-    append_common_jade_args(
+    append_common_cloud_args(
         &mut args,
         user_id.to_string(),
         profile.map(ToOwned::to_owned),
@@ -882,12 +882,12 @@ fn fetch_cloud_session_list_json(
 
 /// Parse the helper's `list --json` output.
 ///
-/// The Jade helper prints a top-level JSON array, but we also accept an object
+/// The Cloud helper prints a top-level JSON array, but we also accept an object
 /// wrapper keyed by `items` or `sessions` so the dashboard keeps working if the
 /// helper's output shape changes.
 fn parse_cloud_session_list_json(raw: &str) -> Result<Vec<CloudSessionListItem>> {
     let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|err| anyhow::anyhow!("failed to parse Jade list JSON: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("failed to parse Cloud list JSON: {err}"))?;
     let array = match value {
         serde_json::Value::Array(items) => items,
         serde_json::Value::Object(mut map) => map
@@ -899,11 +899,11 @@ fn parse_cloud_session_list_json(raw: &str) -> Result<Vec<CloudSessionListItem>>
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "failed to parse Jade list JSON: expected an array or an object with an `items`/`sessions` array"
+                    "failed to parse Cloud list JSON: expected an array or an object with an `items`/`sessions` array"
                 )
             })?,
         other => anyhow::bail!(
-            "failed to parse Jade list JSON: expected an array, found {}",
+            "failed to parse Cloud list JSON: expected an array, found {}",
             json_value_kind(&other)
         ),
     };
@@ -911,7 +911,7 @@ fn parse_cloud_session_list_json(raw: &str) -> Result<Vec<CloudSessionListItem>>
         .into_iter()
         .map(|item| {
             serde_json::from_value(item)
-                .map_err(|err| anyhow::anyhow!("failed to parse Jade list item: {err}"))
+                .map_err(|err| anyhow::anyhow!("failed to parse Cloud list item: {err}"))
         })
         .collect()
 }
@@ -982,7 +982,7 @@ fn render_cloud_sessions_dashboard_html(
     }
     format!(
         "<!doctype html><meta charset='utf-8'>\n\
-<title>Jade Cloud Sessions Dashboard</title>\n\
+<title>Cloud Sessions Dashboard</title>\n\
 <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#1b1b1f}}\
 h1{{margin-bottom:0.2rem}}.meta{{color:#666;margin-bottom:1.5rem}}\
 table{{border-collapse:collapse;width:100%}}th,td{{text-align:left;padding:0.5rem 0.6rem;border-bottom:1px solid #e3e3e8}}\
@@ -990,7 +990,7 @@ th{{background:#f6f8fa;position:sticky;top:0}}td.id{{font-family:ui-monospace,mo
 td.id a{{color:#0a58ca;text-decoration:none}}td.id a:hover{{text-decoration:underline}}\
 td.num{{text-align:right}}td.ts{{white-space:nowrap;color:#555}}td.empty{{text-align:center;color:#888;padding:2rem}}\
 tr:hover td{{background:#fafbff}}</style>\n\
-<h1>Jade Cloud Sessions</h1>\n\
+<h1>Cloud Sessions</h1>\n\
 <div class='meta'>user: {user} &middot; {count} session(s) &middot; generated {generated}</div>\n\
 <table><thead><tr><th>Session ID</th><th>Title</th><th>Messages</th><th>Uploaded</th></tr></thead>\n\
 <tbody>\n{rows}</tbody></table>\n",
@@ -1004,7 +1004,7 @@ tr:hover td{{background:#fafbff}}</style>\n\
 fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Result<()> {
     let config = load_cloud_sessions_config()?.unwrap_or_default();
     let helper_override = request.helper.clone().or_else(|| config.helper.clone());
-    let helper = resolve_jade_sessions_helper(helper_override.as_deref())?;
+    let helper = resolve_cloud_sessions_helper(helper_override.as_deref())?;
     let helper_env = cloud_sessions_helper_env(&config);
     let user_id = config_or_default_user_id(request.user_id.clone(), &config);
 
@@ -1025,7 +1025,7 @@ fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Resul
     {
         Some(path) => expand_home_path(path),
         None => std::env::temp_dir().join(format!(
-            "jade-cloud-dashboard-{}.html",
+            "cloud-session-dashboard-{}.html",
             chrono::Utc::now().format("%Y%m%d-%H%M%S")
         )),
     };
@@ -1079,7 +1079,7 @@ fn run_cloud_sessions_dashboard(request: CloudSessionsDashboardRequest) -> Resul
         .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", output_path.display()))?;
 
     println!(
-        "Wrote Jade cloud sessions dashboard ({} session(s)) to {}",
+        "Wrote Cloud sessions dashboard ({} session(s)) to {}",
         items.len(),
         output_path.display()
     );
@@ -1132,7 +1132,7 @@ fn generate_cloud_session_view_html(
     output_file: &Path,
 ) -> Result<()> {
     let mut args = vec!["view".to_string()];
-    append_common_jade_args(
+    append_common_cloud_args(
         &mut args,
         user_id.to_string(),
         profile.map(ToOwned::to_owned),
@@ -1183,13 +1183,13 @@ fn config_or_default_user_id(user_id: String, config: &CloudSessionsConfig) -> S
 fn cloud_sessions_helper_env(config: &CloudSessionsConfig) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
     if let Some(api_base) = non_empty(config.api_base.clone()) {
-        env.push(("JADE_API_BASE", api_base));
+        env.push(("CLOUD_API_BASE", api_base));
     }
     if let Some(api_token) = non_empty(config.api_token.clone()) {
-        env.push(("JADE_API_TOKEN", api_token));
+        env.push(("CLOUD_API_TOKEN", api_token));
     }
     if let Some(api_token_id) = non_empty(config.api_token_id.clone()) {
-        env.push(("JADE_API_TOKEN_ID", api_token_id));
+        env.push(("CLOUD_API_TOKEN_ID", api_token_id));
     }
     env
 }
@@ -1208,7 +1208,7 @@ fn cloud_sessions_helper_override(action: &CloudSessionsSubcommand) -> Option<St
     }
 }
 
-fn append_common_jade_args(
+fn append_common_cloud_args(
     args: &mut Vec<String>,
     user_id: String,
     profile: Option<String>,
@@ -1224,11 +1224,11 @@ fn append_common_jade_args(
 }
 
 #[cfg(test)]
-fn build_jade_sessions_args(action: CloudSessionsSubcommand) -> Vec<String> {
-    build_jade_sessions_args_with_config(action, &CloudSessionsConfig::default())
+fn build_cloud_sessions_args(action: CloudSessionsSubcommand) -> Vec<String> {
+    build_cloud_sessions_args_with_config(action, &CloudSessionsConfig::default())
 }
 
-fn build_jade_sessions_args_with_config(
+fn build_cloud_sessions_args_with_config(
     action: CloudSessionsSubcommand,
     config: &CloudSessionsConfig,
 ) -> Vec<String> {
@@ -1238,7 +1238,7 @@ fn build_jade_sessions_args_with_config(
         | CloudSessionsSubcommand::Sync { .. }
         | CloudSessionsSubcommand::Dashboard { .. } => {
             unreachable!(
-                "configure/status/sync/dashboard do not invoke the Jade helper via this builder"
+                "configure/status/sync/dashboard do not invoke the Cloud helper via this builder"
             )
         }
         CloudSessionsSubcommand::Upload {
@@ -1250,7 +1250,7 @@ fn build_jade_sessions_args_with_config(
             ..
         } => {
             let mut args = vec!["upload".to_string()];
-            append_common_jade_args(
+            append_common_cloud_args(
                 &mut args,
                 config_or_default_user_id(user_id, config),
                 profile,
@@ -1271,7 +1271,7 @@ fn build_jade_sessions_args_with_config(
             ..
         } => {
             let mut args = vec!["upload-latest".to_string()];
-            append_common_jade_args(
+            append_common_cloud_args(
                 &mut args,
                 config_or_default_user_id(user_id, config),
                 profile,
@@ -1292,7 +1292,7 @@ fn build_jade_sessions_args_with_config(
             ..
         } => {
             let mut args = vec!["list".to_string()];
-            append_common_jade_args(
+            append_common_cloud_args(
                 &mut args,
                 config_or_default_user_id(user_id, config),
                 profile,
@@ -1312,7 +1312,7 @@ fn build_jade_sessions_args_with_config(
             ..
         } => {
             let mut args = vec!["verify".to_string()];
-            append_common_jade_args(
+            append_common_cloud_args(
                 &mut args,
                 config_or_default_user_id(user_id, config),
                 profile,
@@ -1332,7 +1332,7 @@ fn build_jade_sessions_args_with_config(
             ..
         } => {
             let mut args = vec!["view".to_string()];
-            append_common_jade_args(
+            append_common_cloud_args(
                 &mut args,
                 config_or_default_user_id(user_id, config),
                 profile,
@@ -1351,12 +1351,12 @@ fn build_jade_sessions_args_with_config(
     }
 }
 
-fn resolve_jade_sessions_helper(override_path: Option<&str>) -> Result<PathBuf> {
+fn resolve_cloud_sessions_helper(override_path: Option<&str>) -> Result<PathBuf> {
     if let Some(path) = override_path.map(str::trim).filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
 
-    if let Some(path) = std::env::var_os("JCODE_JADE_SESSIONS_HELPER")
+    if let Some(path) = std::env::var_os("JCODE_CLOUD_SESSIONS_HELPER")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
     {
@@ -1365,11 +1365,11 @@ fn resolve_jade_sessions_helper(override_path: Option<&str>) -> Result<PathBuf> 
 
     let mut candidates = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("../jade/scripts/jade_sessions.py"));
-        candidates.push(cwd.join("jade/scripts/jade_sessions.py"));
+        candidates.push(cwd.join("../cloud/scripts/cloud_sessions.py"));
+        candidates.push(cwd.join("cloud/scripts/cloud_sessions.py"));
     }
     if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join("jade/scripts/jade_sessions.py"));
+        candidates.push(home.join("cloud/scripts/cloud_sessions.py"));
     }
 
     for candidate in candidates {
@@ -1379,7 +1379,7 @@ fn resolve_jade_sessions_helper(override_path: Option<&str>) -> Result<PathBuf> 
     }
 
     anyhow::bail!(
-        "Could not find Jade session helper. Set --helper PATH or JCODE_JADE_SESSIONS_HELPER. Expected a private helper like ~/jade/scripts/jade_sessions.py"
+        "Could not find Cloud session helper. Set --helper PATH or JCODE_CLOUD_SESSIONS_HELPER. Expected a private helper like ~/cloud/scripts/cloud_sessions.py"
     );
 }
 

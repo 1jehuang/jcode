@@ -2,7 +2,7 @@
 
 jcode opens new terminal windows in several flows: swarm agent spawning
 (`swarm spawn` with `spawn_mode=visible`), resume-in-new-terminal, self-dev
-sessions, restart restores, and jade relay launches. By default jcode detects
+sessions, restart restores, and cloud relay launches. By default jcode detects
 an installed terminal emulator (kitty, wezterm, alacritty, gnome-terminal, ...)
 and opens a new OS window.
 
@@ -51,7 +51,7 @@ The hook (and any terminal spawned by the built-in fallback) receives:
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_SPAWN_KIND` | Why the spawn happened: `swarm-agent`, `resume`, `selfdev`, `restart`, `jade-relay` |
+| `JCODE_SPAWN_KIND` | Why the spawn happened: `swarm-agent`, `resume`, `selfdev`, `restart`, `cloud-relay` |
 | `JCODE_SPAWN_SESSION_ID` | The jcode session the window will run |
 | `JCODE_SPAWN_TITLE` | Suggested window/tab title (includes session icon + name) |
 | `JCODE_SPAWN_CWD` | Session working directory |
