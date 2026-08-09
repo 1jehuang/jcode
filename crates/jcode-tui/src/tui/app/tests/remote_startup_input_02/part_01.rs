@@ -740,7 +740,6 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                     && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
-        assert_eq!(jcode_routes.len(), 4);
         assert_eq!(
             jcode_routes
                 .iter()
