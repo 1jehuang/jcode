@@ -110,7 +110,14 @@ pub fn hot_reload(session_id: &str) -> Result<()> {
         if is_selfdev {
             cmd.arg("self-dev");
         }
-        cmd.arg("--resume").arg(session_id).current_dir(&cwd);
+        cmd.arg("--resume")
+            .arg(session_id)
+            // The server has already completed its handoff before the client
+            // re-execs. Let the replacement client paint and accept input from
+            // its startup stub immediately; the authoritative History payload
+            // will repopulate the transcript after reconnect.
+            .env("JCODE_RELOAD_FAST_START", "1")
+            .current_dir(&cwd);
         let err = crate::platform::replace_process(&mut cmd);
 
         if err.kind() == std::io::ErrorKind::NotFound && attempt < 2 {

@@ -634,7 +634,16 @@ fn maybe_enable_config_default_provider_for_auto() -> Result<bool> {
 }
 
 async fn detect_auto_provider_flags() -> AutoProviderAvailability {
-    let auth_status = auth::AuthStatus::check_fast();
+    // An exec-based daemon reload inherits this one-shot, non-secret snapshot
+    // from its predecessor. Consuming it avoids repeating credential discovery
+    // on the reload critical path while ensuring later processes cannot reuse it.
+    let auth_status = std::env::var("JCODE_RELOAD_AUTH_STATUS")
+        .ok()
+        .and_then(|snapshot| {
+            crate::env::remove_var("JCODE_RELOAD_AUTH_STATUS");
+            serde_json::from_str::<auth::AuthStatus>(&snapshot).ok()
+        })
+        .unwrap_or_else(auth::AuthStatus::check_fast);
     AutoProviderAvailability {
         has_claude: auth_status.anthropic.has_oauth || auth_status.anthropic.has_api_key,
         has_openai: auth_status.openai_has_oauth || auth_status.openai_has_api_key,

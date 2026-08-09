@@ -1321,10 +1321,24 @@ impl App {
         app.remote_startup_phase = Some(super::RemoteStartupPhase::Connecting);
         app.remote_startup_phase_started = Some(Instant::now());
 
+        let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // One-shot handoff flag. A later ordinary resume in the same process
+        // must retain the existing eager local-history behavior.
+        crate::env::remove_var("JCODE_RELOAD_FAST_START");
+
         // Load session to get canary status (for "client self-dev" badge)
         if let Some(ref session_id) = resume_session {
-            app.restore_remote_startup_history(session_id);
-            if fresh_spawn {
+            if reload_fast_start {
+                crate::logging::info(&format!(
+                    "Remote reload fast start: deferring persisted transcript for {} until server history",
+                    session_id
+                ));
+            } else {
+                app.restore_remote_startup_history(session_id);
+            }
+            if fresh_spawn && !reload_fast_start {
                 crate::logging::info(&format!(
                     "Remote startup fresh-spawn path: restored persisted transcript for {} while awaiting server history",
                     session_id

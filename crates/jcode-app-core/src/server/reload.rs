@@ -197,6 +197,17 @@ pub(super) async fn await_reload_signal(
                 );
                 let mut cmd = ProcessCommand::new(&binary);
                 cmd.arg("serve").arg("--socket").arg(socket.as_os_str());
+                // Auto provider detection is dominated by credential-file probes.
+                // The replacement process is the same trusted daemon with the same
+                // environment, so carry the already-resolved, non-secret status
+                // snapshot across exec instead of repeating those probes while the
+                // socket is unavailable. Provider credentials themselves are still
+                // loaded normally when their runtimes are constructed or used.
+                if let Ok(auth_status) =
+                    serde_json::to_string(&crate::auth::AuthStatus::check_fast())
+                {
+                    cmd.env("JCODE_RELOAD_AUTH_STATUS", auth_status);
+                }
                 prepare_server_exec(&mut cmd, &socket);
                 let err = crate::platform::replace_process(&mut cmd);
                 crate::server::write_reload_state(
