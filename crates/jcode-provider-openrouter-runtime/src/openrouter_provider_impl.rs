@@ -66,9 +66,10 @@ impl Provider for OpenRouterProvider {
         // call even though the route has no OpenRouter provider features
         // (issue #815). Unlike Kimi, this only unlocks stored reasoning: it does
         // not synthesize the field when the prior turn did not return one.
-        let deepseek_model = Self::model_is_deepseek_family(&model);
+        let direct_deepseek_model =
+            !self.supports_provider_features && Self::model_is_deepseek_family(&model);
         let allow_reasoning =
-            (self.supports_provider_features || kimi_coding_endpoint || deepseek_model)
+            (self.supports_provider_features || kimi_coding_endpoint || direct_deepseek_model)
                 && thinking_enabled != Some(false);
         let include_reasoning_content = thinking_enabled == Some(true)
             || (allow_reasoning && Self::is_kimi_model(&model))
