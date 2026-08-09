@@ -307,12 +307,26 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let mut targets: Vec<&Token> = tokens
-        .iter()
-        .skip(1)
-        .filter(|t| !t.is_flag() && !t.is_operator)
-        .collect();
-    targets.extend(redirect_targets.iter().copied());
+    // Command operands are targets only when the command itself is destructive.
+    // For an otherwise harmless command with a redirect (`find ... 2>/dev/null`),
+    // treating every argument as a deletion target produces both nonsense and
+    // catastrophic false positives. In that case only the redirect destination
+    // is written.
+    let mut targets: Vec<&Token> = if triggered {
+        tokens
+            .iter()
+            .skip(1)
+            .filter(|t| !t.is_flag() && !t.is_operator)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    targets.extend(
+        redirect_targets
+            .iter()
+            .copied()
+            .filter(|target| !is_safe_redirect_sink(&target.text)),
+    );
 
     // A destructive command fed by a pipe takes its operands from the previous
     // command's output, which we cannot enumerate. `find ~ -type f | xargs rm`
@@ -343,7 +357,10 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
         return;
     }
 
-    let recursive = tokens.iter().any(|t| t.is_recursive_flag());
+    // Flags belonging to a read-only command are not deletion flags. In
+    // particular, the `r` in `find -printf` must not turn a redirect into a
+    // recursive deletion.
+    let recursive = triggered && tokens.iter().any(|t| t.is_recursive_flag());
 
     for target in targets {
         // `dd`-style `key=value` operands hide the path from a naive scan.
@@ -358,6 +375,12 @@ fn assess_segment(tokens: &[Token], ctx: &RiskContext, findings: &mut Vec<RiskFi
             findings.push(finding);
         }
     }
+}
+
+/// Conventional bit buckets are safe *redirect* destinations. They remain
+/// protected when explicitly passed to a destructive command such as `rm`.
+fn is_safe_redirect_sink(raw: &str) -> bool {
+    matches!(raw, "/dev/null" | "/dev/stdout" | "/dev/stderr" | "NUL")
 }
 
 #[cfg(test)]
