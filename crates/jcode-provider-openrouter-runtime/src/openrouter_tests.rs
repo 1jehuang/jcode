@@ -356,6 +356,51 @@ fn named_openai_compatible_provider_uses_per_model_image_input_support() {
 }
 
 #[test]
+fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("text-model".to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "text-model".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
+        .expect("local named profile should initialize without auth");
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn named_openai_compatible_model_with_empty_input_defaults_to_text_only() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+
+    let profile = jcode_base::config::NamedProviderConfig {
+        base_url: "http://localhost:1234/v1".to_string(),
+        auth: jcode_base::config::NamedProviderAuth::None,
+        default_model: Some("text-model".to_string()),
+        models: vec![jcode_base::config::NamedProviderModelConfig {
+            id: "text-model".to_string(),
+            input: Vec::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
+        .expect("local named profile should initialize without auth");
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
 fn direct_deepseek_profile_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
