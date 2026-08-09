@@ -225,6 +225,14 @@ pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
         .map(|t| {
+            // Copilot's chat-completions endpoint routes to heterogeneous
+            // upstreams and, like OpenRouter, rejects combiners at the tool
+            // schema root. Normalize to that conservative dialect before the
+            // schema is placed in the request payload (issue #855).
+            let parameters = jcode_schema_dialect::normalize(
+                &t.input_schema,
+                &jcode_schema_dialect::registry::OPENROUTER,
+            );
             json!({
                 "type": "function",
                 "function": {
@@ -232,9 +240,74 @@ pub fn build_tools(tools: &[ToolDefinition]) -> Vec<Value> {
                     // Prompt-visible. Approximate token cost for this field:
                     // t.description_token_estimate().
                     "description": &t.description,
-                    "parameters": &t.input_schema,
+                    "parameters": parameters,
                 }
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn swarm_shaped_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "swarm".to_string(),
+            description: "Coordinate agents".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": {"type": "string"},
+                    "message": {"type": "string"}
+                },
+                "anyOf": [
+                    {
+                        "type": "object",
+                        "required": ["action", "label"],
+                        "properties": {
+                            "action": {"type": "string", "enum": ["spawn"]},
+                            "label": {"type": "string", "minLength": 1}
+                        }
+                    },
+                    {
+                        "type": "object",
+                        "required": ["action"],
+                        "properties": {
+                            "action": {"type": "string", "enum": ["list"]}
+                        }
+                    }
+                ]
+            }),
+        }
+    }
+
+    #[test]
+    fn copilot_tool_serialization_flattens_swarm_top_level_combiners() {
+        let json = serde_json::to_string(&build_tools(&[swarm_shaped_tool()])).unwrap();
+        let serialized: Value = serde_json::from_str(&json).unwrap();
+        let parameters = &serialized[0]["function"]["parameters"];
+
+        for combiner in ["anyOf", "oneOf", "allOf"] {
+            assert!(
+                parameters.get(combiner).is_none(),
+                "top-level {combiner} must not reach Copilot: {parameters}"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_tool_payload_preserves_swarm_properties_and_required_fields() {
+        let tools = build_tools(&[swarm_shaped_tool()]);
+        let function = &tools[0]["function"];
+        let parameters = &function["parameters"];
+
+        assert_eq!(function["name"], "swarm");
+        assert_eq!(function["description"], "Coordinate agents");
+        assert!(parameters["properties"]["action"].is_object());
+        assert!(parameters["properties"]["message"].is_object());
+        assert!(parameters["properties"]["label"].is_object());
+        assert_eq!(parameters["required"], json!(["action"]));
+    }
 }
