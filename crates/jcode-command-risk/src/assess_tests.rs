@@ -406,3 +406,30 @@ fn ordinary_wrapped_commands_still_run_immediately() {
         "gate became noisy on normal work: {noisy:#?}"
     );
 }
+
+#[test]
+fn read_only_find_with_stderr_redirect_is_safe() {
+    let command = "find ~/.jcode -maxdepth 3 -type f \\
+                   \\( -name '*.log' -o -name '*events*' \\) \\
+                   -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -20";
+    let assessment = assess(command, &ctx());
+    assert_eq!(assessment.level, RiskLevel::Safe, "{assessment:#?}");
+    assert!(assessment.findings.is_empty(), "{assessment:#?}");
+}
+
+#[test]
+fn harmless_command_operands_are_not_redirect_targets() {
+    for command in [
+        "grep needle /home/u/.jcode/config 2>/dev/null",
+        "find / -name '*.conf' 2>/dev/null",
+        "printf '%s\\n' /home/u/.ssh/id_ed25519 >/tmp/list",
+    ] {
+        let assessment = assess(command, &ctx());
+        assert_eq!(assessment.level, RiskLevel::Safe, "{command}: {assessment:#?}");
+    }
+}
+
+#[test]
+fn safe_redirect_sink_does_not_make_explicit_deletion_safe() {
+    assert_eq!(level("rm /dev/null"), RiskLevel::Catastrophic);
+}
