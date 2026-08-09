@@ -299,6 +299,9 @@ pub(super) fn reset_current_session(app: &mut App) {
     // prefix reuse means retained messages do not re-render/re-register
     // (see the comments at the /rewind handlers in commands.rs).
     crate::tui::mermaid::clear_active_diagrams();
+    app.swarm_plan_items.clear();
+    app.swarm_plan_version = None;
+    app.swarm_plan_swarm_id = None;
     app.queued_messages.clear();
     app.pasted_contents.clear();
     app.pending_images.clear();

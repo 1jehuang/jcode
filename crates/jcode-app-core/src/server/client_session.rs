@@ -226,24 +226,22 @@ pub(super) async fn handle_clear_session(
     }
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
 
+    // `/clear` creates a genuinely fresh session. Do not migrate the old
+    // session's swarm membership or plan participation to the replacement:
+    // doing so lets a subsequent plan snapshot repopulate the cleared UI.
     let swarm_id_for_update = {
         let mut members = swarm_members.write().await;
-        if let Some(mut member) = members.remove(client_session_id) {
-            let swarm_id = member.swarm_id.clone();
-            member.session_id = new_id.clone();
-            member.status = "ready".to_string();
-            member.detail = None;
-            members.insert(new_id.clone(), member);
-            swarm_id
-        } else {
-            None
-        }
+        members
+            .remove(client_session_id)
+            .and_then(|member| member.swarm_id)
     };
     if let Some(ref swarm_id) = swarm_id_for_update {
         let mut swarms = swarms_by_id.write().await;
         if let Some(swarm) = swarms.get_mut(swarm_id) {
             swarm.remove(client_session_id);
-            swarm.insert(new_id.clone());
+            if swarm.is_empty() {
+                swarms.remove(swarm_id);
+            }
         }
     }
     file_touch.clear_session(client_session_id).await;
@@ -265,7 +263,7 @@ pub(super) async fn handle_clear_session(
     )
     .await;
     if let Some(ref swarm_id) = swarm_id_for_update {
-        rename_plan_participant(swarm_id, client_session_id, &new_id, swarm_plans).await;
+        remove_plan_participant(swarm_id, client_session_id, swarm_plans).await;
     }
 
     *client_session_id = new_id.clone();

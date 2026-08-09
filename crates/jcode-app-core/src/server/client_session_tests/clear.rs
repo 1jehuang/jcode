@@ -57,8 +57,14 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
             disconnect_tx: mpsc::unbounded_channel().0,
         },
     )])));
-    let swarm_members = Arc::new(RwLock::new(HashMap::<String, SwarmMember>::new()));
-    let swarms_by_id = Arc::new(RwLock::new(HashMap::<String, HashSet<String>>::new()));
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        old_session_id.to_string(),
+        test_swarm_member(old_session_id, "ready"),
+    )])));
+    let swarms_by_id = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-test".to_string(),
+        HashSet::from([old_session_id.to_string()]),
+    )])));
     let file_touch = FileTouchService::new();
     let channel_subscriptions = Arc::new(RwLock::new(HashMap::<
         String,
@@ -68,7 +74,17 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
         String,
         HashMap<String, HashSet<String>>,
     >::new()));
-    let swarm_plans = Arc::new(RwLock::new(HashMap::<String, VersionedPlan>::new()));
+    let swarm_plans = Arc::new(RwLock::new(HashMap::from([(
+        "swarm-test".to_string(),
+        VersionedPlan {
+            items: Vec::new(),
+            version: 1,
+            participants: HashSet::from([old_session_id.to_string()]),
+            task_progress: HashMap::new(),
+            mode: "deep".to_string(),
+            node_meta: HashMap::new(),
+        },
+    )])));
     let event_history = Arc::new(RwLock::new(VecDeque::<SwarmEvent>::new()));
     let event_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (swarm_event_tx, _swarm_event_rx) = broadcast::channel::<SwarmEvent>(8);
@@ -101,6 +117,17 @@ async fn handle_clear_session_replaces_runtime_handles_and_updates_shutdown_regi
     .await;
 
     assert_ne!(client_session_id, old_session_id);
+    assert!(swarm_members.read().await.is_empty());
+    assert!(swarm_members.read().await.get(&client_session_id).is_none());
+    assert!(swarms_by_id.read().await.get("swarm-test").is_none());
+    let plans = swarm_plans.read().await;
+    assert!(!plans["swarm-test"].participants.contains(old_session_id));
+    assert!(
+        !plans["swarm-test"]
+            .participants
+            .contains(&client_session_id)
+    );
+    drop(plans);
 
     old_queue
         .lock()
