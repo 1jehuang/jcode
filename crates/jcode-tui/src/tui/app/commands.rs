@@ -836,6 +836,7 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         return false;
     }
 
+    let pending_retry = app.rate_limit_reset.is_some() && app.rate_limit_pending_message.is_some();
     if app.is_processing {
         app.cancel_requested = true;
         app.interleave_message = None;
@@ -847,6 +848,13 @@ pub(super) fn handle_cancel_command(app: &mut App, trimmed: &str) -> bool {
         } else {
             app.set_status_notice("Interrupting...");
         }
+    } else if pending_retry {
+        app.clear_pending_remote_retry();
+        if matches!(app.status, ProcessingStatus::WaitingForNetwork { .. }) {
+            app.status = ProcessingStatus::Idle;
+            app.status_detail = None;
+        }
+        app.set_status_notice("Pending retry cancelled");
     } else {
         app.push_display_message(DisplayMessage::system(
             "Nothing to cancel: no prompt or operation is in progress.".to_string(),

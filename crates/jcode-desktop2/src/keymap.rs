@@ -102,6 +102,10 @@ pub enum Action {
     SessionRight,
     SessionUp,
     SessionDown,
+    /// Ctrl+Alt+Shift+Left/Right: resize only the focused session page while
+    /// leaving the application window and UI scale unchanged.
+    PanelShrink,
+    PanelGrow,
 
     /// Ctrl+Shift+N: start a fresh session and attach to it. The chord every
     /// browser and terminal spends on "new window", for the same act: this is
@@ -735,6 +739,8 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
             // Session-strip motion is checked first: the arrow arms below
             // would otherwise swallow it, and chrome navigation has to be
             // reachable from any editor state.
+            NamedKey::ArrowLeft if ctrl && alt && shift => Some(Action::PanelShrink),
+            NamedKey::ArrowRight if ctrl && alt && shift => Some(Action::PanelGrow),
             NamedKey::ArrowLeft if ctrl && alt => Some(Action::SessionLeft),
             NamedKey::ArrowRight if ctrl && alt => Some(Action::SessionRight),
             NamedKey::ArrowUp if ctrl && alt => Some(Action::SessionUp),

@@ -1793,6 +1793,18 @@ impl App {
                 }
             }
 
+            Action::PanelShrink | Action::PanelGrow => {
+                let grow = matches!(action, Action::PanelGrow);
+                if self.model.workspace.resize_column(grow) {
+                    self.model.set_notice(format!(
+                        "session panel {}%",
+                        self.model.workspace.column_percent()
+                    ));
+                } else {
+                    self.model.set_notice("session panel size limit reached");
+                }
+            }
+
             // In a multi-line input, Up/Down move between lines first and only
             // fall through to history recall at the edges, like a normal
             // multi-line composer.

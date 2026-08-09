@@ -3311,7 +3311,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.71.0"
+version = "0.73.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3902,6 +3902,7 @@ name = "jcode-provider-copilot"
 version = "0.1.0"
 dependencies = [
  "jcode-message-types",
+ "jcode-schema-dialect",
  "serde",
  "serde_json",
 ]

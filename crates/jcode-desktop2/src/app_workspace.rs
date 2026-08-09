@@ -60,7 +60,7 @@ impl App {
         let scale = self.effective_scale();
         let inset = (workspace::VERTICAL_INSET * scale * 2.0).round() as u32;
         (
-            workspace::column_width(viewport.0, row_len),
+            self.model.workspace.column_width(viewport.0, row_len),
             viewport.1.saturating_sub(inset).max(1),
         )
     }

@@ -258,7 +258,7 @@ fn pinned_todos_payload_refreshes_and_clears_with_config_and_todos() {
 }
 
 #[test]
-fn pinned_todo_band_renders_at_top_when_scrolled() {
+fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
@@ -302,10 +302,23 @@ fn pinned_todo_band_renders_at_top_when_scrolled() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    let first_rows = text.lines().take(4).collect::<Vec<_>>().join(" ");
+    let first_rows = text.lines().take(6).collect::<Vec<_>>();
+    let prompt_row = first_rows
+        .iter()
+        .position(|row| row.contains("kick off the work"))
+        .expect("sticky prompt should be visible");
+    let todo_row = first_rows
+        .iter()
+        .position(|row| row.contains("pinned band item"))
+        .expect("pinned todo should be visible");
     assert!(
-        first_rows.contains("pinned band item"),
-        "pinned todo band should render at the top of the scrolled viewport, got:\n{}",
+        prompt_row < todo_row,
+        "pinned todo band should render below the sticky prompt, got:\n{}",
+        text
+    );
+    assert!(
+        !first_rows.iter().any(|row| row.contains("────")),
+        "pinned todo band should not render a horizontal separator, got:\n{}",
         text
     );
 

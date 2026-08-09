@@ -135,17 +135,19 @@ impl App {
     }
 
     /// Record a terminal focus-state change (from crossterm FocusGained/FocusLost).
-    /// Returns true when a redraw is warranted (focus regained, so we repaint at
-    /// full fidelity immediately).
+    /// Returns true when a redraw is warranted. The normal ratatui diff is enough
+    /// to catch up state that changed while the tab was backgrounded: the terminal
+    /// still contains the last frame ratatui emitted. Do not invalidate the whole
+    /// backend here. Doing so sends an ED2 clear followed by every terminal cell on
+    /// each tab switch, which makes focus changes visibly lag on large terminals.
     pub(super) fn set_client_focused(&mut self, focused: bool) -> bool {
         if self.client_focused == focused {
             return false;
         }
         self.client_focused = focused;
         if focused {
-            // Repaint immediately so a newly-focused window is not stuck on the
-            // last paused frame, and resume animation timing from "now".
-            self.request_full_redraw();
+            // Schedule an immediate differential frame so a newly-focused window
+            // catches up and resumes animation timing from "now".
             self.note_client_focus(true);
             true
         } else {

@@ -359,9 +359,8 @@ pub(super) fn draw_messages(
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
-    // Pinned todo band (display.pin_todos): the full todo card rendered at the
-    // very top of the viewport while the transcript is scrolled, like the
-    // sticky previous-prompt preview below it.
+    // Pinned todo band (display.pin_todos): the full todo card rendered beneath
+    // the sticky previous-prompt preview while the transcript is scrolled.
     let pinned_todo_band = pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
@@ -418,8 +417,8 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    // Total synthetic rows reserved at the top of the viewport (todo band
-    // first, then the previous-prompt preview, then transcript content).
+    // Total synthetic rows reserved at the top of the viewport (previous-prompt
+    // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;
 
     let content_area = Rect {
@@ -1162,7 +1161,7 @@ pub(super) fn draw_messages(
     if pinned_todo_lines > 0 {
         let band_area = Rect {
             x: content_area.x,
-            y: render_area.y,
+            y: render_area.y.saturating_add(prompt_preview_lines),
             width: content_area.width,
             height: pinned_todo_lines.min(render_area.height),
         };
@@ -1236,7 +1235,7 @@ pub(super) fn draw_messages(
                 let line_count = preview_lines.len() as u16;
                 let preview_area = Rect {
                     x: content_area.x,
-                    y: render_area.y.saturating_add(pinned_todo_lines),
+                    y: render_area.y,
                     width: content_area.width.saturating_sub(1),
                     height: line_count,
                 };
@@ -1339,9 +1338,9 @@ fn pinned_todo_band_lines(
     if card_lines.is_empty() {
         return Vec::new();
     }
-    // Band budget: about a third of the viewport, separator included.
+    // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget.saturating_sub(1);
+    let content_budget = budget;
     let mut lines: Vec<Line<'static>> = Vec::new();
     if card_lines.len() > content_budget {
         let shown = content_budget.saturating_sub(1);
@@ -1354,11 +1353,6 @@ fn pinned_todo_band_lines(
     } else {
         lines.extend(card_lines);
     }
-    // Separator between the pinned band and the scrolled transcript.
-    lines.push(Line::from(Span::styled(
-        "─".repeat(width as usize),
-        Style::default().fg(dim_color()),
-    )));
     lines
 }
 

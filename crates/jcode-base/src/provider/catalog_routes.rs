@@ -889,6 +889,13 @@ pub fn remote_model_routes_fallback(
             continue;
         }
 
+        if model.contains('/')
+            && let Some(route) = remote_openai_compatible_route_for_model(model)
+        {
+            routes.push(route);
+            continue;
+        }
+
         if model.contains('/') {
             let cached = openrouter_cached;
             let auto_detail = cached
@@ -1103,7 +1110,7 @@ pub fn remote_current_openai_compatible_route_for_model(
     remote_provider_name: Option<&str>,
     model: &str,
 ) -> Option<ModelRoute> {
-    if model.trim().is_empty() || model.contains('/') || provider_for_model(model).is_some() {
+    if model.trim().is_empty() || (!model.contains('/') && provider_for_model(model).is_some()) {
         return None;
     }
 
@@ -1115,6 +1122,13 @@ pub fn remote_current_openai_compatible_route_for_model(
         return None;
     }
     let resolved = crate::provider_catalog::resolve_openai_compatible_profile(profile);
+    if model.contains('/')
+        && !remote_openai_compatible_profile_models(&resolved, profile)
+            .iter()
+            .any(|candidate| candidate.0 == model)
+    {
+        return None;
+    }
 
     Some(ModelRoute {
         model: model.to_string(),
@@ -1520,6 +1534,35 @@ mod tests {
         assert_eq!(route.api_method, "openai-compatible:opencode");
         assert_eq!(route.detail, "https://opencode.ai/zen/v1");
         assert!(!route.detail.contains("fallback"));
+    }
+
+    #[test]
+    fn slash_model_fallback_prefers_matching_compatible_profile() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let routes = remote_model_routes_fallback(Some("OpenCode Zen"), &[model.to_string()]);
+
+        assert_eq!(routes.len(), 1, "unexpected fallback routes: {routes:?}");
+        assert_eq!(routes[0].provider, "OpenCode Zen");
+        assert_eq!(routes[0].api_method, "openai-compatible:opencode");
+        assert!(routes[0].available);
+    }
+
+    #[test]
+    fn current_compatible_profile_accepts_only_cataloged_slash_models() {
+        let guard = EnvGuard::new();
+        let model = "vendouple/gpt-5.6-sol";
+        guard.save_opencode_cache("https://opencode.ai/zen/v1", &[model]);
+
+        let route = remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), model)
+            .expect("cataloged slash model should use the current compatible profile");
+        assert_eq!(route.api_method, "openai-compatible:opencode");
+        assert!(
+            remote_current_openai_compatible_route_for_model(Some("OpenCode Zen"), "unknown/model")
+                .is_none()
+        );
     }
 
     #[test]

@@ -625,6 +625,31 @@ fn test_background_update_ready_waits_for_turn_to_finish() {
 }
 
 #[test]
+fn test_background_update_ready_waits_for_typing_to_go_idle() {
+    let mut app = create_test_app();
+    let session_id = app.session.id.clone();
+    app.note_client_interaction();
+
+    app.handle_session_update_status(SessionUpdateStatus::ReadyToReload {
+        session_id: session_id.clone(),
+        action: ClientMaintenanceAction::Update,
+        version: "v1.2.3".to_string(),
+    });
+
+    assert!(app.reload_requested.is_none());
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.status_notice(),
+        Some("↑ v1.2.3 ready · reloads when idle".to_string())
+    );
+
+    app.last_user_interaction = Some(Instant::now() - Duration::from_secs(2));
+    crate::tui::app::local::handle_tick(&mut app);
+    assert_eq!(app.reload_requested.as_deref(), Some(session_id.as_str()));
+    assert!(app.should_quit);
+}
+
+#[test]
 fn test_background_rebuild_status_uses_compact_rebuild_card() {
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
@@ -673,21 +698,16 @@ fn test_startup_update_checking_stays_quiet_until_update_work_starts() {
         .iter()
         .filter(|message| message.title.as_deref() == Some("Update"))
         .count();
-    assert_eq!(update_cards, 1, "update statuses should update one card");
-    let message = app
-        .display_messages()
-        .last()
-        .expect("expected update display message");
-    assert!(message.content.contains("Status: downloading v1.2.3"));
-    assert!(
-        message.content.contains("50%"),
-        "download card should show progress: {}",
-        message.content
+    assert_eq!(
+        update_cards, 0,
+        "background progress should stay out of the transcript"
     );
-    assert!(message.content.contains("reload in place"));
     let notice = app.status_notice().expect("expected download notice");
-    assert!(notice.starts_with("Updating to v1.2.3..."));
-    assert!(notice.contains("50%"), "notice should show progress: {notice}");
+    assert!(notice.starts_with("↑ v1.2.3 · Downloading update..."));
+    assert!(
+        notice.contains("50%"),
+        "notice should show progress: {notice}"
+    );
 
     app.handle_update_status(UpdateStatus::Installed {
         version: "v1.2.3".to_string(),
@@ -707,8 +727,8 @@ fn test_startup_update_checking_stays_quiet_until_update_work_starts() {
 
 /// The user-facing complaint behind the progress work: update output used to
 /// churn the transcript and clobber the input line. A streaming download must
-/// keep exactly one Update card (updated in place), never grow the message
-/// list, and never touch the input buffer.
+/// stay in the compact status area, never grow the message list, and never
+/// touch the input buffer.
 #[test]
 fn test_startup_update_progress_stream_does_not_churn_transcript_or_input() {
     let mut app = create_test_app();
@@ -725,11 +745,14 @@ fn test_startup_update_progress_stream_does_not_churn_transcript_or_input() {
 
     assert_eq!(
         app.display_messages().len(),
-        baseline_messages + 1,
-        "streamed progress must reuse one card, not append per event"
+        baseline_messages,
+        "streamed progress must not append transcript cards"
     );
-    let card = app.display_messages().last().expect("update card");
-    assert!(card.content.contains("100%"), "card shows latest progress");
+    assert!(
+        app.status_notice()
+            .is_some_and(|notice| notice.contains("100%")),
+        "compact status shows latest progress"
+    );
     assert_eq!(
         app.input(),
         "draft the user was typing",
@@ -850,7 +873,10 @@ fn test_startup_update_error_replaces_checking_card() {
     );
     let notice = app.status_notice().expect("expected failure notice");
     assert_eq!(notice, "Update failed: offline");
-    assert!(!notice.contains('\n'), "notice should be one line: {notice}");
+    assert!(
+        !notice.contains('\n'),
+        "notice should be one line: {notice}"
+    );
     assert!(app.background_client_action.is_none());
     assert!(app.pending_background_client_reload.is_none());
 }

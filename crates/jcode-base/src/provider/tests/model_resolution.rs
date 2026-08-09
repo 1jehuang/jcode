@@ -740,6 +740,91 @@ fn test_active_compatible_route_treats_claude_like_bare_model_as_provider_local(
     });
 }
 
+fn test_multi_provider_with_openrouter(openrouter: Arc<dyn Provider>) -> MultiProvider {
+    MultiProvider {
+        claude: RwLock::new(None),
+        anthropic: RwLock::new(None),
+        openai: RwLock::new(None),
+        copilot_api: RwLock::new(None),
+        antigravity: RwLock::new(None),
+        gemini: RwLock::new(None),
+        cursor: RwLock::new(None),
+        bedrock: RwLock::new(None),
+        openrouter: RwLock::new(Some(openrouter)),
+        openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+        active_openai_compatible_profile: RwLock::new(None),
+        active: RwLock::new(ActiveProvider::OpenRouter),
+        use_claude_cli: false,
+        startup_notices: RwLock::new(Vec::new()),
+        initial_provider: Some(ActiveProvider::OpenRouter),
+        routes_memo: std::sync::Mutex::new(None),
+        post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }
+}
+
+#[test]
+fn test_bare_model_served_by_active_catalog_profile_stays_on_that_profile() {
+    with_clean_provider_test_env(|| {
+        let profile = crate::provider_catalog::OPENCODE_GO_PROFILE;
+        crate::env::set_var(profile.api_key_env, "test-opencode-go-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
+        let runtime = test_openrouter_runtime().expect("OpenCode Go runtime should initialize");
+        runtime
+            .set_model("kimi-k2.5")
+            .expect("initial OpenCode Go model should be selectable");
+        let provider = test_multi_provider_with_openrouter(runtime);
+
+        assert!(provider.model_routes().iter().any(|route| {
+            route.model == "deepseek-v4-flash"
+                && route.api_method == "openai-compatible:opencode-go"
+                && route.available
+        }));
+        provider
+            .set_model("deepseek-v4-flash")
+            .expect("bare catalog model should stay on OpenCode Go");
+
+        assert_eq!(provider.model(), "deepseek-v4-flash");
+        assert_eq!(
+            provider
+                .active_openrouter_execution_provider()
+                .and_then(|runtime| runtime.direct_openai_compatible_route_parts())
+                .map(|(_, api_method, _)| api_method),
+            Some("openai-compatible:opencode-go".to_string())
+        );
+    });
+}
+
+#[test]
+fn test_bare_model_absent_from_active_catalog_profile_still_rebinds_to_openrouter() {
+    with_clean_provider_test_env(|| {
+        let profile = crate::provider_catalog::OPENCODE_GO_PROFILE;
+        crate::env::set_var(profile.api_key_env, "test-opencode-go-key");
+        crate::provider_catalog::force_apply_openai_compatible_profile_env(Some(profile));
+        let runtime = test_openrouter_runtime().expect("OpenCode Go runtime should initialize");
+        runtime
+            .set_model("kimi-k2.5")
+            .expect("initial OpenCode Go model should be selectable");
+        let provider = test_multi_provider_with_openrouter(runtime);
+
+        let error = provider
+            .set_model("not-in-opencode-go-catalog")
+            .expect_err("unknown bare model should still attempt native OpenRouter");
+
+        assert!(
+            error.to_string().contains("OPENROUTER_API_KEY"),
+            "unexpected rebind error: {error:#}"
+        );
+        assert_eq!(provider.model(), "kimi-k2.5");
+        assert_eq!(
+            provider
+                .active_openrouter_execution_provider()
+                .and_then(|runtime| runtime.direct_openai_compatible_route_parts())
+                .map(|(_, api_method, _)| api_method),
+            Some("openai-compatible:opencode-go".to_string())
+        );
+    });
+}
+
 #[test]
 fn test_active_compatible_route_preserves_custom_at_sign_model_ids() {
     with_clean_provider_test_env(|| {

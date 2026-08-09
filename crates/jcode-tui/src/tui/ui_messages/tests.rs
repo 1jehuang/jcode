@@ -1770,7 +1770,7 @@ fn render_system_message_centered_mode_caps_wrap_width_for_visible_gutters() {
 }
 
 #[test]
-fn render_system_message_uses_reload_card_for_reload_title() {
+fn render_system_message_uses_minimal_inline_style_for_reload_title() {
     let msg = DisplayMessage::system("Reloading server with newer binary...").with_title("Reload");
 
     let lines = render_system_message(&msg, 80, crate::config::DiffDisplayMode::Off);
@@ -1781,8 +1781,16 @@ fn render_system_message_uses_reload_card_for_reload_title() {
         .join("\n");
 
     assert!(
-        plain.contains("reload"),
-        "expected reload card title: {plain}"
+        !plain.contains('╭'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains('╰'),
+        "unexpected reload card border: {plain}"
+    );
+    assert!(
+        !plain.contains("⚡ reload"),
+        "unexpected reload card title: {plain}"
     );
     assert!(plain.contains("Reloading server with newer binary"));
 }

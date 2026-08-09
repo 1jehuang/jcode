@@ -114,11 +114,16 @@ fn idle_donut_pauses_while_unfocused() {
         "idle animation must pause while the terminal is unfocused"
     );
 
-    // Regaining focus requests a full repaint so the window is not stuck on the
-    // last paused frame.
+    // Regaining focus requests a differential redraw so the window catches up
+    // without clearing and retransmitting every terminal cell.
+    app.force_full_redraw = false;
     let redraw = app.set_client_focused(true);
     assert!(redraw, "regaining focus should request a redraw");
     assert!(app.client_focused());
+    assert!(
+        !app.force_full_redraw,
+        "focus changes must not force an expensive full-terminal repaint"
+    );
 }
 
 #[test]

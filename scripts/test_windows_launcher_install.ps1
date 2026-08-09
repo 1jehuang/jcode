@@ -106,11 +106,14 @@ try {
     $armManifest = "$digest  nested/path/jcode-windows-aarch64.exe"
     Assert-Equal $digest (Get-JcodeSha256FromManifest -ManifestText $armManifest -AssetName 'jcode-windows-aarch64.exe') 'checksum parser should match the Windows ARM64 release asset'
 
+    Write-Host 'test_temp_cleanup_tolerates_windows_short_paths'
+    $installText = Get-Content -LiteralPath $installScript -Raw
+    Assert-True ($installText -match '(?m)^\s*Get-Item -LiteralPath \$TempDir -ErrorAction SilentlyContinue \|\r?\n\s*Remove-Item -Recurse -Force -ErrorAction SilentlyContinue\s*$') 'temporary cleanup should resolve the item before removal so Windows 8.3 TEMP paths are tolerated'
+
     Write-Host 'test_optional_setup_and_source_build_are_opt_in'
     Assert-Equal $false ([bool]$ConfigureAlacritty) 'core install should not install an optional terminal by default'
     Assert-Equal $false ([bool]$ConfigureHotkey) 'core install should not add login persistence by default'
     Assert-Equal $false ([bool]$BuildFromSource) 'installer should not start a source build by default'
-    $installText = Get-Content -LiteralPath $installScript -Raw
     Assert-True ($installText.Contains('will not start a long source build automatically')) 'missing release assets should produce an explicit source-build opt-in message'
     Assert-True ($installText.Contains('"--locked", "-p", "jcode", "--bin", "jcode"')) 'source-build fallback should compile only the locked jcode binary target'
 

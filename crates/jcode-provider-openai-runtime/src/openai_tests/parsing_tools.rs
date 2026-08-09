@@ -2,6 +2,7 @@
 fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -9,6 +10,7 @@ fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -26,6 +28,7 @@ fn test_parse_openai_response_completed_captures_incomplete_stop_reason() {
 fn test_parse_openai_response_completed_without_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"completed"}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -33,6 +36,7 @@ fn test_parse_openai_response_completed_without_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -50,6 +54,7 @@ fn test_parse_openai_response_completed_without_stop_reason() {
 fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
     let data = r#"{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}]}]}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -57,6 +62,7 @@ fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -74,6 +80,7 @@ fn test_parse_openai_response_completed_commentary_phase_sets_stop_reason() {
 fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
     let data = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}"#;
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -81,6 +88,7 @@ fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -97,6 +105,7 @@ fn test_parse_openai_response_incomplete_emits_message_end_with_reason() {
 #[test]
 fn test_parse_openai_response_function_call_arguments_streaming() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -106,6 +115,7 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         parse_openai_response_event(
             added,
             &mut saw_text_delta,
+            &mut saw_thinking_delta,
             &mut streaming_tool_calls,
             &mut completed_tool_items,
             &mut pending,
@@ -119,6 +129,7 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         parse_openai_response_event(
             delta,
             &mut saw_text_delta,
+            &mut saw_thinking_delta,
             &mut streaming_tool_calls,
             &mut completed_tool_items,
             &mut pending,
@@ -131,6 +142,7 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
     let first = parse_openai_response_event(
         done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -165,6 +177,7 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
 #[test]
 fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_done() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::from(["fc_123".to_string()]);
     let mut pending = VecDeque::new();
@@ -173,6 +186,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
     let event = parse_openai_response_event(
         duplicate_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -186,6 +200,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 #[test]
 fn test_parse_openai_response_output_item_done_emits_native_compaction() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -194,6 +209,7 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
     let event = parse_openai_response_event(
         compaction_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -218,6 +234,7 @@ fn test_parse_openai_response_output_item_done_emits_native_compaction() {
 #[test]
 fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -235,6 +252,7 @@ fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
     let event = parse_openai_response_event(
         reasoning_done,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -261,6 +279,61 @@ fn test_parse_openai_response_output_item_done_emits_reasoning_item() {
 }
 
 #[test]
+fn test_reasoning_item_done_does_not_replay_summary_after_live_deltas() {
+    // Regression: OpenAI streams the reasoning summary live via
+    // `response.reasoning_summary_text.delta`, then repeats the full summary
+    // inside the `response.output_item.done` reasoning item. Replaying it
+    // rendered the thinking text twice in the TUI.
+    let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
+    let mut streaming_tool_calls = HashMap::new();
+    let mut completed_tool_items = HashSet::new();
+    let mut pending = VecDeque::new();
+
+    let delta = r#"{"type":"response.reasoning_summary_text.delta","delta":"Checked the constraints."}"#;
+    let event = parse_openai_response_event(
+        delta,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected thinking delta");
+    assert!(matches!(event, StreamEvent::ThinkingDelta(text) if text == "Checked the constraints."));
+
+    let reasoning_done = r#"{
+        "type":"response.output_item.done",
+        "item":{
+            "id":"rs_123",
+            "type":"reasoning",
+            "status":"completed",
+            "encrypted_content":"enc_reasoning",
+            "summary":[{"type":"summary_text","text":"Checked the constraints."}]
+        }
+    }"#;
+    let event = parse_openai_response_event(
+        reasoning_done,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("expected reasoning item event");
+    assert!(
+        matches!(event, StreamEvent::OpenAIReasoning { .. }),
+        "expected OpenAIReasoning (for history persistence), got {:?}",
+        event
+    );
+    assert!(
+        pending.is_empty(),
+        "summary must not be replayed as thinking events after live deltas: {:?}",
+        pending
+    );
+}
+
+#[test]
 fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() {
     let _lock = jcode_base::storage::lock_test_env();
     let original_dir = std::env::current_dir().expect("current dir");
@@ -271,6 +344,7 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
     std::env::set_current_dir(temp.path()).expect("set temp cwd");
 
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut streaming_tool_calls = HashMap::new();
     let mut completed_tool_items = HashSet::new();
     let mut pending = VecDeque::new();
@@ -289,6 +363,7 @@ fn test_parse_openai_response_image_generation_saves_metadata_and_emits_event() 
     let event = parse_openai_response_event(
         data,
         &mut saw_text_delta,
+        &mut saw_thinking_delta,
         &mut streaming_tool_calls,
         &mut completed_tool_items,
         &mut pending,
@@ -522,8 +597,9 @@ fn test_handle_openai_output_item_normalizes_null_arguments() {
         "arguments": "null",
     });
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut pending = VecDeque::new();
-    let first = handle_openai_output_item(item, &mut saw_text_delta, &mut pending)
+    let first = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending)
         .expect("expected tool event");
 
     match first {
@@ -551,10 +627,11 @@ fn test_handle_openai_output_item_recovers_bright_pearl_fixture() {
     });
 
     let mut saw_text_delta = false;
+    let mut saw_thinking_delta = false;
     let mut pending = VecDeque::new();
     let mut events = Vec::new();
 
-    if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut pending) {
+    if let Some(first) = handle_openai_output_item(item, &mut saw_text_delta, &mut saw_thinking_delta, &mut pending) {
         events.push(first);
     }
     while let Some(ev) = pending.pop_front() {

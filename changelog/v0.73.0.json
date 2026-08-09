@@ -1,0 +1,19 @@
+{
+  "version": "0.73.0",
+  "date": "2026-08-09",
+  "title": "Focused desktop sessions and provider reliability",
+  "highlights": [
+    "Desktop session panels can expand the focused session for more working space"
+  ],
+  "improvements": [
+    "Switching models preserves the active catalog profile",
+    "Tab focus changes avoid unnecessary full terminal repaints",
+    "Missing swarm server errors now explain how to restore the connection"
+  ],
+  "fixes": [
+    "OpenAI model responses no longer duplicate thinking text",
+    "GitHub Copilot tool schemas are normalized for reliable tool calls",
+    "Custom models default to text input unless they explicitly advertise other capabilities",
+    "Homebrew launchers preserve command-line arguments during startup"
+  ]
+}
