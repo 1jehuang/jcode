@@ -35,7 +35,35 @@ case "$profile" in
     ;;
 esac
 
-cargo build --profile "$profile" --manifest-path "$repo_root/Cargo.toml"
+git_hash=""
+git_date=""
+git_dirty="0"
+if command -v git >/dev/null 2>&1; then
+  if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+    git_hash="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
+    git_date="$(git -C "$repo_root" log -1 --format=%ci 2>/dev/null || true)"
+    if [[ -n "${git_hash}" ]] && [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]]; then
+      git_dirty="1"
+    fi
+  fi
+fi
+
+hash="$git_hash"
+if [[ -n "$hash" ]] && [[ "$git_dirty" == "1" ]]; then
+  hash="${hash}-dirty"
+fi
+if [[ -z "$hash" ]]; then
+  hash="$(date +%Y%m%d%H%M%S)"
+fi
+
+if [[ -n "$git_hash" ]]; then
+  JCODE_BUILD_GIT_HASH="$git_hash" \
+    JCODE_BUILD_GIT_DATE="$git_date" \
+    JCODE_BUILD_GIT_DIRTY="$git_dirty" \
+    cargo build --profile "$profile" --manifest-path "$repo_root/Cargo.toml"
+else
+  cargo build --profile "$profile" --manifest-path "$repo_root/Cargo.toml"
+fi
 bin="$repo_root/target/$profile/jcode"
 
 if [[ ! -x "$bin" ]]; then
@@ -43,18 +71,15 @@ if [[ ! -x "$bin" ]]; then
   exit 1
 fi
 
-hash=""
-if command -v git >/dev/null 2>&1; then
-  if git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
-    hash="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
-    if [[ -n "${hash}" ]] && [[ -n "$(git -C "$repo_root" status --porcelain 2>/dev/null || true)" ]]; then
-      hash="${hash}-dirty"
-    fi
+if [[ -n "$git_hash" ]]; then
+  expected_git_identity="($git_hash)"
+  if [[ "$git_dirty" == "1" ]]; then
+    expected_git_identity="($git_hash, dirty)"
   fi
-fi
-
-if [[ -z "$hash" ]]; then
-  hash="$(date +%Y%m%d%H%M%S)"
+  if [[ "$($bin --version)" != *"$expected_git_identity"* ]]; then
+    echo "Release binary does not report expected git identity: $expected_git_identity" >&2
+    exit 1
+  fi
 fi
 
 # Install versioned binary into ~/.jcode/builds/versions/<hash>/
