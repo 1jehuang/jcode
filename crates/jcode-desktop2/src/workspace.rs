@@ -444,6 +444,21 @@ mod tests {
     }
 
     #[test]
+    fn resized_panel_width_survives_focus_transitions() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.resize_column(true));
+        let resized = workspace.column_width(1000, 3);
+
+        workspace.begin(Direction::Right);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+        workspace.advance(TRANSITION_SECONDS);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+
+        workspace.begin_row_change(Direction::Down, vec!["old".into()], 0);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+    }
+
+    #[test]
     fn right_navigation_starts_on_the_previous_page_and_settles_on_target() {
         let mut workspace = Workspace::default();
         workspace.begin(Direction::Right);
