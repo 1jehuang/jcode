@@ -69,6 +69,13 @@ pub fn has_credentials() -> bool {
     get_api_key().is_some()
 }
 
+/// Whether the shared transport is configured as native OpenRouter BYOK.
+/// Direct OpenAI-compatible endpoints reuse this transport but must not be
+/// reported as OpenRouter.
+pub fn has_openrouter_credentials() -> bool {
+    provider_features_enabled(&configured_api_base()) && has_credentials()
+}
+
 /// Resolve the configured API key for the OpenRouter/OpenAI-compatible slot.
 pub fn get_api_key() -> Option<String> {
     let key_name = configured_api_key_name();

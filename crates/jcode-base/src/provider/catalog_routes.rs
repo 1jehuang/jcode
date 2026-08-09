@@ -240,14 +240,14 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     append_cursor_routes(provider, &mut routes);
     append_bedrock_routes(provider, &mut routes);
 
-    let has_openrouter = provider.openrouter_provider().is_some();
+    let has_openrouter_transport = provider.openrouter_provider().is_some();
     let has_openrouter_provider_features = provider
         .openrouter_provider()
         .map(|openrouter| openrouter.supports_provider_routing_features())
         .unwrap_or(false);
     append_openrouter_routes(provider, &mut routes, &mut openrouter_stats);
 
-    if !has_openrouter && !added_direct_openai_compatible_routes {
+    if !has_openrouter_transport && !added_direct_openai_compatible_routes {
         // OpenRouter not configured - show a placeholder as unavailable.
         routes.push(ModelRoute {
             model: "openrouter models".to_string(),
@@ -268,7 +268,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
         crate::logging::info(&format!(
             "[TIMING] model_routes: routes={}, openrouter_configured={}, openrouter_models={}, openrouter_endpoint_cache_hits={}, openrouter_endpoint_routes={}, openrouter_scheduled_endpoint_refreshes={}, total={}ms",
             routes.len(),
-            has_openrouter,
+            has_openrouter_provider_features,
             openrouter_stats.models,
             openrouter_stats.endpoint_cache_hits,
             openrouter_stats.endpoint_routes,
@@ -301,7 +301,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
         has_api_key,
         openai_auth.openai_has_oauth,
         openai_auth.openai_has_api_key,
-        has_openrouter,
+        has_openrouter_provider_features,
         has_openrouter_provider_features,
         added_direct_openai_compatible_routes,
         total_ms,
