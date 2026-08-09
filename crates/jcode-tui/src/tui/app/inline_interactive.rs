@@ -3031,7 +3031,7 @@ impl App {
         }
     }
 
-    fn cycle_model_favorite_after_current(&mut self) {
+    fn cycle_model_favorite_after_current(&mut self) -> bool {
         let selected_name = (|| {
             let picker = self.inline_interactive_state.as_mut()?;
             if !picker_is_runtime_model_picker(picker) || picker.filtered.is_empty() {
@@ -3048,8 +3048,10 @@ impl App {
         })();
         if let Some(entry_name) = selected_name {
             self.set_status_notice(format!("Favorite → {}", entry_name));
+            true
         } else {
             self.set_status_notice("No favorited models yet. Use Ctrl+N to favorite one.");
+            false
         }
     }
 
@@ -3074,8 +3076,9 @@ impl App {
             self.set_status_notice("Model favorites unavailable until model routes finish loading");
             return;
         }
-        self.cycle_model_favorite_after_current();
-        let _ = self.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE);
+        if self.cycle_model_favorite_after_current() {
+            let _ = self.handle_inline_interactive_key(KeyCode::Enter, KeyModifiers::NONE);
+        }
     }
 
     pub(super) fn handle_inline_interactive_key(
