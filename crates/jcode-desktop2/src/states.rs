@@ -12,6 +12,9 @@ type NodeBuilder = fn() -> Model;
 /// All named state-space nodes. Keep deterministic: no clocks, no randomness.
 pub const NODES: &[(&str, NodeBuilder)] = &[
     ("connecting", connecting),
+    ("starting_new_session", starting_new_session),
+    ("attach_in_flight", attach_in_flight),
+    ("reconnecting", reconnecting),
     ("attached_empty", attached_empty),
     ("boot_opening", boot_opening),
     ("boot_donut", boot_donut),
@@ -178,6 +181,39 @@ fn connecting() -> Model {
         },
         panel: crate::settings::Panel::default(),
     }
+}
+
+/// The gap after the gesture and before the daemon assigns the new id used to
+/// exist only as `session_id == None`, conflated with first boot. Keep it in the
+/// enumerable space because this is the latency-sensitive frame a user sees.
+fn starting_new_session() -> Model {
+    Model {
+        status: "starting a new session...".into(),
+        session_id: None,
+        working_dir: None,
+        ..attached_empty()
+    }
+}
+
+/// Existing-session navigation optimistically retargets the id while the attach
+/// RPC is outstanding. That is observably different from both detached and
+/// attached-empty, even though it deliberately renders an empty transcript.
+fn attach_in_flight() -> Model {
+    Model {
+        status: "attaching: session-demo-2".into(),
+        session_id: Some("session-demo-2".into()),
+        transcript: crate::transcript::Transcript::default(),
+        ..attached_empty()
+    }
+}
+
+/// A dropped connection preserves the current conversation while reporting
+/// recovery. It must not regress into the visually unrelated first-boot node.
+fn reconnecting() -> Model {
+    let mut model = attached_empty();
+    model.status = "connection lost; retrying in 500ms".into();
+    model.failure = Some("connection lost; retrying in 500ms".into());
+    model
 }
 
 /// Three frames of the boot reveal: the black opening, the donut half grown,
