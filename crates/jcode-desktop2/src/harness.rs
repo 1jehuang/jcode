@@ -146,7 +146,7 @@ pub fn api_socket_path() -> PathBuf {
 /// desktop2 product focus from this directory, and a session rooted anywhere
 /// else gets an agent that assumes it is working on the TUI. Overridable so a
 /// desktop2 build can be pointed at another project.
-fn default_working_dir() -> Option<String> {
+pub(crate) fn default_working_dir() -> Option<String> {
     if let Some(raw) = std::env::var_os("JCODE_DESKTOP2_WORKING_DIR") {
         let path = PathBuf::from(raw);
         if path.is_dir() {
