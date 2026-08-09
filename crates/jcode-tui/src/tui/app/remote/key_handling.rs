@@ -1666,6 +1666,9 @@ async fn handle_remote_key_internal(
                     // are both orphaned (same rationale as
                     // reset_current_session; side panel is #605).
                     crate::tui::mermaid::clear_active_diagrams();
+                    app.swarm_plan_items.clear();
+                    app.swarm_plan_version = None;
+                    app.swarm_plan_swarm_id = None;
                     super::super::commands_review::clear_side_panel_for_new_session(app);
                     app.is_processing = false;
                     app.status = ProcessingStatus::Idle;

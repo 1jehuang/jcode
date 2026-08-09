@@ -1019,8 +1019,8 @@ fn assert_transcript_clear_leaks_diagram_and_plan_state(
 /// Shared post-clear assertions for the FULL-DISCARD paths: the transcript
 /// and the diagram registry are both wiped (no orphaned diagram can be shown
 /// by the pinned pane or the Margin info widget), while the swarm plan
-/// snapshot fields still survive (a separate pinned staleness).
-fn assert_full_discard_clears_diagrams_but_keeps_plan_state(app: &mut App, path: &str) {
+/// snapshot fields are reset with the discarded session.
+fn assert_full_discard_clears_diagrams_and_plan_state(app: &mut App, path: &str) {
     assert!(
         plan_graph_titles(app).is_empty(),
         "{path}: transcript wiped, no plan-graph message remains"
@@ -1031,9 +1031,11 @@ fn assert_full_discard_clears_diagrams_but_keeps_plan_state(app: &mut App, path:
          (no orphaned diagram survives)"
     );
     assert!(
-        !app.swarm_plan_items.is_empty(),
-        "{path}: STALE STATE (still pinned) - swarm_plan_items persist after the discard"
+        app.swarm_plan_items.is_empty(),
+        "{path}: plan items cleared"
     );
+    assert_eq!(app.swarm_plan_version, None, "{path}: plan version cleared");
+    assert_eq!(app.swarm_plan_swarm_id, None, "{path}: swarm id cleared");
     // With an empty registry the pinned pane has nothing to anchor on.
     app.diagram_index = 0;
     app.sync_diagram_fit_context();
@@ -1047,9 +1049,9 @@ fn assert_full_discard_clears_diagrams_but_keeps_plan_state(app: &mut App, path:
 /// commands_review.rs). A full transcript discard: it now also clears the
 /// process-global ACTIVE_DIAGRAMS registry, so neither the pinned pane nor
 /// the Margin info widget can keep showing a diagram from the old
-/// transcript. The swarm plan snapshot fields remain stale (separate pin).
+/// transcript, including its swarm plan snapshot.
 #[test]
-fn test_local_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state() {
+fn test_local_clear_command_clears_active_diagrams_and_swarm_plan_state() {
     let _render_lock = scroll_render_test_lock();
     let _mode_guard = DiagramModeOverrideGuard::pinned();
     let mut app = create_test_app();
@@ -1064,7 +1066,7 @@ fn test_local_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state() 
 
     assert!(super::commands::handle_session_command(&mut app, "/clear"));
 
-    assert_full_discard_clears_diagrams_but_keeps_plan_state(
+    assert_full_discard_clears_diagrams_and_plan_state(
         &mut app,
         "local /clear (reset_current_session)",
     );
@@ -1198,10 +1200,9 @@ fn test_recover_session_without_tools_leaves_stale_active_diagram_and_swarm_plan
 
 /// Path 4: remote `/clear` (remote/key_handling.rs). A full transcript
 /// discard like path 1: the server session is cleared, so the registry is
-/// re-scoped too. The swarm plan snapshot fields remain stale (unlike the
-/// session-changing History event, which resets them).
+/// re-scoped too, along with the old session's swarm plan snapshot.
 #[test]
-fn test_remote_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state() {
+fn test_remote_clear_command_clears_active_diagrams_and_swarm_plan_state() {
     let _render_lock = scroll_render_test_lock();
     let _mode_guard = DiagramModeOverrideGuard::pinned();
     let mut app = create_test_app();
@@ -1225,7 +1226,7 @@ fn test_remote_clear_command_clears_active_diagrams_but_keeps_swarm_plan_state()
         "remote /clear path executed"
     );
 
-    assert_full_discard_clears_diagrams_but_keeps_plan_state(&mut app, "remote /clear");
+    assert_full_discard_clears_diagrams_and_plan_state(&mut app, "remote /clear");
 
     crate::tui::mermaid::clear_active_diagrams();
 }
