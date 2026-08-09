@@ -813,7 +813,11 @@ fn provider_matrix_env_credentials_activate_openrouter_runtime() -> Result<()> {
             resolved.id
         );
         OpenRouterProvider::new()?;
-        assert_eq!(AuthStatus::check().openrouter, AuthState::Available);
+        assert_eq!(
+            AuthStatus::check().openrouter,
+            AuthState::NotConfigured,
+            "direct compatible runtime must not report native OpenRouter auth"
+        );
 
         jcode::env::remove_var(&resolved.api_key_env);
     }
@@ -842,7 +846,11 @@ fn provider_matrix_file_credentials_activate_openrouter_runtime() -> Result<()> 
             resolved.id
         );
         OpenRouterProvider::new()?;
-        assert_eq!(AuthStatus::check().openrouter, AuthState::Available);
+        assert_eq!(
+            AuthStatus::check().openrouter,
+            AuthState::NotConfigured,
+            "direct compatible runtime must not report native OpenRouter auth"
+        );
 
         std::fs::remove_file(env_file)?;
     }
@@ -891,7 +899,11 @@ fn provider_matrix_custom_compat_overrides_flow_into_runtime() -> Result<()> {
     );
     assert!(jcode::provider::openrouter::has_credentials());
     OpenRouterProvider::new()?;
-    assert_eq!(AuthStatus::check().openrouter, AuthState::Available);
+    assert_eq!(
+        AuthStatus::check().openrouter,
+        AuthState::NotConfigured,
+        "direct compatible runtime must not report native OpenRouter auth"
+    );
 
     Ok(())
 }
@@ -918,7 +930,11 @@ fn provider_matrix_custom_local_compat_without_api_key_activates_openrouter_runt
     );
     assert!(jcode::provider::openrouter::has_credentials());
     OpenRouterProvider::new()?;
-    assert_eq!(AuthStatus::check().openrouter, AuthState::Available);
+    assert_eq!(
+        AuthStatus::check().openrouter,
+        AuthState::NotConfigured,
+        "direct compatible runtime must not report native OpenRouter auth"
+    );
 
     Ok(())
 }
