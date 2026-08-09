@@ -541,10 +541,10 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    if let Some(title) = msg.title.as_deref() {
-        if title == "Connection" {
-            return render_connection_system_message(msg, width);
-        }
+    if let Some(title) = msg.title.as_deref()
+        && title == "Connection"
+    {
+        return render_connection_system_message(msg, width);
     }
 
     if msg
