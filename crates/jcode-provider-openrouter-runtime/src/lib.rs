@@ -1326,7 +1326,7 @@ impl OpenRouterProvider {
             .iter()
             .filter_map(|model| {
                 let id = model.id.trim();
-                if id.is_empty() || model.input.is_empty() {
+                if id.is_empty() {
                     return None;
                 }
                 let supports_images = model
