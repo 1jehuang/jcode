@@ -563,6 +563,55 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
 }
 
 #[test]
+fn test_repository_markdown_link_opens_in_focused_side_panel() {
+    let repository = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repository.path().join("docs")).unwrap();
+    std::fs::write(
+        repository.path().join("docs/guide.md"),
+        "# Repository guide\n",
+    )
+    .unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repository.path().to_string_lossy().into_owned());
+
+    assert!(app.try_open_repository_markdown_link("docs/guide.md#setup"));
+
+    let page = app
+        .side_panel
+        .focused_page()
+        .expect("focused Markdown page");
+    assert_eq!(page.title, "guide.md");
+    assert_eq!(page.content, "# Repository guide\n");
+    assert_eq!(
+        page.source,
+        crate::side_panel::SidePanelPageSource::LinkedFile
+    );
+    assert!(app.diff_pane_focus);
+    assert!(!app.side_panel_user_hidden);
+    assert_eq!(
+        app.status_notice(),
+        Some("Opened Markdown: guide.md".to_string())
+    );
+}
+
+#[test]
+fn test_repository_markdown_link_cannot_escape_working_directory() {
+    let parent = tempfile::tempdir().unwrap();
+    let repository = parent.path().join("repo");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(parent.path().join("outside.md"), "secret").unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(repository.to_string_lossy().into_owned());
+
+    assert!(app.try_open_repository_markdown_link("../outside.md"));
+    assert!(app.side_panel.focused_page().is_none());
+    assert_eq!(
+        app.status_notice(),
+        Some("Refused to open a Markdown file outside the repository".to_string())
+    );
+}
+
+#[test]
 fn test_mouse_click_in_input_moves_cursor_to_clicked_position() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
