@@ -80,6 +80,17 @@ impl ResolvedTokenPricing {
     }
 }
 
+fn remote_provider_is_inherently_billed(provider_name: &str) -> bool {
+    provider_name.contains("opencode")
+        || provider_name.contains("openrouter")
+        || provider_name.contains("bedrock")
+        || provider_name.contains("cerebras")
+        || provider_name.contains("compatible")
+        || crate::provider_catalog::openai_compatible_profile_id_for_display_name(provider_name)
+            .and_then(crate::provider_catalog::openai_compatible_profile_by_id)
+            .is_some_and(|profile| profile.requires_api_key)
+}
+
 /// Update cost calculation based on token usage (for API-key providers)
 impl App {
     pub(super) fn current_streaming_tps_elapsed(&self) -> Duration {
@@ -358,11 +369,7 @@ impl App {
             api_key_billed
         } else {
             // Providers that are inherently cost-based when proxied remotely.
-            provider_name.contains("opencode")
-                || provider_name.contains("openrouter")
-                || provider_name.contains("bedrock")
-                || provider_name.contains("cerebras")
-                || provider_name.contains("compatible")
+            remote_provider_is_inherently_billed(&provider_name)
         };
         if !billed {
             return None;
@@ -553,5 +560,25 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_provider_is_inherently_billed;
+
+    #[test]
+    fn remote_billing_recognizes_deepseek_display_name() {
+        assert!(remote_provider_is_inherently_billed("DeepSeek"));
+    }
+
+    #[test]
+    fn remote_billing_does_not_meter_no_auth_compatible_profiles() {
+        for provider_name in ["LM Studio", "Ollama"] {
+            assert!(
+                !remote_provider_is_inherently_billed(provider_name),
+                "{provider_name} should not be billed per token"
+            );
+        }
     }
 }

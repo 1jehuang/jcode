@@ -541,13 +541,10 @@ pub(crate) fn render_system_message(
     width: u16,
     _diff_mode: crate::config::DiffDisplayMode,
 ) -> Vec<Line<'static>> {
-    if let Some(title) = msg.title.as_deref() {
-        if title == "Reload" {
-            return render_reload_system_message(msg, width);
-        }
-        if title == "Connection" {
-            return render_connection_system_message(msg, width);
-        }
+    if let Some(title) = msg.title.as_deref()
+        && title == "Connection"
+    {
+        return render_connection_system_message(msg, width);
     }
 
     if msg
@@ -2403,52 +2400,6 @@ fn render_scheduled_tool_message(msg: &DisplayMessage, width: u16) -> Option<Vec
         left_pad_lines_for_centered_mode(&mut lines, width);
     }
     Some(lines)
-}
-
-fn render_reload_system_message(msg: &DisplayMessage, width: u16) -> Vec<Line<'static>> {
-    let centered = markdown::center_code_blocks();
-    let border_style = Style::default().fg(rgb(120, 180, 255));
-    let label_style = Style::default().fg(dim_color());
-    let text_style = Style::default().fg(rgb(220, 236, 255));
-    let max_box_width = if centered {
-        (width.saturating_sub(4) as usize).min(96)
-    } else {
-        (width.saturating_sub(2) as usize).min(88)
-    }
-    .max(20);
-    let inner_width = max_box_width.saturating_sub(4).max(1);
-
-    let mut box_content = Vec::new();
-    let mut non_empty_lines = msg
-        .content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .peekable();
-
-    if non_empty_lines.peek().is_none() {
-        box_content.push(Line::from(Span::styled("No reload details.", label_style)));
-    } else {
-        for (idx, line) in non_empty_lines.enumerate() {
-            if idx > 0 {
-                box_content.push(Line::from(""));
-            }
-            for chunk in split_by_display_width(line, inner_width) {
-                box_content.push(Line::from(Span::styled(chunk, text_style)));
-            }
-        }
-    }
-
-    let mut lines = render_rounded_box(
-        width_stable_system_title("⚡ reload", "reload"),
-        box_content,
-        max_box_width,
-        border_style,
-    );
-    if centered {
-        left_pad_lines_for_centered_mode(&mut lines, width);
-    }
-    lines
 }
 
 fn split_resume_hint(detail: &str) -> (&str, Option<&str>) {

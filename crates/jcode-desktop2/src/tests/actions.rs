@@ -1399,6 +1399,31 @@ fn ctrl_plus_and_minus_change_the_ui_zoom() {
     assert_eq!(app.geometry.zoom, start, "ctrl+0 did not reset the zoom");
 }
 
+#[test]
+fn ctrl_alt_shift_arrows_resize_only_the_session_panel() {
+    let mut app = App::default();
+    let window_zoom = app.geometry.zoom;
+    let initial = app.model.workspace.column_width(1000, 3);
+
+    press(
+        &mut app,
+        Key::Named(NamedKey::ArrowRight),
+        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
+        None,
+    );
+    assert!(app.model.workspace.column_width(1000, 3) > initial);
+    assert_eq!(app.geometry.zoom, window_zoom, "panel resize changed UI zoom");
+
+    press(
+        &mut app,
+        Key::Named(NamedKey::ArrowLeft),
+        ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT,
+        None,
+    );
+    assert_eq!(app.model.workspace.column_width(1000, 3), initial);
+    assert_eq!(app.geometry.zoom, window_zoom, "panel resize changed UI zoom");
+}
+
 /// Zoom is bounded on both sides: unreadably small and absurdly large are both
 /// states a user cannot get out of by eye.
 #[test]

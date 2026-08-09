@@ -166,27 +166,13 @@ impl App {
                         downloaded,
                         total,
                     });
-                self.set_status_notice(format!("Updating to {}... {}", version, progress));
-                self.set_client_maintenance_message(
-                    action,
-                    Self::client_maintenance_card_message(
-                        action,
-                        format!("downloading {}\n{}", version, progress),
-                        "jcode will reload in place (input preserved) when the update is ready.",
-                    ),
-                );
+                self.set_status_notice(format!("↑ {} · {}", version, progress));
+                self.remove_client_maintenance_message(action);
             }
             UpdateStatus::Installing { version } => {
                 self.background_client_action = Some(action);
-                self.set_status_notice(format!("Installing {}...", version));
-                self.set_client_maintenance_message(
-                    action,
-                    Self::client_maintenance_card_message(
-                        action,
-                        format!("installing {}", version),
-                        "jcode will restart automatically when the update is ready.",
-                    ),
-                );
+                self.set_status_notice(format!("↑ {} · preparing", version));
+                self.remove_client_maintenance_message(action);
             }
             UpdateStatus::Installed { version } => {
                 self.background_client_action = None;
@@ -238,6 +224,18 @@ impl App {
             return false;
         }
 
+        // Downloading and installation are entirely background work. Once the
+        // replacement is ready, do not take the terminal away while the user is
+        // typing. The tick loop retries as soon as this small quiet window ends.
+        const RELOAD_TYPING_QUIET_WINDOW: std::time::Duration =
+            std::time::Duration::from_millis(1200);
+        if self
+            .last_user_interaction
+            .is_some_and(|activity| activity.elapsed() < RELOAD_TYPING_QUIET_WINDOW)
+        {
+            return false;
+        }
+
         let Some((session_id, action)) = self.pending_background_client_reload.take() else {
             return false;
         };
@@ -251,6 +249,12 @@ impl App {
             ),
         );
         self.save_input_for_reload(&session_id);
+        #[cfg(not(test))]
+        if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            // Survives exec and lets the replacement measure the complete period
+            // from the old client's final interactive state to its first frame.
+            crate::env::set_var("JCODE_RELOAD_GAP_STARTED_MS", now.as_millis().to_string());
+        }
         self.reload_requested = Some(session_id);
         self.should_quit = true;
         true
@@ -340,7 +344,10 @@ impl App {
                     Self::client_maintenance_card_message(action, ready_message, "Reloading now."),
                 );
                 self.pending_background_client_reload = Some((session_id, action));
-                self.maybe_finish_background_client_reload();
+                if !self.maybe_finish_background_client_reload() {
+                    self.set_status_notice(format!("↑ {} ready · reloads when idle", version));
+                    self.remove_client_maintenance_message(action);
+                }
             }
             SessionUpdateStatus::Error {
                 session_id,

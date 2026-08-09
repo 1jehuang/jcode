@@ -16,6 +16,10 @@
 /// strip is split between the adjacent sessions so they are always
 /// discoverable.
 const COLUMN_FRACTION: f64 = 0.76;
+const COLUMN_FRACTION_UNITS: u16 = 760;
+const MIN_COLUMN_FRACTION_UNITS: u16 = 400;
+const MAX_COLUMN_FRACTION_UNITS: u16 = 1000;
+const COLUMN_RESIZE_STEP_UNITS: u16 = 50;
 /// Space between session pages, in logical pixels.
 pub const GAP: f64 = 14.0;
 /// Breathing room above and below every page while the workspace chrome is
@@ -78,6 +82,9 @@ pub struct Workspace {
     prev_row: Vec<String>,
     /// Which column of the departing row was focused, so it exits centered.
     prev_focused: usize,
+    /// Width of the focused session page in thousandths of the viewport.
+    /// This changes the child page only; the containing OS window is untouched.
+    column_fraction: u16,
 }
 
 impl Default for Workspace {
@@ -87,6 +94,7 @@ impl Default for Workspace {
             side_bias: Direction::Right,
             prev_row: Vec::new(),
             prev_focused: 0,
+            column_fraction: COLUMN_FRACTION_UNITS,
         }
     }
 }
@@ -126,6 +134,29 @@ impl Column {
 }
 
 impl Workspace {
+    /// Grow or shrink the focused session page. Returns whether it changed.
+    pub fn resize_column(&mut self, grow: bool) -> bool {
+        let previous = self.column_fraction;
+        self.column_fraction = if grow {
+            self.column_fraction.saturating_add(COLUMN_RESIZE_STEP_UNITS)
+        } else {
+            self.column_fraction.saturating_sub(COLUMN_RESIZE_STEP_UNITS)
+        }
+        .clamp(MIN_COLUMN_FRACTION_UNITS, MAX_COLUMN_FRACTION_UNITS);
+        self.column_fraction != previous
+    }
+
+    pub fn column_percent(&self) -> u16 {
+        self.column_fraction / 10
+    }
+
+    pub fn column_width(&self, viewport_width: u32, session_count: usize) -> u32 {
+        if session_count <= 1 {
+            return viewport_width;
+        }
+        ((u64::from(viewport_width) * u64::from(self.column_fraction) + 500) / 1000) as u32
+    }
+
     /// Start a horizontal camera move after the strip has moved focus to its
     /// destination. At phase zero the old neighbor is still centered and the
     /// new focused page starts one pitch away; the offset then eases to zero.
@@ -338,7 +369,7 @@ pub fn placement(
         .map(|i| bases[group] + i)
         .collect();
     let current = RowSpec {
-        column_width: f64::from(column_width(viewport.0.round() as u32, row.len())),
+        column_width: f64::from(workspace.column_width(viewport.0.round() as u32, row.len())),
         focused_pos: pos,
         indices: row,
     };
@@ -351,7 +382,7 @@ pub fn placement(
                 .filter_map(|id| locate(id).map(|(g, i)| bases[g] + i))
                 .collect();
             RowSpec {
-                column_width: f64::from(column_width(viewport.0.round() as u32, indices.len())),
+                column_width: f64::from(workspace.column_width(viewport.0.round() as u32, indices.len())),
                 focused_pos: prev_focused.min(indices.len().saturating_sub(1)),
                 indices,
             }
@@ -410,6 +441,21 @@ mod tests {
         assert_eq!(column_width(1000, 0), 1000);
         assert_eq!(column_width(1000, 1), 1000);
         assert_eq!(column_width(1000, 3), 760);
+    }
+
+    #[test]
+    fn resized_panel_width_survives_focus_transitions() {
+        let mut workspace = Workspace::default();
+        assert!(workspace.resize_column(true));
+        let resized = workspace.column_width(1000, 3);
+
+        workspace.begin(Direction::Right);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+        workspace.advance(TRANSITION_SECONDS);
+        assert_eq!(workspace.column_width(1000, 3), resized);
+
+        workspace.begin_row_change(Direction::Down, vec!["old".into()], 0);
+        assert_eq!(workspace.column_width(1000, 3), resized);
     }
 
     #[test]
