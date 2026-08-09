@@ -51,10 +51,14 @@ pub(super) fn plan_launch_notice(goal: Option<&str>, interrupted: bool) -> Strin
     } else {
         "🧭 Planning"
     };
-    match goal.map(str::trim).filter(|goal| !goal.is_empty()) {
+    let notice = match goal.map(str::trim).filter(|goal| !goal.is_empty()) {
         Some(goal) => format!("{} {}... (plan-only; no edits)", prefix, goal),
         None => format!("{}... (plan-only; no edits)", prefix),
-    }
+    };
+    format!(
+        "{}\nNote: It is better to talk with your agent until it understands what you mean than to make a plan too early.",
+        notice
+    )
 }
 
 pub(super) fn handle_plan_command_local(app: &mut App, command: PlanCommand) {
@@ -114,5 +118,16 @@ mod tests {
 
         let bare = build_plan_prompt(None);
         assert!(bare.contains("currently in focus in this session"));
+    }
+
+    #[test]
+    fn launch_notice_encourages_conversation_before_planning() {
+        let notice = plan_launch_notice(Some("ship feature x"), false);
+        assert!(notice.contains("Planning ship feature x"));
+        assert!(
+            notice.contains(
+                "It is better to talk with your agent until it understands what you mean"
+            )
+        );
     }
 }
