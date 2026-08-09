@@ -360,7 +360,7 @@ pub(super) fn draw_messages(
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
     // Pinned todo band (display.pin_todos): the full todo card rendered beneath
-    // the sticky previous-prompt preview while the transcript is scrolled.
+    // the sticky previous-prompt preview, including at the top of the transcript.
     let pinned_todo_band = pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
@@ -412,11 +412,7 @@ pub(super) fn draw_messages(
     } else {
         0u16
     };
-    let pinned_todo_lines = if scroll > 0 {
-        pinned_todo_band.len() as u16
-    } else {
-        0u16
-    };
+    let pinned_todo_lines = pinned_todo_band.len() as u16;
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;
