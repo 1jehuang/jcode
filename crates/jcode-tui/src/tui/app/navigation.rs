@@ -323,6 +323,7 @@ impl App {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn try_open_link_at_with<F, E>(
         &mut self,
         column: u16,
