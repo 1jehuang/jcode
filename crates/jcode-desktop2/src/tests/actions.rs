@@ -1412,7 +1412,10 @@ fn ctrl_alt_shift_arrows_resize_only_the_session_panel() {
         None,
     );
     assert!(app.model.workspace.column_width(1000, 3) > initial);
-    assert_eq!(app.geometry.zoom, window_zoom, "panel resize changed UI zoom");
+    assert_eq!(
+        app.geometry.zoom, window_zoom,
+        "panel resize changed UI zoom"
+    );
 
     press(
         &mut app,
@@ -1421,7 +1424,10 @@ fn ctrl_alt_shift_arrows_resize_only_the_session_panel() {
         None,
     );
     assert_eq!(app.model.workspace.column_width(1000, 3), initial);
-    assert_eq!(app.geometry.zoom, window_zoom, "panel resize changed UI zoom");
+    assert_eq!(
+        app.geometry.zoom, window_zoom,
+        "panel resize changed UI zoom"
+    );
 }
 
 /// Zoom is bounded on both sides: unreadably small and absurdly large are both

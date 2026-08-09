@@ -138,9 +138,11 @@ impl Workspace {
     pub fn resize_column(&mut self, grow: bool) -> bool {
         let previous = self.column_fraction;
         self.column_fraction = if grow {
-            self.column_fraction.saturating_add(COLUMN_RESIZE_STEP_UNITS)
+            self.column_fraction
+                .saturating_add(COLUMN_RESIZE_STEP_UNITS)
         } else {
-            self.column_fraction.saturating_sub(COLUMN_RESIZE_STEP_UNITS)
+            self.column_fraction
+                .saturating_sub(COLUMN_RESIZE_STEP_UNITS)
         }
         .clamp(MIN_COLUMN_FRACTION_UNITS, MAX_COLUMN_FRACTION_UNITS);
         self.column_fraction != previous
@@ -382,7 +384,9 @@ pub fn placement(
                 .filter_map(|id| locate(id).map(|(g, i)| bases[g] + i))
                 .collect();
             RowSpec {
-                column_width: f64::from(workspace.column_width(viewport.0.round() as u32, indices.len())),
+                column_width: f64::from(
+                    workspace.column_width(viewport.0.round() as u32, indices.len()),
+                ),
                 focused_pos: prev_focused.min(indices.len().saturating_sub(1)),
                 indices,
             }
