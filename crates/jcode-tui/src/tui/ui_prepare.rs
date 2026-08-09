@@ -664,7 +664,11 @@ pub(super) fn prepare_messages(
         width,
         height,
         diff_mode: app.diff_mode(),
-        messages_version: app.display_messages_version(),
+        // Pinning changes which tool messages participate in the transcript.
+        messages_version: app
+            .display_messages_version()
+            .wrapping_mul(2)
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -1109,7 +1113,11 @@ fn prepare_body_cached(app: &dyn TuiState, width: u16) -> Arc<PreparedMessages> 
     let key = BodyCacheKey {
         width,
         diff_mode: app.diff_mode(),
-        messages_version: app.display_messages_version(),
+        // Pinning changes which tool messages participate in the transcript.
+        messages_version: app
+            .display_messages_version()
+            .wrapping_mul(2)
+            .wrapping_add(u64::from(crate::config::config().display.pin_todos)),
         diagram_mode: app.diagram_mode(),
         centered: app.centered_mode(),
         mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
@@ -1370,6 +1378,18 @@ fn render_message_into(
     let centered = ctx.centered;
     let app = ctx.app;
     let role = msg.effective_role();
+    // The pinned band is the canonical todo presentation while enabled. Keep
+    // todo tool messages in display_messages for history/session fidelity, but
+    // omit their duplicate cards from the prepared transcript.
+    if role == "tool"
+        && crate::config::config().display.pin_todos
+        && msg
+            .tool_data
+            .as_ref()
+            .is_some_and(|tool| tools_ui::canonical_tool_name(&tool.name) == "todo")
+    {
+        return;
+    }
     let align = default_message_alignment(role, centered);
 
     if (acc.body_has_content || !acc.lines.is_empty())
