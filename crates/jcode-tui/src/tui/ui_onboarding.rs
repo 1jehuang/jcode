@@ -538,7 +538,7 @@ fn welcome_body_lines(app: &dyn TuiState) -> Vec<Line<'static>> {
                     lines.push(import_summary_pills_line(prompt.summary_pill, align));
                     lines.push(
                         Line::from(Span::styled(
-                            "$10 → $20 inference, $20 → $40; then provider API prices. Scales through Solo.",
+                            "$10 to $20 inference, $20 to $40; then provider API prices. Scales through Solo.",
                             Style::default().fg(dim_color()),
                         ))
                         .alignment(align),
