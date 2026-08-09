@@ -425,7 +425,11 @@ fn harmless_command_operands_are_not_redirect_targets() {
         "printf '%s\\n' /home/u/.ssh/id_ed25519 >/tmp/list",
     ] {
         let assessment = assess(command, &ctx());
-        assert_eq!(assessment.level, RiskLevel::Safe, "{command}: {assessment:#?}");
+        assert_eq!(
+            assessment.level,
+            RiskLevel::Safe,
+            "{command}: {assessment:#?}"
+        );
     }
 }
 
