@@ -740,7 +740,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                     && route.api_method == crate::subscription_catalog::JCODE_ROUTE_API_METHOD
             })
             .collect::<Vec<_>>();
-        assert_eq!(jcode_routes.len(), 3);
+        assert_eq!(jcode_routes.len(), 4);
         assert_eq!(
             jcode_routes
                 .iter()
@@ -748,6 +748,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                 .collect::<std::collections::BTreeSet<_>>(),
             std::collections::BTreeSet::from([
                 "claude-opus-4-8",
+                "claude-fable-5",
                 "gpt-5.5",
                 "gpt-5.6-sol",
             ])
@@ -760,7 +761,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
             route.provider != crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME
                 || matches!(
                     route.model.as_str(),
-                    "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
+                    "claude-fable-5" | "claude-opus-4-8" | "gpt-5.5" | "gpt-5.6-sol"
                 )
         }));
     });
