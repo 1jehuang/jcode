@@ -1,7 +1,7 @@
 {
-  "total": 3243,
+  "total": 3248,
   "totals_by_pattern": {
-    "dot_ok": 1213,
+    "dot_ok": 1218,
     "let_underscore": 1202,
     "unwrap_or_default": 828
   },
@@ -1997,7 +1997,7 @@
       "unwrap_or_default": 6
     },
     "crates/jcode-tui/src/tui/app/navigation.rs": {
-      "dot_ok": 0,
+      "dot_ok": 2,
       "let_underscore": 0,
       "unwrap_or_default": 1
     },
@@ -2052,7 +2052,7 @@
       "unwrap_or_default": 0
     },
     "crates/jcode-tui/src/tui/app/run_shell.rs": {
-      "dot_ok": 0,
+      "dot_ok": 1,
       "let_underscore": 1,
       "unwrap_or_default": 0
     },
@@ -2417,7 +2417,7 @@
       "unwrap_or_default": 0
     },
     "src/cli/provider_init.rs": {
-      "dot_ok": 2,
+      "dot_ok": 4,
       "let_underscore": 14,
       "unwrap_or_default": 0
     },
