@@ -189,12 +189,19 @@ fn detect_terminal_theme() -> Option<ThemeMode> {
     // OSC support but never replies (multiplexers, remote shells), so keep it
     // far below the perceptible-stall threshold.
     options.timeout = std::time::Duration::from_millis(120);
-    match terminal_colorsaurus::theme_mode(options) {
-        Ok(terminal_colorsaurus::ThemeMode::Light) => {
+    // Ask for only OSC 11. `theme_mode` queries both OSC 10 (foreground) and
+    // OSC 11 (background); on some terminals the two replies can be split far
+    // enough apart that the query consumes one and crossterm later decodes the
+    // other as ordinary keys. That produces composer garbage such as
+    // `10;rgb:cdcd/d6d6/f4f4\\11;rgb:0000/0000/0000\\` at startup. Background
+    // lightness is all our renderer needs, and a single request has no second
+    // reply that can escape into the event reader.
+    match terminal_colorsaurus::background_color(options) {
+        Ok(background) if background.perceived_lightness() > 0.5 => {
             crate::logging::info("Detected light terminal background; adapting theme");
             Some(ThemeMode::Light)
         }
-        Ok(terminal_colorsaurus::ThemeMode::Dark) => Some(ThemeMode::Dark),
+        Ok(_) => Some(ThemeMode::Dark),
         Err(e) => {
             if matches!(e, terminal_colorsaurus::Error::Timeout(_)) {
                 cache_silent_terminal_at(
