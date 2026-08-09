@@ -1934,6 +1934,31 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
 }
 
 #[test]
+fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_favorite() {
+    with_temp_jcode_home(|| {
+        let model = "placeholder-favorite-hotkey-model";
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("Some Server".to_string());
+        app.remote_provider_model = Some(model.to_string());
+        app.remote_available_entries = vec![model.to_string()];
+        app.remote_model_options = vec![crate::provider::ModelRoute {
+            model: model.to_string(),
+            provider: "Some Server".to_string(),
+            api_method: "remote-catalog".to_string(),
+            available: true,
+            detail: "refreshing route details…".to_string(),
+            cheapness: None,
+        }];
+
+        app.cycle_model_favorite_hotkey();
+
+        assert!(app.inline_interactive_state.is_some());
+        assert!(app.pending_model_switch.is_none());
+    });
+}
+
+#[test]
 fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
     // A picker opened while the catalog is still names-only shows placeholder
     // rows. When the detailed catalog lands, the open picker must be rebuilt
