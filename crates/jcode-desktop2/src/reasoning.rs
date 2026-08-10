@@ -22,9 +22,9 @@
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ReasoningMode {
     Off,
+    #[default]
     Full,
     /// Show only the live thought, trimmed to its current paragraph.
-    #[default]
     Current,
 }
 
@@ -72,9 +72,7 @@ impl ReasoningMode {
         if let Some(mode) = env_override.and_then(Self::parse) {
             return mode;
         }
-        config_text
-            .and_then(configured_mode)
-            .unwrap_or(Self::Current)
+        config_text.and_then(configured_mode).unwrap_or(Self::Full)
     }
 }
 
@@ -136,11 +134,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_is_live_thinking() {
-        assert_eq!(ReasoningMode::resolve(None, None), ReasoningMode::Current);
+    fn the_default_shows_full_thinking() {
+        assert_eq!(ReasoningMode::resolve(None, None), ReasoningMode::Full);
         assert_eq!(
             ReasoningMode::resolve(None, Some("[display]\nemoji = true\n")),
-            ReasoningMode::Current
+            ReasoningMode::Full
         );
     }
 
