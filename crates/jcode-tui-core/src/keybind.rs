@@ -298,6 +298,12 @@ fn normalize_key(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifie
     {
         return (KeyCode::Char(c.to_ascii_lowercase()), modifiers);
     }
+    // Legacy terminal input commonly reports Shift+; as the produced ':'
+    // character and omits the SHIFT modifier. Normalize it to the physical key
+    // encoding used by configured bindings and the Kitty keyboard protocol.
+    if code == KeyCode::Char(':') {
+        return (KeyCode::Char(';'), modifiers | KeyModifiers::SHIFT);
+    }
     (code, modifiers)
 }
 
@@ -593,6 +599,18 @@ mod tests {
             binding.matches_for_platform(code, mods, true),
             "Cmd+Shift+; kitty sequence must trigger the new_terminal binding"
         );
+    }
+
+    #[test]
+    fn legacy_alt_shift_semicolon_sequence_matches_new_terminal_binding() {
+        // Legacy terminals may report Alt+Shift+; as the produced ':' character
+        // with ALT set but without an explicit SHIFT modifier.
+        let binding = parse_keybinding("alt+shift+;").expect("alt+shift+; parses");
+        assert!(binding.matches(KeyCode::Char(':'), KeyModifiers::ALT));
+        assert!(binding.matches(
+            KeyCode::Char(';'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT
+        ));
     }
 
     #[test]
