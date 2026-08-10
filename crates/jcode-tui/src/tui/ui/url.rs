@@ -9,6 +9,13 @@ pub(crate) fn url_regex() -> Option<&'static Regex> {
         .as_ref()
 }
 
+fn markdown_link_regex() -> Option<&'static Regex> {
+    static MARKDOWN_LINK_REGEX: OnceLock<Option<Regex>> = OnceLock::new();
+    MARKDOWN_LINK_REGEX
+        .get_or_init(|| Regex::new(r#"\[([^]\n]+)\]\(([^\s)]+)(?:\s+[^)]*)?\)"#).ok())
+        .as_ref()
+}
+
 pub(crate) fn trim_url_candidate(candidate: &str) -> &str {
     let mut trimmed = candidate;
     loop {
@@ -33,6 +40,19 @@ pub(crate) fn trim_url_candidate(candidate: &str) -> &str {
 }
 
 pub(crate) fn link_target_for_display_column(raw_text: &str, column: usize) -> Option<String> {
+    if let Some(regex) = markdown_link_regex() {
+        for captures in regex.captures_iter(raw_text) {
+            let (Some(label), Some(target)) = (captures.get(1), captures.get(2)) else {
+                continue;
+            };
+            let start_col = raw_text[..label.start()].width();
+            let end_col = start_col + label.as_str().width();
+            if column >= start_col && column < end_col {
+                return Some(target.as_str().to_string());
+            }
+        }
+    }
+
     for mat in url_regex()?.find_iter(raw_text) {
         let matched = &raw_text[mat.start()..mat.end()];
         let trimmed = trim_url_candidate(matched);
@@ -133,5 +153,16 @@ mod tests {
             Some("https://example.com".to_string())
         );
         assert_eq!(link_target_for_display_column(text, 1), None);
+    }
+
+    #[test]
+    fn link_target_for_display_column_resolves_markdown_label() {
+        let text = "Read the [guide](docs/guide.md#setup) today";
+
+        assert_eq!(
+            link_target_for_display_column(text, 10),
+            Some("docs/guide.md#setup".to_string())
+        );
+        assert_eq!(link_target_for_display_column(text, 8), None);
     }
 }

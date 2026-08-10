@@ -564,6 +564,7 @@ fn test_try_open_link_at_opens_clicked_url_and_sets_notice() {
 
 #[test]
 fn test_repository_markdown_link_opens_in_focused_side_panel() {
+    let _render_lock = scroll_render_test_lock();
     let repository = tempfile::tempdir().unwrap();
     std::fs::create_dir(repository.path().join("docs")).unwrap();
     std::fs::write(
@@ -573,8 +574,23 @@ fn test_repository_markdown_link_opens_in_focused_side_panel() {
     .unwrap();
     let mut app = create_test_app();
     app.session.working_dir = Some(repository.path().to_string_lossy().into_owned());
+    crate::tui::ui::clear_copy_viewport_snapshot();
+    crate::tui::ui::record_copy_viewport_snapshot(
+        std::sync::Arc::new(vec!["Read the guide".to_string()]),
+        std::sync::Arc::new(vec![0]),
+        std::sync::Arc::new(vec!["Read the [guide](docs/guide.md#setup)".to_string()]),
+        std::sync::Arc::new(vec![crate::tui::ui::WrappedLineMap {
+            raw_line: 0,
+            start_col: 0,
+            end_col: 40,
+        }]),
+        0,
+        1,
+        Rect::new(0, 0, 80, 5),
+        &[0],
+    );
 
-    assert!(app.try_open_repository_markdown_link("docs/guide.md#setup"));
+    assert!(app.try_open_link_at(10, 0));
 
     let page = app
         .side_panel
