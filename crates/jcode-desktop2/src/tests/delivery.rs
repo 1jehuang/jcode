@@ -92,7 +92,7 @@ fn the_harness_acceptance_update_promotes_the_message() {
     let mut app = app_with_session();
     let (updates, update_rx) = std::sync::mpsc::channel();
     let (commands, _command_rx) = std::sync::mpsc::channel();
-    app.harness = Some((update_rx, commands));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
     app.apply(Action::Insert, Some("hello"));
     app.apply(Action::Submit, None);
     updates
@@ -208,7 +208,7 @@ fn a_message_typed_mid_turn_is_queued_not_sent() {
     let mut app = app_with_session();
     let (_updates, update_rx) = std::sync::mpsc::channel();
     let (commands, command_rx) = std::sync::mpsc::channel();
-    app.harness = Some((update_rx, commands));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
 
     app.apply(Action::Insert, Some("first"));
     app.apply(Action::Submit, None);
@@ -238,7 +238,7 @@ fn the_turn_ending_sends_the_oldest_queued_message() {
     let mut app = app_with_session();
     let (updates, update_rx) = std::sync::mpsc::channel();
     let (commands, command_rx) = std::sync::mpsc::channel();
-    app.harness = Some((update_rx, commands));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
 
     app.apply(Action::Insert, Some("first"));
     app.apply(Action::Submit, None);
@@ -282,7 +282,7 @@ fn a_failure_also_flushes_the_queue() {
     let mut app = app_with_session();
     let (updates, update_rx) = std::sync::mpsc::channel();
     let (commands, command_rx) = std::sync::mpsc::channel();
-    app.harness = Some((update_rx, commands));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
 
     app.apply(Action::Insert, Some("first"));
     app.apply(Action::Submit, None);
@@ -311,7 +311,7 @@ fn streamed_text_lands_above_queued_messages() {
     let mut app = app_with_session();
     let (updates, update_rx) = std::sync::mpsc::channel();
     let (commands, _command_rx) = std::sync::mpsc::channel();
-    app.harness = Some((update_rx, commands));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
 
     app.apply(Action::Insert, Some("first"));
     app.apply(Action::Submit, None);

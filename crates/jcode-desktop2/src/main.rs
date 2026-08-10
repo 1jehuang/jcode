@@ -98,7 +98,7 @@ struct App {
     state: Option<render::RenderState>,
     painter: paint::Painter,
     model: Model,
-    harness: Option<(Receiver<harness::HarnessUpdate>, Sender<harness::Command>)>,
+    harness: Option<(Receiver<harness::HarnessUpdate>, harness::CommandSender)>,
     /// Latest modifier state; winit reports it separately from key events.
     modifiers: winit::keyboard::ModifiersState,
     /// When Super went down with nothing else pressed since, or `None` when

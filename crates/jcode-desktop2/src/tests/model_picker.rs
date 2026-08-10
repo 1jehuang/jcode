@@ -17,7 +17,7 @@ fn app() -> (
     });
     let (update_tx, update_rx) = channel();
     let (command_tx, command_rx) = channel();
-    app.harness = Some((update_rx, command_tx));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(command_tx)));
     (app, update_tx, command_rx)
 }
 

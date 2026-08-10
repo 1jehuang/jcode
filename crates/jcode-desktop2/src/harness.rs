@@ -12,9 +12,9 @@
 
 use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient, LaunchOptions};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Failure wording and connection-stage reporting are the SDK's, so the app
@@ -117,6 +117,37 @@ pub enum Command {
     SetModel(String),
 }
 
+/// UI handle for commands sent to the harness worker.
+///
+/// New-session is a lifecycle interrupt, not an ordinary ordered request. If it
+/// sits behind a slow attach/model request in the command queue, the UI clears
+/// its page and then waits forever for a command the worker cannot reach. Keep
+/// that one signal out-of-band; ordinary sends and attaches retain FIFO order.
+#[derive(Clone)]
+pub struct CommandSender {
+    tx: Sender<Command>,
+    new_requested: Arc<AtomicBool>,
+}
+
+impl CommandSender {
+    #[cfg(test)]
+    pub(crate) fn for_test(tx: Sender<Command>) -> Self {
+        Self {
+            tx,
+            new_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn send(&self, command: Command) -> Result<(), std::sync::mpsc::SendError<Command>> {
+        if matches!(command, Command::New) {
+            self.new_requested.store(true, Ordering::Release);
+            Ok(())
+        } else {
+            self.tx.send(command)
+        }
+    }
+}
+
 /// A handle every worker thread can use to reach the UI.
 ///
 /// The connection worker, the command thread and the session poller all
@@ -181,9 +212,14 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 /// one behind their back.
 pub fn spawn(
     redraw: impl Fn() + Send + Sync + 'static,
-) -> (Receiver<HarnessUpdate>, Sender<Command>) {
+) -> (Receiver<HarnessUpdate>, CommandSender) {
     let (update_tx, update_rx) = channel::<HarnessUpdate>();
     let (outgoing_tx, outgoing_rx) = channel::<Command>();
+    let new_requested = Arc::new(AtomicBool::new(false));
+    let commands = CommandSender {
+        tx: outgoing_tx,
+        new_requested: Arc::clone(&new_requested),
+    };
     let ui = Ui {
         updates: update_tx,
         redraw: Arc::new(redraw),
@@ -193,7 +229,6 @@ pub fn spawn(
         // and the session to re-attach to has to be remembered.
         let outgoing = Arc::new(Mutex::new(outgoing_rx));
         let resume = Arc::new(Mutex::new(String::new()));
-        let new_requested = Arc::new(AtomicBool::new(false));
         let mut backoff = RECONNECT_BACKOFF;
         loop {
             // Where the attempt got to, and when the stream came up: both are
@@ -249,7 +284,7 @@ pub fn spawn(
             backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
         }
     });
-    (update_rx, outgoing_tx)
+    (update_rx, commands)
 }
 
 /// One connection attempt: connect, attach, then stream until it dies.
@@ -478,6 +513,9 @@ fn run(
 
     loop {
         if new_requested.load(Ordering::Acquire) {
+            if let Ok(mut guard) = resume.lock() {
+                guard.clear();
+            }
             return Ok(());
         }
         let Some(event) = events.next_timeout(Duration::from_millis(25)) else {
@@ -605,6 +643,31 @@ fn run(
     }
     // The event stream only ends when the connection does.
     Ok(())
+}
+
+#[cfg(test)]
+mod command_sender_tests {
+    use super::*;
+
+    #[test]
+    fn new_session_bypasses_an_occupied_command_queue() {
+        let (tx, rx) = channel();
+        let new_requested = Arc::new(AtomicBool::new(false));
+        let commands = CommandSender {
+            tx,
+            new_requested: Arc::clone(&new_requested),
+        };
+
+        commands.send(Command::ListModels).unwrap();
+        commands.send(Command::New).unwrap();
+
+        assert!(new_requested.load(Ordering::Acquire));
+        assert!(matches!(rx.try_recv(), Ok(Command::ListModels)));
+        assert!(
+            rx.try_recv().is_err(),
+            "New must not wait in the FIFO queue"
+        );
+    }
 }
 
 /// A session-list entry, sized for the overview.
