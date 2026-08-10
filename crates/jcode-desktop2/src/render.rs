@@ -163,7 +163,7 @@ impl RenderState {
         &mut self,
         scene: &Scene,
         meter: &mut crate::frame_meter::FrameMeter,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         meter.start();
         let (width, height) = self.size();
         self.renderer
@@ -184,7 +184,7 @@ impl RenderState {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             // Skip this frame; the next resize/redraw will recover.
-            _ => return Ok(()),
+            _ => return Ok(false),
         };
         let mut encoder = self
             .device
@@ -208,7 +208,7 @@ impl RenderState {
         meter.start();
         surface_texture.present();
         meter.end_present();
-        Ok(())
+        Ok(true)
     }
 }
 
