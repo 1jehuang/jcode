@@ -68,12 +68,18 @@ pub fn describe_disconnect(
     socket_state: SocketState,
 ) -> String {
     let lower = error.to_ascii_lowercase();
+    let daemon_closed = lower.contains("daemon connection closed");
     let stream_closed = lower.contains("harness api stream closed")
         || lower.contains("harness connection closed")
         || lower.contains("the harness closed the connection")
         || lower.contains("broken pipe")
         || lower.contains("connection reset");
-    let cause = if stream_closed {
+    let cause = if daemon_closed {
+        format!(
+            "the jcode runtime connection closed while {} (the bridge is still available and will reconnect)",
+            stage.doing()
+        )
+    } else if stream_closed {
         match socket_state {
             // The socket answers but our stream is gone: the bridge we were
             // talking to is not the one on the pathname any more, which is

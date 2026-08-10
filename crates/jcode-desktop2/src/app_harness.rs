@@ -19,6 +19,15 @@ impl App {
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
+                harness::HarnessUpdate::ConnectionLost(message) => {
+                    // The harness worker reattaches automatically. Keep the
+                    // transcript and in-flight turn intact while it does so.
+                    // Turning this into `Failed` used to add two scary error
+                    // cards for one routine daemon reload.
+                    self.model.status = message;
+                    self.model
+                        .set_notice("connection interrupted, reconnecting");
+                }
                 // A failure goes into the conversation, not only the status
                 // line: the status line is suppressed once a session is
                 // attached, which is exactly when a failed turn happens, so a

@@ -422,6 +422,9 @@ fn run_e2e(message: &str) -> Result<()> {
             harness::HarnessUpdate::Failed(message) => {
                 anyhow::bail!("harness failure: {message}");
             }
+            harness::HarnessUpdate::ConnectionLost(message) => {
+                anyhow::bail!("harness connection lost: {message}");
+            }
             harness::HarnessUpdate::Attached { session_id, .. } => {
                 println!("[e2e] attached: {session_id}");
                 model.status = format!("attached: {session_id}");
