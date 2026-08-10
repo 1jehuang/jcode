@@ -132,7 +132,7 @@ pin_images = true
 
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
-# pin_todos = false
+# pin_todos = true
 
 # Wrap long lines in the pinned diff pane (default: true)
 # Set to false for horizontal scrolling instead of wrapping
