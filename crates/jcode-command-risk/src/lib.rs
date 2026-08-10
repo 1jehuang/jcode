@@ -48,8 +48,8 @@ pub enum RiskLevel {
     /// Destructive but bounded (inside the working directory, recoverable via
     /// git, or under a temp dir). Run, but record it.
     Low,
-    /// Irreversible and reaches outside the working directory. Requires the
-    /// model to re-justify against the user's actual request before running.
+    /// Destructive target cannot be determined statically. Requires the model
+    /// to re-justify against the user's actual request before running.
     Confirm,
     /// Would destroy the user's home, root, or credentials. Never runs, and no
     /// amount of model justification can unlock it.

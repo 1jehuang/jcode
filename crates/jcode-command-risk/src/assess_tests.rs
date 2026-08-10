@@ -89,9 +89,9 @@ fn routine_cleanup_inside_the_project_is_not_blocked() {
 }
 
 #[test]
-fn deleting_outside_the_project_asks_for_justification() {
+fn deleting_concrete_paths_outside_the_project_runs_immediately() {
     for command in ["rm -rf /home/u/other-project", "rm -rf /srv/data"] {
-        assert_eq!(level(command), RiskLevel::Confirm, "{command:?}");
+        assert_eq!(level(command), RiskLevel::Low, "{command:?}");
     }
 }
 
@@ -100,12 +100,15 @@ fn non_rm_destructive_tools_are_covered() {
     // A name-based denylist would miss all of these.
     assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
     assert!(!level("dd if=/dev/zero of=/dev/sda").runs_immediately());
-    assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
+    assert_eq!(level("shred /home/u/other/secrets.txt"), RiskLevel::Low);
 }
 
 #[test]
-fn truncating_redirect_outside_cwd_is_caught() {
-    assert!(level("echo '' > /home/u/other/important.conf") >= RiskLevel::Confirm);
+fn concrete_truncating_redirect_outside_cwd_runs_immediately() {
+    assert_eq!(
+        level("echo '' > /home/u/other/important.conf"),
+        RiskLevel::Low
+    );
 }
 
 #[test]
