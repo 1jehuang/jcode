@@ -340,6 +340,26 @@ pub(crate) fn swarm_id_for_dir(dir: Option<PathBuf>) -> Option<String> {
     Some(dir.to_string_lossy().to_string())
 }
 
+/// Return the swarm identity for an independently-created root session.
+///
+/// Swarm plans are keyed by swarm id. Deriving that id from the working
+/// directory made every session opened in one repository share one plan, even
+/// when those sessions were unrelated. Root sessions therefore own a swarm by
+/// default. `JCODE_SWARM_ID` remains an explicit opt-in to a shared swarm.
+pub(crate) fn swarm_id_for_session(session_id: &str) -> Option<String> {
+    if let Ok(sw_id) = std::env::var("JCODE_SWARM_ID") {
+        let trimmed = sw_id.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if session_id.trim().is_empty() {
+        None
+    } else {
+        Some(format!("session:{session_id}"))
+    }
+}
+
 /// Decide whether any reload candidate is *provably* newer than the running
 /// server binary.
 ///

@@ -8,7 +8,7 @@ use super::{
     register_session_interrupt_queue, remove_background_tool_signal, remove_plan_participant,
     remove_session_channel_subscriptions, remove_session_from_swarm,
     remove_session_interrupt_queue, rename_background_tool_signal, rename_plan_participant,
-    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_dir,
+    rename_session_interrupt_queue, send_swarm_plan_to_session, swarm_id_for_session,
     unregister_session_event_sender, update_member_status,
 };
 use crate::agent::Agent;
@@ -333,7 +333,7 @@ async fn ensure_client_swarm_member(
             }
         };
         let derived_swarm_id = if swarm_enabled {
-            swarm_id_for_dir(working_dir.clone())
+            swarm_id_for_session(client_session_id)
         } else {
             None
         };
@@ -611,7 +611,7 @@ pub(super) async fn handle_subscribe(
             ("swarm_enabled", swarm_enabled.to_string()),
         ],
     );
-    ensure_client_swarm_member(
+    let inserted_swarm_member = ensure_client_swarm_member(
         client_session_id,
         client_connection_id,
         friendly_name,
@@ -640,13 +640,24 @@ pub(super) async fn handle_subscribe(
             effective_subscribe_working_dir(current.as_deref(), dir, dirs::home_dir().as_deref())
         };
         let new_path = PathBuf::from(&bound_dir);
-        let new_swarm_id = swarm_id_for_dir(Some(new_path.clone()));
         let mut old_swarm_id: Option<String> = None;
         let mut updated_swarm_id: Option<String> = None;
         {
             let mut members = swarm_members.write().await;
             if let Some(member) = members.get_mut(client_session_id) {
                 old_swarm_id = member.swarm_id.clone();
+                // Existing members include reconnects and daemon-restored
+                // sessions. Keep their persisted swarm id so an intentional
+                // resume retains its workers and plan. Only a newly inserted
+                // root receives the new session-scoped identity.
+                let new_swarm_id = if inserted_swarm_member {
+                    swarm_id_for_session(client_session_id)
+                } else {
+                    member
+                        .swarm_id
+                        .clone()
+                        .or_else(|| swarm_id_for_session(client_session_id))
+                };
                 member.working_dir = Some(new_path);
                 member.swarm_id = if member.swarm_enabled {
                     new_swarm_id.clone()
