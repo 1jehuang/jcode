@@ -290,6 +290,25 @@ impl App {
         logical_key: &winit::keyboard::Key,
         typed: Option<&str>,
     ) -> bool {
+        // F1 is application help rather than input for whichever picker happens
+        // to be open. Let it rise above existing overlays so it is always a
+        // reliable, discoverable way to ask what the window can do.
+        if !self.model.help_open
+            && keymap::resolve(logical_key, self.modifiers) == Some(keymap::Action::ToggleHelp)
+        {
+            self.apply(keymap::Action::ToggleHelp, typed);
+            self.request_redraw();
+            return true;
+        }
+        if self.model.help_open {
+            if let Some(action) = keymap::resolve_help(logical_key) {
+                self.apply(action, typed);
+            }
+            // The help card is modal. Unknown keys are consumed instead of
+            // leaking into the composer hidden beneath it.
+            self.request_redraw();
+            return true;
+        }
         if self.model.resume.is_open() {
             return self.resume_keydown(logical_key, typed);
         }

@@ -29,6 +29,9 @@ pub enum Action {
     /// Insert the event's text at the cursor.
     Insert,
     Submit,
+    /// Open or close the Desktop2 help overlay. F1 is intentionally unmodified
+    /// so the feature is discoverable without knowing a command first.
+    ToggleHelp,
     /// Newline within the input (Shift+Enter), not a submit.
     InsertNewline,
 
@@ -213,6 +216,11 @@ pub struct Ported {
 /// Chords ported from the TUI. Adding a row without wiring the chord fails
 /// `tests::every_ported_chord_resolves`.
 pub const PORTED: &[Ported] = &[
+    Ported {
+        chord: "f1",
+        action: Action::ToggleHelp,
+        tui: "/help (Desktop2 overlay)",
+    },
     Ported {
         chord: "enter",
         action: Action::Submit,
@@ -647,6 +655,7 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
 pub fn resolve_overview(key: &Key) -> Option<Action> {
     match key {
         Key::Named(named) => match named {
+            NamedKey::F1 => Some(Action::ToggleHelp),
             NamedKey::ArrowLeft => Some(Action::OverviewLeft),
             NamedKey::ArrowRight => Some(Action::OverviewRight),
             NamedKey::ArrowUp => Some(Action::OverviewUp),
@@ -720,6 +729,14 @@ pub fn resolve_resume(key: &Key, mods: ModifiersState) -> Option<Action> {
         }
         _ => None,
     }
+}
+
+/// Resolve a key while the help card owns the keyboard.
+///
+/// Only its two close chords are live. Returning `None` deliberately swallows
+/// everything else so typing cannot edit a composer obscured by a modal card.
+pub fn resolve_help(key: &Key) -> Option<Action> {
+    matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1)).then_some(Action::ToggleHelp)
 }
 
 /// Resolve a key press to an action. `None` means the key is not bound and
@@ -967,6 +984,7 @@ pub fn parse_chord(chord: &str) -> Option<(Key, ModifiersState)> {
                     "pageup" => Key::Named(NamedKey::PageUp),
                     "pagedown" => Key::Named(NamedKey::PageDown),
                     "tab" => Key::Named(NamedKey::Tab),
+                    "f1" => Key::Named(NamedKey::F1),
                     other if other.chars().count() == 1 => {
                         Key::Character(winit::keyboard::SmolStr::new(other))
                     }
