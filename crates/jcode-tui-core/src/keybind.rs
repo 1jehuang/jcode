@@ -607,10 +607,7 @@ mod tests {
         // with ALT set but without an explicit SHIFT modifier.
         let binding = parse_keybinding("alt+shift+;").expect("alt+shift+; parses");
         assert!(binding.matches(KeyCode::Char(':'), KeyModifiers::ALT));
-        assert!(binding.matches(
-            KeyCode::Char(';'),
-            KeyModifiers::ALT | KeyModifiers::SHIFT
-        ));
+        assert!(binding.matches(KeyCode::Char(';'), KeyModifiers::ALT | KeyModifiers::SHIFT));
     }
 
     #[test]
