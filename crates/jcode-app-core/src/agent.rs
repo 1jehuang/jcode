@@ -570,6 +570,17 @@ impl Agent {
         self.rewind_undo_snapshot = None;
     }
 
+    /// Synchronize the remote client's selected skill, accepting only names
+    /// present in the daemon's own registry snapshot.
+    pub(super) fn set_remote_active_skill(&mut self, active_skill: Option<String>) -> bool {
+        let skills = self.current_skills_snapshot();
+        let recognized = active_skill
+            .as_ref()
+            .is_none_or(|name| skills.get(name).is_some());
+        self.active_skill = active_skill.filter(|name| skills.get(name).is_some());
+        recognized
+    }
+
     fn sync_session_compaction_state_from_manager(
         &mut self,
         manager: &crate::compaction::CompactionManager,
