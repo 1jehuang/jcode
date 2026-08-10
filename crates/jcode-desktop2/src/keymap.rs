@@ -709,8 +709,8 @@ pub fn resolve_resume(key: &Key, mods: ModifiersState) -> Option<Action> {
                 return match ch {
                     'r' => Some(Action::ToggleResume),
                     'c' | 'd' | 'g' => Some(Action::ResumeCancel),
-                    'n' => Some(Action::ResumeDown),
-                    'p' => Some(Action::ResumeUp),
+                    'j' | 'n' => Some(Action::ResumeDown),
+                    'k' | 'p' => Some(Action::ResumeUp),
                     _ => None,
                 };
             }
@@ -991,6 +991,17 @@ mod tests {
     fn unknown_chords_are_rejected_rather_than_guessed() {
         assert!(parse_chord("ctrl+nope").is_none());
         assert!(parse_chord("ctrl").is_none(), "a chord needs a key");
+    }
+
+    #[test]
+    fn resume_picker_supports_ctrl_j_and_k_navigation() {
+        for (chord, action) in [
+            ("ctrl+j", Action::ResumeDown),
+            ("ctrl+k", Action::ResumeUp),
+        ] {
+            let (key, mods) = parse(chord);
+            assert_eq!(resolve_resume(&key, mods), Some(action), "'{chord}'");
+        }
     }
 
     /// R7: chrome navigation must never cost the user their text motion.
