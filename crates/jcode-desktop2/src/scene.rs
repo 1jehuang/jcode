@@ -693,6 +693,18 @@ fn draw_scrollbar(
     );
 }
 
+/// Vertical paint bounds for a diff band.
+///
+/// Whole-row washes deliberately overlap by one physical pixel in total. Vello
+/// rasterizes each rectangle independently, so merely sharing a floating-point
+/// edge is not enough to guarantee that the device pixel at that edge is
+/// covered. Keeping this calculation separate gives the rule a cheap,
+/// GPU-independent regression test.
+fn diff_band_y(rect: vello::kurbo::Rect, origin: f64, hairline: f64, emphasis: bool) -> (f64, f64) {
+    let bleed = if emphasis { 0.0 } else { hairline * 0.5 };
+    (origin + rect.y0 - bleed, origin + rect.y1 + bleed)
+}
+
 /// Draw the conversation.
 ///
 /// Roles are distinguished structurally rather than by a marker glyph: your
@@ -1281,6 +1293,19 @@ fn draw_transcript(
                 } else {
                     (block_left, frame.right - USER_PAD_X)
                 };
+                // Parley's selection rectangles stop exactly at each row's
+                // floating-point edge. Rasterizing those independent edges can
+                // leave a hairline of the card background between consecutive
+                // diff rows, especially at fractional display scales. Row
+                // washes are meant to form one continuous diff surface, so
+                // bleed them by half a device pixel on each side. Keep the
+                // tighter emphasis marks untouched.
+                let (y0, y1) = diff_band_y(
+                    band.rect,
+                    block_top + inset_y,
+                    frame.hairline(),
+                    band.emphasis,
+                );
                 scene.fill(
                     vello::peniko::Fill::NonZero,
                     Affine::scale(scale),
@@ -1288,9 +1313,9 @@ fn draw_transcript(
                     None,
                     &Rect::new(
                         x0,
-                        block_top + inset_y + band.rect.y0,
+                        y0,
                         x1,
-                        block_top + inset_y + band.rect.y1,
+                        y1,
                     ),
                 );
             }
@@ -1887,7 +1912,7 @@ pub fn elide(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::elide;
+    use super::{diff_band_y, elide};
 
     #[test]
     fn elide_keeps_short_text() {
@@ -1905,5 +1930,40 @@ mod tests {
     #[test]
     fn elide_handles_tiny_budget() {
         assert_eq!(elide("abcdef", 2), "...");
+    }
+
+    #[test]
+    fn adjacent_diff_row_washes_overlap_by_a_device_pixel() {
+        use vello::kurbo::Rect;
+
+        // Integer and fractional HiDPI scales. `hairline` is one physical pixel
+        // in logical coordinates, exactly as Frame supplies it to painting.
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let hairline = 1.0 / scale;
+            let origin = 13.37;
+            let (_, first_bottom) = diff_band_y(
+                Rect::new(0.0, 0.0, 100.0, 19.2),
+                origin,
+                hairline,
+                false,
+            );
+            let (second_top, _) = diff_band_y(
+                Rect::new(0.0, 19.2, 100.0, 38.4),
+                origin,
+                hairline,
+                false,
+            );
+            let overlap_px = (first_bottom - second_top) * scale;
+            assert!(
+                (overlap_px - 1.0).abs() < 1e-9,
+                "scale {scale}: row washes overlap by {overlap_px} device pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_emphasis_marks_keep_exact_text_geometry() {
+        let rect = vello::kurbo::Rect::new(2.0, 3.0, 7.0, 11.0);
+        assert_eq!(diff_band_y(rect, 20.0, 0.5, true), (23.0, 31.0));
     }
 }
