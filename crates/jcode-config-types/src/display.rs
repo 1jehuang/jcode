@@ -51,8 +51,8 @@ pub struct DisplayConfig {
     /// Pin read images to side pane (default: true)
     pub pin_images: bool,
     /// Pin the full session todo list to the top of the chat transcript while
-    /// it scrolls, like the sticky previous-prompt preview (default: false)
-    #[serde(default)]
+    /// it scrolls, like the sticky previous-prompt preview (default: true)
+    #[serde(default = "default_true")]
     pub pin_todos: bool,
     /// Show idle animation before first prompt (default: false)
     pub idle_animation: bool,
@@ -127,7 +127,7 @@ impl Default for DisplayConfig {
             diff_mode: DiffDisplayMode::default(),
             show_diffs: None,
             pin_images: true,
-            pin_todos: false,
+            pin_todos: true,
             queue_mode: false,
             auto_server_reload: true,
             mouse_capture: true,
@@ -201,5 +201,22 @@ impl DisplayConfig {
     /// Whether reasoning content should be generated/requested at all.
     pub fn reasoning_enabled(&self) -> bool {
         !matches!(self.reasoning_display(), ReasoningDisplayMode::Off)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayConfig;
+
+    #[test]
+    fn todos_are_pinned_by_default_but_can_be_disabled() {
+        assert!(DisplayConfig::default().pin_todos);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(missing.pin_todos);
+
+        let disabled: DisplayConfig =
+            serde_json::from_str(r#"{"pin_todos":false}"#).expect("display config");
+        assert!(!disabled.pin_todos);
     }
 }
