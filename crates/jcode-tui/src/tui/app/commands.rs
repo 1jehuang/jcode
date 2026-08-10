@@ -3054,9 +3054,23 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
 fn run_interactive_editor(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::ExitStatus> {
+    run_interactive_editor_with(command, suspend_terminal_for_editor, resume_terminal_after_editor)
+}
+
+fn run_interactive_editor_with(
+    command: &mut std::process::Command,
+    suspend: impl FnOnce(),
+    resume: impl FnOnce(),
+) -> std::io::Result<std::process::ExitStatus> {
+    suspend();
+    let result = command.status();
+    resume();
+    result
+}
+
+fn suspend_terminal_for_editor() {
     use crossterm::event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
     };
 
     // These commands are safe even when a mode was not enabled. Disable them
@@ -3069,8 +3083,10 @@ fn run_interactive_editor(
     );
     crate::tui::disable_keyboard_enhancement();
     jcode_tui_style::restore_terminal_quietly();
+}
 
-    let result = command.status();
+fn resume_terminal_after_editor() {
+    use crossterm::event::{EnableBracketedPaste, EnableFocusChange, EnableMouseCapture};
 
     // Re-enter the TUI before returning to the event loop. The existing
     // ratatui Terminal remains usable and the next loop iteration redraws it.
@@ -3086,8 +3102,57 @@ fn run_interactive_editor(
     if policy.enable_keyboard_enhancement {
         crate::tui::enable_keyboard_enhancement();
     }
+}
 
-    result
+#[cfg(all(test, unix))]
+mod interactive_editor_tests {
+    use super::run_interactive_editor_with;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn handoff_waits_for_editor_before_resuming_terminal() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let child_events = Rc::clone(&events);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 0.05"]);
+
+        let started = std::time::Instant::now();
+        let status = run_interactive_editor_with(
+            &mut command,
+            {
+                let events = Rc::clone(&events);
+                move || events.borrow_mut().push("suspend")
+            },
+            move || {
+                assert!(
+                    started.elapsed() >= std::time::Duration::from_millis(40),
+                    "terminal resumed before the editor process exited"
+                );
+                child_events.borrow_mut().push("resume");
+            },
+        )
+        .expect("editor command should run");
+
+        assert!(status.success());
+        assert_eq!(&*events.borrow(), &["suspend", "resume"]);
+    }
+
+    #[test]
+    fn handoff_resumes_terminal_after_editor_failure_status() {
+        let resumed = Rc::new(RefCell::new(false));
+        let resumed_after = Rc::clone(&resumed);
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 7"]);
+
+        let status = run_interactive_editor_with(&mut command, || {}, move || {
+            *resumed_after.borrow_mut() = true;
+        })
+        .expect("shell should launch");
+
+        assert_eq!(status.code(), Some(7));
+        assert!(*resumed.borrow());
+    }
 }
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
