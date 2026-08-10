@@ -68,6 +68,7 @@ pub const NODES: &[(&str, NodeBuilder)] = &[
     ("resume_picker_preview", resume_picker_preview),
     ("resume_picker_search", resume_picker_search),
     ("resume_picker_group", resume_picker_group),
+    ("help_overlay", help_overlay),
     ("settings_panel", settings_panel),
     ("settings_panel_hover", settings_panel_hover),
     ("model_picker", model_picker),
@@ -122,6 +123,7 @@ fn connecting() -> Model {
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         resume: crate::resume::Picker::default(),
+        help_open: false,
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -290,6 +292,7 @@ fn attached_empty() -> Model {
         transcript: crate::transcript::Transcript::default(),
         editor: crate::editor::Editor::default(),
         resume: crate::resume::Picker::default(),
+        help_open: false,
         caret: fixed_caret(),
         // Nodes render the focused case: an unfocused window hides the caret,
         // which would make most caret nodes indistinguishable.
@@ -919,6 +922,13 @@ fn resume_picker_group() -> Model {
     Model {
         resume: crate::resume::Picker::pinned(stored_sessions(), 0, ""),
         ..session_strip()
+    }
+}
+
+fn help_overlay() -> Model {
+    Model {
+        help_open: true,
+        ..attached_empty()
     }
 }
 

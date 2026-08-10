@@ -25,6 +25,7 @@ mod edits;
 mod file_tree;
 mod frame_meter;
 mod harness;
+mod help;
 mod hints;
 mod icons;
 mod input;
@@ -44,6 +45,7 @@ mod render;
 mod resume;
 mod scene;
 mod scene_file_tree;
+mod scene_help;
 mod scene_overview;
 mod scene_resume;
 mod scene_workspace;
@@ -387,6 +389,9 @@ pub struct Model {
     /// The resume-from-disk picker: stored sessions grouped by project, drawn
     /// as an overlay panel over the conversation rather than instead of it.
     pub resume: resume::Picker,
+    /// Desktop-native keyboard and local-command reference. This is deliberately
+    /// local state: help must be available before a daemon session attaches.
+    pub help_open: bool,
     /// Working directory of the attached session, as the daemon reports it.
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
@@ -486,6 +491,7 @@ impl Default for Model {
             overview: overview::Overview::default(),
             peeks: overview::Peeks::default(),
             resume: resume::Picker::default(),
+            help_open: false,
             working_dir: None,
             file_tree: file_tree::FileTree::default(),
             model: None,
@@ -658,6 +664,14 @@ impl Model {
 
 impl App {
     fn submit_input(&mut self) {
+        // Help is a Desktop2 command, not a prompt. Recognize it before the
+        // attachment guard so a disconnected or still-starting window can
+        // explain itself, and never let an attached harness see the command.
+        if help::is_alias(self.model.editor.text()) {
+            self.model.editor.take_for_submit();
+            self.model.help_open = true;
+            return;
+        }
         // An attachment is a message: sending a screenshot with no words is a
         // normal thing to do, so the composer is only empty when there is
         // nothing pending either.
@@ -1562,6 +1576,10 @@ impl App {
                 }
             }
             Action::Submit => self.submit_input(),
+
+            // F1 is both the discoverable entry point and the close chord.
+            // Escape is resolved to this same action while the modal is open.
+            Action::ToggleHelp => self.model.help_open = !self.model.help_open,
 
             // Strip motion moves the highlight and attaches in one step:
             // a selection you then have to confirm would be a second

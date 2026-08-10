@@ -1467,7 +1467,12 @@ pub fn build_scene(
     // the wordmark, and the chrome read as one thing being created rather than
     // as several arrivals.
     match model.boot.chrome_layer() {
-        crate::boot::ChromeReveal::Hidden => return,
+        crate::boot::ChromeReveal::Hidden => {
+            // Help is local emergency documentation, so F1 must work even in
+            // the opening frames before the ordinary chrome has appeared.
+            crate::scene_help::draw_help(scene, text, model, &frame, scale);
+            return;
+        }
         crate::boot::ChromeReveal::Fading(alpha) => scene.push_layer(
             vello::peniko::Fill::NonZero,
             vello::peniko::Mix::Normal,
@@ -1854,6 +1859,10 @@ pub fn build_scene(
     if revealing {
         scene.pop_layer();
     }
+
+    // Draw outside the boot reveal layer and after every other overlay. Help is
+    // a modal reference, not part of the page fading in underneath it.
+    crate::scene_help::draw_help(scene, text, model, &frame, scale);
 }
 
 /// Middle-elide `text` to at most `max_chars` characters, keeping the head and

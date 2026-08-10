@@ -924,6 +924,50 @@ fn typed_text_survives_the_busy_state() {
     );
 }
 
+/// The help state has to reach real pixels as a centred surface with a veil,
+/// not merely toggle a boolean that no renderer consumes.
+#[test]
+#[ignore = "requires a GPU"]
+fn help_overlay_renders_a_dim_backdrop_and_readable_card() {
+    let model = states::by_name("help_overlay").expect("help state");
+    assert!(model.help_open);
+    let mut closed = states::by_name("help_overlay").expect("help state");
+    closed.help_open = false;
+    let Some(open_shot) = Rendered::new(&model) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+    let Some(closed_shot) = Rendered::new(&closed) else {
+        eprintln!("skipping: no GPU");
+        return;
+    };
+
+    let geometry = crate::help::Layout::new(open_shot.frame.width, open_shot.frame.height);
+    assert!(geometry.card.x0 > 0.0 && geometry.card.y0 > 0.0);
+    assert!(geometry.card.x1 < open_shot.frame.width);
+    assert!(geometry.card.y1 < open_shot.frame.height);
+
+    // Sample the empty margin beside the card. The same pixels without help are
+    // paper; opening help must visibly darken them.
+    let margin_x1 = (geometry.card.x0 - 3.0).max(3.0);
+    let open_backdrop = open_shot.mean_in(2.0, geometry.card.y0, margin_x1, geometry.card.y1);
+    let closed_backdrop = closed_shot.mean_in(2.0, geometry.card.y0, margin_x1, geometry.card.y1);
+    assert!(
+        open_backdrop + 0.08 < closed_backdrop,
+        "help veil did not dim the page ({open_backdrop:.3} vs {closed_backdrop:.3})"
+    );
+
+    // Both columns (or the one responsive column) must contain readable ink.
+    for column in 0..geometry.columns {
+        let area = geometry.column(column);
+        let contrast = open_shot.contrast_in(1.0, area.x0, area.y0, area.x1, area.y1);
+        assert!(
+            contrast > 0.35,
+            "help column {column} has no readable ink ({contrast:.3})"
+        );
+    }
+}
+
 /// The model caption must actually reach the pixels, on the trailing end of the
 /// footnote row, and must not collide with a footnote sharing that row. A
 /// unit-tested label that the renderer forgets to draw is the failure mode this

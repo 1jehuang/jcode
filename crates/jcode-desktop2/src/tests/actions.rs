@@ -266,6 +266,62 @@ fn submitting_without_a_session_keeps_the_text_and_says_why() {
     assert!(app.model.notice.is_some(), "no notice explained the no-op");
 }
 
+#[test]
+fn local_help_aliases_work_before_attachment_and_never_reach_the_harness() {
+    for alias in crate::help::ALIASES {
+        let mut app = App::default();
+        app.apply(Action::Insert, Some(alias));
+        app.submit_input();
+        assert!(app.model.help_open, "{alias} did not open help");
+        assert!(
+            app.model.editor.is_empty(),
+            "{alias} stayed in the composer"
+        );
+        assert!(app.model.transcript.is_empty(), "{alias} became a message");
+        assert_eq!(app.model.session_id, None, "test unexpectedly attached");
+    }
+
+    // Repeat while attached to prove interception happens before the outgoing
+    // command path, not merely because an unattached submit is rejected.
+    let mut app = app_with("/commands");
+    let (_updates_tx, updates_rx) = std::sync::mpsc::channel();
+    let (commands_tx, commands_rx) = std::sync::mpsc::channel();
+    app.harness = Some((
+        updates_rx,
+        crate::harness::CommandSender::for_test(commands_tx),
+    ));
+    app.submit_input();
+    assert!(app.model.help_open);
+    assert!(matches!(
+        commands_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+}
+
+#[test]
+fn f1_help_is_keyboard_modal_and_escape_or_f1_closes_it() {
+    let mut app = app_with("draft stays put");
+    assert_eq!(
+        keymap::resolve(&Key::Named(NamedKey::F1), ModifiersState::empty()),
+        Some(Action::ToggleHelp)
+    );
+    assert!(app.key_pressed(&Key::Named(NamedKey::F1), None));
+    assert!(app.model.help_open);
+
+    assert!(app.key_pressed(&ch('x'), Some("x")));
+    assert_eq!(app.model.editor.text(), "draft stays put");
+    assert!(app.model.help_open, "an unrelated key closed help");
+
+    assert!(app.key_pressed(&Key::Named(NamedKey::Escape), None));
+    assert!(!app.model.help_open);
+    assert_eq!(app.model.editor.text(), "draft stays put");
+
+    assert!(app.key_pressed(&Key::Named(NamedKey::F1), None));
+    assert!(app.model.help_open);
+    assert!(app.key_pressed(&Key::Named(NamedKey::F1), None));
+    assert!(!app.model.help_open);
+}
+
 /// A conversation long enough to overflow any test region.
 fn long_transcript(turns: usize) -> crate::transcript::Transcript {
     use crate::transcript::{Message, Transcript};
