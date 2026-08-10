@@ -1292,7 +1292,10 @@ fn streaming() -> Model {
 /// blank screen. The activity line is the whole of the feedback here, so it is
 /// worth a node of its own.
 fn working() -> Model {
+    let mut transcript = crate::transcript::Transcript::default();
+    transcript.set_live_tool("", "thinking");
     Model {
+        transcript,
         busy: true,
         activity: crate::activity::Activity::pinned(
             5,
@@ -1313,6 +1316,7 @@ fn message_sent() -> Model {
     transcript.push(crate::transcript::Message::sent(
         "explain the harness API handshake",
     ));
+    transcript.set_live_tool("", "thinking");
     Model {
         transcript,
         busy: true,
