@@ -193,6 +193,24 @@ pub fn classify_target(
                 target: Some(raw.to_string()),
             });
         }
+        // A glob in a filename cannot escape its concrete parent directory.
+        // Keep wildcard directory components conservative because their parent
+        // is not the actual expansion boundary (`/home/u/*/node_modules`).
+        if let Some(parent) = expanded.parent()
+            && !parent.to_string_lossy().contains(['*', '?'])
+        {
+            let inside_cwd = ctx
+                .working_dir
+                .as_ref()
+                .is_some_and(|cwd| parent.starts_with(normalize(cwd)));
+            if inside_cwd || is_temp_path(parent) {
+                return Some(RiskFinding {
+                    level: RiskLevel::Low,
+                    reason: "glob is bounded to the working or temporary directory".to_string(),
+                    target: Some(raw.to_string()),
+                });
+            }
+        }
         return Some(RiskFinding {
             level: RiskLevel::Confirm,
             reason: "target contains a glob, so the exact set of affected files \

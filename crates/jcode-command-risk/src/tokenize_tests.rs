@@ -93,3 +93,16 @@ fn tokenizing_is_total_and_never_panics() {
         let _ = split_segments(command);
     }
 }
+
+#[test]
+fn parentheses_split_subshell_and_command_substitution_bodies() {
+    let segments = split_segments("x=$(rm -rf ~); (echo ok)");
+    let texts: Vec<Vec<_>> = segments
+        .into_iter()
+        .map(|segment| segment.into_iter().map(|token| token.text).collect())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![vec!["x=$"], vec!["rm", "-rf", "~"], vec!["echo", "ok"]]
+    );
+}
