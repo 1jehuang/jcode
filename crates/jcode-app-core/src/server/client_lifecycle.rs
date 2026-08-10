@@ -111,6 +111,7 @@ struct ProcessingMessage {
     content: String,
     images: Vec<(String, String)>,
     system_reminder: Option<String>,
+    active_skill: Option<String>,
 }
 
 struct ProcessingState<'a> {
@@ -1105,6 +1106,7 @@ pub(super) async fn handle_client(
                 content,
                 images,
                 system_reminder,
+                active_skill,
                 no_reply,
             } => {
                 if no_reply {
@@ -1133,6 +1135,7 @@ pub(super) async fn handle_client(
                         content,
                         images,
                         system_reminder,
+                        active_skill,
                     },
                     &client_session_id,
                     &mut ProcessingState {
@@ -2850,6 +2853,7 @@ async fn start_processing_message(
         content,
         images,
         system_reminder,
+        active_skill,
     } = message;
     if server_reload_starting() {
         crate::logging::info(&format!(
@@ -2864,6 +2868,20 @@ async fn start_processing_message(
         let _ = client_event_tx.send(ServerEvent::Error {
             id,
             message: "Already processing a message".to_string(),
+            retry_after_secs: None,
+        });
+        return;
+    }
+
+    if !agent
+        .lock()
+        .await
+        .set_remote_active_skill(active_skill.clone())
+    {
+        let skill_name = active_skill.as_deref().unwrap_or_default();
+        let _ = client_event_tx.send(ServerEvent::Error {
+            id,
+            message: format!("Skill '{skill_name}' is not installed on the server"),
             retry_after_secs: None,
         });
         return;
