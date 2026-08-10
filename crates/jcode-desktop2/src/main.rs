@@ -1680,6 +1680,8 @@ impl App {
                     .set_notice(format!("reasoning display: {}", next.label()));
             }
 
+            Action::ManualReload => selfdev_reload::request(),
+
             Action::InsertNewline => self.model.editor.insert_char('\n'),
 
             Action::MoveLeft => self.model.editor.move_left(),

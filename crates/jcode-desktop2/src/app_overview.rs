@@ -290,6 +290,11 @@ impl App {
         logical_key: &winit::keyboard::Key,
         typed: Option<&str>,
     ) -> bool {
+        // Reload is application chrome rather than overlay input. Resolve it
+        // before an open help card, picker, or overview owns the keyboard.
+        if keymap::resolve(logical_key, self.modifiers) == Some(keymap::Action::ManualReload) {
+            return self.apply(keymap::Action::ManualReload, typed);
+        }
         // F1 is application help rather than input for whichever picker happens
         // to be open. Let it rise above existing overlays so it is always a
         // reliable, discoverable way to ask what the window can do.
