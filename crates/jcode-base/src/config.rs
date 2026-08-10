@@ -640,6 +640,7 @@ impl ToolConfig {
                     "agentgrep",
                     "ls",
                     "batch",
+                    "mcp",
                 ]
                 .into_iter()
                 .map(|name| name.to_string())

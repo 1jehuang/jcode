@@ -477,7 +477,9 @@ impl Agent {
         let allowed = self.allowed_tools.as_ref();
         registry_names.iter().any(|name| {
             name.starts_with("mcp__")
-                && allowed.map(|set| set.contains(name)).unwrap_or(true)
+                && allowed
+                    .map(|set| crate::tool::tool_name_is_allowed(set, name))
+                    .unwrap_or(true)
                 && !self.disabled_tools.contains(name)
                 && !locked.iter().any(|t| &t.name == name)
         })
