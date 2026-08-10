@@ -166,10 +166,13 @@ pub enum Action {
     /// action rather than a pointer-only control.
     ToggleModelPicker,
 
-    /// Ctrl+Shift+R: cycle how much of the model's thinking the transcript
-    /// keeps (`current` -> `full` -> `off`). A view choice, so it is a
-    /// keypress rather than a config edit and a restart.
+    /// Cycle how much of the model's thinking the transcript keeps (`current`
+    /// -> `full` -> `off`). This remains available from the settings panel.
     CycleReasoningDisplay,
+
+    /// Ctrl+Shift+R: relaunch from the currently activated desktop2 binary.
+    /// Deliberately global, so it works even while an overlay owns the keyboard.
+    ManualReload,
 
     /// Ctrl+plus / Ctrl+minus / Ctrl+0: grow, shrink, or reset the UI zoom.
     /// The browser's chords, because "the text is too small" is a browser-
@@ -430,6 +433,11 @@ pub const PORTED: &[Ported] = &[
         chord: "ctrl+shift+d",
         action: Action::ToggleTheme,
         tui: "light/dark theme",
+    },
+    Ported {
+        chord: "ctrl+shift+r",
+        action: Action::ManualReload,
+        tui: "desktop: manually reload the activated build",
     },
     Ported {
         chord: "ctrl+shift+n",
@@ -881,10 +889,9 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     // Ctrl+Shift+D: light/dark. Shifted so it cannot collide
                     // with a plain Ctrl+D, which is interrupt-or-quit.
                     'd' => return Some(Action::ToggleTheme),
-                    // Ctrl+Shift+R: how much thinking is shown. Shifted so it
-                    // cannot collide with a future plain Ctrl+R (recovery in
-                    // the TUI), and grouped with the other view chords.
-                    'r' => return Some(Action::CycleReasoningDisplay),
+                    // Ctrl+Shift+R: gracefully adopt the activated desktop
+                    // build. Plain Ctrl+R remains session recovery.
+                    'r' => return Some(Action::ManualReload),
                     // Ctrl+Shift+N: a new session. Shifted so it cannot be hit
                     // by a plain Ctrl+N reflex while typing, and matching the
                     // "new window" chord rather than "new tab": a session is a

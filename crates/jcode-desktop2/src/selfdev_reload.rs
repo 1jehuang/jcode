@@ -49,6 +49,13 @@ pub fn requested() -> bool {
     RELOAD_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// Ask the event loop to relaunch from the currently activated desktop build.
+/// Using the same flag as the self-dev signal keeps geometry saving and graceful
+/// replacement behavior identical for automatic and keyboard-triggered reloads.
+pub fn request() {
+    RELOAD_REQUESTED.store(true, Ordering::Release);
+}
+
 /// Tell the window which launched this process that our replacement surface is
 /// alive. This deliberately happens after window and GPU creation, rather than
 /// at process start, so a failed replacement never makes the visible window
@@ -114,7 +121,7 @@ mod tests {
 
     #[test]
     fn reload_flag_is_consumed_once() {
-        RELOAD_REQUESTED.store(true, Ordering::Release);
+        request();
         assert!(requested());
         assert!(!requested());
     }
