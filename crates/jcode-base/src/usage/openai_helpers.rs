@@ -104,7 +104,15 @@ pub(super) fn classify_openai_limits(limits: &[UsageLimit]) -> OpenAIUsageData {
     }
 
     if five_hour.is_none() {
-        five_hour = generic_non_spark.first().cloned();
+        five_hour = generic_non_spark
+            .iter()
+            .find(|w| {
+                seven_day
+                    .as_ref()
+                    .map(|weekly| weekly.name != w.name || weekly.resets_at != w.resets_at)
+                    .unwrap_or(true)
+            })
+            .cloned();
     }
     if seven_day.is_none() {
         seven_day = generic_non_spark
