@@ -444,7 +444,9 @@ impl Agent {
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
+            tools.retain(|tool| {
+                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+            });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
         tools
@@ -480,7 +482,7 @@ impl Agent {
                 && allowed
                     .map(|set| crate::tool::tool_name_is_allowed(set, name))
                     .unwrap_or(true)
-                && !self.disabled_tools.contains(name)
+                && !crate::tool::tool_name_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
     }
@@ -500,7 +502,9 @@ impl Agent {
         }
         let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
         if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| !self.disabled_tools.contains(&tool.name));
+            tools.retain(|tool| {
+                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+            });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
         tools
@@ -581,11 +585,11 @@ impl Agent {
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
         if let Some(allowed) = self.allowed_tools.as_ref()
-            && !allowed.contains(name)
+            && !crate::tool::tool_name_is_allowed(allowed, name)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
-        if self.disabled_tools.contains(name) {
+        if crate::tool::tool_name_is_disabled(&self.disabled_tools, name) {
             return Err(anyhow::anyhow!("Tool '{}' is disabled", name));
         }
         Ok(())
