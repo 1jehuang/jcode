@@ -228,6 +228,33 @@ fn test_classify_openai_limits_recognizes_five_weekly_and_spark() {
 }
 
 #[test]
+fn test_classify_openai_limits_does_not_duplicate_weekly_window() {
+    let limits = vec![
+        UsageLimit {
+            name: "Codex weekly".to_string(),
+            usage_percent: 25.0,
+            resets_at: Some("2026-01-07T00:00:00Z".to_string()),
+        },
+        UsageLimit {
+            name: "Codex 7-day window".to_string(),
+            usage_percent: 50.0,
+            resets_at: Some("2026-01-14T00:00:00Z".to_string()),
+        },
+    ];
+
+    let classified = openai_helpers::classify_openai_limits(&limits);
+
+    assert_eq!(
+        classified.seven_day.as_ref().map(|window| window.name.as_str()),
+        Some("Codex weekly")
+    );
+    assert_eq!(
+        classified.five_hour.as_ref().map(|window| window.name.as_str()),
+        Some("Codex 7-day window")
+    );
+}
+
+#[test]
 fn test_parse_usage_percent_supports_used_limit_shape() {
     let mut obj = serde_json::Map::new();
     obj.insert("used".to_string(), serde_json::json!(20));
