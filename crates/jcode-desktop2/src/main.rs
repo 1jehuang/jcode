@@ -22,6 +22,7 @@ mod clipboard_image;
 mod donut;
 mod editor;
 mod edits;
+mod file_tree;
 mod frame_meter;
 mod harness;
 mod hints;
@@ -42,6 +43,7 @@ mod reasoning;
 mod render;
 mod resume;
 mod scene;
+mod scene_file_tree;
 mod scene_overview;
 mod scene_resume;
 mod scene_workspace;
@@ -389,6 +391,8 @@ pub struct Model {
     /// `None` until attach, because a guess here is worse than silence: it is
     /// the fact that decides whether an answer applies to your project.
     pub working_dir: Option<String>,
+    /// Expandable project explorer for the attached working directory.
+    pub file_tree: file_tree::FileTree,
     /// Provider and model serving this session, once the harness reports it.
     /// `None` until then, so the caption appears rather than showing a guess
     /// that could be wrong.
@@ -483,6 +487,7 @@ impl Default for Model {
             peeks: overview::Peeks::default(),
             resume: resume::Picker::default(),
             working_dir: None,
+            file_tree: file_tree::FileTree::default(),
             model: None,
             model_picker: model_picker::Picker::default(),
             boot: boot::Boot::default(),
@@ -837,6 +842,22 @@ impl App {
     }
 
     fn on_pointer_pressed(&mut self) {
+        // The explorer is in window space and sits above session pages. Folder
+        // presses therefore resolve before the focused-page coordinate bridge.
+        if self.pointer.0 <= file_tree::WIDTH {
+            let height = self
+                .state
+                .as_ref()
+                .map(|state| f64::from(state.size().1) / self.effective_scale())
+                .unwrap_or(self.frame.height);
+            if let Some(entry) = self.model.file_tree.row_at(self.pointer.1, height) {
+                if entry.directory {
+                    self.model.file_tree.toggle(&entry.path);
+                    self.request_redraw();
+                }
+                return;
+            }
+        }
         let (x, y) = self.focused_pointer();
         if self
             .model

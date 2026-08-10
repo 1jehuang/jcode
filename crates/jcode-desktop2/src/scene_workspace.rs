@@ -7,7 +7,7 @@
 //! [`crate::workspace`], each clipped to a rounded window with its own border
 //! ring, so where one session ends and the next begins is legible at a glance.
 
-use crate::{Model, paint, scene, strip, workspace};
+use crate::{Model, paint, scene, scene_file_tree, strip, workspace};
 use vello::Scene;
 use vello::kurbo::{Affine, Rect, RoundedRect, Stroke};
 
@@ -33,6 +33,7 @@ pub fn build_workspace_scene(
 ) {
     if model.overview.is_visible() {
         scene::build_scene(output, painter, model, size, scale);
+        scene_file_tree::draw(output, painter, model, size, scale);
         return;
     }
     let entries = model.strip.entries();
@@ -48,6 +49,7 @@ pub fn build_workspace_scene(
     // painting.
     if columns.len() <= 1 && !model.workspace.is_animating() {
         scene::build_scene(output, painter, model, size, scale);
+        scene_file_tree::draw(output, painter, model, size, scale);
         return;
     }
 
@@ -126,6 +128,7 @@ pub fn build_workspace_scene(
             &page,
         );
     }
+    scene_file_tree::draw(output, painter, model, size, scale);
 }
 
 /// Make the immutable scene input for one retained session. This deliberately
@@ -169,6 +172,7 @@ fn retained_session_model(source: &Model, entry: &strip::Entry) -> Model {
         peeks: crate::overview::Peeks::default(),
         resume: crate::resume::Picker::default(),
         working_dir: entry.working_dir.clone(),
+        file_tree: crate::file_tree::FileTree::default(),
         model: None,
         model_picker: crate::model_picker::Picker::default(),
         boot: crate::boot::Boot::default(),

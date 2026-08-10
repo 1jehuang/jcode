@@ -205,6 +205,9 @@ impl App {
                 }
             }
         }
+        self.model
+            .file_tree
+            .sync_root(self.model.working_dir.as_deref());
         // The turn is over and the channel is drained: if the user typed
         // while the agent was busy, the oldest waiting message goes now. Its
         // card leaves the queued tone, and the send is exactly the one the
