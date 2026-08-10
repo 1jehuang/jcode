@@ -201,7 +201,7 @@ impl Agent {
 
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
-        new_session.model = Some(self.provider.model());
+        new_session.model = Some(self.provider_model());
         new_session.provider_key =
             crate::session::derive_session_provider_key(self.provider.name());
         new_session.is_canary = preserve_canary;
@@ -649,7 +649,7 @@ impl Agent {
                 ));
             }
         } else {
-            self.session.model = Some(self.provider.model());
+            self.session.model = Some(self.provider_model());
         }
         self.restore_reasoning_effort_from_session();
         let model_ms = model_start.elapsed().as_millis();

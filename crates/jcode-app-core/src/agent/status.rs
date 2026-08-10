@@ -158,7 +158,11 @@ impl Agent {
     }
 
     pub fn provider_model(&self) -> String {
-        self.provider.model().to_string()
+        let model = self.provider.model();
+        self.provider
+            .explicit_provider_pin_for_current_model()
+            .map(|pin| format!("{model}@{pin}"))
+            .unwrap_or(model)
     }
 
     /// Get the short/friendly name for this session (e.g., "fox")

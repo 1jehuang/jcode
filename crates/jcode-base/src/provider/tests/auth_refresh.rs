@@ -392,6 +392,57 @@ fn test_on_auth_changed_hot_initializes_openrouter_and_marks_routes_available() 
 }
 
 #[test]
+fn test_on_auth_changed_preserves_openrouter_model_and_explicit_provider_pin() {
+    with_clean_provider_test_env(|| {
+        with_env_var("OPENROUTER_API_KEY", "test-openrouter-key", || {
+            with_env_var("JCODE_OPENROUTER_MODEL_CATALOG", "0", || {
+                let runtime = enter_test_runtime();
+                let _enter = runtime.enter();
+                let provider = MultiProvider {
+                    claude: RwLock::new(None),
+                    anthropic: RwLock::new(None),
+                    openai: RwLock::new(None),
+                    copilot_api: RwLock::new(None),
+                    antigravity: RwLock::new(None),
+                    gemini: RwLock::new(None),
+                    cursor: RwLock::new(None),
+                    bedrock: RwLock::new(None),
+                    openrouter: RwLock::new(None),
+                    openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+                    active_openai_compatible_profile: RwLock::new(None),
+                    active: RwLock::new(ActiveProvider::OpenRouter),
+                    use_claude_cli: false,
+                    startup_notices: RwLock::new(Vec::new()),
+                    initial_provider: Some(ActiveProvider::OpenRouter),
+                    routes_memo: std::sync::Mutex::new(None),
+                    post_auth_refreshes_pending: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                };
+
+                provider.on_auth_changed();
+                provider
+                    .set_model("openrouter:z-ai/glm-5.2@Novita")
+                    .expect("set explicitly pinned OpenRouter model");
+                let original = provider.openrouter_provider().expect("OpenRouter runtime");
+
+                provider.on_auth_changed();
+
+                let replacement = provider
+                    .openrouter_provider()
+                    .expect("replacement OpenRouter runtime");
+                assert!(!Arc::ptr_eq(&original, &replacement));
+                assert_eq!(provider.model(), "z-ai/glm-5.2");
+                assert_eq!(
+                    provider
+                        .explicit_provider_pin_for_current_model()
+                        .as_deref(),
+                    Some("Novita")
+                );
+            })
+        })
+    });
+}
+
+#[test]
 fn test_on_auth_changed_hot_initializes_copilot_and_marks_routes_available() {
     with_clean_provider_test_env(|| {
         with_env_var("GITHUB_TOKEN", "gho_test_token", || {

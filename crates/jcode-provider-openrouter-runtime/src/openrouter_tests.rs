@@ -1195,7 +1195,7 @@ fn test_parse_model_spec() {
     assert_eq!(model, "anthropic/claude-sonnet-4");
     let provider = provider.expect("provider");
     assert_eq!(provider.name, "Fireworks");
-    assert!(provider.allow_fallbacks);
+    assert!(!provider.allow_fallbacks);
 
     let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks!");
     assert_eq!(model, "anthropic/claude-sonnet-4");
@@ -1211,6 +1211,22 @@ fn test_parse_model_spec() {
     let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@auto");
     assert_eq!(model, "anthropic/claude-sonnet-4");
     assert!(provider.is_none());
+}
+
+#[test]
+fn fork_preserves_explicit_provider_pin() {
+    let provider = make_provider();
+    provider
+        .set_model("z-ai/glm-5.2@Novita")
+        .expect("set explicitly pinned model");
+
+    let fork = provider.fork();
+
+    assert_eq!(fork.model(), "z-ai/glm-5.2");
+    assert_eq!(
+        fork.explicit_provider_pin_for_current_model().as_deref(),
+        Some("Novita")
+    );
 }
 
 fn make_endpoint(name: &str, throughput: f64, uptime: f64, cache: bool, cost: f64) -> EndpointInfo {
