@@ -193,7 +193,7 @@ pub(crate) fn draw_overview(
     }
     let theme = &model.theme;
     let field = crate::overview::layout(
-        &model.strip.entries(),
+        &model.strips.panels(),
         model.overview.focus().or(model.session_id.as_deref()),
         model.session_id.as_deref(),
         crate::overview::area(frame),

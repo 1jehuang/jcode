@@ -16,7 +16,7 @@
 
 /// One session, as the strip and the overview need to know it.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Entry {
+pub struct Panel {
     pub session_id: String,
     /// User- or agent-generated session title, once one has been assigned.
     pub title: Option<String>,
@@ -31,7 +31,7 @@ pub struct Entry {
     pub weight: f64,
 }
 
-impl Entry {
+impl Panel {
     #[cfg(test)]
     pub fn new(session_id: &str, working_dir: Option<&str>) -> Self {
         Self {
@@ -46,20 +46,20 @@ impl Entry {
 
 /// A group of sessions sharing a working directory: one "workspace".
 #[derive(Clone, Debug, PartialEq)]
-pub struct Group {
+pub struct Strip {
     /// Short label shown before the bars, like the workspace number in the
     /// waybar module. The final path component, because the full path is far
     /// too wide for a strip and the leaf is what distinguishes checkouts.
     pub label: String,
-    pub entries: Vec<Entry>,
+    pub panels: Vec<Panel>,
 }
 
 /// The strip's state: the grouped sessions plus where focus sits.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Strip {
-    groups: Vec<Group>,
-    group: usize,
-    index: usize,
+pub struct Strips {
+    strips: Vec<Strip>,
+    strip_index: usize,
+    panel_index: usize,
 }
 
 /// Label for a working directory: the leaf component, or a placeholder when
@@ -75,7 +75,7 @@ fn label_for(working_dir: Option<&str>) -> String {
     }
 }
 
-impl Strip {
+impl Strips {
     /// Build the strip from a session list, keeping focus on `focused` when it
     /// is still present.
     ///
@@ -83,22 +83,22 @@ impl Strip {
     /// bars stay put across polls: a strip whose bars reshuffle every refresh
     /// is unreadable, and worse, makes "one to the left" mean something
     /// different from one second to the next.
-    pub fn build(entries: Vec<Entry>, focused: Option<&str>) -> Self {
-        let mut groups: Vec<Group> = Vec::new();
-        for entry in entries {
-            let label = label_for(entry.working_dir.as_deref());
-            match groups.iter_mut().find(|group| group.label == label) {
-                Some(group) => group.entries.push(entry),
-                None => groups.push(Group {
+    pub fn build(panels: Vec<Panel>, focused: Option<&str>) -> Self {
+        let mut strips: Vec<Strip> = Vec::new();
+        for panel in panels {
+            let label = label_for(panel.working_dir.as_deref());
+            match strips.iter_mut().find(|strip| strip.label == label) {
+                Some(strip) => strip.panels.push(panel),
+                None => strips.push(Strip {
                     label,
-                    entries: vec![entry],
+                    panels: vec![panel],
                 }),
             }
         }
         let mut strip = Self {
-            groups,
-            group: 0,
-            index: 0,
+            strips,
+            strip_index: 0,
+            panel_index: 0,
         };
         if let Some(focused) = focused {
             strip.focus_session(focused);
@@ -108,45 +108,45 @@ impl Strip {
 
     /// Point focus at a session id, if the strip still has it.
     pub fn focus_session(&mut self, session_id: &str) -> bool {
-        for (g, group) in self.groups.iter().enumerate() {
-            if let Some(i) = group
-                .entries
+        for (strip_index, strip) in self.strips.iter().enumerate() {
+            if let Some(i) = strip
+                .panels
                 .iter()
-                .position(|entry| entry.session_id == session_id)
+                .position(|panel| panel.session_id == session_id)
             {
-                self.group = g;
-                self.index = i;
+                self.strip_index = strip_index;
+                self.panel_index = i;
                 return true;
             }
         }
         false
     }
 
-    pub fn groups(&self) -> &[Group] {
-        &self.groups
+    pub fn strips(&self) -> &[Strip] {
+        &self.strips
     }
 
     /// Every session, flat, in strip order. The overview lays out the whole
     /// set rather than one group at a time, and reads it through here so the
     /// two surfaces can never disagree about which sessions exist.
-    pub fn entries(&self) -> Vec<Entry> {
-        self.groups
+    pub fn panels(&self) -> Vec<Panel> {
+        self.strips
             .iter()
-            .flat_map(|group| group.entries.iter().cloned())
+            .flat_map(|strip| strip.panels.iter().cloned())
             .collect()
     }
 
-    pub fn group_index(&self) -> usize {
-        self.group
+    pub fn strip_index(&self) -> usize {
+        self.strip_index
     }
 
-    pub fn index(&self) -> usize {
-        self.index
+    pub fn panel_index(&self) -> usize {
+        self.panel_index
     }
 
     /// Total sessions across all groups.
     pub fn len(&self) -> usize {
-        self.groups.iter().map(|group| group.entries.len()).sum()
+        self.strips.iter().map(|strip| strip.panels.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -154,14 +154,14 @@ impl Strip {
     }
 
     /// The focused group, if any.
-    pub fn focused_group(&self) -> Option<&Group> {
-        self.groups.get(self.group)
+    pub fn focused_strip(&self) -> Option<&Strip> {
+        self.strips.get(self.strip_index)
     }
 
     /// The focused session's id, if any.
     pub fn focused_session(&self) -> Option<&str> {
-        self.focused_group()
-            .and_then(|group| group.entries.get(self.index))
+        self.focused_strip()
+            .and_then(|strip| strip.panels.get(self.panel_index))
             .map(|entry| entry.session_id.as_str())
     }
 
@@ -170,9 +170,9 @@ impl Strip {
     pub fn focused_heading(&self) -> Option<String> {
         let focused = self.focused_session()?;
         let (index, entry) = self
-            .groups
+            .strips
             .iter()
-            .flat_map(|group| group.entries.iter())
+            .flat_map(|strip| strip.panels.iter())
             .enumerate()
             .find(|(_, entry)| entry.session_id == focused)?;
         match entry.title.as_deref().map(str::trim) {
@@ -183,8 +183,8 @@ impl Strip {
 
     /// The focused session's assigned title, excluding the ordinal fallback.
     pub fn focused_title(&self) -> Option<&str> {
-        self.focused_group()
-            .and_then(|group| group.entries.get(self.index))
+        self.focused_strip()
+            .and_then(|strip| strip.panels.get(self.panel_index))
             .and_then(|entry| entry.title.as_deref())
             .map(str::trim)
             .filter(|title| !title.is_empty())
@@ -192,8 +192,8 @@ impl Strip {
 
     /// The focused session's working directory, if the strip knows one.
     pub fn focused_working_dir(&self) -> Option<&str> {
-        self.focused_group()
-            .and_then(|group| group.entries.get(self.index))
+        self.focused_strip()
+            .and_then(|strip| strip.panels.get(self.panel_index))
             .and_then(|entry| entry.working_dir.as_deref())
     }
 
@@ -201,24 +201,24 @@ impl Strip {
     /// than stopping because a strip is a ring of a handful of items, and
     /// hitting an invisible wall at the end reads as the key being broken.
     pub fn focus_left(&mut self) -> bool {
-        self.step_within_group(-1)
+        self.step_within_strip(-1)
     }
 
     /// Move focus one bar right, wrapping within the group.
     pub fn focus_right(&mut self) -> bool {
-        self.step_within_group(1)
+        self.step_within_strip(1)
     }
 
-    fn step_within_group(&mut self, delta: isize) -> bool {
-        let len = self.focused_group().map(|g| g.entries.len()).unwrap_or(0);
+    fn step_within_strip(&mut self, delta: isize) -> bool {
+        let len = self.focused_strip().map(|g| g.panels.len()).unwrap_or(0);
         if len <= 1 {
             return false;
         }
-        let next = (self.index as isize + delta).rem_euclid(len as isize) as usize;
-        if next == self.index {
+        let next = (self.panel_index as isize + delta).rem_euclid(len as isize) as usize;
+        if next == self.panel_index {
             return false;
         }
-        self.index = next;
+        self.panel_index = next;
         true
     }
 
@@ -226,25 +226,26 @@ impl Strip {
     /// still exists. Clamping rather than resetting to 0 keeps the motion
     /// feeling like moving *up a column*, which is how the compositor behaves.
     pub fn focus_up(&mut self) -> bool {
-        self.step_group(-1)
+        self.step_strip(-1)
     }
 
     /// Move focus to the next group.
     pub fn focus_down(&mut self) -> bool {
-        self.step_group(1)
+        self.step_strip(1)
     }
 
-    fn step_group(&mut self, delta: isize) -> bool {
-        if self.groups.len() <= 1 {
+    fn step_strip(&mut self, delta: isize) -> bool {
+        if self.strips.len() <= 1 {
             return false;
         }
-        let next = (self.group as isize + delta).rem_euclid(self.groups.len() as isize) as usize;
-        if next == self.group {
+        let next =
+            (self.strip_index as isize + delta).rem_euclid(self.strips.len() as isize) as usize;
+        if next == self.strip_index {
             return false;
         }
-        self.group = next;
-        let len = self.groups[next].entries.len();
-        self.index = self.index.min(len.saturating_sub(1));
+        self.strip_index = next;
+        let len = self.strips[next].panels.len();
+        self.panel_index = self.panel_index.min(len.saturating_sub(1));
         true
     }
 }
@@ -277,8 +278,8 @@ fn ordinal(number: usize) -> String {
 pub enum Item {
     /// The outline enclosing one group's blocks. Which group it is indexes
     /// `groups()`.
-    Frame {
-        group: usize,
+    Strip {
+        strip: usize,
         x: f64,
         width: f64,
         /// Whether focus currently sits inside this group, so the enclosing
@@ -286,9 +287,9 @@ pub enum Item {
         focused: bool,
     },
     /// A session block. `focused` selects the wide solid form.
-    Block {
-        group: usize,
-        index: usize,
+    Panel {
+        strip: usize,
+        panel: usize,
         x: f64,
         width: f64,
         focused: bool,
@@ -301,37 +302,37 @@ pub enum Item {
 /// directory, holding one block per session, then a wider gap before the next
 /// group. Groups past `right` are dropped whole rather than squeezed, because a
 /// strip that reflows or shrinks its blocks stops being scannable at a glance.
-pub fn layout_items(strip: &Strip, left: f64, right: f64) -> Vec<Item> {
+pub fn layout_items(strip: &Strips, left: f64, right: f64) -> Vec<Item> {
     let pad = crate::layout::STRIP_FRAME_PAD;
     let mut items = Vec::new();
     let mut x = left;
-    for (g, group) in strip.groups().iter().enumerate() {
+    for (g, group) in strip.strips().iter().enumerate() {
         let blocks_w: f64 = group
-            .entries
+            .panels
             .iter()
             .enumerate()
-            .map(|(i, _)| block_width(strip, g, i))
+            .map(|(i, _)| panel_width(strip, g, i))
             .sum::<f64>()
-            + group.entries.len().saturating_sub(1) as f64 * crate::layout::STRIP_BAR_GAP;
+            + group.panels.len().saturating_sub(1) as f64 * crate::layout::STRIP_BAR_GAP;
         let frame_w = blocks_w + pad * 2.0;
         if x + frame_w > right {
             break;
         }
-        items.push(Item::Frame {
-            group: g,
+        items.push(Item::Strip {
+            strip: g,
             x,
             width: frame_w,
-            focused: strip.group_index() == g,
+            focused: strip.strip_index() == g,
         });
         let mut bx = x + pad;
-        for (i, _) in group.entries.iter().enumerate() {
-            let width = block_width(strip, g, i);
-            items.push(Item::Block {
-                group: g,
-                index: i,
+        for (i, _) in group.panels.iter().enumerate() {
+            let width = panel_width(strip, g, i);
+            items.push(Item::Panel {
+                strip: g,
+                panel: i,
                 x: bx,
                 width,
-                focused: strip.group_index() == g && strip.index() == i,
+                focused: strip.strip_index() == g && strip.panel_index() == i,
             });
             bx += width + crate::layout::STRIP_BAR_GAP;
         }
@@ -340,8 +341,8 @@ pub fn layout_items(strip: &Strip, left: f64, right: f64) -> Vec<Item> {
     items
 }
 
-fn block_width(strip: &Strip, group: usize, index: usize) -> f64 {
-    if strip.group_index() == group && strip.index() == index {
+fn panel_width(strips: &Strips, strip: usize, panel: usize) -> f64 {
+    if strips.strip_index() == strip && strips.panel_index() == panel {
         crate::layout::STRIP_BAR_FOCUS_WIDTH
     } else {
         crate::layout::STRIP_BAR_WIDTH
@@ -352,13 +353,13 @@ fn block_width(strip: &Strip, group: usize, index: usize) -> f64 {
 mod tests {
     use super::*;
 
-    fn strip() -> Strip {
-        Strip::build(
+    fn strip() -> Strips {
+        Strips::build(
             vec![
-                Entry::new("a1", Some("/home/j/jcode")),
-                Entry::new("a2", Some("/home/j/jcode")),
-                Entry::new("a3", Some("/home/j/jcode")),
-                Entry::new("b1", Some("/home/j/site")),
+                Panel::new("a1", Some("/home/j/jcode")),
+                Panel::new("a2", Some("/home/j/jcode")),
+                Panel::new("a3", Some("/home/j/jcode")),
+                Panel::new("b1", Some("/home/j/site")),
             ],
             Some("a1"),
         )
@@ -369,10 +370,10 @@ mod tests {
     #[test]
     fn grouping_is_by_working_dir_and_is_stable() {
         let strip = strip();
-        assert_eq!(strip.groups().len(), 2);
-        assert_eq!(strip.groups()[0].label, "jcode");
-        assert_eq!(strip.groups()[0].entries.len(), 3);
-        assert_eq!(strip.groups()[1].label, "site");
+        assert_eq!(strip.strips().len(), 2);
+        assert_eq!(strip.strips()[0].label, "jcode");
+        assert_eq!(strip.strips()[0].panels.len(), 3);
+        assert_eq!(strip.strips()[1].label, "site");
         // Rebuilding the same list must produce the same layout.
         let again = strip.clone();
         assert_eq!(strip, again);
@@ -382,9 +383,9 @@ mod tests {
     /// vanishing: an invisible session is worse than an oddly labelled one.
     #[test]
     fn sessions_without_a_working_dir_are_still_grouped() {
-        let strip = Strip::build(vec![Entry::new("x", None)], None);
-        assert_eq!(strip.groups().len(), 1);
-        assert_eq!(strip.groups()[0].label, "-");
+        let strip = Strips::build(vec![Panel::new("x", None)], None);
+        assert_eq!(strip.strips().len(), 1);
+        assert_eq!(strip.strips()[0].label, "-");
     }
 
     /// R3.
@@ -398,7 +399,7 @@ mod tests {
         assert_eq!(strip.focused_session(), Some("a3"));
         assert!(strip.focus_right());
         assert_eq!(strip.focused_session(), Some("a1"), "did not wrap");
-        assert_eq!(strip.group_index(), 0, "left the group");
+        assert_eq!(strip.strip_index(), 0, "left the group");
     }
 
     /// R3.
@@ -407,7 +408,7 @@ mod tests {
         let mut strip = strip();
         assert!(strip.focus_left());
         assert_eq!(strip.focused_session(), Some("a3"));
-        assert_eq!(strip.group_index(), 0);
+        assert_eq!(strip.strip_index(), 0);
     }
 
     /// R4.
@@ -416,26 +417,30 @@ mod tests {
         let mut strip = strip();
         strip.focus_right();
         strip.focus_right();
-        assert_eq!(strip.index(), 2);
+        assert_eq!(strip.panel_index(), 2);
         assert!(strip.focus_down());
-        assert_eq!(strip.group_index(), 1);
-        assert_eq!(strip.index(), 0, "index was not clamped into the group");
+        assert_eq!(strip.strip_index(), 1);
+        assert_eq!(
+            strip.panel_index(),
+            0,
+            "index was not clamped into the group"
+        );
         assert_eq!(strip.focused_session(), Some("b1"));
         assert!(strip.focus_up());
-        assert_eq!(strip.group_index(), 0);
+        assert_eq!(strip.strip_index(), 0);
     }
 
     /// R4: with nothing to move to, the keys must be quiet no-ops rather than
     /// appearing to work.
     #[test]
     fn movement_is_a_no_op_when_there_is_nowhere_to_go() {
-        let mut only = Strip::build(vec![Entry::new("solo", Some("/tmp"))], Some("solo"));
+        let mut only = Strips::build(vec![Panel::new("solo", Some("/tmp"))], Some("solo"));
         assert!(!only.focus_left());
         assert!(!only.focus_right());
         assert!(!only.focus_up());
         assert!(!only.focus_down());
 
-        let mut empty = Strip::default();
+        let mut empty = Strips::default();
         assert!(!empty.focus_left());
         assert!(!empty.focus_down());
         assert_eq!(empty.focused_session(), None);
@@ -446,26 +451,26 @@ mod tests {
     #[test]
     fn rebuilding_keeps_focus_on_the_same_session() {
         let entries = vec![
-            Entry::new("a1", Some("/home/j/jcode")),
-            Entry::new("a2", Some("/home/j/jcode")),
+            Panel::new("a1", Some("/home/j/jcode")),
+            Panel::new("a2", Some("/home/j/jcode")),
         ];
-        let strip = Strip::build(entries, Some("a2"));
+        let strip = Strips::build(entries, Some("a2"));
         assert_eq!(strip.focused_session(), Some("a2"));
     }
 
     #[test]
     fn heading_uses_the_session_title_when_available() {
-        let mut entry = Entry::new("a1", Some("/tmp"));
+        let mut entry = Panel::new("a1", Some("/tmp"));
         entry.title = Some("  Fix the renderer  ".into());
-        let strip = Strip::build(vec![entry], Some("a1"));
+        let strip = Strips::build(vec![entry], Some("a1"));
         assert_eq!(strip.focused_heading().as_deref(), Some("Fix the renderer"));
     }
 
     #[test]
     fn heading_falls_back_to_the_chat_ordinal() {
-        let strip = Strip::build(
+        let strip = Strips::build(
             (1..=13)
-                .map(|number| Entry::new(&format!("s{number}"), Some("/tmp")))
+                .map(|number| Panel::new(&format!("s{number}"), Some("/tmp")))
                 .collect(),
             Some("s13"),
         );
@@ -480,7 +485,7 @@ mod tests {
     /// A session that disappeared must not leave focus pointing at nothing.
     #[test]
     fn focus_falls_back_when_the_session_is_gone() {
-        let strip = Strip::build(vec![Entry::new("a1", Some("/tmp"))], Some("vanished"));
+        let strip = Strips::build(vec![Panel::new("a1", Some("/tmp"))], Some("vanished"));
         assert_eq!(strip.focused_session(), Some("a1"));
     }
 
@@ -497,12 +502,12 @@ mod tests {
 mod layout_tests {
     use super::*;
 
-    fn strip() -> Strip {
-        Strip::build(
+    fn strip() -> Strips {
+        Strips::build(
             vec![
-                Entry::new("a1", Some("/home/j/jcode")),
-                Entry::new("a2", Some("/home/j/jcode")),
-                Entry::new("b1", Some("/home/j/site")),
+                Panel::new("a1", Some("/home/j/jcode")),
+                Panel::new("a2", Some("/home/j/jcode")),
+                Panel::new("b1", Some("/home/j/site")),
             ],
             Some("a2"),
         )
@@ -514,11 +519,11 @@ mod layout_tests {
         let items = layout_items(&strip(), 0.0, 400.0);
         let blocks = items
             .iter()
-            .filter(|item| matches!(item, Item::Block { .. }))
+            .filter(|item| matches!(item, Item::Panel { .. }))
             .count();
         let frames = items
             .iter()
-            .filter(|item| matches!(item, Item::Frame { .. }))
+            .filter(|item| matches!(item, Item::Strip { .. }))
             .count();
         assert_eq!(blocks, 3, "blocks did not match the session count");
         assert_eq!(frames, 2, "frames did not match the group count");
@@ -532,12 +537,12 @@ mod layout_tests {
         let focused: Vec<(usize, f64)> = items
             .iter()
             .filter_map(|item| match item {
-                Item::Block {
+                Item::Panel {
                     focused: true,
                     width,
-                    index,
+                    panel,
                     ..
-                } => Some((*index, *width)),
+                } => Some((*panel, *width)),
                 _ => None,
             })
             .collect();
@@ -557,11 +562,11 @@ mod layout_tests {
         let focused: Vec<usize> = items
             .iter()
             .filter_map(|item| match item {
-                Item::Frame {
-                    group,
+                Item::Strip {
+                    strip,
                     focused: true,
                     ..
-                } => Some(*group),
+                } => Some(*strip),
                 _ => None,
             })
             .collect();
@@ -574,8 +579,8 @@ mod layout_tests {
     fn blocks_sit_inside_their_group_frame() {
         let items = layout_items(&strip(), 10.0, 400.0);
         for item in &items {
-            let Item::Block {
-                group, x, width, ..
+            let Item::Panel {
+                strip, x, width, ..
             } = item
             else {
                 continue;
@@ -583,12 +588,12 @@ mod layout_tests {
             let frame = items
                 .iter()
                 .find_map(|other| match other {
-                    Item::Frame {
-                        group: g,
+                    Item::Strip {
+                        strip: g,
                         x: fx,
                         width: fw,
                         ..
-                    } if g == group => Some((*fx, *fw)),
+                    } if g == strip => Some((*fx, *fw)),
                     _ => None,
                 })
                 .expect("a block was laid out without its group frame");
@@ -606,7 +611,7 @@ mod layout_tests {
         let items = layout_items(&strip(), 10.0, 400.0);
         let mut cursor = 10.0f64;
         for item in &items {
-            let Item::Block { x, width, .. } = item else {
+            let Item::Panel { x, width, .. } = item else {
                 continue;
             };
             assert!(*x >= cursor - 1e-9, "block at {x} overlapped {cursor}");
@@ -620,7 +625,7 @@ mod layout_tests {
         let items = layout_items(&strip(), 0.0, 400.0);
         let mut cursor = 0.0f64;
         for item in &items {
-            let Item::Frame { x, width, .. } = item else {
+            let Item::Strip { x, width, .. } = item else {
                 continue;
             };
             assert!(*x >= cursor - 1e-9, "frame at {x} overlapped {cursor}");
@@ -636,13 +641,13 @@ mod layout_tests {
         let groups: std::collections::BTreeSet<usize> = items
             .iter()
             .map(|item| match item {
-                Item::Frame { group, .. } | Item::Block { group, .. } => *group,
+                Item::Strip { strip, .. } | Item::Panel { strip, .. } => *strip,
             })
             .collect();
         assert!(groups.len() < 2, "a group was drawn past the right edge");
         for item in &items {
             let (x, width) = match item {
-                Item::Frame { x, width, .. } | Item::Block { x, width, .. } => (*x, *width),
+                Item::Strip { x, width, .. } | Item::Panel { x, width, .. } => (*x, *width),
             };
             assert!(x + width <= 30.0, "an item ran off the page");
         }

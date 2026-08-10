@@ -190,6 +190,15 @@ struct App {
     /// When the workspace camera last stepped. Kept separate from the overview
     /// so either animation can run or settle independently.
     workspace_frame: Option<std::time::Instant>,
+    /// A newly created session is not present in the strip until the daemon's
+    /// next session-list update. Defer its niri-style slide until that update,
+    /// otherwise the animation finishes while there is still only one panel.
+    new_session_transition_pending: bool,
+    /// A fresh desktop window starts as a two-panel workspace. The first
+    /// `Attached` event spends this once by asking the worker for the neighboring
+    /// session; reconnects and later attaches already have a session id and do
+    /// not create more panels.
+    startup_panel_pending: bool,
     /// Geometry of the most recently built frame. Pointer hit-testing reads
     /// this instead of the GPU state, so input handling is testable without a
     /// window and can never disagree with what was actually drawn.
@@ -232,6 +241,8 @@ impl Default for App {
             last_frame: None,
             overview_frame: None,
             workspace_frame: None,
+            new_session_transition_pending: false,
+            startup_panel_pending: true,
             // A sensible frame until the first real one is built, so input
             // before the first paint is still handled sanely.
             frame: layout::Frame::new((1100, 720), 1.0),
@@ -391,7 +402,7 @@ pub struct Model {
     /// in `scroll`; this is only how the view catches up to it.
     pub smooth: scroll::Smooth,
     /// Live sessions, drawn as the strip at the top of the window.
-    pub strip: strip::Strip,
+    pub strips: strip::Strips,
     /// Horizontal multi-session camera. Session ownership stays in `strip` and
     /// this state only supplies native-scale column positions and easing.
     pub workspace: workspace::Workspace,
@@ -502,7 +513,7 @@ impl Default for Model {
             hint: hints::arbitrary_index(),
             stream: stream::Stream::default(),
             smooth: scroll::Smooth::default(),
-            strip: strip::Strip::default(),
+            strips: strip::Strips::default(),
             workspace: workspace::Workspace::default(),
             overview: overview::Overview::default(),
             peeks: overview::Peeks::default(),
@@ -828,7 +839,7 @@ impl App {
         // than one session to move between (the strip proper), or a working
         // directory to name. With neither it would be a widget saying "1 of 1"
         // about nowhere, so nothing is reserved and the page is unchanged.
-        let strip = model.strip.len() > 1
+        let strip = model.strips.len() > 1
             || model.working_dir.is_some()
             || model.mem.is_some()
             || model.transcript.has_user_message();
@@ -1601,14 +1612,14 @@ impl App {
             // a selection you then have to confirm would be a second
             // interaction for something the user already asked for.
             Action::SessionLeft => {
-                if self.model.strip.focus_left() {
+                if self.model.strips.focus_left() {
                     self.begin_workspace_transition(workspace::Direction::Left);
                     self.attach_focused_session();
                     self.request_peek();
                 }
             }
             Action::SessionRight => {
-                if self.model.strip.focus_right() {
+                if self.model.strips.focus_right() {
                     self.begin_workspace_transition(workspace::Direction::Right);
                     self.attach_focused_session();
                     self.request_peek();
@@ -1619,7 +1630,7 @@ impl App {
             // before the strip moves or it could not be drawn leaving.
             Action::SessionUp => {
                 let (prev_row, prev_focused) = self.focused_row_snapshot();
-                if self.model.strip.focus_up() {
+                if self.model.strips.focus_up() {
                     self.begin_row_transition(workspace::Direction::Up, prev_row, prev_focused);
                     self.attach_focused_session();
                     self.request_peek();
@@ -1627,7 +1638,7 @@ impl App {
             }
             Action::SessionDown => {
                 let (prev_row, prev_focused) = self.focused_row_snapshot();
-                if self.model.strip.focus_down() {
+                if self.model.strips.focus_down() {
                     self.begin_row_transition(workspace::Direction::Down, prev_row, prev_focused);
                     self.attach_focused_session();
                     self.request_peek();

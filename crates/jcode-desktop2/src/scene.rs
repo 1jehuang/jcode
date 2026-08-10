@@ -341,7 +341,7 @@ fn draw_strip(
     scale: f64,
 ) {
     let (top, bottom) = band;
-    let items = crate::strip::layout_items(&model.strip, frame.left, frame.right);
+    let items = crate::strip::layout_items(&model.strips, frame.left, frame.right);
 
     // Blocks are centred in the band; the enclosure adds its padding around
     // them, so both are derived from the same centre line.
@@ -351,11 +351,11 @@ fn draw_strip(
 
     for item in items {
         match item {
-            crate::strip::Item::Frame {
+            crate::strip::Item::Strip {
                 x,
                 width,
                 focused,
-                group: _,
+                strip: _,
             } => {
                 // The enclosure is a hairline so it frames without competing
                 // with the blocks inside it. The focused group's outline is
@@ -380,21 +380,21 @@ fn draw_strip(
                     ),
                 );
             }
-            crate::strip::Item::Block {
+            crate::strip::Item::Panel {
                 x,
                 width,
                 focused,
-                group,
-                index,
+                strip,
+                panel,
             } => {
                 // Unfocused blocks are dim so the focused one reads instantly;
                 // a busy session is drawn at full ink even when unfocused, so
                 // work happening off-screen is visible rather than silent.
                 let busy = model
-                    .strip
-                    .groups()
-                    .get(group)
-                    .and_then(|g| g.entries.get(index))
+                    .strips
+                    .strips()
+                    .get(strip)
+                    .and_then(|strip| strip.panels.get(panel))
                     .map(|entry| entry.busy)
                     .unwrap_or(false);
                 let color = if focused {
@@ -420,11 +420,11 @@ fn draw_strip(
     // the same stable session order used by the strip.
     if model.transcript.has_user_message() {
         let heading = model
-            .strip
+            .strips
             .focused_title()
             .map(str::to_string)
             .or_else(|| model.transcript.provisional_heading())
-            .or_else(|| model.strip.focused_heading())
+            .or_else(|| model.strips.focused_heading())
             .unwrap_or_else(|| "1st chat".to_string());
         text.draw_paragraph_scaled(
             scene,

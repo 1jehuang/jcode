@@ -25,12 +25,13 @@ fn the_strip_reads_like_the_waybar_module() {
         .strip()
         .expect("the strip node did not get a strip band");
 
-    let items = crate::strip::layout_items(&model.strip, rendered.frame.left, rendered.frame.right);
+    let items =
+        crate::strip::layout_items(&model.strips, rendered.frame.left, rendered.frame.right);
 
     let mut focused_ink = None;
     let mut unfocused_ink = Vec::new();
     for item in &items {
-        if let crate::strip::Item::Block {
+        if let crate::strip::Item::Panel {
             x, width, focused, ..
         } = item
         {

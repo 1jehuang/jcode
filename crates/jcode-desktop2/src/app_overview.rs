@@ -17,7 +17,7 @@ impl App {
     /// mid-gesture.
     pub(crate) fn overview_field(&self) -> overview::Field {
         overview::layout(
-            &self.model.strip.entries(),
+            &self.model.strips.panels(),
             self.model
                 .overview
                 .focus()
@@ -76,8 +76,8 @@ impl App {
             .into_iter()
             .chain(
                 self.model
-                    .strip
-                    .entries()
+                    .strips
+                    .panels()
                     .into_iter()
                     .map(|entry| entry.session_id),
             )
@@ -95,7 +95,7 @@ impl App {
         if commit
             && let Some(target) = self.model.overview.focus().map(str::to_string)
             && self.model.session_id.as_deref() != Some(target.as_str())
-            && self.model.strip.focus_session(&target)
+            && self.model.strips.focus_session(&target)
         {
             self.attach_focused_session();
         }
