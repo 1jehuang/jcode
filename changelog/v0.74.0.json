@@ -1,0 +1,24 @@
+{
+  "version": "0.74.0",
+  "date": "2026-08-10",
+  "title": "Better ACP controls and focused session workflows",
+  "highlights": [
+    "ACP clients can switch models and reasoning effort, list available models, and use model control slash commands",
+    "Jcode can search version-matched documentation bundled with the installed build",
+    "The session picker can filter sessions to the current working directory"
+  ],
+  "improvements": [
+    "Session todos are pinned by default without being duplicated in the transcript or info widgets",
+    "Config and swarm prompt editors now temporarily hand off terminal control and restore the TUI after exit",
+    "Independent root sessions in the same repository now keep separate swarm plans while spawned workers remain attached to their parent swarm"
+  ],
+  "fixes": [
+    "Headed forks reliably submit their staged startup prompt after subscribing",
+    "ACP tool policies that enable MCP now include tools dynamically exposed by configured MCP servers",
+    "Desktop new-session transitions no longer stall while establishing a live connection",
+    "Explicit OpenRouter provider selections remain pinned",
+    "Nested shell commands and concrete external paths receive more accurate command-risk classification",
+    "Imitated Antigravity tool calls are rejected instead of being treated as genuine tool requests",
+    "Ollama cloud models use their reported context metadata"
+  ]
+}
