@@ -14,6 +14,7 @@ use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient, LaunchOptions};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Failure wording and connection-stage reporting are the SDK's, so the app
@@ -192,6 +193,7 @@ pub fn spawn(
         // and the session to re-attach to has to be remembered.
         let outgoing = Arc::new(Mutex::new(outgoing_rx));
         let resume = Arc::new(Mutex::new(String::new()));
+        let new_requested = Arc::new(AtomicBool::new(false));
         let mut backoff = RECONNECT_BACKOFF;
         loop {
             // Where the attempt got to, and when the stream came up: both are
@@ -204,9 +206,18 @@ pub fn spawn(
                 Arc::clone(&resume),
                 Arc::clone(&stage),
                 Arc::clone(&connected_at),
+                Arc::clone(&new_requested),
             ) {
                 // `run` only returns on failure; `Ok` would mean the stream
                 // ended cleanly, which is still a lost connection.
+                Ok(()) if new_requested.swap(false, Ordering::AcqRel) => {
+                    // A fresh session requires a fresh legacy connection. The
+                    // daemon binds one session id to a connection for life, so
+                    // a second subscribe without a target cannot retarget it.
+                    // Re-enter immediately with an empty resume id; `run` then
+                    // creates the new session on a clean connection.
+                    continue;
+                }
                 Ok(()) => "the harness closed the connection".to_string(),
                 Err(error) => error.to_string(),
             };
@@ -248,6 +259,7 @@ fn run(
     resume: Arc<Mutex<String>>,
     stage: Arc<Mutex<Stage>>,
     connected_at: Arc<Mutex<Option<Instant>>>,
+    new_requested: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let set_stage = |next: Stage| {
         if let Ok(mut guard) = stage.lock() {
@@ -308,11 +320,12 @@ fn run(
         let session_id = Arc::clone(&session_id);
         let resume = Arc::clone(&resume);
         let ui = ui.clone();
+        let new_requested = Arc::clone(&new_requested);
         move || {
             // `recv_timeout` rather than `recv`: a blocking receive would hold
             // the queue past this connection's death and swallow the first
             // command the *next* connection should have sent.
-            while !client.is_closed() {
+            while !client.is_closed() && !new_requested.load(Ordering::Acquire) {
                 let command = {
                     let Ok(queue) = outgoing.lock() else { break };
                     match queue.recv_timeout(Duration::from_millis(100)) {
@@ -385,25 +398,20 @@ fn run(
                         });
                         Ok(())
                     }
-                    // Clearing the current id while the session is created is
-                    // deliberate: a message sent into that gap is dropped
-                    // rather than landing in the session the user just left.
+                    // A daemon connection is permanently bound to the session
+                    // from its first subscribe. Signal the stream loop to drop
+                    // this connection and let the outer worker create on a new
+                    // one instead of issuing a second subscribe that can never
+                    // produce a different id.
                     Command::New => {
                         if let Ok(mut guard) = session_id.lock() {
                             guard.clear();
                         }
-                        client.create_session(default_working_dir()).map(|session| {
-                            if let Ok(mut guard) = session_id.lock() {
-                                *guard = session.session_id.clone();
-                            }
-                            if let Ok(mut guard) = resume.lock() {
-                                *guard = session.session_id.clone();
-                            }
-                            ui.send(HarnessUpdate::Attached {
-                                session_id: session.session_id,
-                                working_dir: session.working_dir,
-                            })
-                        })
+                        if let Ok(mut guard) = resume.lock() {
+                            guard.clear();
+                        }
+                        new_requested.store(true, Ordering::Release);
+                        Ok(())
                     }
                     Command::ListModels => {
                         let session = session_id.lock().map(|s| s.clone()).unwrap_or_default();
@@ -437,22 +445,19 @@ fn run(
         }
     });
 
-    // Session-list poller. The API has no push notification for sessions
-    // appearing or disappearing, so the strip is refreshed on a slow timer;
-    // slow because a strip that is a second stale costs nothing, while a busy
-    // poll would tax the daemon for the whole life of the window.
+    // Session-list polling is independent of the command worker. It may retain
+    // the old client briefly during a new-session handoff, but the replacement
+    // connection is separate and does not wait for this poller to retire.
     std::thread::spawn({
         let client = client.clone();
         let ui = ui.clone();
+        let poll_new_requested = Arc::clone(&new_requested);
         move || {
-            while !client.is_closed() {
+            while !client.is_closed() && !poll_new_requested.load(Ordering::Acquire) {
                 match client.list_sessions() {
                     Ok(sessions) => ui.send(HarnessUpdate::Sessions(
                         sessions.into_iter().map(to_entry).collect(),
                     )),
-                    // A poll that fails is not worth a banner: the strip simply
-                    // stays as it was, and a dead connection is reported once
-                    // by the event loop rather than every two seconds.
                     Err(_) => break,
                 }
                 std::thread::sleep(SESSION_POLL_INTERVAL);
@@ -471,7 +476,16 @@ fn run(
     // degrade to a briefly wrong label rather than a panic if that changed.
     let mut current_call = String::new();
 
-    for event in events {
+    loop {
+        if new_requested.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(event) = events.next_timeout(Duration::from_millis(25)) else {
+            if client.is_closed() {
+                break;
+            }
+            continue;
+        };
         match event {
             ApiEvent::TextDelta { text, .. } => ui.send(HarnessUpdate::Text(text)),
             // Reasoning is not rendered as transcript text yet, but its

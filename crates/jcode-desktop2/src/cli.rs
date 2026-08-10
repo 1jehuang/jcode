@@ -40,6 +40,7 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         Some("--check-clipboard-image") => Some(check_clipboard_image()),
         Some("--check-primary-selection") => Some(check_primary_selection()),
         Some("--check-connect") => Some(check_connect()),
+        Some("--check-new-session") => Some(check_new_session()),
         Some("--check-reconnect") => Some(check_reconnect()),
         Some("--check-resume-scan") => Some(check_resume_scan()),
         Some("--e2e") => Some(run_e2e(
@@ -49,6 +50,42 @@ pub fn dispatch(args: &[String]) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+/// Exercise the exact worker and command queue used by Ctrl+Shift+N.
+fn check_new_session() -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let (updates, outgoing) = harness::spawn(|| {});
+    let wait_for_attached = |after: Option<&str>| -> Result<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match updates.recv_timeout(Duration::from_millis(100)) {
+                Ok(harness::HarnessUpdate::Attached { session_id, .. })
+                    if after != Some(session_id.as_str()) =>
+                {
+                    return Ok(session_id);
+                }
+                Ok(harness::HarnessUpdate::Failed(message)) => anyhow::bail!(message),
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("desktop2 harness disconnected")
+                }
+            }
+        }
+        anyhow::bail!("desktop2 did not attach a session within 10 seconds")
+    };
+
+    let first = wait_for_attached(None)?;
+    println!("desktop2 initial session attached: {first}");
+    let started = Instant::now();
+    outgoing.send(harness::Command::New)?;
+    let second = wait_for_attached(Some(&first))?;
+    println!(
+        "desktop2 new session ok: {first} -> {second} in {:.2?}",
+        started.elapsed()
+    );
+    Ok(())
 }
 
 /// `--profile-transitions`: time the real daemon boundaries behind navigation.
