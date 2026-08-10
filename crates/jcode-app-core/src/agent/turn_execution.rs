@@ -450,19 +450,21 @@ impl Agent {
         tools
     }
 
-    /// Tailor the `selfdev` tool definition to the session mode.
+    /// Expose the `selfdev` tool only while running in self-development mode.
     ///
-    /// The registry stores a single shared `selfdev` tool with a default
-    /// (non-self-dev) schema. Self-dev sessions get the full build/test/reload
-    /// surface; every other session keeps the lightweight on-ramp surface
-    /// (`enter`, `setup`, `reload`, `status`, `find-config`). The tool stays
-    /// available in all sessions so the agent can always enter self-dev mode.
-    fn apply_selfdev_tool_surface(tools: &mut [ToolDefinition], is_canary: bool) {
+    /// The registry keeps the implementation available for self-dev sessions,
+    /// but regular agents should not spend tool-list context on an internal
+    /// development surface.
+    fn apply_selfdev_tool_surface(tools: &mut Vec<ToolDefinition>, is_canary: bool) {
+        if !is_canary {
+            tools.retain(|tool| tool.name != "selfdev");
+            return;
+        }
         for tool in tools.iter_mut() {
             if tool.name == "selfdev" {
                 tool.description =
-                    crate::tool::selfdev::SelfDevTool::description_for(is_canary).to_string();
-                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(is_canary);
+                    crate::tool::selfdev::SelfDevTool::description_for(true).to_string();
+                tool.input_schema = crate::tool::selfdev::SelfDevTool::schema_for(true);
             }
         }
     }
