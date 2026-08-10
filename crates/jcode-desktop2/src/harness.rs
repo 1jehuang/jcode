@@ -82,6 +82,10 @@ pub enum HarnessUpdate {
     /// status line is hidden once a session is attached, which is exactly when
     /// a failure matters most.
     Failed(String),
+    /// The runtime transport disappeared and the worker is reconnecting.
+    /// Unlike `Failed`, this is not a failed model turn and must not leave an
+    /// error card in the conversation.
+    ConnectionLost(String),
     /// The daemon's current session list, for the session strip.
     Sessions(Vec<crate::strip::Entry>),
     /// The tail of another session's conversation, for the overview's preview.
@@ -269,7 +273,7 @@ pub fn spawn(
             if uptime.is_some() {
                 backoff = RECONNECT_BACKOFF;
             }
-            ui.send(HarnessUpdate::Failed(describe_disconnect(
+            ui.send(HarnessUpdate::ConnectionLost(describe_disconnect(
                 stage,
                 &error,
                 uptime,
@@ -631,6 +635,17 @@ fn run(
                 percent,
                 done,
             }),
+            ApiEvent::Error { message, .. }
+                if message.eq_ignore_ascii_case("daemon connection closed") =>
+            {
+                // The bridge sends this immediately before closing the API
+                // stream. Let the outer retry loop report it once as a
+                // recoverable transport interruption, rather than first
+                // recording a failed turn and then recording a disconnect.
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::ConnectionReset, message).into(),
+                );
+            }
             ApiEvent::Error { message, .. } => {
                 // A failed request is also the end of the turn it belonged to:
                 // the daemon sends `error` *instead of* `done`, so without this
