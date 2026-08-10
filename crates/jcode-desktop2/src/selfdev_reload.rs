@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
+const READY_ENV: &str = "JCODE_DESKTOP2_RELOAD_READY";
+const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 pub struct Registration(Option<std::path::PathBuf>);
 
@@ -47,6 +49,19 @@ pub fn requested() -> bool {
     RELOAD_REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// Tell the window which launched this process that our replacement surface is
+/// alive. This deliberately happens after window and GPU creation, rather than
+/// at process start, so a failed replacement never makes the visible window
+/// disappear.
+pub fn acknowledge_ready() {
+    let Some(path) = std::env::var_os(READY_ENV).map(std::path::PathBuf::from) else {
+        return;
+    };
+    if let Err(error) = std::fs::write(&path, b"ready\n") {
+        eprintln!("desktop2 selfdev reload acknowledgement failed: {error}");
+    }
+}
+
 fn marker_path() -> Option<std::path::PathBuf> {
     Some(
         std::path::PathBuf::from(std::env::var_os("HOME")?).join(".jcode/selfdev/desktop2-current"),
@@ -54,15 +69,43 @@ fn marker_path() -> Option<std::path::PathBuf> {
 }
 
 /// Start the activated build with this process's environment and working
-/// directory. The caller exits the old event loop only after spawning works.
+/// directory. The old window remains visible until the replacement has created
+/// its own window and GPU surface. This avoids a reload looking like all desktop
+/// windows were closed when startup takes a moment (or fails altogether).
 pub fn relaunch() -> anyhow::Result<()> {
     let marker = marker_path().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
     let binary = std::fs::read_to_string(&marker)?.trim().to_owned();
     if binary.is_empty() {
         anyhow::bail!("desktop2 selfdev marker is empty: {}", marker.display());
     }
-    std::process::Command::new(binary).spawn()?;
-    Ok(())
+    let ready = marker
+        .parent()
+        .expect("selfdev marker has a parent")
+        .join(format!(
+            ".desktop2-ready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+    let mut child = std::process::Command::new(binary)
+        .env(READY_ENV, &ready)
+        .spawn()?;
+    let deadline = std::time::Instant::now() + READY_TIMEOUT;
+    loop {
+        if ready.exists() {
+            let _ = std::fs::remove_file(&ready);
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("replacement exited before opening a window ({status})");
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("replacement did not open a window within {READY_TIMEOUT:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[cfg(test)]

@@ -1942,6 +1942,10 @@ impl ApplicationHandler for App {
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
         self.state = Some(state);
+        // A selfdev predecessor stays on screen until this point. Acknowledge
+        // only after both the native window and its GPU surface exist, so reload
+        // never leaves the desktop with no jcode window open.
+        selfdev_reload::acknowledge_ready();
         // Start the reveal at the moment the surface exists, not at process
         // start: GPU init takes long enough that timing it from `main` would
         // spend the whole sequence before the first frame is presented.
@@ -2226,6 +2230,7 @@ impl ApplicationHandler for App {
     /// waking forever.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if selfdev_reload::requested() {
+            self.save_geometry(true);
             match selfdev_reload::relaunch() {
                 Ok(()) => event_loop.exit(),
                 Err(error) => eprintln!("desktop2 selfdev reload failed: {error:#}"),
