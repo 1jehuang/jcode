@@ -3054,7 +3054,11 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
 fn run_interactive_editor(
     command: &mut std::process::Command,
 ) -> std::io::Result<std::process::ExitStatus> {
-    run_interactive_editor_with(command, suspend_terminal_for_editor, resume_terminal_after_editor)
+    run_interactive_editor_with(
+        command,
+        suspend_terminal_for_editor,
+        resume_terminal_after_editor,
+    )
 }
 
 fn run_interactive_editor_with(
@@ -3069,9 +3073,7 @@ fn run_interactive_editor_with(
 }
 
 fn suspend_terminal_for_editor() {
-    use crossterm::event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture,
-    };
+    use crossterm::event::{DisableBracketedPaste, DisableFocusChange, DisableMouseCapture};
 
     // These commands are safe even when a mode was not enabled. Disable them
     // before leaving the alternate screen so the child receives normal input.
@@ -3145,9 +3147,13 @@ mod interactive_editor_tests {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", "exit 7"]);
 
-        let status = run_interactive_editor_with(&mut command, || {}, move || {
-            *resumed_after.borrow_mut() = true;
-        })
+        let status = run_interactive_editor_with(
+            &mut command,
+            || {},
+            move || {
+                *resumed_after.borrow_mut() = true;
+            },
+        )
         .expect("shell should launch");
 
         assert_eq!(status.code(), Some(7));
