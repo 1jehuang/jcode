@@ -760,9 +760,21 @@ fn test_filter_mode_cycles_through_requested_session_sources() {
     cursor.source = SessionSource::Cursor;
 
     let mut picker = SessionPicker::new(vec![saved, claude_code, codex, pi, opencode, cursor]);
+    picker.all_sessions[0].working_dir = Some("/work/project".to_string());
+    picker.set_current_dir(Some("/work/project/".to_string()));
+    picker.rebuild_items();
 
     assert_eq!(picker.filter_mode, SessionFilterMode::All);
     assert_eq!(picker.visible_sessions.len(), 6);
+
+    picker.cycle_filter_mode();
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
+    assert_eq!(picker.visible_sessions.len(), 1);
+    assert!(
+        picker
+            .visible_session_iter()
+            .all(|session| picker.session_in_current_dir(session))
+    );
 
     picker.cycle_filter_mode();
     assert_eq!(picker.filter_mode, SessionFilterMode::CatchUp);
@@ -846,7 +858,7 @@ fn test_filter_mode_keyboard_shortcuts_cycle_both_directions() {
     picker
         .handle_overlay_key(KeyCode::Char('s'), KeyModifiers::empty())
         .unwrap();
-    assert_eq!(picker.filter_mode, SessionFilterMode::CatchUp);
+    assert_eq!(picker.filter_mode, SessionFilterMode::CurrentDir);
 
     picker
         .handle_overlay_key(KeyCode::Char('S'), KeyModifiers::empty())
