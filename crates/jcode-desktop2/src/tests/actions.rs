@@ -1590,10 +1590,7 @@ fn a_new_session_preserves_the_old_panel_until_the_new_one_attaches() {
     let (updates_tx, updates_rx) = channel();
     let (commands_tx, _commands_rx) = channel();
     let commands = crate::harness::CommandSender::for_test(commands_tx);
-    app.harness = Some((
-        updates_rx,
-        commands.clone(),
-    ));
+    app.harness = Some((updates_rx, commands.clone()));
 
     app.new_session();
 
