@@ -170,9 +170,15 @@ fn wrapper_flag_takes_value(wrapper: &str, flag: &str) -> bool {
     match wrapper {
         "sudo" | "doas" => matches!(flag, "-u" | "--user" | "-g" | "--group" | "-C"),
         "nice" => matches!(flag, "-n" | "--adjustment"),
-        "ionice" => matches!(flag, "-c" | "--class" | "-n" | "--classdata" | "-p" | "--pid"),
+        "ionice" => matches!(
+            flag,
+            "-c" | "--class" | "-n" | "--classdata" | "-p" | "--pid"
+        ),
         "timeout" => matches!(flag, "-s" | "--signal" | "-k" | "--kill-after"),
-        "xargs" => matches!(flag, "-n" | "--max-args" | "-P" | "--max-procs" | "-s" | "--max-chars"),
+        "xargs" => matches!(
+            flag,
+            "-n" | "--max-args" | "-P" | "--max-procs" | "-s" | "--max-chars"
+        ),
         "chroot" => matches!(flag, "--userspec" | "--groups"),
         _ => false,
     }
