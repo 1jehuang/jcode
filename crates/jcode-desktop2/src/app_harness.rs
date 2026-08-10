@@ -79,6 +79,10 @@ impl App {
                     self.model.model_picker.mark_selected(model);
                 }
                 harness::HarnessUpdate::Text(text) => {
+                    // The reply is now the visible proof of life. Retire the
+                    // provisional "thinking" row (or the final tool row) so it
+                    // does not linger below an answer that is already arriving.
+                    self.model.transcript.clear_live_tool();
                     self.model.transcript.append_assistant(&text);
                     // Chase the new length rather than jumping to it: the
                     // reveal is what turns a burst of tokens into a sweep.

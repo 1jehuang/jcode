@@ -39,6 +39,44 @@ fn a_submitted_message_starts_pending() {
     assert_eq!(deliveries(&app), vec![Some(Delivery::Sent)]);
 }
 
+#[test]
+fn a_submitted_message_shows_thinking_before_any_server_event() {
+    let mut app = app_with_session();
+    app.apply(Action::Insert, Some("hello"));
+    app.apply(Action::Submit, None);
+
+    let tail = app.model.transcript.messages().last().expect("status row");
+    assert_eq!(tail.role, crate::transcript::Role::Tool);
+    assert_eq!(tail.source, "thinking");
+    assert!(app.model.activity.is_running());
+}
+
+#[test]
+fn first_answer_delta_retires_the_thinking_row() {
+    let mut app = app_with_session();
+    let (updates, update_rx) = std::sync::mpsc::channel();
+    let (commands, _command_rx) = std::sync::mpsc::channel();
+    app.harness = Some((update_rx, harness::CommandSender::for_test(commands)));
+    app.apply(Action::Insert, Some("hello"));
+    app.apply(Action::Submit, None);
+
+    updates
+        .send(harness::HarnessUpdate::Text("Hi".into()))
+        .expect("queue the delta");
+    app.drain_harness_updates();
+
+    assert_eq!(
+        app.model.transcript.messages().last().map(|message| message.role),
+        Some(crate::transcript::Role::Assistant)
+    );
+    assert!(app
+        .model
+        .transcript
+        .messages()
+        .iter()
+        .all(|message| message.role != crate::transcript::Role::Tool));
+}
+
 /// The acceptance event is what promotes it, and it promotes the *oldest*
 /// pending message: the session's queue is a queue.
 #[test]
