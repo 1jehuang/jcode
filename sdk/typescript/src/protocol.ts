@@ -151,6 +151,7 @@ export type ApiEvent =
       description: string;
     }
   | { ev: "session_status"; session_id: string; status: string }
+  | { ev: "connection_phase"; session_id: string; phase: string }
   | { ev: "model_info"; session_id: string; provider?: string; model?: string }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
@@ -240,6 +241,7 @@ export const KNOWN_EVENT_KINDS = [
   "message_accepted",
   "permission_request",
   "session_status",
+  "connection_phase",
   "model_info",
   "models",
   "runtime_info",
