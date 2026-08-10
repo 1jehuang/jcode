@@ -590,6 +590,40 @@ impl Provider for AntigravityProvider {
                     }
                 }
             }
+
+            // The unsigned-history fallback contains a deliberately distinctive
+            // marker. Gemini 3 Flash can imitate it as fresh assistant text,
+            // making the session look productive while no tool is dispatched
+            // (#845). Never execute or render that pseudo-call. Retry exactly
+            // once with native function calling forced, then fail clearly.
+            if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
+                response = match provider
+                    .generate_content(
+                        &model,
+                        &messages,
+                        &tools,
+                        &system,
+                        resume_session_id.as_deref(),
+                        true,
+                        signature_policy,
+                    )
+                    .await
+                {
+                    Ok(retried) => retried,
+                    Err(err) => {
+                        let _ = tx.send(Err(err)).await;
+                        return;
+                    }
+                };
+                if jcode_provider_antigravity::is_pseudo_tool_call_turn(&response) {
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "Antigravity returned a textual pseudo-tool call after a forced native-call retry; start a new turn or choose another model"
+                        )))
+                        .await;
+                    return;
+                }
+            }
             let _ = tx
                 .send(Ok(StreamEvent::ConnectionPhase {
                     phase: ConnectionPhase::Streaming,

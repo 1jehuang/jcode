@@ -416,6 +416,35 @@ pub fn is_retryable_empty_turn(response: &CodeAssistGenerateResponse) -> bool {
         .unwrap_or(false)
 }
 
+/// Detect the recovery marker used when unsigned historical tool calls have to
+/// be downgraded to text. Gemini can imitate that marker as a new assistant
+/// response, which looks like a tool call but is not safe to execute.
+pub fn is_pseudo_tool_call_turn(response: &CodeAssistGenerateResponse) -> bool {
+    response
+        .response
+        .as_ref()
+        .and_then(|response| response.candidates.as_ref())
+        .and_then(|candidates| candidates.first())
+        .and_then(|candidate| candidate.content.as_ref())
+        .is_some_and(|content| {
+            content.parts.iter().any(|part| {
+                let Some(text) = part.text.as_deref() else {
+                    return false;
+                };
+                let Some(call) = text.trim_start().strip_prefix("[previous tool call]") else {
+                    return false;
+                };
+                let call = call.trim_start();
+                let name_len = call
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+                name_len > 0 && call[name_len..].trim_start().starts_with('(')
+            })
+        })
+}
+
 /// Remap model ids that the Antigravity catalog advertises but the
 /// `generateContent`/`streamGenerateContent` backend cannot actually service,
 /// onto an equivalent id that works.
