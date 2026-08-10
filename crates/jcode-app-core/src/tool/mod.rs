@@ -18,6 +18,7 @@ mod gmail;
 mod goal;
 pub mod inflight;
 mod invalid;
+mod jcode_docs;
 mod ls;
 pub mod mcp;
 mod memory;
@@ -237,6 +238,12 @@ impl Registry {
                 websearch::WebSearchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "invalid", invalid::InvalidTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "jcode_docs",
+                jcode_docs::JcodeDocsTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "todo", todo::TodoTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bg", bg::BgTool::new);
             Self::insert_tool_timed(
