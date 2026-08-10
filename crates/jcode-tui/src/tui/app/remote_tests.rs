@@ -567,6 +567,36 @@ fn process_remote_followups_auto_submits_staged_startup_prompt() {
 }
 
 #[test]
+fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.input = "Start the fork immediately".to_string();
+    app.cursor_pos = app.input.len();
+    app.submit_input_on_startup = true;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    assert!(!remote.has_loaded_history());
+
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+
+    assert!(!app.submit_input_on_startup);
+    assert!(app.input.is_empty());
+    assert!(
+        app.is_processing,
+        "the ordered startup request should start immediately"
+    );
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.role == "user"),
+        "the local user echo must wait for the server Transcript behind History"
+    );
+}
+
+#[test]
 fn has_pending_startup_submission_requires_input_and_flag() {
     // Guards the predicate that gates post-connect startup dispatch.
     let mut app = create_test_app();

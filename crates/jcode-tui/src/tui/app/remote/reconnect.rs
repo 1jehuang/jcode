@@ -718,12 +718,9 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
     // would show its prompt in the input box but never actually submit it,
     // because `process_remote_followups` (the only production dispatcher) was
     // never invoked post-connect. See issues #267/#268/#76.
-    if remote.has_loaded_history()
-        && !app.is_processing
-        && (app.has_queued_followups() || app.has_pending_startup_submission())
-    {
+    if !app.is_processing && (app.has_queued_followups() || app.has_pending_startup_submission()) {
         crate::logging::info(
-            "Post-connect history restored with queued followups or startup submission; dispatching immediately",
+            "Post-connect has queued followups or startup submission; dispatching immediately",
         );
         if app.pending_queued_dispatch {
             crate::logging::info(

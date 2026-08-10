@@ -1198,6 +1198,55 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         return;
     }
 
+    // A headed fork stages its first prompt before launching the new client. We
+    // can send that prompt immediately after Subscribe, without waiting for the
+    // client to receive and render History: requests and events share one
+    // ordered socket, so the server finishes writing the Subscribe History
+    // response before it reads this Message request. Do not echo the user turn
+    // locally here because the still-in-flight History payload would clear it;
+    // the server's ordered Transcript event will add it immediately afterwards.
+    //
+    // This removes the visible, intermittent pause between the fork window
+    // opening and its prompt starting, which was proportional to history payload
+    // transfer/render time for large parent sessions.
+    if !remote.has_loaded_history()
+        && app.submit_input_on_startup
+        && !app.is_processing
+        && !app.remote_model_switch_in_flight
+        && !app.auth_catalog_refresh_pending
+        && (!app.input.is_empty() || !app.pending_images.is_empty())
+    {
+        app.submit_input_on_startup = false;
+        app.startup_submit_deferred_reason = None;
+        let prepared = input::take_prepared_input(app);
+        app.last_submitted_input = Some(prepared.raw_input);
+        crate::logging::info(&format!(
+            "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",
+            prepared.expanded.chars().count(),
+            prepared.images.len(),
+        ));
+        if let Err(error) = begin_remote_send(
+            app,
+            remote,
+            prepared.expanded,
+            prepared.images,
+            false,
+            None,
+            false,
+            0,
+        )
+        .await
+        {
+            crate::logging::warn(&format!("Early startup auto-submit failed: {error}"));
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to submit startup prompt: {}",
+                error
+            )));
+            app.set_status_notice("Startup prompt failed");
+        }
+        return;
+    }
+
     if !remote.has_loaded_history() {
         note_startup_submit_deferred(app, "remote history not loaded yet");
         return;
