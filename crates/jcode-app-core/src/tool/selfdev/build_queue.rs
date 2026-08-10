@@ -402,7 +402,7 @@ export -f cargo
                             Some(published)
                         };
                         let desktop_instances = if builds_desktop2 {
-                            Self::activate_desktop2_selfdev_binary(&repo_dir)?
+                            Self::activate_desktop2_selfdev_binary(&repo_dir, &source_after_build)?
                         } else {
                             0
                         };
@@ -544,12 +544,38 @@ export -f cargo
                     String::from_utf8_lossy(&output.stderr).trim()
                 );
             }
+            let library_name = format!(
+                "{}jcode_desktop2{}",
+                std::env::consts::DLL_PREFIX,
+                std::env::consts::DLL_SUFFIX
+            );
+            let library = repo_dir
+                .join("target")
+                .join(build::SELFDEV_CARGO_PROFILE)
+                .join(library_name);
+            let output = std::process::Command::new(&binary)
+                .arg("--check-worker")
+                .arg(&library)
+                .env("JCODE_NON_INTERACTIVE", "1")
+                .output()?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "Desktop2 worker smoke test failed for {} with exit code {:?}: {}{}",
+                    library.display(),
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
         }
         Ok(())
     }
 
     #[cfg(unix)]
-    fn activate_desktop2_selfdev_binary(repo_dir: &Path) -> Result<usize> {
+    fn activate_desktop2_selfdev_binary(
+        repo_dir: &Path,
+        source: &build::SourceState,
+    ) -> Result<usize> {
         use std::io::Write;
 
         let binary = repo_dir
@@ -568,6 +594,50 @@ export -f cargo
             file.sync_all()?;
         }
         std::fs::rename(&temporary, dir.join("desktop2-current"))?;
+
+        // Never dlopen Cargo's mutable output path. A loaded ELF image may
+        // still back callbacks or worker-owned threads, and dlopen also caches
+        // handles by pathname. Publish every generation under a fresh name so
+        // the stable host can retain old mappings and activate the exact bytes
+        // that were smoke-tested.
+        let library_name = format!(
+            "{}jcode_desktop2{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
+        let library = repo_dir
+            .join("target")
+            .join(build::SELFDEV_CARGO_PROFILE)
+            .join(library_name);
+        if !library.exists() {
+            anyhow::bail!("Desktop2 worker library not found at {}", library.display());
+        }
+        let workers = dir.join("desktop2-workers");
+        std::fs::create_dir_all(&workers)?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let fingerprint = source
+            .fingerprint
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(20)
+            .collect::<String>();
+        let worker = workers.join(format!(
+            "worker-{fingerprint}-{nonce}{}",
+            std::env::consts::DLL_SUFFIX
+        ));
+        let worker_temporary = workers.join(format!(".worker-{}-{nonce}", std::process::id()));
+        std::fs::copy(&library, &worker_temporary)?;
+        std::fs::rename(&worker_temporary, &worker)?;
+        let marker_temporary = dir.join(format!(".desktop2-worker-current-{}", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&marker_temporary)?;
+            writeln!(file, "{}", worker.display())?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&marker_temporary, dir.join("desktop2-worker-current"))?;
 
         let mut signalled = 0;
         let instances = dir.join("desktop2-instances");
@@ -594,7 +664,10 @@ export -f cargo
     }
 
     #[cfg(not(unix))]
-    fn activate_desktop2_selfdev_binary(_repo_dir: &Path) -> Result<usize> {
+    fn activate_desktop2_selfdev_binary(
+        _repo_dir: &Path,
+        _source: &build::SourceState,
+    ) -> Result<usize> {
         Ok(0)
     }
 
@@ -1253,7 +1326,7 @@ mod desktop_binary_tests {
     #[test]
     fn each_desktop_build_validates_its_own_binary() {
         let desktop2 = SelfDevTool::desktop_binary_name(&command(
-            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop2 --bin jcode-desktop2",
+            "scripts/dev_cargo.sh build --profile selfdev -p jcode-desktop2 --bin jcode-desktop2 --lib",
         ));
         assert!(
             desktop2.is_some_and(|name| name.starts_with("jcode-desktop2")),

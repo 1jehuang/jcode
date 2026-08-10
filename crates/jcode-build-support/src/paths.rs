@@ -200,11 +200,16 @@ pub fn selfdev_build_command_for_target(
             .iter()
             .map(|(package, binary)| {
                 format!(
-                    "{} build --profile {} -p {} --bin {}",
+                    "{} build --profile {} -p {} --bin {}{}",
                     shell_escape(&script),
                     SELFDEV_CARGO_PROFILE,
                     package,
-                    binary
+                    binary,
+                    if *package == "jcode-desktop2" {
+                        " --lib"
+                    } else {
+                        ""
+                    }
                 )
             })
             .collect::<Vec<_>>()
@@ -229,8 +234,16 @@ fn display_build_command(program: &str, specs: &[(&str, &str)]) -> String {
         .iter()
         .map(|(package, binary)| {
             format!(
-                "{} build --profile {} -p {} --bin {}",
-                program, SELFDEV_CARGO_PROFILE, package, binary
+                "{} build --profile {} -p {} --bin {}{}",
+                program,
+                SELFDEV_CARGO_PROFILE,
+                package,
+                binary,
+                if *package == "jcode-desktop2" {
+                    " --lib"
+                } else {
+                    ""
+                }
             )
         })
         .collect::<Vec<_>>()

@@ -1,8 +1,8 @@
-//! jcode-desktop2: greenfield desktop app.
-//!
-//! Milestone 3+4 of docs/HARNESS_API_AND_DESKTOP_REWRITE.md: winit window,
-//! Vello vector rendering, Parley text layout, and a live harness API
-//! connection (via jcode-harness-api-bridge) with a minimal chat loop.
+// jcode-desktop2: greenfield desktop app.
+//
+// Milestone 3+4 of docs/HARNESS_API_AND_DESKTOP_REWRITE.md: winit window,
+// Vello vector rendering, Parley text layout, and a live harness API
+// connection (via jcode-harness-api-bridge) with a minimal chat loop.
 
 mod ack;
 mod activity;
@@ -27,6 +27,7 @@ mod frame_meter;
 mod harness;
 mod help;
 mod hints;
+mod hot_worker;
 mod icons;
 mod input;
 mod keymap;
@@ -84,13 +85,21 @@ use winit::window::{Window, WindowId};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--check-worker") {
+        let path = args
+            .get(1)
+            .ok_or_else(|| anyhow::anyhow!("--check-worker requires a shared-library path"))?;
+        let build = hot_worker::check_artifact(std::path::Path::new(path))?;
+        println!("desktop2 worker {build:016x} ok");
+        return Ok(());
+    }
     // Every entry point that runs *instead of* the window lives in `cli`, so
     // this stays a router rather than accumulating subcommands.
     if let Some(result) = cli::dispatch(&args) {
         return result;
     }
     selfdev_reload::install();
-    let _selfdev_registration = selfdev_reload::register();
+    let _selfdev_registration = selfdev_reload::register(hot_worker::builtin_build());
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App::default();
@@ -99,6 +108,11 @@ fn main() -> Result<()> {
 }
 
 struct App {
+    /// Reloadable Scene/Model/App callback generation. The allocation around
+    /// this dispatcher is the stable host and survives every activation.
+    worker: hot_worker::Worker,
+    /// Permanent process-local GPU operations called by every worker generation.
+    host: hot_worker::HostApi,
     state: Option<render::RenderState>,
     painter: paint::Painter,
     model: Model,
@@ -193,6 +207,8 @@ struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            worker: hot_worker::Worker::default(),
+            host: hot_worker::HostApi::default(),
             state: None,
             painter: paint::Painter::default(),
             model: Model::default(),
@@ -1940,8 +1956,8 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+impl hot_worker::ApplicationWorker for App {
+    fn worker_resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
@@ -1962,17 +1978,13 @@ impl ApplicationHandler for App {
         self.harness = Some(harness::spawn(move || redraw_window.request_redraw()));
         let state = pollster::block_on(render::RenderState::new(window)).expect("init gpu");
         self.state = Some(state);
-        // A selfdev predecessor stays on screen until this point. Acknowledge
-        // only after both the native window and its GPU surface exist, so reload
-        // never leaves the desktop with no jcode window open.
-        selfdev_reload::acknowledge_ready();
         // Start the reveal at the moment the surface exists, not at process
         // start: GPU init takes long enough that timing it from `main` would
         // spend the whole sequence before the first frame is presented.
         self.model.boot = boot::Boot::start(std::time::Instant::now());
     }
 
-    fn window_event(
+    fn worker_window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
@@ -1987,8 +1999,9 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(state) = self.state.as_mut() {
-                    state.resize(size.width, size.height);
+                let app = self as *mut App;
+                self.host.resize(app, size.width, size.height);
+                if let Some(state) = self.state.as_ref() {
                     let scale = state.scale_factor();
                     self.geometry.width = f64::from(size.width) / scale;
                     self.geometry.height = f64::from(size.height) / scale;
@@ -2204,13 +2217,10 @@ impl ApplicationHandler for App {
                 // (the frame was just measured through it), so this is a
                 // lookup rather than a relayout.
                 self.observe_stream_growth();
-                if let Some(state) = self.state.as_mut() {
-                    let size = state.size();
+                if let Some(size) = self.state.as_ref().map(render::RenderState::size) {
                     build_workspace_scene(&mut scene, &mut self.painter, &self.model, size, scale);
-                    self.frame_meter.end_build();
-                    if let Err(error) = state.render(&scene, &mut self.frame_meter) {
-                        eprintln!("render error: {error:#}");
-                    }
+                    let app = self as *mut App;
+                    self.host.present(app, &scene);
                 }
                 // A continuous animation is paced by the display, not by the
                 // timer: ask for the next frame now and let the compositor's
@@ -2237,7 +2247,11 @@ impl ApplicationHandler for App {
     /// An animation deadline expired, so the window has to be repainted.
     /// Setting a `WaitUntil` deadline only wakes the loop, it does not draw
     /// anything, which is why the caret used to sit static and never blink.
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+    fn worker_new_events(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        cause: winit::event::StartCause,
+    ) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             self.request_redraw();
         }
@@ -2248,15 +2262,7 @@ impl ApplicationHandler for App {
     /// Done here rather than in the redraw handler so the deadline is refreshed
     /// after *any* event, and so an idle window sleeps indefinitely instead of
     /// waking forever.
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if selfdev_reload::requested() {
-            self.save_geometry(true);
-            match selfdev_reload::relaunch() {
-                Ok(()) => event_loop.exit(),
-                Err(error) => eprintln!("desktop2 selfdev reload failed: {error:#}"),
-            }
-            return;
-        }
+    fn worker_about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let flow = match self.animation_deadline(std::time::Instant::now()) {
             Some(at) => ControlFlow::WaitUntil(
                 at.min(std::time::Instant::now() + std::time::Duration::from_millis(250)),
@@ -2268,5 +2274,56 @@ impl ApplicationHandler for App {
             ),
         };
         event_loop.set_control_flow(flow);
+    }
+}
+
+/// Permanently linked native host. These methods never move into a reloadable
+/// generation: winit therefore keeps the exact EventLoop, Window, Wayland
+/// surface, PID, compositor window ID, geometry, workspace, and focus.
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let app = self as *mut App;
+        self.worker.snapshot().resumed(app, event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let app = self as *mut App;
+        self.worker
+            .snapshot()
+            .window_event(app, event_loop, window_id, event);
+    }
+
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        let app = self as *mut App;
+        self.worker.snapshot().new_events(app, event_loop, cause);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut activated = None;
+        if selfdev_reload::requested() {
+            match selfdev_reload::worker_path()
+                .and_then(|path| self.worker.activate(&path).map(|changed| (path, changed)))
+            {
+                Ok((path, true)) => activated = Some(path),
+                Ok((_path, false)) => {}
+                Err(error) => eprintln!("desktop2 worker activation failed: {error:#}"),
+            }
+        }
+
+        // Invoke the selected generation before recording success. The marker
+        // is therefore evidence that changed callback code actually ran, not
+        // merely that dlopen returned a handle.
+        let app = self as *mut App;
+        self.worker.snapshot().about_to_wait(app, event_loop);
+        if let Some(path) = activated {
+            let build = self.worker.worker_build();
+            selfdev_reload::record_activation(&path, build);
+            self.request_redraw();
+        }
     }
 }

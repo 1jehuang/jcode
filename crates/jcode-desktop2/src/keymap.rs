@@ -170,7 +170,7 @@ pub enum Action {
     /// -> `full` -> `off`). This remains available from the settings panel.
     CycleReasoningDisplay,
 
-    /// Ctrl+Shift+R: relaunch from the currently activated desktop2 binary.
+    /// Ctrl+Shift+R: activate changed application code inside the stable native host.
     /// Deliberately global, so it works even while an overlay owns the keyboard.
     ManualReload,
 
