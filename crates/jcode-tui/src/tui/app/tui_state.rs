@@ -1274,7 +1274,14 @@ impl crate::tui::TuiState for App {
         };
 
         let todos_are_swarm_plan = self.swarm_enabled && !self.swarm_plan_items.is_empty();
-        let (todos, todo_goals) = if todos_are_swarm_plan {
+        let (todos, todo_goals) = if crate::config::config().display.pin_todos
+            && !todos_are_swarm_plan
+        {
+            // The pinned band is the single source of truth while enabled. Do
+            // not duplicate the same session todos in a margin or overview
+            // info widget.
+            (Vec::new(), Vec::new())
+        } else if todos_are_swarm_plan {
             (
                 crate::tui::info_widget::swarm_plan_todos(&self.swarm_plan_items),
                 Vec::new(),
