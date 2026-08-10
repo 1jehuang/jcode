@@ -1798,11 +1798,11 @@ pub(super) fn is_next_prompt_new_session_hotkey(code: KeyCode, modifiers: KeyMod
     if code != KeyCode::Char(' ') {
         return false;
     }
-    // Accept either Command/Super+Space (macOS Cmd, often eaten by Spotlight) or
-    // Option/Alt+Space (macOS Option) so the fork-to-new-session arming hotkey is
-    // reachable across terminals. Reject Ctrl/Hyper combos so other chords still
-    // route to their own handlers.
-    let has_super = modifiers.contains(KeyModifiers::SUPER);
+    // Terminals report Command/Super as either SUPER or META depending on their
+    // keyboard protocol. Accept both encodings, plus Option/Alt+Space, so the
+    // shortcut remains reachable across terminals. Reject Ctrl/Hyper combos so
+    // other chords still route to their own handlers.
+    let has_super = modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META);
     let has_alt = modifiers.contains(KeyModifiers::ALT);
     (has_super || has_alt) && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::HYPER)
 }
