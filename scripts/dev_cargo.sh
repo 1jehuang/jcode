@@ -25,6 +25,7 @@ rust_action_log_started_ns=""
 rust_action_log_started_at=""
 rust_action_log_path=""
 rust_action_log_execution="local"
+cargo_gate_wait_ms=0
 
 start_rust_action_log() {
   case "${JCODE_RUST_ACTION_LOG:-1}" in
@@ -53,6 +54,7 @@ record_rust_action_log() {
 
   JCODE_LOG_STARTED_AT="$rust_action_log_started_at" \
   JCODE_LOG_DURATION_MS="$duration_ms" \
+  JCODE_LOG_GATE_WAIT_MS="$cargo_gate_wait_ms" \
   JCODE_LOG_EXIT_CODE="$exit_code" \
   JCODE_LOG_ACTION="$action" \
   JCODE_LOG_PROFILE="$profile" \
@@ -67,6 +69,12 @@ path = sys.argv[1]
 record = {
     "started_at": os.environ["JCODE_LOG_STARTED_AT"],
     "duration_ms": int(os.environ["JCODE_LOG_DURATION_MS"]),
+    "gate_wait_ms": int(os.environ["JCODE_LOG_GATE_WAIT_MS"]),
+    "execution_duration_ms": max(
+        0,
+        int(os.environ["JCODE_LOG_DURATION_MS"])
+        - int(os.environ["JCODE_LOG_GATE_WAIT_MS"]),
+    ),
     "exit_code": int(os.environ["JCODE_LOG_EXIT_CODE"]),
     "success": os.environ["JCODE_LOG_EXIT_CODE"] == "0",
     "action": os.environ["JCODE_LOG_ACTION"],
@@ -706,6 +714,8 @@ print_setup() {
   if [[ -n "${JCODE_DEV_FEATURE_PROFILE:-}" && "${JCODE_DEV_FEATURE_PROFILE}" != "default" ]]; then
     feature_profile_status="${JCODE_DEV_FEATURE_PROFILE}"
   fi
+  local cargo_gate_mode="${JCODE_CARGO_GATE:-on}"
+  local cargo_gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   cat <<EOF
 repo_root=$repo_root
 os=$(uname -s)
@@ -715,6 +725,8 @@ selfdev_low_memory_status=$selfdev_low_memory_status
 parallel_frontend_status=$parallel_frontend_status
 build_jobs_status=$build_jobs_status
 cargo_build_jobs=${CARGO_BUILD_JOBS:-<unset>}
+cargo_gate_mode=$cargo_gate_mode
+cargo_gate_path=${JCODE_CARGO_GATE_PATH:-$cargo_gate_dir/jcode-cargo-build.lock}
 build_tmpdir_status=$build_tmpdir_status
 tmpdir=${TMPDIR:-<unset>}
 feature_profile_status=$feature_profile_status
@@ -973,19 +985,75 @@ run_local_cargo() {
   cargo "${cargo_argv[@]}"
 }
 
+cargo_action_needs_gate() {
+  case "${cargo_argv[0]:-}" in
+    build|check|clippy|test|bench|run|rustc|rustdoc) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Cargo's own package-cache and target-dir locks only coordinate processes that
+# happen to share those exact directories. Jcode agents also build from scratch
+# worktrees, different target directories, and different toolchains, so several
+# memory-heavy rustc processes can still run at once. On this 15 GiB development
+# machine that makes every build slower and can trigger earlyoom.
+#
+# Serialize compile-capable local Cargo actions across all jcode worktrees. A
+# single Cargo invocation can still use all jobs selected by select_build_jobs,
+# so this trades harmful process-level competition for useful crate-level
+# parallelism. Nested wrapper calls inherit JCODE_CARGO_GATE_HELD and cannot
+# deadlock. Set JCODE_CARGO_GATE=off for an intentional concurrency experiment.
+acquire_cargo_gate() {
+  cargo_gate_status="not-needed"
+  cargo_gate_wait_ms=0
+  cargo_action_needs_gate || return 0
+
+  case "${JCODE_CARGO_GATE:-on}" in
+    0|false|no|off|disabled)
+      cargo_gate_status="disabled"
+      return 0
+      ;;
+  esac
+  if [[ "${JCODE_CARGO_GATE_HELD:-0}" == "1" ]]; then
+    cargo_gate_status="inherited"
+    return 0
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    cargo_gate_status="unavailable"
+    log "flock is unavailable; running without the host-wide Cargo gate"
+    return 0
+  fi
+
+  local gate_dir gate_path wait_started_ns wait_finished_ns
+  gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
+  mkdir -p "$gate_dir"
+  gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
+  exec {cargo_gate_fd}>"$gate_path"
+  if ! flock -n "$cargo_gate_fd"; then
+    log "waiting for the host-wide Cargo gate ($gate_path)"
+    wait_started_ns=$(date +%s%N)
+    flock "$cargo_gate_fd"
+    wait_finished_ns=$(date +%s%N)
+    cargo_gate_wait_ms=$(( (wait_finished_ns - wait_started_ns) / 1000000 ))
+  fi
+  export JCODE_CARGO_GATE_HELD=1
+  cargo_gate_status="acquired"
+  log "acquired host-wide Cargo gate (waited ${cargo_gate_wait_ms}ms)"
+}
+
 validate_feature_profile
 configure_build_tmpdir
 export_git_build_metadata
 maybe_configure_low_memory_selfdev "$@"
 maybe_enable_sccache "$@"
 configure_parallel_frontend "$@"
-select_build_jobs
 
 if [[ "$(uname -s)" == "Linux" ]] && [[ "$(uname -m)" == "x86_64" ]]; then
   configure_linux_linker
 fi
 
 if [[ "${1:-}" == "--print-setup" ]]; then
+  select_build_jobs
   print_setup
   exit 0
 fi
@@ -1012,4 +1080,9 @@ if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
   fi
 fi
 
+acquire_cargo_gate
+# Size the in-process parallelism only after competing jcode Cargo processes
+# have drained. Measuring before the wait would preserve an unnecessarily low
+# one-job decision even after memory becomes available.
+select_build_jobs
 run_local_cargo
