@@ -497,11 +497,19 @@ fn spawn_detached(program: &Path, args: &[&str]) -> std::io::Result<()> {
 /// Block until `path` accepts connections, or the timeout expires.
 pub fn wait_for_socket(path: &Path, what: &str, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    // Runtime startup normally takes only a few milliseconds after the first
+    // failed dial. A fixed 100ms sleep therefore imposed almost exactly 100ms
+    // of artificial latency on every cold desktop launch. Start aggressively,
+    // then back off so a genuinely broken runtime still costs little CPU while
+    // we wait for the diagnostic timeout.
+    let mut retry_delay = Duration::from_millis(2);
+    const MAX_RETRY_DELAY: Duration = Duration::from_millis(25);
     while Instant::now() < deadline {
         if socket_accepts(path) {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(retry_delay.min(deadline.saturating_duration_since(Instant::now())));
+        retry_delay = (retry_delay * 2).min(MAX_RETRY_DELAY);
     }
     Err(Error::new(
         ErrorKind::LaunchFailed,
