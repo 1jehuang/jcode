@@ -205,6 +205,12 @@ impl PinTodosEnvGuard {
         crate::config::invalidate_config_cache();
         Self
     }
+
+    fn disable() -> Self {
+        crate::env::set_var("JCODE_PIN_TODOS", "0");
+        crate::config::invalidate_config_cache();
+        Self
+    }
 }
 
 impl Drop for PinTodosEnvGuard {
@@ -219,6 +225,7 @@ impl Drop for PinTodosEnvGuard {
 #[test]
 fn pinned_todos_payload_stays_empty_when_config_off() {
     let _env_lock = crate::storage::lock_test_env();
+    let _pin_guard = PinTodosEnvGuard::disable();
     let mut app = create_test_app();
     let session_id = app.session.id.clone();
     crate::todo::save_todos(&session_id, &[pinned_band_todo("t1", "pin me", "pending")]).unwrap();
