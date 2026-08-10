@@ -18,7 +18,7 @@
 //! This module is pure. It owns the sizing, the placement, the focus, and the
 //! directional navigation; the renderer and the app only consume it.
 
-use crate::strip::Entry;
+use crate::strip::Panel;
 
 /// Narrowest a card may be drawn, in logical units. A session with no
 /// conversation yet is still a target you have to be able to see and click.
@@ -252,7 +252,7 @@ fn width_for(weight: f64, heaviest: f64) -> f64 {
 ///
 /// Same rule as the strip, and for the same reason: a field whose rows
 /// reorder between polls is unreadable.
-fn row_of(entry: &Entry) -> String {
+fn row_of(entry: &Panel) -> String {
     let Some(dir) = entry.working_dir.as_deref() else {
         return "-".to_string();
     };
@@ -269,7 +269,7 @@ fn row_of(entry: &Entry) -> String {
 /// attached to; they differ while the user is moving around the field before
 /// committing.
 pub fn layout(
-    entries: &[Entry],
+    entries: &[Panel],
     focus: Option<&str>,
     current: Option<&str>,
     area: (f64, f64, f64, f64),
@@ -551,8 +551,8 @@ impl Overview {
 mod tests {
     use super::*;
 
-    fn entry(id: &str, dir: &str, weight: f64) -> Entry {
-        Entry {
+    fn entry(id: &str, dir: &str, weight: f64) -> Panel {
+        Panel {
             session_id: id.into(),
             title: None,
             working_dir: Some(dir.into()),

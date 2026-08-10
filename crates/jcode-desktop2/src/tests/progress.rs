@@ -165,10 +165,10 @@ fn switching_sessions_drops_the_bars() {
     app.drain_harness_updates();
     assert_eq!(cards(&app).len(), 1);
 
-    app.model.strip = crate::strip::Strip::build(
+    app.model.strips = crate::strip::Strips::build(
         vec![
-            crate::strip::Entry::new("session_test", Some("/tmp/a")),
-            crate::strip::Entry::new("session_other", Some("/tmp/b")),
+            crate::strip::Panel::new("session_test", Some("/tmp/a")),
+            crate::strip::Panel::new("session_other", Some("/tmp/b")),
         ],
         Some("session_other"),
     );

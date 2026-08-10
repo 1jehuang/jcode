@@ -110,10 +110,8 @@ pub enum Action {
     PanelShrink,
     PanelGrow,
 
-    /// Ctrl+Shift+N: start a fresh session and attach to it. The chord every
-    /// browser and terminal spends on "new window", for the same act: this is
-    /// the only way to add a session from inside the app, so it is bound
-    /// rather than left to the strip, which can only walk what already exists.
+    /// Cmd/Ctrl+T or Ctrl+Shift+N: create a fresh session panel and focus it.
+    /// This is spatially a new tab/panel, never a clear of the current page.
     SessionNew,
     /// Overview field navigation, while the overview is held open. Spatial
     /// rather than list motion: the field is 2D, so these move to whichever
@@ -445,6 +443,16 @@ pub const PORTED: &[Ported] = &[
         tui: "new session",
     },
     Ported {
+        chord: "ctrl+t",
+        action: Action::SessionNew,
+        tui: "new session panel (browser convention)",
+    },
+    Ported {
+        chord: "super+t",
+        action: Action::SessionNew,
+        tui: "new session panel (macOS convention)",
+    },
+    Ported {
         chord: "ctrl+r",
         action: Action::ToggleResume,
         tui: "Ctrl+R resume a stored session",
@@ -663,7 +671,6 @@ pub const NOT_PORTED: &[(&str, &str)] = &[
 pub fn resolve_overview(key: &Key) -> Option<Action> {
     match key {
         Key::Named(named) => match named {
-            NamedKey::F1 => Some(Action::ToggleHelp),
             NamedKey::ArrowLeft => Some(Action::OverviewLeft),
             NamedKey::ArrowRight => Some(Action::OverviewRight),
             NamedKey::ArrowUp => Some(Action::OverviewUp),
@@ -761,6 +768,7 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
 
     match key {
         Key::Named(named) => match named {
+            NamedKey::F1 => Some(Action::ToggleHelp),
             // Session-strip motion is checked first: the arrow arms below
             // would otherwise swallow it, and chrome navigation has to be
             // reachable from any editor state.
@@ -873,6 +881,9 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
                     '+' | '=' => return Some(Action::ZoomIn),
                     '-' | '_' => return Some(Action::ZoomOut),
                     '0' => return Some(Action::ZoomReset),
+                    // New-tab muscle memory maps directly to a new spatial
+                    // session panel. Shift remains free for reopen-closed-tab.
+                    't' if !shift => return Some(Action::SessionNew),
                     _ => {}
                 }
             }
@@ -1020,10 +1031,7 @@ mod tests {
 
     #[test]
     fn resume_picker_supports_ctrl_j_and_k_navigation() {
-        for (chord, action) in [
-            ("ctrl+j", Action::ResumeDown),
-            ("ctrl+k", Action::ResumeUp),
-        ] {
+        for (chord, action) in [("ctrl+j", Action::ResumeDown), ("ctrl+k", Action::ResumeUp)] {
             let (key, mods) = parse(chord);
             assert_eq!(resolve_resume(&key, mods), Some(action), "'{chord}'");
         }

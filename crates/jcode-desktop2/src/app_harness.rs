@@ -16,6 +16,8 @@ impl App {
         // sent at the boundary, after the drain: the flush needs `&mut self`,
         // which the loop's borrow of the update channel forbids.
         let mut turn_ended = false;
+        let mut begin_new_panel_slide = false;
+        let mut create_startup_panel = false;
         while let Ok(update) = updates.try_recv() {
             match update {
                 harness::HarnessUpdate::Status(status) => self.model.status = status,
@@ -53,7 +55,19 @@ impl App {
                     session_id,
                     working_dir,
                 } => {
+                    let initial_attach = self.model.session_id.is_none();
                     let reconnected = self.model.failure.is_some();
+                    // SessionNew is a panel creation, not a destructive clear of
+                    // the panel under the pointer. Keep that old panel visible
+                    // while the daemon creates its replacement, then reset the
+                    // live page only when the new id actually attaches. Its
+                    // transcript was cached by `new_session`, so it remains
+                    // available as the left-hand neighbor during the slide.
+                    if self.new_session_transition_pending
+                        && self.model.session_id.as_deref() != Some(session_id.as_str())
+                    {
+                        Self::clear_model_for_session_change(&mut self.model);
+                    }
                     self.model.status = format!("attached: {session_id}");
                     // A successful attach is the proof the failure is over: a
                     // reconnected window must not keep reporting the outage it
@@ -61,9 +75,17 @@ impl App {
                     self.model.failure = None;
                     // A reconnect re-attaches the same session; the transcript
                     // on screen is the one that was being read, so it stays.
-                    self.model.strip.focus_session(&session_id);
+                    self.model.strips.focus_session(&session_id);
                     self.model.session_id = Some(session_id);
                     self.model.working_dir = working_dir;
+                    if initial_attach && self.startup_panel_pending {
+                        // A desktop window is a workspace rather than a lone
+                        // conversation: create its right-hand neighbor as soon
+                        // as the first panel really exists. Spend the flag before
+                        // sending so a reconnect can never multiply panels.
+                        self.startup_panel_pending = false;
+                        create_startup_panel = true;
+                    }
                     if reconnected {
                         self.model.set_notice("reconnected");
                     }
@@ -201,13 +223,35 @@ impl App {
                     self.model.peeks.insert(&session_id, transcript);
                 }
                 harness::HarnessUpdate::Sessions(entries) => {
+                    let had_panels = !self.model.strips.is_empty();
                     // Rebuild around the session we are actually attached to,
                     // so a refresh never silently moves the highlight off the
                     // conversation currently on screen.
-                    self.model.strip =
-                        strip::Strip::build(entries, self.model.session_id.as_deref());
+                    self.model.strips =
+                        strip::Strips::build(entries, self.model.session_id.as_deref());
+                    if self.new_session_transition_pending
+                        // A poll containing only the old panel can race ahead of
+                        // Attached. It must not consume the pending transition.
+                        && !self.model.status.starts_with("starting a new session")
+                        && self.model.strips.focused_session().is_some()
+                    {
+                        // Creation changes both the daemon and the spatial
+                        // workspace. Only start the camera once the new panel is
+                        // actually in the strip; starting on keydown animated a
+                        // one-panel row and visibly did nothing.
+                        if had_panels {
+                            begin_new_panel_slide = true;
+                        }
+                        self.new_session_transition_pending = false;
+                    }
                 }
             }
+        }
+        if begin_new_panel_slide {
+            self.begin_workspace_transition(crate::workspace::Direction::Right);
+        }
+        if create_startup_panel {
+            self.new_session();
         }
         self.model
             .file_tree
@@ -232,33 +276,37 @@ impl App {
     /// reveal, or a progress clock carried across from the old one would be
     /// output attributed to the wrong session.
     pub(crate) fn clear_for_session_change(&mut self) {
+        Self::clear_model_for_session_change(&mut self.model);
+    }
+
+    fn clear_model_for_session_change(model: &mut crate::Model) {
         // Switching sessions changes the conversation, not the user's view
         // preferences: the thinking-display mode is carried across so a new
         // session does not silently revert to the structural default.
-        let reasoning = self.model.transcript.reasoning_mode();
-        self.model.transcript = transcript::Transcript::default();
-        self.model.transcript.set_reasoning_mode(reasoning);
-        self.model.stream.reveal_all();
-        self.model.busy = false;
-        self.model.activity.finish();
+        let reasoning = model.transcript.reasoning_mode();
+        model.transcript = transcript::Transcript::default();
+        model.transcript.set_reasoning_mode(reasoning);
+        model.stream.reveal_all();
+        model.busy = false;
+        model.activity.finish();
         // The fresh transcript took the bars with it (they belong to the
         // session being left), so the clock they animate off stops too, or an
         // empty page would keep asking for frames.
-        self.model.progress_clock = None;
-        self.model.scroll = 0.0;
+        model.progress_clock = None;
+        model.scroll = 0.0;
         // Attaching is a jump, not a scroll: easing here would sweep through
         // the previous session's layout.
-        self.model.smooth.settle();
+        model.smooth.settle();
         // A catalog and its open menu belong to the session that produced it.
-        self.model.model_picker = crate::model_picker::Picker::default();
+        model.model_picker = crate::model_picker::Picker::default();
     }
 
     /// Start a fresh session and attach to it.
     ///
-    /// The id is the daemon's to assign, so the app clears the page now and
-    /// adopts whatever comes back on the `Attached` event. Until then the
-    /// session id is `None`, which is the same state the app boots in, so
-    /// every consumer already handles it.
+    /// The id is the daemon's to assign. Keep the current panel intact while
+    /// creation is in flight, then clear the live page when `Attached` proves
+    /// that the new panel exists. Clearing on keydown made this shortcut look
+    /// like a destructive reset rather than a spatial panel creation.
     pub(crate) fn new_session(&mut self) {
         let Some((_, outgoing)) = self.harness.as_ref() else {
             self.model.notice = Some("not connected: cannot start a session".into());
@@ -268,11 +316,13 @@ impl App {
             self.model.notice = Some("not connected: cannot start a session".into());
             return;
         }
-        self.clear_for_session_change();
-        self.model.session_id = None;
-        self.model.working_dir = None;
+        if let Some(current) = self.model.session_id.clone() {
+            self.model
+                .peeks
+                .insert(&current, self.model.transcript.clone());
+        }
+        self.new_session_transition_pending = true;
         self.model.status = "starting a new session...".into();
-        self.retitle();
     }
 
     /// Switch to whichever session the strip now points at.
@@ -282,7 +332,7 @@ impl App {
     /// screen would be actively misleading. Reloading real history needs
     /// `GetHistory`; until that is wired, an empty page is the honest state.
     pub(crate) fn attach_focused_session(&mut self) {
-        let Some(target) = self.model.strip.focused_session().map(str::to_string) else {
+        let Some(target) = self.model.strips.focused_session().map(str::to_string) else {
             return;
         };
         if self.model.session_id.as_deref() == Some(target.as_str()) {
@@ -302,7 +352,7 @@ impl App {
         // The new session's directory arrives with its `Attached` event; until
         // then show the strip's entry rather than the previous session's path,
         // which would name the wrong project.
-        self.model.working_dir = self.model.strip.focused_working_dir().map(str::to_string);
+        self.model.working_dir = self.model.strips.focused_working_dir().map(str::to_string);
         self.retitle();
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Attach(target));

@@ -147,7 +147,7 @@ fn connecting() -> Model {
         // Detached: nothing has told us the model yet, so the caption is absent.
         model: None,
         model_picker: crate::model_picker::Picker::default(),
-        strip: crate::strip::Strip::default(),
+        strips: crate::strip::Strips::default(),
         workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -315,7 +315,7 @@ fn attached_empty() -> Model {
         hint: 0,
         model: Some(fixed_model()),
         model_picker: crate::model_picker::Picker::default(),
-        strip: crate::strip::Strip::default(),
+        strips: crate::strip::Strips::default(),
         workspace: crate::workspace::Workspace::default(),
         // Captures are still frames, so nothing is mid-reveal: a default
         // stream draws every glyph.
@@ -540,41 +540,41 @@ fn scrolled_back() -> Model {
 
 /// Several live sessions across two working directories: the case the strip
 /// exists for. Fixed ids so the bars are a pinned, testable arrangement.
-fn demo_strip(focused: &str) -> crate::strip::Strip {
-    crate::strip::Strip::build(
+fn demo_strip(focused: &str) -> crate::strip::Strips {
+    crate::strip::Strips::build(
         vec![
             // Weights differ by an order of magnitude, because that is what
             // the overview's blobs are for: a capture where every session is
             // the same size would prove nothing about the sizing.
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_clover_1785130341680_5a8db08".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 480_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_mushroom_1785129393446_e7007f8".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: true,
                 weight: 90_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_pebble_1785130002233_1c93aa4".into(),
                 title: None,
                 working_dir: Some("/home/j/jcode".into()),
                 busy: false,
                 weight: 6_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_harbor_1785128881021_9f0b21d".into(),
                 title: None,
                 working_dir: Some("/home/j/site".into()),
                 busy: false,
                 weight: 210_000.0,
             },
-            crate::strip::Entry {
+            crate::strip::Panel {
                 session_id: "session_ember_1785131110907_44de7c2".into(),
                 title: None,
                 working_dir: Some("/home/j/site".into()),
@@ -595,7 +595,7 @@ fn session_strip() -> Model {
             ][..],
         ),
         session_id: Some("session_mushroom_1785129393446_e7007f8".into()),
-        strip: demo_strip("session_mushroom_1785129393446_e7007f8"),
+        strips: demo_strip("session_mushroom_1785129393446_e7007f8"),
         ..attached_empty()
     }
 }
@@ -618,7 +618,7 @@ fn mem_readout() -> Model {
 fn session_strip_second_group() -> Model {
     Model {
         session_id: Some("session_harbor_1785128881021_9f0b21d".into()),
-        strip: demo_strip("session_harbor_1785128881021_9f0b21d"),
+        strips: demo_strip("session_harbor_1785128881021_9f0b21d"),
         ..attached_empty()
     }
 }
@@ -668,8 +668,8 @@ fn overview_other_session() -> Model {
 /// One session. The field must still look deliberate rather than like a bug,
 /// which is the case a layout that only ever fits a crowd tends to get wrong.
 fn overview_single_session() -> Model {
-    let strip = crate::strip::Strip::build(
-        vec![crate::strip::Entry {
+    let strip = crate::strip::Strips::build(
+        vec![crate::strip::Panel {
             session_id: "session_willow_1785130555000_7d3e9f1".into(),
             title: None,
             working_dir: Some("/home/j/jcode".into()),
@@ -680,7 +680,7 @@ fn overview_single_session() -> Model {
     );
     Model {
         session_id: Some("session_willow_1785130555000_7d3e9f1".into()),
-        strip,
+        strips: strip,
         overview: crate::overview::Overview::pinned(
             true,
             1.0,
@@ -704,8 +704,8 @@ fn overview_many_sessions() -> Model {
             NAMES[n % NAMES.len()]
         )
     };
-    let entries: Vec<crate::strip::Entry> = (0..18)
-        .map(|n| crate::strip::Entry {
+    let entries: Vec<crate::strip::Panel> = (0..18)
+        .map(|n| crate::strip::Panel {
             session_id: id(n),
             title: None,
             working_dir: Some(format!("/home/j/proj{}", n % 4)),
@@ -715,10 +715,10 @@ fn overview_many_sessions() -> Model {
             weight: ((n * 7919) % 400) as f64 * 900.0 + 500.0,
         })
         .collect();
-    let strip = crate::strip::Strip::build(entries, Some(&id(3)));
+    let strip = crate::strip::Strips::build(entries, Some(&id(3)));
     Model {
         session_id: Some(id(3)),
-        strip,
+        strips: strip,
         // Highlight parked away from the attached session: the crowded field
         // is exactly where "where I am" and "where I am going" have to stay
         // distinguishable.

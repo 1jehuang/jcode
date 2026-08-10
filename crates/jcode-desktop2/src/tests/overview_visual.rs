@@ -25,7 +25,7 @@ fn field(model: &crate::Model) -> (Rendered, crate::overview::Field) {
     let (width, height, scale) = SURFACE;
     let rendered = Rendered::at(model, width, height, scale).expect("a GPU render");
     let field = crate::overview::layout(
-        &model.strip.entries(),
+        &model.strips.panels(),
         model.overview.focus().or(model.session_id.as_deref()),
         model.session_id.as_deref(),
         crate::overview::area(&rendered.frame),

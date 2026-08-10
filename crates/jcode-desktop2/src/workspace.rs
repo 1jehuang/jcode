@@ -332,13 +332,13 @@ pub fn column_width(viewport_width: u32, session_count: usize) -> u32 {
 /// same reason [`crate::layout::Frame`] is shared: if the two ever disagreed,
 /// clicks would land on a different page than the one under the cursor.
 pub fn placement(
-    strip: &crate::strip::Strip,
+    strip: &crate::strip::Strips,
     workspace: &Workspace,
     session_id: Option<&str>,
     viewport: (f64, f64),
     gap: f64,
 ) -> Vec<Column> {
-    let groups = strip.groups();
+    let groups = strip.strips();
     if groups.is_empty() {
         return Vec::new();
     }
@@ -349,12 +349,12 @@ pub fn placement(
     let mut base = 0usize;
     for group in groups {
         bases.push(base);
-        base += group.entries.len();
+        base += group.panels.len();
     }
     let locate = |id: &str| {
         groups.iter().enumerate().find_map(|(g, group)| {
             group
-                .entries
+                .panels
                 .iter()
                 .position(|entry| entry.session_id == id)
                 .map(|i| (g, i))
@@ -363,11 +363,11 @@ pub fn placement(
     // The attached session anchors the camera; the strip's own focus is the
     // fallback for the moments before an attach resolves.
     let (group, pos) = session_id.and_then(locate).unwrap_or_else(|| {
-        let group = strip.group_index().min(groups.len() - 1);
-        let len = groups[group].entries.len();
-        (group, strip.index().min(len.saturating_sub(1)))
+        let group = strip.strip_index().min(groups.len() - 1);
+        let len = groups[group].panels.len();
+        (group, strip.panel_index().min(len.saturating_sub(1)))
     });
-    let row: Vec<usize> = (0..groups[group].entries.len())
+    let row: Vec<usize> = (0..groups[group].panels.len())
         .map(|i| bases[group] + i)
         .collect();
     let current = RowSpec {
@@ -417,7 +417,7 @@ fn ring_offset(index: usize, focused: usize, len: usize, bias: Direction) -> isi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::strip::{Entry, Strip};
+    use crate::strip::{Panel, Strips};
 
     const VIEW: (f64, f64) = (1000.0, 700.0);
     const WIDTH: f64 = 760.0;
@@ -567,8 +567,8 @@ mod tests {
         );
     }
 
-    fn entry(id: &str, dir: &str) -> Entry {
-        Entry {
+    fn entry(id: &str, dir: &str) -> Panel {
+        Panel {
             session_id: id.into(),
             title: None,
             working_dir: Some(dir.into()),
@@ -581,7 +581,7 @@ mod tests {
     /// that is what makes a column's neighbors always mean "same project".
     #[test]
     fn placement_shows_only_the_focused_group_at_rest() {
-        let strip = Strip::build(
+        let strip = Strips::build(
             vec![
                 entry("a1", "/w/jcode"),
                 entry("a2", "/w/jcode"),
@@ -600,7 +600,7 @@ mod tests {
     /// list cannot make the wrong pages fly off.
     #[test]
     fn placement_draws_the_departing_row_during_a_slide() {
-        let strip = Strip::build(
+        let strip = Strips::build(
             vec![
                 entry("a1", "/w/jcode"),
                 entry("a2", "/w/jcode"),
@@ -626,7 +626,7 @@ mod tests {
     /// rather than panicking or drawing a stranger in its place.
     #[test]
     fn placement_survives_a_departing_session_disappearing() {
-        let strip = Strip::build(vec![entry("b1", "/w/site")], Some("b1"));
+        let strip = Strips::build(vec![entry("b1", "/w/site")], Some("b1"));
         let mut workspace = Workspace::default();
         workspace.begin_row_change(Direction::Down, vec!["gone".into()], 0);
         let columns = placement(&strip, &workspace, Some("b1"), VIEW, GAP);

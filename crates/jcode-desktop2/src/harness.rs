@@ -87,7 +87,7 @@ pub enum HarnessUpdate {
     /// error card in the conversation.
     ConnectionLost(String),
     /// The daemon's current session list, for the session strip.
-    Sessions(Vec<crate::strip::Entry>),
+    Sessions(Vec<crate::strip::Panel>),
     /// The tail of another session's conversation, for the overview's preview.
     Peek {
         session_id: String,
@@ -140,6 +140,11 @@ impl CommandSender {
             tx,
             new_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_requested_for_test(&self) -> bool {
+        self.new_requested.load(Ordering::Acquire)
     }
 
     pub fn send(&self, command: Command) -> Result<(), std::sync::mpsc::SendError<Command>> {
@@ -494,11 +499,8 @@ fn run(
         let poll_new_requested = Arc::clone(&new_requested);
         move || {
             let Ok(client) = JcodeClient::connect(ConnectOptions {
-                client_name: concat!(
-                    "jcode-desktop2-sessions/",
-                    env!("CARGO_PKG_VERSION")
-                )
-                .to_string(),
+                client_name: concat!("jcode-desktop2-sessions/", env!("CARGO_PKG_VERSION"))
+                    .to_string(),
                 ensure_runtime: false,
                 ..Default::default()
             }) else {
@@ -698,8 +700,8 @@ mod command_sender_tests {
 }
 
 /// A session-list entry, sized for the overview.
-fn to_entry(session: jcode_sdk::SessionInfo) -> crate::strip::Entry {
-    crate::strip::Entry {
+fn to_entry(session: jcode_sdk::SessionInfo) -> crate::strip::Panel {
+    crate::strip::Panel {
         session_id: session.session_id,
         title: session.title,
         working_dir: session.working_dir,

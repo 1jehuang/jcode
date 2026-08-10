@@ -280,13 +280,13 @@ fn run_script(steps: &[String]) -> Result<()> {
         // nothing to lay out for a lone session and the interesting failures
         // are all about moving between them.
         if let Some(spec) = step.strip_prefix("sessions:") {
-            let entries: Vec<crate::strip::Entry> = spec
+            let entries: Vec<crate::strip::Panel> = spec
                 .split(',')
                 .filter(|part| !part.is_empty())
                 .enumerate()
                 .map(|(index, part)| {
                     let (id, project) = part.split_once('=').unwrap_or((part, "project"));
-                    crate::strip::Entry {
+                    crate::strip::Panel {
                         session_id: id.to_string(),
                         title: None,
                         working_dir: Some(format!("/w/{project}")),
@@ -297,7 +297,7 @@ fn run_script(steps: &[String]) -> Result<()> {
                 .collect();
             let first = entries.first().map(|entry| entry.session_id.clone());
             app.model.session_id = first.clone();
-            app.model.strip = crate::strip::Strip::build(entries, first.as_deref());
+            app.model.strips = crate::strip::Strips::build(entries, first.as_deref());
             continue;
         }
         match step.as_str() {
