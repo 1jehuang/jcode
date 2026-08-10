@@ -776,6 +776,10 @@ impl BridgeState {
                 session_id: session(self),
                 duration_secs: event["duration_secs"].as_f64(),
             })],
+            "connection_phase" => vec![ServerFrame::event(ApiEvent::ConnectionPhase {
+                session_id: session(self),
+                phase: event["phase"].as_str().unwrap_or("connecting").to_string(),
+            })],
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),
