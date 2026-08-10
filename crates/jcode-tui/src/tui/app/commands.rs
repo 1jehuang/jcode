@@ -3019,19 +3019,23 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         return true;
     };
     let extra: Vec<&str> = parts.collect();
-    match std::process::Command::new(bin)
-        .args(&extra)
-        .arg(&path)
-        .spawn()
-    {
-        Ok(_) => {
+    let mut command = std::process::Command::new(bin);
+    command.args(&extra).arg(&path);
+    match run_interactive_editor(&mut command) {
+        Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Opening the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
+                "Edited the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
                 editor,
                 path.display()
             )));
-            app.set_status_notice("Opened swarm prompt");
+            app.set_status_notice("Edited swarm prompt");
         }
+        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+            "Editor '{}' exited with status {} while editing {}",
+            editor,
+            status,
+            path.display()
+        ))),
         Err(error) => app.push_display_message(DisplayMessage::error(format!(
             "Failed to launch editor '{}' for {}: {}",
             editor,
@@ -3040,6 +3044,50 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
         ))),
     }
     true
+}
+
+/// Run a terminal editor without letting it fight Jcode's raw-mode event loop.
+///
+/// Interactive editors need the primary screen and cooked input. Spawning one
+/// while the TUI keeps ownership of the terminal causes arrow-key escape
+/// sequences and editor output to be consumed/rendered by both processes.
+fn run_interactive_editor(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::ExitStatus> {
+    use crossterm::event::{
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture,
+    };
+
+    // These commands are safe even when a mode was not enabled. Disable them
+    // before leaving the alternate screen so the child receives normal input.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableBracketedPaste,
+        DisableFocusChange,
+        DisableMouseCapture
+    );
+    crate::tui::disable_keyboard_enhancement();
+    jcode_tui_style::restore_terminal_quietly();
+
+    let result = command.status();
+
+    // Re-enter the TUI before returning to the event loop. The existing
+    // ratatui Terminal remains usable and the next loop iteration redraws it.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(ratatui::init));
+    let policy = crate::perf::tui_policy();
+    let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste);
+    if policy.enable_focus_change {
+        let _ = crossterm::execute!(std::io::stdout(), EnableFocusChange);
+    }
+    if policy.enable_mouse_capture {
+        let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
+    if policy.enable_keyboard_enhancement {
+        crate::tui::enable_keyboard_enhancement();
+    }
+
+    result
 }
 
 pub(super) fn handle_agents_command(app: &mut App, trimmed: &str) -> bool {
@@ -3393,19 +3441,6 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             }
 
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-            app.push_display_message(DisplayMessage {
-                role: "system".to_string(),
-                content: format!(
-                    "Opening config in editor...\n{} {}\n\n*Restart jcode after editing for changes to take effect.*",
-                    editor,
-                    path.display()
-                ),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
-
             // $EDITOR may contain arguments (e.g. "zed --wait" or "code -w"), so
             // split on whitespace and use the first token as the binary, passing
             // the rest as leading args before the file path. Report spawn errors
@@ -3414,15 +3449,25 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             match parts.next() {
                 Some(bin) => {
                     let extra: Vec<&str> = parts.collect();
-                    if let Err(e) = std::process::Command::new(bin)
-                        .args(&extra)
-                        .arg(&path)
-                        .spawn()
-                    {
-                        app.push_display_message(DisplayMessage::error(format!(
+                    let mut command = std::process::Command::new(bin);
+                    command.args(&extra).arg(&path);
+                    match run_interactive_editor(&mut command) {
+                        Ok(status) if status.success() => {
+                            app.push_display_message(DisplayMessage::system(format!(
+                                "Edited config in {}:\n{}\n\n*Restart jcode after editing for changes to take effect.*",
+                                editor,
+                                path.display()
+                            )));
+                            app.set_status_notice("Edited config");
+                        }
+                        Ok(status) => app.push_display_message(DisplayMessage::error(format!(
+                            "Editor '{}' exited with status {}",
+                            editor, status
+                        ))),
+                        Err(e) => app.push_display_message(DisplayMessage::error(format!(
                             "Failed to launch editor '{}': {}",
                             editor, e
-                        )));
+                        ))),
                     }
                 }
                 None => {
