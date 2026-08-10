@@ -245,11 +245,17 @@ fn test_classify_openai_limits_does_not_duplicate_weekly_window() {
     let classified = openai_helpers::classify_openai_limits(&limits);
 
     assert_eq!(
-        classified.seven_day.as_ref().map(|window| window.name.as_str()),
+        classified
+            .seven_day
+            .as_ref()
+            .map(|window| window.name.as_str()),
         Some("Codex weekly")
     );
     assert_eq!(
-        classified.five_hour.as_ref().map(|window| window.name.as_str()),
+        classified
+            .five_hour
+            .as_ref()
+            .map(|window| window.name.as_str()),
         Some("Codex 7-day window")
     );
 }
