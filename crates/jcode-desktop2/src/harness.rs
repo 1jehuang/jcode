@@ -704,6 +704,10 @@ mod command_sender_tests {
 
     #[test]
     fn provider_phases_use_tui_status_labels() {
+        assert_eq!(
+            connection_phase_label("authenticating".into()),
+            "refreshing auth"
+        );
         assert_eq!(connection_phase_label("connecting".into()), "connecting");
         assert_eq!(
             connection_phase_label("sending request".into()),
@@ -716,6 +720,11 @@ mod command_sender_tests {
         assert_eq!(
             connection_phase_label("retrying (2/4)".into()),
             "retrying 2/4"
+        );
+        assert_eq!(connection_phase_label("streaming".into()), "streaming");
+        assert_eq!(
+            connection_phase_label("negotiating proxy".into()),
+            "negotiating proxy"
         );
     }
 
