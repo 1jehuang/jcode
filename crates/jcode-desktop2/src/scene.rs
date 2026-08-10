@@ -1311,12 +1311,7 @@ fn draw_transcript(
                     Affine::scale(scale),
                     color,
                     None,
-                    &Rect::new(
-                        x0,
-                        y0,
-                        x1,
-                        y1,
-                    ),
+                    &Rect::new(x0, y0, x1, y1),
                 );
             }
             if let Some(selection) = model.selection.as_ref()
@@ -1941,18 +1936,10 @@ mod tests {
         for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
             let hairline = 1.0 / scale;
             let origin = 13.37;
-            let (_, first_bottom) = diff_band_y(
-                Rect::new(0.0, 0.0, 100.0, 19.2),
-                origin,
-                hairline,
-                false,
-            );
-            let (second_top, _) = diff_band_y(
-                Rect::new(0.0, 19.2, 100.0, 38.4),
-                origin,
-                hairline,
-                false,
-            );
+            let (_, first_bottom) =
+                diff_band_y(Rect::new(0.0, 0.0, 100.0, 19.2), origin, hairline, false);
+            let (second_top, _) =
+                diff_band_y(Rect::new(0.0, 19.2, 100.0, 38.4), origin, hairline, false);
             let overlap_px = (first_bottom - second_top) * scale;
             assert!(
                 (overlap_px - 1.0).abs() < 1e-9,
