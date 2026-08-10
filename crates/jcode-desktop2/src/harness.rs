@@ -484,14 +484,26 @@ fn run(
         }
     });
 
-    // Session-list polling is independent of the command worker. It may retain
-    // the old client briefly during a new-session handoff, but the replacement
-    // connection is separate and does not wait for this poller to retire.
+    // Session-list polling is independent of the command worker. Give it its
+    // own connection as well as its own thread: the bridge serves requests on
+    // one connection in order, so a list read on a clone of the live client can
+    // otherwise sit in front of a user message (or its streamed events). This
+    // is the same isolation used for transcript previews above.
     std::thread::spawn({
-        let client = client.clone();
         let ui = ui.clone();
         let poll_new_requested = Arc::clone(&new_requested);
         move || {
+            let Ok(client) = JcodeClient::connect(ConnectOptions {
+                client_name: concat!(
+                    "jcode-desktop2-sessions/",
+                    env!("CARGO_PKG_VERSION")
+                )
+                .to_string(),
+                ensure_runtime: false,
+                ..Default::default()
+            }) else {
+                return;
+            };
             while !client.is_closed() && !poll_new_requested.load(Ordering::Acquire) {
                 match client.list_sessions() {
                     Ok(sessions) => ui.send(HarnessUpdate::Sessions(
