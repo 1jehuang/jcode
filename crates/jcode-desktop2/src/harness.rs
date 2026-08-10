@@ -21,6 +21,23 @@ use std::time::{Duration, Instant};
 /// and any other client describe the same failure the same way.
 pub use jcode_sdk::{SocketState, Stage, describe_disconnect, explain};
 
+/// Use the same concise lifecycle vocabulary as the TUI. The API intentionally
+/// carries the daemon's stable wire strings, so this remains tolerant of a new
+/// phase added by a newer daemon.
+fn connection_phase_label(phase: String) -> String {
+    match phase.as_str() {
+        "authenticating" => "refreshing auth".to_string(),
+        "connecting" => "connecting".to_string(),
+        "sending request" => "sending context".to_string(),
+        "waiting for response" => "waiting for response".to_string(),
+        "streaming" => "streaming".to_string(),
+        _ if phase.starts_with("retrying (") && phase.ends_with(')') => {
+            format!("retrying {}", &phase[10..phase.len() - 1])
+        }
+        _ => phase,
+    }
+}
+
 /// UI-facing updates produced by the connection worker.
 #[derive(Debug)]
 pub enum HarnessUpdate {
@@ -551,6 +568,13 @@ fn run(
                 ui.send(HarnessUpdate::Activity("thinking".into()));
                 ui.send(HarnessUpdate::Reasoning(text));
             }
+            ApiEvent::ConnectionPhase { phase, .. } => {
+                // Match the TUI's user-facing vocabulary rather than exposing
+                // the provider protocol's `sending request` wording. These
+                // events arrive before reasoning/text, which is precisely when
+                // a generic "thinking" label otherwise looks hung.
+                ui.send(HarnessUpdate::Activity(connection_phase_label(phase)));
+            }
             ApiEvent::ToolStart { call_id, name, .. } => {
                 tool_input.remove(&call_id);
                 current_call = call_id.clone();
@@ -677,6 +701,23 @@ fn run(
 #[cfg(test)]
 mod command_sender_tests {
     use super::*;
+
+    #[test]
+    fn provider_phases_use_tui_status_labels() {
+        assert_eq!(connection_phase_label("connecting".into()), "connecting");
+        assert_eq!(
+            connection_phase_label("sending request".into()),
+            "sending context"
+        );
+        assert_eq!(
+            connection_phase_label("waiting for response".into()),
+            "waiting for response"
+        );
+        assert_eq!(
+            connection_phase_label("retrying (2/4)".into()),
+            "retrying 2/4"
+        );
+    }
 
     #[test]
     fn new_session_bypasses_an_occupied_command_queue() {

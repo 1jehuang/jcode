@@ -83,6 +83,25 @@ fn state_with_session() -> BridgeState {
 }
 
 #[test]
+fn connection_phase_is_forwarded_to_api_clients() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "connection_phase",
+        "phase": "sending request",
+    }));
+
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, None);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::ConnectionPhase {
+            session_id: "s1".into(),
+            phase: "sending request".into(),
+        }
+    );
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));

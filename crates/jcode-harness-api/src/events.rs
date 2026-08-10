@@ -133,6 +133,15 @@ pub enum ApiEvent {
     /// Session-level status change (idle, generating, tool_running, ...).
     SessionStatus { session_id: String, status: String },
 
+    /// Provider request lifecycle. The value uses the daemon's stable display
+    /// vocabulary, for example `connecting`, `sending request`, `waiting for
+    /// response`, `streaming`, or `retrying (2/4)`.
+    ///
+    /// This is separate from `SessionStatus`: a session can be `generating`
+    /// throughout all of these phases, while clients need the finer progress to
+    /// avoid looking stuck before the model emits its first token.
+    ConnectionPhase { session_id: String, phase: String },
+
     /// The provider and model serving the attached session.
     ///
     /// Sent unsolicited after attach, and again whenever the model changes, so
