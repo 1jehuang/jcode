@@ -11,7 +11,7 @@ jcode-harness-api = { path = "../jcode-harness-api" }
 jcode-transport = { path = "../jcode-transport" }
 serde = "1"
 serde_json = "1"
-tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

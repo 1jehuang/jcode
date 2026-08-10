@@ -2,7 +2,13 @@
 //!
 //! Usage: jcode-harness-api-bridge [api_socket] [legacy_socket]
 
-#[tokio::main(flavor = "current_thread")]
+// Each API client has its own translation task. Some translation paths still
+// perform bounded synchronous archive/config I/O, so a single-thread runtime
+// lets one busy desktop connection prevent the accept loop from even replying
+// to the next client's `hello`. That made Ctrl+Shift+N wait for the full
+// handshake timeout while the socket misleadingly remained healthy. Keep an
+// executor thread available for accepts and fresh-session handshakes.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let api_socket = args

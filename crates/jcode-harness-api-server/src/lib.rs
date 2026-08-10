@@ -277,7 +277,13 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                         continue;
                     }
                 };
-                for out in state.api_request_to_legacy(&request) {
+                // Translation may inspect persisted session/archive files. Tell
+                // Tokio before entering that synchronous region so it can keep
+                // the accept loop and fresh-client handshakes scheduled.
+                let outbound = tokio::task::block_in_place(|| {
+                    state.api_request_to_legacy(&request)
+                });
+                for out in outbound {
                     match out {
                         translate::Outbound::Legacy(value) => {
                             write_json_line(&mut legacy_write, &value).await?;
@@ -302,7 +308,10 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                     Ok(value) => value,
                     Err(_) => continue,
                 };
-                for frame in state.legacy_event_to_api(&event) {
+                let frames = tokio::task::block_in_place(|| {
+                    state.legacy_event_to_api(&event)
+                });
+                for frame in frames {
                     write_json_line(&mut write_half, &frame).await?;
                 }
             }

@@ -15,7 +15,7 @@ fn app_with_harness() -> (App, std::sync::mpsc::Sender<harness::HarnessUpdate>) 
     let (outgoing_tx, _outgoing_rx) = std::sync::mpsc::channel();
     let mut app = App::default();
     app.model.session_id = Some("session_test".into());
-    app.harness = Some((update_rx, outgoing_tx));
+    app.harness = Some((update_rx, harness::CommandSender::for_test(outgoing_tx)));
     (app, update_tx)
 }
 
