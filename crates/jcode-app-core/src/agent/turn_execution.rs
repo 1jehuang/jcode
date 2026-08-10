@@ -202,8 +202,7 @@ impl Agent {
         let mut new_session = Session::create(None, None);
         new_session.mark_active();
         new_session.model = Some(self.provider_model());
-        new_session.provider_key =
-            crate::session::derive_session_provider_key(self.provider.name());
+        new_session.provider_key = self.provider_key_for_new_session();
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
@@ -211,6 +210,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
         self.seed_compaction_from_session();
@@ -655,6 +655,8 @@ impl Agent {
                     "Failed to restore session model '{}' via '{}': {}",
                     model, model_request, e
                 ));
+            } else {
+                self.reconcile_explicit_provider_pin_route();
             }
         } else {
             self.session.model = Some(self.provider_model());
