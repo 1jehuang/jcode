@@ -363,7 +363,7 @@ impl Agent {
             tool_selection.disabled_tools,
         );
         agent.session.mark_active();
-        agent.session.model = Some(agent.provider.model());
+        agent.session.model = Some(agent.provider_model());
         agent.session.provider_key =
             crate::session::derive_session_provider_key(agent.provider.name());
         agent.session.ensure_initial_session_context_message();
@@ -422,7 +422,7 @@ impl Agent {
                 ));
             }
         } else {
-            agent.session.model = Some(agent.provider.model());
+            agent.session.model = Some(agent.provider_model());
         }
         agent.restore_reasoning_effort_from_session();
         agent.session.ensure_initial_session_context_message();

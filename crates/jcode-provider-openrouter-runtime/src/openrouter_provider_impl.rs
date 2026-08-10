@@ -795,7 +795,12 @@ impl Provider for OpenRouterProvider {
                     .map(|r| r.clone())
                     .unwrap_or_default(),
             )),
-            provider_pin: Arc::new(Mutex::new(None)),
+            provider_pin: Arc::new(Mutex::new(
+                self.provider_pin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone(),
+            )),
             endpoints_cache: Arc::clone(&self.endpoints_cache),
             endpoint_refresh: Arc::clone(&self.endpoint_refresh),
         })

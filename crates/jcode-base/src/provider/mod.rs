@@ -1335,6 +1335,13 @@ impl MultiProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(openai);
         }
 
+        let current_openrouter_model = self.openrouter_provider().map(|existing| {
+            let model = existing.model();
+            existing
+                .explicit_provider_pin_for_current_model()
+                .map(|pin| format!("{model}@{pin}"))
+                .unwrap_or(model)
+        });
         if openrouter::has_credentials() {
             match external::instantiate_openrouter_runtime(external::OpenRouterRuntimeSpec::Default)
             {
@@ -1353,6 +1360,13 @@ impl MultiProvider {
                         true
                     };
                     if should_install {
+                        if let Some(model) = current_openrouter_model.as_deref()
+                            && let Err(error) = provider.set_model(model)
+                        {
+                            crate::logging::warn(&format!(
+                                "Failed to preserve OpenRouter model routing after auth change: {error}"
+                            ));
+                        }
                         crate::logging::info(
                             "Hot-initialized OpenRouter/OpenAI-compatible provider after auth change",
                         );
@@ -1739,6 +1753,13 @@ impl Provider for MultiProvider {
                 .map(|o| o.model())
                 .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string()),
         }
+    }
+
+    fn explicit_provider_pin_for_current_model(&self) -> Option<String> {
+        matches!(self.active_provider(), ActiveProvider::OpenRouter)
+            .then(|| self.active_openrouter_execution_provider())
+            .flatten()
+            .and_then(|provider| provider.explicit_provider_pin_for_current_model())
     }
 
     fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
