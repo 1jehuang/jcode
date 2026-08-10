@@ -713,6 +713,12 @@ impl App {
         self.model.stream.reveal_all();
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
+        // Give the turn a visible tail immediately. The activity clock already
+        // starts here, but the spinner is painted on the live status card, so
+        // waiting for ToolStart made a reasoning-only or slow first event look
+        // like a dropped submission. The first tool refines this same slot; an
+        // answer removes it when text begins streaming.
+        self.model.transcript.set_live_tool("", "thinking");
         if let Some((_, outgoing)) = self.harness.as_ref() {
             let _ = outgoing.send(harness::Command::Send { content, images });
         }
@@ -731,6 +737,7 @@ impl App {
         };
         self.model.busy = true;
         self.model.activity.start(std::time::Instant::now());
+        self.model.transcript.set_live_tool("", "thinking");
         // Oldest first, matching the card being promoted: the queue and this
         // deque are pushed in the same order, so the front is this message's.
         let images = self.queued_images.pop_front().unwrap_or_default();
