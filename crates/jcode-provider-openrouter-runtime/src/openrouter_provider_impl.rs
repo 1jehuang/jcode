@@ -751,7 +751,9 @@ impl Provider for OpenRouterProvider {
         // was actually serving 4K. It stays *below* the live catalog and the
         // user's explicit per-model `context_window`, both of which are real
         // evidence about this endpoint.
-        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref()) {
+        if super::ollama_context::is_ollama_api_base(&self.api_base, self.profile_id.as_deref())
+            && !super::ollama_context::is_cloud_model(&model_id)
+        {
             return super::ollama_context::OLLAMA_DEFAULT_SERVING_CONTEXT as usize;
         }
         if let Some(profile_id) = self.profile_id.as_deref()

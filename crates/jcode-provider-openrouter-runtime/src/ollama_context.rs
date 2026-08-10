@@ -29,6 +29,16 @@ use std::time::Duration;
 /// truthful (conservative) window instead of a fabricated 262K one.
 pub(crate) const OLLAMA_DEFAULT_SERVING_CONTEXT: u64 = 4096;
 
+/// Ollama's `:cloud` tag identifies models executed by Ollama's cloud service,
+/// not by the local runner. Local `OLLAMA_CONTEXT_LENGTH` and `/api/ps` limits
+/// therefore do not constrain these models.
+pub(crate) fn is_cloud_model(model: &str) -> bool {
+    model
+        .trim()
+        .rsplit_once(':')
+        .is_some_and(|(_, tag)| tag.eq_ignore_ascii_case("cloud"))
+}
+
 /// Native-API probes are best-effort metadata enrichment on a catalog fetch, so
 /// keep them short enough that a wedged local server cannot stall model listing.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,6 +75,23 @@ pub(crate) fn ollama_native_root(api_base: &str) -> String {
 pub(crate) fn effective_serving_context(trained: Option<u64>, server_default: Option<u64>) -> u64 {
     let default = server_default.unwrap_or(OLLAMA_DEFAULT_SERVING_CONTEXT);
     trained.map_or(default, |trained| trained.min(default))
+}
+
+/// Resolve a model's effective window without applying local-runner limits to
+/// Ollama cloud models. For cloud routes, `/api/show` metadata describes the
+/// remote serving window and is authoritative when available.
+pub(crate) fn effective_context_for_model(
+    model: &str,
+    trained: Option<u64>,
+    server_default: Option<u64>,
+) -> u64 {
+    if is_cloud_model(model) {
+        trained
+            .or(server_default)
+            .unwrap_or(OLLAMA_DEFAULT_SERVING_CONTEXT)
+    } else {
+        effective_serving_context(trained, server_default)
+    }
 }
 
 /// Server default serving window, parsed from `/api/ps`. Ollama applies the
@@ -179,7 +206,7 @@ async fn enrich_ollama_context_lengths(client: &Client, api_base: &str, models: 
 
     for model in models.iter_mut() {
         let trained = trained_by_model.get(&model.id).copied().flatten();
-        let effective = effective_serving_context(trained, server_default);
+        let effective = effective_context_for_model(&model.id, trained, server_default);
         model.context_length = Some(effective);
 
         if let Some(trained) = trained
@@ -233,6 +260,22 @@ mod tests {
         assert_eq!(effective_serving_context(Some(262_144), Some(4096)), 4096);
         assert_eq!(effective_serving_context(Some(4096), Some(262_144)), 4096);
         assert_eq!(effective_serving_context(None, Some(16_384)), 16_384);
+    }
+
+    #[test]
+    fn cloud_model_uses_remote_trained_context_instead_of_local_clamp() {
+        assert!(is_cloud_model("glm-5.2:cloud"));
+        assert!(is_cloud_model("GLM-5.2:CLOUD"));
+        assert!(!is_cloud_model("glm-5.2"));
+        assert!(!is_cloud_model("cloud-model:latest"));
+        assert_eq!(
+            effective_context_for_model("glm-5.2:cloud", Some(1_000_000), Some(4096)),
+            1_000_000
+        );
+        assert_eq!(
+            effective_context_for_model("glm-5.2", Some(1_000_000), Some(4096)),
+            4096
+        );
     }
 
     #[test]
