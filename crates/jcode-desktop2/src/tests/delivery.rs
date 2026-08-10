@@ -66,15 +66,20 @@ fn first_answer_delta_retires_the_thinking_row() {
     app.drain_harness_updates();
 
     assert_eq!(
-        app.model.transcript.messages().last().map(|message| message.role),
+        app.model
+            .transcript
+            .messages()
+            .last()
+            .map(|message| message.role),
         Some(crate::transcript::Role::Assistant)
     );
-    assert!(app
-        .model
-        .transcript
-        .messages()
-        .iter()
-        .all(|message| message.role != crate::transcript::Role::Tool));
+    assert!(
+        app.model
+            .transcript
+            .messages()
+            .iter()
+            .all(|message| message.role != crate::transcript::Role::Tool)
+    );
 }
 
 /// The acceptance event is what promotes it, and it promotes the *oldest*
