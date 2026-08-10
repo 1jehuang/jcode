@@ -361,6 +361,18 @@ impl MultiProvider {
             return model.to_string();
         }
 
+        // An `@provider` suffix is an explicit OpenRouter upstream pin. It is
+        // stronger route identity than older/stale `provider_key` metadata.
+        // In particular, sessions created through the public CLI could retain
+        // an `openai-api` key from process-level runtime state while correctly
+        // persisting `z-ai/glm-5.2@Novita` as their model. Restoring through the
+        // stale key sent the pinned model to OpenAI and left the resumed run on
+        // its default model instead. Reconstruct the explicit OpenRouter route
+        // first so both the provider and pin survive resume.
+        if model.contains('@') {
+            return format!("openrouter:{model}");
+        }
+
         if let Some((prefix, rest)) = model.split_once(':') {
             let prefix = prefix.trim();
             if !prefix.is_empty()
@@ -436,6 +448,12 @@ impl MultiProvider {
         let model = model.trim();
         if model.is_empty() {
             return String::new();
+        }
+        // The model itself carries explicit OpenRouter route identity. Honor it
+        // before persisted route metadata, which may come from an older buggy
+        // session and contradict the pin.
+        if crate::provider::explicit_model_provider_prefix(model).is_none() && model.contains('@') {
+            return format!("openrouter:{model}");
         }
         if let Some(api_method) = route_api_method
             .map(str::trim)

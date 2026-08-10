@@ -364,8 +364,8 @@ impl Agent {
         );
         agent.session.mark_active();
         agent.session.model = Some(agent.provider_model());
-        agent.session.provider_key =
-            crate::session::derive_session_provider_key(agent.provider.name());
+        agent.session.provider_key = agent.provider_key_for_new_session();
+        agent.reconcile_explicit_provider_pin_route();
         agent.session.ensure_initial_session_context_message();
         agent.seed_compaction_from_session();
         agent.log_env_snapshot("create");
@@ -402,8 +402,7 @@ impl Agent {
         );
         agent.session.mark_active();
         if agent.session.provider_key.is_none() {
-            agent.session.provider_key =
-                crate::session::derive_session_provider_key(agent.provider.name());
+            agent.session.provider_key = agent.provider_key_for_new_session();
         }
         if let Some(model) = agent.session.model.clone() {
             let model_request =
@@ -420,6 +419,8 @@ impl Agent {
                     "Failed to restore session model '{}' via '{}': {}",
                     model, model_request, e
                 ));
+            } else {
+                agent.reconcile_explicit_provider_pin_route();
             }
         } else {
             agent.session.model = Some(agent.provider_model());
