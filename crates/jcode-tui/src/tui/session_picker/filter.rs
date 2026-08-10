@@ -161,6 +161,7 @@ impl SessionPicker {
     ) -> bool {
         match filter_mode {
             SessionFilterMode::All => true,
+            SessionFilterMode::CurrentDir => self.session_in_current_dir(session),
             SessionFilterMode::CatchUp => session.needs_catchup,
             SessionFilterMode::Saved => session.saved,
             SessionFilterMode::Active => self.session_is_live(session),
