@@ -111,11 +111,11 @@ fn non_recursive_delete_inside_cwd_is_unremarkable() {
 }
 
 #[test]
-fn outside_working_directory_requires_confirmation() {
+fn concrete_outside_working_directory_target_is_low_risk() {
     let ctx = ctx();
     let expanded = expand("/home/u/other-project", &ctx);
     let finding = classify_target(&expanded, "/home/u/other-project", true, &ctx).expect("finding");
-    assert_eq!(finding.level, RiskLevel::Confirm);
+    assert_eq!(finding.level, RiskLevel::Low);
 }
 
 #[test]

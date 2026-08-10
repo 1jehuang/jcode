@@ -917,7 +917,14 @@ async fn bash_holds_a_risky_delete_until_justified_then_runs_it() {
     std::fs::create_dir_all(&target).expect("target");
     std::fs::write(target.join("f.txt"), "x").expect("file");
 
-    let command = format!("rm -rf {}", target.display());
+    // The concrete outside-workspace directory is allowed by policy. Its glob
+    // keeps this test focused on the Confirm path for a statically unknown set
+    // of affected files.
+    let command = format!(
+        "rm -rf {}/* && rmdir {}",
+        target.display(),
+        target.display()
+    );
     let tool = BashTool::new();
 
     // First attempt: no justification, so it is held.

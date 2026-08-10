@@ -276,9 +276,14 @@ pub fn classify_target(
         return None;
     }
 
+    // A concrete path being outside the workspace is not, by itself, a reason
+    // to interrupt the agent. Protected home/system paths and unknown targets
+    // have already returned above. Keep this as Low so the operation remains
+    // visible in risk logs without requiring a justification retry.
     Some(RiskFinding {
-        level: RiskLevel::Confirm,
-        reason: "targets a path outside the working directory".to_string(),
+        level: RiskLevel::Low,
+        reason: "destructive operation targets a concrete path outside the working directory"
+            .to_string(),
         target: Some(expanded.display().to_string()),
     })
 }
