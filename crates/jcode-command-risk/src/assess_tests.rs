@@ -99,7 +99,7 @@ fn deleting_outside_the_project_asks_for_justification() {
 fn non_rm_destructive_tools_are_covered() {
     // A name-based denylist would miss all of these.
     assert_eq!(level("find /home/u -delete"), RiskLevel::Catastrophic);
-    assert!(level("dd if=/dev/zero of=/dev/sda").runs_immediately() == false);
+    assert!(!level("dd if=/dev/zero of=/dev/sda").runs_immediately());
     assert!(level("shred /home/u/other/secrets.txt") >= RiskLevel::Confirm);
 }
 
@@ -304,7 +304,6 @@ fn wrapper_commands_do_not_hide_the_real_program() {
 
 #[test]
 fn nested_wrappers_are_unwrapped_all_the_way_down() {
-    let ctx = ctx();
     assert_eq!(
         level("sudo env nice -n 5 rm -rf ~"),
         RiskLevel::Catastrophic
@@ -358,7 +357,6 @@ fn piped_deletes_cannot_launder_their_targets() {
 fn files_inside_system_directories_are_protected_too() {
     // Exact-root matching left /etc/passwd merely "Confirm", and apply_patch
     // consults only the catastrophic tier, so it would have deleted it.
-    let ctx = ctx();
     for path in [
         "rm -f /etc/passwd",
         "rm -rf /usr/bin/env",
@@ -373,7 +371,6 @@ fn files_inside_system_directories_are_protected_too() {
 fn user_directories_under_home_root_stay_workable() {
     // /home and /Users must not become recursive, or every project path under
     // them would be blocked.
-    let ctx = ctx();
     assert!(level("rm -rf /home/u/proj/target").runs_immediately());
     assert_eq!(level("rm -rf /home"), RiskLevel::Catastrophic);
 }
@@ -436,4 +433,55 @@ fn harmless_command_operands_are_not_redirect_targets() {
 #[test]
 fn safe_redirect_sink_does_not_make_explicit_deletion_safe() {
     assert_eq!(level("rm /dev/null"), RiskLevel::Catastrophic);
+}
+
+#[test]
+fn shell_constructs_do_not_hide_catastrophic_commands() {
+    for command in [
+        "(rm -rf ~)",
+        "x=$(rm -rf ~)",
+        "case x in y) rm -rf ~;; esac",
+        "if true; then rm -rf ~; fi",
+        "while true; do rm -rf ~; done",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command:?}");
+    }
+    assert!(
+        level("rm -rf $(echo ~)") >= RiskLevel::Confirm,
+        "runtime-computed targets must not run immediately"
+    );
+}
+
+#[test]
+fn issue_725_read_only_and_bounded_commands_run_immediately() {
+    for command in [
+        r#"t=$(readlink "$f" 2>/dev/null)"#,
+        "sudo -n ls /sys",
+        "rm -f build-2026-*.json",
+        "rm -f /tmp/jcode-*.json",
+    ] {
+        assert!(
+            level(command).runs_immediately(),
+            "{command:?} should be bounded, got {:?}",
+            level(command)
+        );
+    }
+}
+
+#[test]
+fn wrapper_value_flags_and_unbounded_globs_remain_guarded() {
+    for command in [
+        "nice -n 10 rm -rf ~",
+        "sudo -u root rm -rf ~",
+        "timeout -s KILL 5 rm -rf ~",
+        "xargs -n 1 rm -rf ~",
+        "ionice -c 3 rm -rf ~",
+        "rm -rf /home/u/*/node_modules",
+        "rm -rf /etc/*",
+    ] {
+        assert!(
+            level(command) >= RiskLevel::Confirm,
+            "{command:?} must remain guarded"
+        );
+    }
 }

@@ -54,7 +54,7 @@ impl Token {
 }
 
 /// Characters that separate one command from the next.
-const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "\n"];
+const SEGMENT_SEPARATORS: &[&str] = &["&&", "||", ";", "|", "\n", "(", ")"];
 
 /// Split a command line into individual command segments, each tokenized.
 ///
@@ -165,6 +165,12 @@ pub fn tokenize(command: &str) -> Vec<Token> {
                     chars.next();
                 }
                 let mut op = Token::word(text);
+                op.is_operator = true;
+                tokens.push(op);
+            }
+            '(' | ')' => {
+                flush!();
+                let mut op = Token::word(c.to_string());
                 op.is_operator = true;
                 tokens.push(op);
             }
