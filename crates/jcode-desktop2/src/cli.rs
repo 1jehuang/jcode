@@ -300,6 +300,44 @@ fn run_script(steps: &[String]) -> Result<()> {
             app.model.strips = crate::strip::Strips::build(entries, first.as_deref());
             continue;
         }
+        // `click-strip:<group>:<panel>` drives the same pointer handler as the
+        // live window, at the centre of the block produced by the real strip
+        // layout. This keeps mouse behavior available to packaged-binary smoke
+        // tests without depending on compositor-specific pointer injection.
+        if let Some(spec) = step.strip_prefix("click-strip:") {
+            let (group, panel) = spec
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("click-strip expects <group>:<panel>"))?;
+            let group: usize = group.parse()?;
+            let panel: usize = panel.parse()?;
+            app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+            let (top, bottom) = app
+                .frame
+                .strip()
+                .ok_or_else(|| anyhow::anyhow!("session strip is not visible"))?;
+            let point = crate::strip::layout_items(
+                &app.model.strips,
+                app.frame.left,
+                app.frame.right,
+            )
+            .into_iter()
+            .find_map(|item| match item {
+                crate::strip::Item::Panel {
+                    strip,
+                    panel: index,
+                    x,
+                    width,
+                    ..
+                } if strip == group && index == panel => {
+                    Some((x + width / 2.0, (top + bottom) / 2.0))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("strip panel {group}:{panel} is not visible"))?;
+            app.pointer = point;
+            app.on_pointer_pressed();
+            continue;
+        }
         match step.as_str() {
             "super-down" => {
                 app.modifiers |= winit::keyboard::ModifiersState::SUPER;
