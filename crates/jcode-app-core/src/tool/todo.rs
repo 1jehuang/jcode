@@ -656,6 +656,12 @@ fn normalize_todo_input(mut input: Value) -> Value {
                 let Some(fields) = item.as_object_mut() else {
                     continue;
                 };
+                if key == "todos"
+                    && let Some(Value::String(status)) = fields.get_mut("status")
+                    && let Some(canonical) = crate::todo::canonical_todo_status(status)
+                {
+                    *status = canonical.to_string();
+                }
                 for key in [
                     "confidence",
                     "completion_confidence",
@@ -727,7 +733,8 @@ impl Tool for TodoTool {
                             },
                             "status": {
                                 "type": "string",
-                                "description": "Status."
+                                "enum": ["pending", "in_progress", "completed", "cancelled"],
+                                "description": "Status. Use completed when the task is done."
                             },
                             "priority": {
                                 "type": "string",
@@ -1220,6 +1227,25 @@ mod tests {
             todos[1].confidence,
             Some(crate::todo::ConfidenceState::Plausible)
         );
+    }
+
+    #[test]
+    fn normalizes_natural_and_case_varied_todo_statuses() {
+        let parsed = parse(json!({
+            "todos": [
+                {"content": "a", "status": "done", "priority": "high", "id": "1", "confidence": "verified"},
+                {"content": "b", "status": " Finished ", "priority": "low", "id": "2", "confidence": "validated"},
+                {"content": "c", "status": "Canceled", "priority": "low", "id": "3", "confidence": "plausible"}
+            ]
+        }))
+        .expect("status synonyms should parse");
+        let statuses: Vec<_> = parsed
+            .todos
+            .expect("todos present")
+            .into_iter()
+            .map(|todo| todo.status)
+            .collect();
+        assert_eq!(statuses, ["completed", "completed", "cancelled"]);
     }
 
     #[test]
