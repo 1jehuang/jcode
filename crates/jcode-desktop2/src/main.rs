@@ -1648,6 +1648,14 @@ impl App {
             // has to come from a key.
             Action::SessionNew => self.new_session(),
 
+            Action::ToggleOverview => {
+                if self.model.overview.is_visible() {
+                    self.close_overview(false);
+                } else {
+                    self.open_overview();
+                }
+            }
+
             // The overview owns the keyboard while it is up, so these are the
             // only actions that can reach here from that state.
             Action::OverviewLeft => self.move_overview(overview::Dir::Left),

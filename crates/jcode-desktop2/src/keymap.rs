@@ -113,6 +113,10 @@ pub enum Action {
     /// Cmd/Ctrl+T or Ctrl+Shift+N: create a fresh session panel and focus it.
     /// This is spatially a new tab/panel, never a clear of the current page.
     SessionNew,
+    /// Ctrl+Alt+Space: open the spatial session overview without relying on a
+    /// bare Super event, which Wayland compositors may reserve and never send
+    /// to the focused client.
+    ToggleOverview,
     /// Overview field navigation, while the overview is held open. Spatial
     /// rather than list motion: the field is 2D, so these move to whichever
     /// blob actually lies that way.
@@ -769,6 +773,7 @@ pub fn resolve(key: &Key, mods: ModifiersState) -> Option<Action> {
     match key {
         Key::Named(named) => match named {
             NamedKey::F1 => Some(Action::ToggleHelp),
+            NamedKey::Space if ctrl && alt => Some(Action::ToggleOverview),
             // Session-strip motion is checked first: the arrow arms below
             // would otherwise swallow it, and chrome navigation has to be
             // reachable from any editor state.
