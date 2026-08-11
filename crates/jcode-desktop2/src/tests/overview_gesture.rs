@@ -63,23 +63,22 @@ fn app() -> App {
     app
 }
 
-/// The gesture is benched: a default app leaves Super as a plain chord
-/// modifier, because the workspace now moves like niri directly and a
-/// zoomed-out field would be a second spatial model fighting the first.
+/// The overview is available by default, including on compositors that consume
+/// Super navigation chords before the focused application receives them.
 #[test]
-fn the_super_overview_is_benched_by_default() {
+fn the_super_overview_opens_by_default() {
     let mut app = App::default();
     app.on_super_changed(true, Instant::now());
     assert!(
-        !app.model.overview.is_visible(),
-        "the benched field opened on a bare Super press"
+        app.model.overview.is_visible(),
+        "the field did not open on a bare Super press"
     );
 }
 
-/// Super+hjkl on a default app is direct niri motion: the session switches
-/// at once and the camera slides, with no overview in between.
+/// Super+hjkl in the default overview moves its focus spatially. Releasing
+/// Super commits the highlighted session and slides the live workspace.
 #[test]
-fn super_hjkl_is_direct_motion_by_default() {
+fn super_hjkl_moves_the_default_overview() {
     let mut app = App::default();
     app.model.session_id = Some("session_clover_1_a".into());
     app.model.strips = Strips::build(
@@ -110,38 +109,26 @@ fn super_hjkl_is_direct_motion_by_default() {
     );
     app.modifiers = winit::keyboard::ModifiersState::SUPER;
     app.on_super_changed(true, Instant::now());
-    assert!(!app.model.overview.is_visible());
+    assert!(app.model.overview.is_visible());
 
     app.key_pressed(&Key::Character(SmolStr::new("l")), Some("l"));
     assert_eq!(
-        app.model.session_id.as_deref(),
+        app.model.overview.focus(),
         Some("session_mushroom_2_b"),
-        "super+l did not switch session directly"
-    );
-    assert!(
-        app.model.workspace.is_animating(),
-        "the direct switch did not slide the camera"
+        "super+l did not move the overview focus"
     );
 
     app.key_pressed(&Key::Character(SmolStr::new("j")), Some("j"));
     assert_eq!(
+        app.model.overview.focus(),
+        Some("session_harbor_4_d"),
+        "super+j did not move to the next workspace"
+    );
+    app.apply(keymap::Action::OverviewCommit, None);
+    assert_eq!(
         app.model.session_id.as_deref(),
         Some("session_harbor_4_d"),
-        "super+j did not switch to the next workspace"
-    );
-    assert_eq!(
-        app.model.workspace.row_change(),
-        Some(crate::workspace::Direction::Down),
-        "the workspace switch was not a vertical row slide"
-    );
-    let (prev_row, _) = app.model.workspace.prev_row();
-    assert_eq!(
-        prev_row,
-        [
-            "session_clover_1_a".to_string(),
-            "session_mushroom_2_b".to_string()
-        ],
-        "the departing row was not captured for the slide"
+        "committing the overview did not switch sessions"
     );
 }
 
