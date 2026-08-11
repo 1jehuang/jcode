@@ -77,6 +77,7 @@ pub fn is_transient_transport_error(error_str: &str) -> bool {
         // or RST_STREAM / GOAWAY frames from the server or an intermediary.
         || lower.contains("http2 error")
         || lower.contains("stream error")
+        || lower.contains("stream_read_error")
         || lower.contains("protocol error")
         || lower.contains("refused_stream")
         || lower.contains("refused stream")
@@ -186,5 +187,18 @@ mod tests {
                 "should be transient: {error}"
             );
         }
+    }
+
+    /// OpenAI-compatible stream failure with structured upstream_error payload.
+    /// Regression test for issue #885: stream_read_error should be retried.
+    #[test]
+    fn openai_compatible_stream_read_error_is_transient() {
+        // Formatted output from extract_error_with_retry when receiving:
+        // { "type": "error", "error": { "type": "upstream_error", "code": "stream_read_error" } }
+        assert!(is_transient_transport_error(
+            "upstream_error: stream_read_error"
+        ));
+        // Also test the identifier in isolation (case-insensitive)
+        assert!(is_transient_transport_error("stream_read_error"));
     }
 }
