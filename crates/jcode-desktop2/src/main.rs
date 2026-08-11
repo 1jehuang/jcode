@@ -136,12 +136,10 @@ struct App {
     /// cancel it, so a synthetic lift is invisible and a real one still
     /// resolves a frame or two later.
     pending_super_release: Option<(std::time::Instant, bool)>,
-    /// Whether holding Super opens the card-strip overview. Benched: the
-    /// workspace now moves like niri itself, so Super+hjkl slides the camera
-    /// between live pages directly and a zoomed-out field of thumbnails is a
-    /// second spatial model fighting the first. The machinery stays behind
-    /// this flag (and the sessions icon) so it can return as a flip rather
-    /// than a revert if the direct motion proves insufficient.
+    /// Whether holding Super opens the card-strip overview. The overview gives
+    /// the spatial workspace a discoverable entry point even when a compositor
+    /// consumes Super+hjkl before the app can see those chords. The sessions
+    /// icon remains the pointer-accessible equivalent.
     super_overview: bool,
     /// Finished session-store scans, from the picker's worker thread.
     ///
@@ -225,7 +223,7 @@ impl Default for App {
             modifiers: winit::keyboard::ModifiersState::empty(),
             super_held_since: None,
             pending_super_release: None,
-            super_overview: false,
+            super_overview: true,
             resume_scans: Some(std::sync::mpsc::channel()),
             clipboard: clipboard::Clipboard::default(),
             pending_images: Vec::new(),
