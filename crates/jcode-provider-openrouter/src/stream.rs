@@ -134,7 +134,7 @@ impl OpenRouterStream {
         }
     }
 
-    fn push_completed_tool_call(&mut self, tc: ToolCallAccumulator) {
+    fn push_completed_tool_call(&mut self, index: u64, mut tc: ToolCallAccumulator) {
         if tc.id.trim().is_empty() {
             jcode_logging::warn(&format!(
                 "OpenRouter SSE dropped incomplete tool call for model {}: missing id (name={} args_len={})",
@@ -155,6 +155,13 @@ impl OpenRouterStream {
             return;
         }
 
+        // Some OpenAI-compatible providers synthesize a positional fallback when
+        // the model omits a call id. Since the position restarts every response,
+        // accepting it verbatim reuses ids across turns (for example `bash:0`).
+        if tc.id == format!("{}:{index}", tc.name) {
+            tc.id = jcode_core::id::new_id("toolu");
+        }
+
         self.pending.push_back(StreamEvent::ToolUseStart {
             id: tc.id,
             name: tc.name,
@@ -166,8 +173,8 @@ impl OpenRouterStream {
 
     fn flush_tool_call_accumulators(&mut self) {
         let calls = std::mem::take(&mut self.tool_call_accumulators);
-        for (_index, tc) in calls {
-            self.push_completed_tool_call(tc);
+        for (index, tc) in calls {
+            self.push_completed_tool_call(index, tc);
         }
     }
 
@@ -193,7 +200,7 @@ impl OpenRouterStream {
             })
             && let Some(previous) = self.tool_call_accumulators.remove(&index)
         {
-            self.push_completed_tool_call(previous);
+            self.push_completed_tool_call(index, previous);
         }
 
         let tc = self.tool_call_accumulators.entry(index).or_default();
@@ -834,5 +841,33 @@ mod tests {
             StreamEvent::MessageEnd { stop_reason } if stop_reason.as_deref() == Some("tool_calls")
         ));
         assert!(stream.tool_call_accumulators.is_empty());
+    }
+
+    #[test]
+    fn positional_fallback_tool_call_ids_are_unique_across_responses() {
+        fn parse_id() -> String {
+            let mut stream = test_stream();
+            stream.apply_tool_call_delta(
+                0,
+                Some("bash:0"),
+                Some("bash"),
+                Some(r#"{"command":"echo ok"}"#),
+            );
+            stream.flush_tool_call_accumulators();
+
+            match stream.pending.pop_front() {
+                Some(StreamEvent::ToolUseStart { id, name }) => {
+                    assert_eq!(name, "bash");
+                    assert!(id.starts_with("toolu_"), "unexpected fallback id: {id}");
+                    id
+                }
+                event => panic!("expected tool-use start, got {event:?}"),
+            }
+        }
+
+        let first_turn_id = parse_id();
+        let second_turn_id = parse_id();
+
+        assert_ne!(first_turn_id, second_turn_id);
     }
 }
