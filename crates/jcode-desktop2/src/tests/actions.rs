@@ -1317,6 +1317,63 @@ mod session_strip {
         assert_eq!(app.model.strips.strip_index(), 1);
     }
 
+    fn panel_point(app: &App, wanted_strip: usize, wanted_panel: usize) -> (f64, f64) {
+        let (top, bottom) = app.frame.strip().expect("strip missing");
+        crate::strip::layout_items(&app.model.strips, app.frame.left, app.frame.right)
+            .into_iter()
+            .find_map(|item| match item {
+                crate::strip::Item::Panel {
+                    strip,
+                    panel,
+                    x,
+                    width,
+                    ..
+                } if strip == wanted_strip && panel == wanted_panel => {
+                    Some((x + width / 2.0, (top + bottom) / 2.0))
+                }
+                _ => None,
+            })
+            .expect("panel was not laid out")
+    }
+
+    #[test]
+    fn clicking_a_strip_block_switches_to_that_session() {
+        let mut app = app_with_sessions("s_a1");
+        app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+        app.pointer = panel_point(&app, 0, 1);
+
+        app.on_pointer_pressed();
+
+        assert_eq!(app.model.session_id.as_deref(), Some("s_a2"));
+        assert!(app.model.workspace.is_animating());
+    }
+
+    #[test]
+    fn clicking_a_strip_block_in_another_group_switches_workspace() {
+        let mut app = app_with_sessions("s_a1");
+        app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+        app.pointer = panel_point(&app, 1, 0);
+
+        app.on_pointer_pressed();
+
+        assert_eq!(app.model.session_id.as_deref(), Some("s_b1"));
+        assert_eq!(
+            app.model.workspace.row_change(),
+            Some(crate::workspace::Direction::Down)
+        );
+    }
+
+    #[test]
+    fn hovering_a_strip_block_uses_the_pointer_cursor() {
+        let mut app = app_with_sessions("s_a1");
+        app.frame = App::frame_for_model((1400, 900), 1.0, &app.model);
+        app.pointer = panel_point(&app, 0, 1);
+
+        app.update_cursor_icon();
+
+        assert_eq!(app.cursor_icon, winit::window::CursorIcon::Pointer);
+    }
+
     /// With one session there is nowhere to go, so the keys must leave the
     /// attached session completely alone rather than "switching" to itself
     /// and wiping the transcript.
