@@ -512,6 +512,7 @@ jobs:
     permissions:
       actions: write
       contents: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
         with:
