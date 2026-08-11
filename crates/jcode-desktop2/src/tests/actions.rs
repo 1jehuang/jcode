@@ -37,6 +37,23 @@ fn ctrl_m_resolves_to_the_model_picker() {
 }
 
 #[test]
+fn ctrl_alt_space_opens_the_session_overview() {
+    use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+    assert_eq!(
+        keymap::resolve(
+            &Key::Named(NamedKey::Space),
+            ModifiersState::CONTROL | ModifiersState::ALT,
+        ),
+        Some(keymap::Action::ToggleOverview)
+    );
+
+    let mut app = app_with("");
+    app.apply(keymap::Action::ToggleOverview, None);
+    assert!(app.model.overview.is_visible());
+}
+
+#[test]
 fn escape_clears_the_input_instead_of_quitting() {
     // The starter quit the app on Escape, silently losing typed work.
     let mut app = app_with("a draft message");
