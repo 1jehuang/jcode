@@ -318,7 +318,7 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
-        if let Err(err) = ensure_no_acp_mcp_servers(&message.params) {
+        if let Err(err) = validate_acp_mcp_servers(&message.params) {
             self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
                 .await?;
             return Ok(());
@@ -373,7 +373,7 @@ impl AcpRuntime {
                 return Ok(());
             }
         };
-        if let Err(err) = ensure_no_acp_mcp_servers(&message.params) {
+        if let Err(err) = validate_acp_mcp_servers(&message.params) {
             self.write_error_value(id, JSONRPC_INVALID_PARAMS, err)
                 .await?;
             return Ok(());
@@ -1616,14 +1616,13 @@ fn required_session_id(params: &Value) -> std::result::Result<String, String> {
         .ok_or_else(|| "Missing required sessionId".to_string())
 }
 
-fn ensure_no_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
+fn validate_acp_mcp_servers(params: &Value) -> std::result::Result<(), String> {
     match params.get("mcpServers") {
         None | Some(Value::Null) => Ok(()),
-        Some(Value::Array(items)) if items.is_empty() => Ok(()),
-        Some(_) => Err(
-            "ACP mcpServers are not supported yet; configure MCP servers in ~/.jcode/mcp.json or a project-local .jcode/mcp.json/.mcp.json"
-                .to_string(),
-        ),
+        // Session-scoped MCP is not supported yet, but rejecting this required
+        // ACP field prevents hosts with MCP servers from creating a session.
+        Some(Value::Array(_)) => Ok(()),
+        Some(_) => Err("ACP mcpServers must be an array".to_string()),
     }
 }
 
@@ -1885,14 +1884,12 @@ mod tests {
     }
 
     #[test]
-    fn non_empty_mcp_servers_rejected_until_session_scoped_mcp_is_supported() {
+    fn non_empty_mcp_servers_are_tolerated_until_session_scoped_mcp_is_supported() {
         let params = json!({"mcpServers": [{"name": "fs"}]});
-        let error = ensure_no_acp_mcp_servers(&params).unwrap_err();
-        assert!(error.contains("~/.jcode/mcp.json"));
-        assert!(error.contains(".mcp.json"));
-        assert!(!error.contains("config.toml"));
+        assert!(validate_acp_mcp_servers(&params).is_ok());
+
         let params = json!({"mcpServers": []});
-        assert!(ensure_no_acp_mcp_servers(&params).is_ok());
+        assert!(validate_acp_mcp_servers(&params).is_ok());
     }
 
     #[test]
