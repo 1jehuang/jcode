@@ -7,7 +7,7 @@ use crate::todo::{
     feedback_loop_passes, intent_understanding_passes, load_goals, load_plan, load_todos,
     save_goals, save_plan, save_todos, update_todo_review_cycle,
 };
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -70,6 +70,21 @@ struct TodoInput {
     todos: Option<Vec<TodoItem>>,
     goals: Option<Vec<TodoGoal>>,
     plan: Option<TodoPlan>,
+}
+
+fn parse_todo_input(input: Value) -> Result<TodoInput> {
+    let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+    if let Some(todo) = params.todos.as_ref().and_then(|todos| {
+        todos
+            .iter()
+            .find(|todo| crate::todo::canonical_todo_status(&todo.status).is_none())
+    }) {
+        bail!(
+            "invalid todo status {:?}; expected one of: pending, in_progress, completed, cancelled",
+            todo.status
+        );
+    }
+    Ok(params)
 }
 
 /// Normalize a goal's group label: trimmed, with empty/whitespace collapsed
@@ -844,7 +859,7 @@ impl Tool for TodoTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
-        let params: TodoInput = serde_json::from_value(normalize_todo_input(input))?;
+        let params = parse_todo_input(input)?;
         let is_write = params.todos.is_some() || params.goals.is_some() || params.plan.is_some();
         let operation = if is_write { "write" } else { "read" };
         let result = if is_write {
@@ -1185,8 +1200,8 @@ mod tests {
         }
     }
 
-    fn parse(input: Value) -> Result<TodoInput, serde_json::Error> {
-        serde_json::from_value(normalize_todo_input(input))
+    fn parse(input: Value) -> Result<TodoInput> {
+        parse_todo_input(input)
     }
 
     #[test]
@@ -1246,6 +1261,20 @@ mod tests {
             .map(|todo| todo.status)
             .collect();
         assert_eq!(statuses, ["completed", "completed", "cancelled"]);
+    }
+
+    #[test]
+    fn rejects_unknown_todo_statuses_with_valid_vocabulary() {
+        let error = parse(json!({
+            "todos": [
+                {"content": "a", "status": "blocked", "priority": "high", "id": "1", "confidence": "plausible"}
+            ]
+        }))
+        .err()
+        .expect("unknown status should be rejected");
+        let message = error.to_string();
+        assert!(message.contains("invalid todo status \"blocked\""));
+        assert!(message.contains("pending, in_progress, completed, cancelled"));
     }
 
     #[test]
