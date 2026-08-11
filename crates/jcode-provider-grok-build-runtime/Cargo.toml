@@ -1,0 +1,30 @@
+[package]
+name = "jcode-provider-grok-build-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Grok Build subscription runtime for jcode over the Grok CLI ACP stdio transport"
+
+[lib]
+name = "jcode_provider_grok_build_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jcode-fake-grok-acp"
+path = "src/bin/fake_acp.rs"
+test = false
+bench = false
+
+[dependencies]
+agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_model", "unstable_session_resume", "unstable_session_usage"] }
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[dev-dependencies]
+tempfile = "3"

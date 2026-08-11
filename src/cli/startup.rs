@@ -134,6 +134,10 @@ pub async fn run() -> Result<()> {
 /// discoverable as more providers move out of the base crate.
 pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
+        crate::provider::external::GROK_BUILD_RUNTIME,
+        || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
+    );
+    crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new()),
     );

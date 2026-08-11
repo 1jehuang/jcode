@@ -58,6 +58,13 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
         );
     }
 
+    if matches!(choice, super::provider_init::ProviderChoice::GrokBuild) {
+        return Some(
+            "Skipped: Grok Build executes its isolated ACP coding-tool loop internally; it does not expose Jcode tool calls for the outer auth-test harness. Basic provider smoke validates the subscription transport."
+                .to_string(),
+        );
+    }
+
     if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
         let model = effective_openai_compatible_auth_test_model(
             crate::provider_catalog::FPT_PROFILE,

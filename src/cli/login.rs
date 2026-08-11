@@ -295,6 +295,9 @@ pub async fn run_login_provider(
             LoginProviderTarget::OpenAiApiKey => {
                 login_openai_api_key_flow().map(|_| LoginFlowOutcome::Completed)
             }
+            LoginProviderTarget::GrokBuild => login_grok_build_flow()
+                .await
+                .map(|_| LoginFlowOutcome::Completed),
             LoginProviderTarget::OpenRouter => {
                 login_openrouter_flow().map(|_| LoginFlowOutcome::Completed)
             }
@@ -400,6 +403,27 @@ pub async fn run_login_provider(
     );
     maybe_persist_default_provider_after_login(provider, &options);
     notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
+    Ok(())
+}
+
+async fn login_grok_build_flow() -> Result<()> {
+    let cli = crate::auth::grok_build::cli_path();
+    let status = tokio::process::Command::new(&cli)
+        .arg("login")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to launch '{}'. Install the Grok CLI, then retry `jcode login --provider grok-build`",
+                cli.display()
+            )
+        })?;
+    if !status.success() {
+        anyhow::bail!("`{} login` exited with status {status}", cli.display());
+    }
     Ok(())
 }
 

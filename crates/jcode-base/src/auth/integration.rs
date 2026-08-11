@@ -64,6 +64,7 @@ pub fn runtime_id_for_login_provider(
         LoginProviderTarget::Azure => Some(RuntimeProviderId::AzureOpenAi),
         LoginProviderTarget::OpenAiCompatible(_) => Some(RuntimeProviderId::OpenAiCompatible),
         LoginProviderTarget::Cursor => Some(RuntimeProviderId::Cursor),
+        LoginProviderTarget::GrokBuild => Some(RuntimeProviderId::GrokBuild),
         LoginProviderTarget::Copilot => Some(RuntimeProviderId::Copilot),
         LoginProviderTarget::Gemini => Some(RuntimeProviderId::Gemini),
         LoginProviderTarget::Antigravity => Some(RuntimeProviderId::Antigravity),
