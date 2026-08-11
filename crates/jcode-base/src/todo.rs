@@ -26,6 +26,42 @@ pub use jcode_task_types::{
     TodoPlanField,
 };
 
+/// Return the canonical todo status for model-written status vocabulary.
+///
+/// The todo tool historically accepted any string, so persisted sessions can
+/// contain natural completion synonyms such as `done` or `finished`. Keep this
+/// helper tolerant for those sessions even though new tool calls advertise a
+/// constrained vocabulary.
+pub fn canonical_todo_status(status: &str) -> Option<&'static str> {
+    let status = status.trim();
+    if status.eq_ignore_ascii_case("pending") {
+        Some("pending")
+    } else if status.eq_ignore_ascii_case("in_progress")
+        || status.eq_ignore_ascii_case("in progress")
+        || status.eq_ignore_ascii_case("in-progress")
+    {
+        Some("in_progress")
+    } else if status.eq_ignore_ascii_case("completed")
+        || status.eq_ignore_ascii_case("complete")
+        || status.eq_ignore_ascii_case("done")
+        || status.eq_ignore_ascii_case("finished")
+    {
+        Some("completed")
+    } else if status.eq_ignore_ascii_case("cancelled") || status.eq_ignore_ascii_case("canceled") {
+        Some("cancelled")
+    } else {
+        None
+    }
+}
+
+pub fn todo_status_is_completed(status: &str) -> bool {
+    canonical_todo_status(status) == Some("completed")
+}
+
+pub fn todo_status_is_cancelled(status: &str) -> bool {
+    canonical_todo_status(status) == Some("cancelled")
+}
+
 /// Whether the plan's intent understanding is solid enough to work against.
 pub fn intent_understanding_passes(state: Option<IntentUnderstanding>) -> bool {
     state.is_some_and(|state| state >= IntentUnderstanding::Clear)

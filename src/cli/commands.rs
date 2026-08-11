@@ -2582,9 +2582,10 @@ fn take_run_gate_digest_if_turn_ended(
     already_delivered: bool,
     todos: &[crate::todo::TodoItem],
 ) -> Option<String> {
-    let work_remains = todos
-        .iter()
-        .any(|todo| todo.status != "completed" && todo.status != "cancelled");
+    let work_remains = todos.iter().any(|todo| {
+        !crate::todo::todo_status_is_completed(&todo.status)
+            && !crate::todo::todo_status_is_cancelled(&todo.status)
+    });
     if work_remains {
         return None;
     }
@@ -2598,7 +2599,10 @@ fn build_run_auto_poke_follow_up_from_todos(
 ) -> Option<RunAutoPokeFollowUp> {
     let incomplete: Vec<_> = todos
         .iter()
-        .filter(|todo| todo.status != "completed" && todo.status != "cancelled")
+        .filter(|todo| {
+            !crate::todo::todo_status_is_completed(&todo.status)
+                && !crate::todo::todo_status_is_cancelled(&todo.status)
+        })
         .cloned()
         .collect();
     if !incomplete.is_empty() {
@@ -2635,7 +2639,7 @@ fn build_run_todo_validation_message(
 ) -> Option<(String, bool)> {
     let completed: Vec<&crate::todo::TodoItem> = todos
         .iter()
-        .filter(|todo| todo.status == "completed")
+        .filter(|todo| crate::todo::todo_status_is_completed(&todo.status))
         .collect();
     if completed.is_empty() {
         return None;

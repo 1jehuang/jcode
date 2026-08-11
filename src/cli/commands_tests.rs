@@ -405,6 +405,34 @@ fn run_auto_poke_followup_prioritizes_incomplete_todos() {
     }
 }
 
+#[test]
+fn run_auto_poke_treats_completion_synonyms_and_case_as_finished() {
+    for status in ["done", "finished", "complete", "Completed", " DONE "] {
+        let todos = vec![test_todo(
+            "a",
+            status,
+            "high",
+            Some(ConfidenceState::Verified),
+            Some(ConfidenceState::Verified),
+        )];
+        assert!(
+            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            "status {status:?} should not trigger an incomplete-todo poke"
+        );
+    }
+}
+
+#[test]
+fn run_auto_poke_treats_cancelled_spelling_variants_as_finished() {
+    for status in ["cancelled", "canceled", "Cancelled"] {
+        let todos = vec![test_todo("a", status, "high", None, None)];
+        assert!(
+            build_run_auto_poke_follow_up_from_todos(&todos, false, None).is_none(),
+            "status {status:?} should not trigger an incomplete-todo poke"
+        );
+    }
+}
+
 /// Headless `jcode run` is what the benchmarks and scripted use go through, so
 /// the deferred quality review must reach that path too, not only the TUI.
 #[test]
