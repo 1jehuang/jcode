@@ -90,6 +90,9 @@ pub enum ProviderChoice {
     Minimax,
     #[value(alias = "x.ai", alias = "x-ai", alias = "grok")]
     Xai,
+    /// Grok Build subscription via the authenticated Grok CLI ACP transport.
+    #[value(name = "grok-build")]
+    GrokBuild,
     #[value(alias = "nvidia", alias = "nim")]
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
@@ -171,6 +174,7 @@ impl ProviderChoice {
             Self::Fireworks => "fireworks",
             Self::Minimax => "minimax",
             Self::Xai => "xai",
+            Self::GrokBuild => "grok-build",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
@@ -325,6 +329,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Xai,
         crate::provider_catalog::XAI_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::GrokBuild,
+        crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::NvidiaNim,
@@ -1285,6 +1293,13 @@ pub async fn login_and_bootstrap_provider(
             disable_subscription_runtime_mode();
             Arc::new(provider::MultiProvider::with_preference(true))
         }
+        LoginProviderTarget::GrokBuild => {
+            disable_subscription_runtime_mode();
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::GROK_BUILD_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
+        }
         LoginProviderTarget::OpenAiApiKey => {
             disable_subscription_runtime_mode();
             select_initial_model_provider("openai");
@@ -1501,6 +1516,16 @@ async fn init_provider_with_options(
             clear_initial_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "gemini");
             Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new())
+        }
+        ProviderChoice::GrokBuild => {
+            disable_subscription_runtime_mode();
+            init_notice("Using Grok Build subscription via the authenticated Grok CLI");
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "grok-build");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::GROK_BUILD_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
         }
         ProviderChoice::Openrouter => {
             disable_subscription_runtime_mode();

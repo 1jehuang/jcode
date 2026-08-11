@@ -46,6 +46,8 @@ pub struct AuthStatus {
     pub gemini: AuthState,
     /// Cursor provider configured via Cursor Agent plus API key or CLI session
     pub cursor: AuthState,
+    /// Grok Build CLI is installed. Runtime auth is delegated to its cached login.
+    pub grok_build: AuthState,
     /// Google/Gmail OAuth configured
     pub google: AuthState,
     /// Google Gmail has send capability (Full tier)

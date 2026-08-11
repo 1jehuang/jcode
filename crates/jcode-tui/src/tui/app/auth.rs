@@ -561,6 +561,17 @@ impl App {
                 self.start_openai_compatible_profile_login(profile)
             }
             crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
+            crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                crate::telemetry::record_auth_surface_blocked(
+                    provider.id,
+                    provider.auth_kind.label(),
+                );
+                self.push_display_message(DisplayMessage::system(
+                    "Grok Build authentication is owned by the Grok CLI. Run `jcode login --provider grok-build` (or `grok login`) in a terminal, then reopen the model picker."
+                        .to_string(),
+                ));
+                self.set_status_notice("Grok Build: run grok login in a terminal");
+            }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
             crate::provider_catalog::LoginProviderTarget::Antigravity => {

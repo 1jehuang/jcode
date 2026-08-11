@@ -963,6 +963,22 @@ pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     order: LoginProviderSurfaceOrder::new(Some(33), Some(33), Some(33), Some(33), Some(33)),
 };
 
+/// Grok Build is intentionally a separate identity from `xai`: it delegates
+/// OAuth/token ownership to the installed Grok CLI and never consumes
+/// `XAI_API_KEY`.
+pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "grok-build",
+    display_name: "Grok Build",
+    auth_kind: LoginProviderAuthKind::Cli,
+    auth_state_key: LoginProviderAuthStateKey::GrokBuild,
+    auth_status_method: "Grok CLI cached login",
+    aliases: &[],
+    menu_detail: "Grok Build subscription via installed Grok CLI",
+    recommended: false,
+    target: LoginProviderTarget::GrokBuild,
+    order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),
+};
+
 pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "nvidia-nim",
     display_name: "NVIDIA NIM",
@@ -1137,7 +1153,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 50] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1174,6 +1190,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 49] = [
     FIREWORKS_LOGIN_PROVIDER,
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
+    GROK_BUILD_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     META_MUSE_LOGIN_PROVIDER,
