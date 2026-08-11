@@ -195,7 +195,9 @@ mod tests {
     fn openai_compatible_stream_read_error_is_transient() {
         // Formatted output from extract_error_with_retry when receiving:
         // { "type": "error", "error": { "type": "upstream_error", "code": "stream_read_error" } }
-        assert!(is_transient_transport_error("upstream_error: stream_read_error"));
+        assert!(is_transient_transport_error(
+            "upstream_error: stream_read_error"
+        ));
         // Also test the identifier in isolation (case-insensitive)
         assert!(is_transient_transport_error("stream_read_error"));
     }
