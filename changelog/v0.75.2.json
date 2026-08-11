@@ -1,0 +1,14 @@
+{
+  "version": "0.75.2",
+  "date": "2026-08-11",
+  "title": "Strict todo status validation",
+  "highlights": [
+    "The todo tool now rejects unknown status values instead of storing them silently"
+  ],
+  "improvements": [
+    "Invalid status errors list the accepted pending, in_progress, completed, and cancelled values"
+  ],
+  "fixes": [
+    "Unknown model-written status strings can no longer leave todo completion behavior ambiguous"
+  ]
+}
