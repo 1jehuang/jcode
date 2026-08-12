@@ -45,6 +45,10 @@ pub enum Request {
         images: Vec<(String, String)>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         system_reminder: Option<String>,
+        /// Skill selected by the client for this and subsequent turns. The
+        /// daemon resolves the name against its own skill registry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_skill: Option<String>,
         /// Append the user message as context only. The daemon persists it and
         /// acknowledges it without starting a model turn.
         #[serde(default, skip_serializing_if = "is_false")]

@@ -229,11 +229,12 @@ pub(super) async fn handle_clear_session(
     // `/clear` creates a genuinely fresh session. Do not migrate the old
     // session's swarm membership or plan participation to the replacement:
     // doing so lets a subsequent plan snapshot repopulate the cleared UI.
-    let swarm_id_for_update = {
+    let (swarm_id_for_update, swarm_enabled, friendly_name) = {
         let mut members = swarm_members.write().await;
-        members
-            .remove(client_session_id)
-            .and_then(|member| member.swarm_id)
+        match members.remove(client_session_id) {
+            Some(member) => (member.swarm_id, member.swarm_enabled, member.friendly_name),
+            None => (None, false, None),
+        }
     };
     if let Some(ref swarm_id) = swarm_id_for_update {
         let mut swarms = swarms_by_id.write().await;
@@ -249,6 +250,23 @@ pub(super) async fn handle_clear_session(
         client_session_id,
         channel_subscriptions,
         channel_subscriptions_by_session,
+    )
+    .await;
+    // The connection remains subscribed across `/clear`, so there is no later
+    // subscribe request to register the replacement session. Register it as a
+    // fresh root while deliberately leaving the old swarm and plan behind.
+    ensure_client_swarm_member(
+        &new_id,
+        client_connection_id,
+        &friendly_name,
+        client_event_tx,
+        agent,
+        swarm_enabled,
+        swarm_members,
+        swarms_by_id,
+        event_history,
+        event_counter,
+        swarm_event_tx,
     )
     .await;
     update_member_status(

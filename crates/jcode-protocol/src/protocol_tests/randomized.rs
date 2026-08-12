@@ -28,6 +28,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             content: content.clone(),
             images: images.clone(),
             system_reminder: system_reminder.clone(),
+            active_skill: None,
             no_reply: rng.random_bool(0.5),
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
@@ -37,6 +38,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             images: decoded_images,
             system_reminder: decoded_system_reminder,
             no_reply: decoded_no_reply,
+            ..
         } = decoded
         else {
             return Err(anyhow!("expected randomized Message"));
@@ -45,7 +47,10 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
         assert_eq!(decoded_content, content);
         assert_eq!(decoded_images, images);
         assert_eq!(decoded_system_reminder, system_reminder);
-        assert_eq!(decoded_no_reply, matches!(req, Request::Message { no_reply: true, .. }));
+        assert_eq!(
+            decoded_no_reply,
+            matches!(req, Request::Message { no_reply: true, .. })
+        );
     }
 
     for id in 100..132u64 {
