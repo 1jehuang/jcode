@@ -315,25 +315,22 @@ fn run_script(steps: &[String]) -> Result<()> {
                 .frame
                 .strip()
                 .ok_or_else(|| anyhow::anyhow!("session strip is not visible"))?;
-            let point = crate::strip::layout_items(
-                &app.model.strips,
-                app.frame.left,
-                app.frame.right,
-            )
-            .into_iter()
-            .find_map(|item| match item {
-                crate::strip::Item::Panel {
-                    strip,
-                    panel: index,
-                    x,
-                    width,
-                    ..
-                } if strip == group && index == panel => {
-                    Some((x + width / 2.0, (top + bottom) / 2.0))
-                }
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("strip panel {group}:{panel} is not visible"))?;
+            let point =
+                crate::strip::layout_items(&app.model.strips, app.frame.left, app.frame.right)
+                    .into_iter()
+                    .find_map(|item| match item {
+                        crate::strip::Item::Panel {
+                            strip,
+                            panel: index,
+                            x,
+                            width,
+                            ..
+                        } if strip == group && index == panel => {
+                            Some((x + width / 2.0, (top + bottom) / 2.0))
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("strip panel {group}:{panel} is not visible"))?;
             app.pointer = point;
             app.on_pointer_pressed();
             continue;
