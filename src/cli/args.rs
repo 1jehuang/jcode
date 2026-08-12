@@ -254,6 +254,10 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Inspect or change anonymous telemetry settings
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
+
     /// Self-development mode: run as a canary session on the shared server
     #[command(alias = "selfdev")]
     SelfDev {
@@ -548,6 +552,20 @@ pub(crate) enum Command {
         #[arg(long = "api-socket")]
         api_socket: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum TelemetryCommand {
+    /// Show the current telemetry state without creating an anonymous ID
+    Status {
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable anonymous usage telemetry
+    Enable,
+    /// Disable all telemetry persistently
+    Disable,
 }
 
 #[derive(Subcommand, Debug)]
