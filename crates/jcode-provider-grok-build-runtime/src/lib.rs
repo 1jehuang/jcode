@@ -1,8 +1,8 @@
-//! Grok Build subscription provider over the installed Grok CLI's ACP server.
+//! Grok Build subscription provider over Jcode's managed ACP backend.
 //!
 //! This runtime deliberately has no xAI HTTP or API-key path. Authentication is
-//! delegated to `grok agent stdio`, which consumes the Grok CLI's own cached
-//! login after ACP `initialize` advertises the supported subscription method.
+//! delegated to the official Grok Build ACP implementation provisioned by
+//! Jcode, which consumes its cached login after `initialize` advertises it.
 
 use acp::Agent as _;
 use agent_client_protocol as acp;
@@ -563,7 +563,7 @@ where
         .kill_on_drop(true);
     let mut child = command.spawn().with_context(|| {
         format!(
-            "Failed to launch '{}'. Install the Grok CLI and run `grok login` first",
+            "Failed to launch Jcode's managed Grok Build backend at '{}'",
             process.command.display()
         )
     })?;
@@ -737,7 +737,7 @@ fn message_text(message: &Message) -> String {
 
 fn cached_login_hint(prefix: &str) -> String {
     format!(
-        "{prefix}. Grok Build uses the Grok CLI subscription login, not XAI_API_KEY. Run `grok login` and retry"
+        "{prefix}. Grok Build uses subscription login, not XAI_API_KEY. Run `jcode login --provider grok-build` and retry"
     )
 }
 

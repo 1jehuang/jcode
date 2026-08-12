@@ -567,10 +567,10 @@ impl App {
                     provider.auth_kind.label(),
                 );
                 self.push_display_message(DisplayMessage::system(
-                    "Grok Build authentication is owned by the Grok CLI. Run `jcode login --provider grok-build` (or `grok login`) in a terminal, then reopen the model picker."
+                    "Run `jcode login --provider grok-build` in a terminal. Jcode will provision the provider backend and open the Grok Build sign-in flow. You do not need to install the Grok CLI."
                         .to_string(),
                 ));
-                self.set_status_notice("Grok Build: run grok login in a terminal");
+                self.set_status_notice("Grok Build: run jcode login in a terminal");
             }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),

@@ -407,7 +407,8 @@ pub async fn run_login_provider(
 }
 
 async fn login_grok_build_flow() -> Result<()> {
-    let cli = crate::auth::grok_build::cli_path();
+    eprintln!("Preparing the Jcode-managed Grok Build backend...");
+    let cli = crate::auth::grok_build::ensure_cli().await?;
     let status = tokio::process::Command::new(&cli)
         .arg("login")
         .stdin(std::process::Stdio::inherit())
@@ -417,7 +418,7 @@ async fn login_grok_build_flow() -> Result<()> {
         .await
         .with_context(|| {
             format!(
-                "Failed to launch '{}'. Install the Grok CLI, then retry `jcode login --provider grok-build`",
+                "Failed to launch Jcode's managed Grok Build backend at '{}'",
                 cli.display()
             )
         })?;
