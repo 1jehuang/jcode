@@ -31,7 +31,7 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_base: "https://api.z.ai/api/coding/paas/v4",
     api_key_env: "ZHIPU_API_KEY",
     env_file: "zai.env",
-    setup_url: "https://docs.z.ai/guides/develop/openai/introduction",
+    setup_url: "https://docs.z.ai/devpack/quick-start",
     default_model: Some("glm-4.5"),
     requires_api_key: true,
 };
@@ -639,7 +639,7 @@ pub const ZAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
     auth_status_method: "API key",
     aliases: &["z.ai", "z-ai", "zai-coding", "zhipu"],
-    menu_detail: "API key",
+    menu_detail: "Coding Plan subscription API key",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ZAI_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(7), Some(6), Some(7), Some(6), Some(6)),
