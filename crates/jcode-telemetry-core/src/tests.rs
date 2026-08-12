@@ -126,6 +126,58 @@ fn test_do_not_track() {
 }
 
 #[test]
+fn telemetry_status_on_fresh_home_is_read_only() {
+    let _guard = lock_test_env();
+
+    let snapshot = status();
+
+    assert!(snapshot.enabled);
+    assert_eq!(snapshot.opt_out_source, None);
+    assert_eq!(snapshot.telemetry_id, None);
+    assert!(!snapshot.content_sharing_enabled);
+    assert!(!telemetry_id_path().expect("telemetry id path").exists());
+}
+
+#[test]
+fn telemetry_status_reads_an_existing_id_without_replacing_it() {
+    let _guard = lock_test_env();
+    let path = telemetry_id_path().expect("telemetry id path");
+    write_private_file(&path, "existing-id\n");
+
+    assert_eq!(status().telemetry_id.as_deref(), Some("existing-id"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing-id\n");
+}
+
+#[test]
+fn telemetry_status_reports_marker_file_opt_out() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::MarkerFile)
+    );
+}
+
+#[test]
+fn environment_opt_out_takes_precedence_over_marker_file() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+    jcode_core::env::set_var("DO_NOT_TRACK", "1");
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::Environment)
+    );
+}
+
+#[test]
 fn test_is_ci_detects_ci_env() {
     let _guard = lock_test_env();
     // Clear any inherited CI markers so the baseline is deterministic.
