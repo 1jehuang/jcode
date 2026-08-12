@@ -912,6 +912,10 @@ impl OpenRouterProvider {
         matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
     }
 
+    fn profile_supports_openai_reasoning_effort(profile_id: Option<&str>) -> bool {
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("zai"))
+    }
+
     /// DeepSeek-family models accept the DeepSeek-style top-level
     /// `reasoning_effort` request field regardless of which OpenAI-compatible
     /// gateway serves them (issue #352: profiles like opencode-go serve
@@ -958,6 +962,9 @@ impl OpenRouterProvider {
     pub(crate) fn supports_openai_reasoning_effort(&self) -> bool {
         if self.reasoning_effort_support == Some(false) {
             return false;
+        }
+        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref()) {
+            return true;
         }
         !Self::profile_supports_unified_reasoning(
             self.profile_id.as_deref(),
@@ -1011,7 +1018,7 @@ impl OpenRouterProvider {
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
-        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
+        matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek") || id.eq_ignore_ascii_case("zai"))
     }
 
     fn profile_supports_unified_reasoning(

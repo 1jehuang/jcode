@@ -412,6 +412,17 @@ fn direct_deepseek_profile_does_not_advertise_image_input_support() {
 }
 
 #[test]
+fn direct_zai_profile_does_not_advertise_image_input_support() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert!(!provider.supports_image_input());
+}
+
+#[test]
 fn direct_deepseek_profile_omits_image_url_parts() {
     let _lock = ENV_LOCK.lock();
     let (api_base, request_rx) = spawn_single_response_chat_server();
@@ -1393,6 +1404,24 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
         .set_reasoning_effort("max")
         .expect("DeepSeek direct profile should accept max effort");
     assert_eq!(provider.reasoning_effort().as_deref(), Some("max"));
+}
+
+#[test]
+fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        provider.available_efforts(),
+        jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
+    );
+    provider
+        .set_reasoning_effort("xhigh")
+        .expect("Z.AI Coding Plan should accept xhigh effort");
+    assert_eq!(provider.reasoning_effort().as_deref(), Some("xhigh"));
 }
 
 #[test]
