@@ -555,6 +555,13 @@ fn build_shell_command(cmd_str: &str) -> TokioCommand {
     }
 }
 
+fn configure_background_command_stdio(command: &mut TokioCommand) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
 #[cfg(unix)]
 fn build_detached_shell_wrapper(command: &str) -> StdCommand {
     let mut cmd = StdCommand::new("bash");
@@ -1160,9 +1167,8 @@ impl BashTool {
 							Ok(())
 						});
 					}
-					cmd.kill_on_drop(true)
-						.stdout(Stdio::piped())
-						.stderr(Stdio::piped());
+                    cmd.kill_on_drop(true);
+                    configure_background_command_stdio(&mut cmd);
                     if let Some(ref dir) = working_dir {
                         cmd.current_dir(dir);
                     }
