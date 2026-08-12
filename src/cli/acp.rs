@@ -943,6 +943,7 @@ impl AcpRuntime {
                 content: text,
                 images,
                 system_reminder: None,
+                active_skill: None,
                 no_reply: false,
             })
             .await;
