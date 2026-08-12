@@ -888,6 +888,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structured_stream_read_error_is_extracted_and_classified_as_transient() {
+        let error = serde_json::json!({
+            "type": "upstream_error",
+            "code": "stream_read_error"
+        });
+
+        let (message, retry_after) = extract_error_with_retry(&None, &Some(error));
+
+        assert_eq!(
+            message,
+            "upstream_error (stream_read_error): OpenAI response stream error (unknown)"
+        );
+        assert_eq!(retry_after, None);
+        assert!(jcode_provider_core::is_transient_transport_error(&message));
+    }
+
+    #[test]
     fn parse_text_wrapped_tool_call_rejects_non_object_json() {
         let text = "prefix to=functions.read [1,2,3]";
         let parsed = parse_text_wrapped_tool_call(text);
