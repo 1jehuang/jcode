@@ -66,6 +66,7 @@ impl Config {
 - Custom colors: {}
 
 **Features:**
+- Check updates: {}
 - Memory: {}
 - Swarm: {}
 - Auto-poke: {}
@@ -213,6 +214,7 @@ impl Config {
                         .join(", ")
                 )
             },
+            self.features.check_updates,
             self.features.memory,
             self.features.swarm,
             self.features.auto_poke,
