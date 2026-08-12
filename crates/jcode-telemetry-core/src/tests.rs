@@ -1,5 +1,8 @@
 use super::*;
-use std::sync::{Mutex, OnceLock};
+use std::{
+    ffi::OsString,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
 
 // All of these tests mutate process-global state: the env-var opt-out tests
 // flip `JCODE_NO_TELEMETRY` / `DO_NOT_TRACK`, while the session tests drive the
@@ -10,12 +13,51 @@ use std::sync::{Mutex, OnceLock};
 // as `None`; the session test's `expect(...)` panicked while holding the
 // `SESSION_STATE` lock and poisoned it, cascading into `PoisonError` failures
 // in every other session test.
-fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
+struct TestEnvironment {
+    _home: tempfile::TempDir,
+    previous_home: Option<OsString>,
+    previous_no_telemetry: Option<OsString>,
+    previous_do_not_track: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        restore_env_var("JCODE_HOME", self.previous_home.take());
+        restore_env_var("JCODE_NO_TELEMETRY", self.previous_no_telemetry.take());
+        restore_env_var("DO_NOT_TRACK", self.previous_do_not_track.take());
+    }
+}
+
+fn restore_env_var(key: &str, value: Option<OsString>) {
+    if let Some(value) = value {
+        jcode_core::env::set_var(key, value);
+    } else {
+        jcode_core::env::remove_var(key);
+    }
+}
+
+fn global_test_lock() -> TestEnvironment {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK
+    let lock = TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = tempfile::tempdir().expect("create isolated telemetry test home");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_no_telemetry = std::env::var_os("JCODE_NO_TELEMETRY");
+    let previous_do_not_track = std::env::var_os("DO_NOT_TRACK");
+    jcode_core::env::set_var("JCODE_HOME", home.path());
+    jcode_core::env::remove_var("JCODE_NO_TELEMETRY");
+    jcode_core::env::remove_var("DO_NOT_TRACK");
+
+    TestEnvironment {
+        _home: home,
+        previous_home,
+        previous_no_telemetry,
+        previous_do_not_track,
+        _lock: lock,
+    }
 }
 
 #[test]
@@ -59,11 +101,11 @@ fn telemetry_endpoint_uses_production_custom_domain() {
     assert_eq!(TELEMETRY_ENDPOINT, "https://telemetry.jcode.sh/v1/event");
 }
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+fn lock_test_env() -> TestEnvironment {
     global_test_lock()
 }
 
-fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
+fn lock_telemetry_test_state() -> TestEnvironment {
     global_test_lock()
 }
 
@@ -81,6 +123,58 @@ fn test_do_not_track() {
     jcode_core::env::set_var("DO_NOT_TRACK", "1");
     assert!(!is_enabled());
     jcode_core::env::remove_var("DO_NOT_TRACK");
+}
+
+#[test]
+fn telemetry_status_on_fresh_home_is_read_only() {
+    let _guard = lock_test_env();
+
+    let snapshot = status();
+
+    assert!(snapshot.enabled);
+    assert_eq!(snapshot.opt_out_source, None);
+    assert_eq!(snapshot.telemetry_id, None);
+    assert!(!snapshot.content_sharing_enabled);
+    assert!(!telemetry_id_path().expect("telemetry id path").exists());
+}
+
+#[test]
+fn telemetry_status_reads_an_existing_id_without_replacing_it() {
+    let _guard = lock_test_env();
+    let path = telemetry_id_path().expect("telemetry id path");
+    write_private_file(&path, "existing-id\n");
+
+    assert_eq!(status().telemetry_id.as_deref(), Some("existing-id"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "existing-id\n");
+}
+
+#[test]
+fn telemetry_status_reports_marker_file_opt_out() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::MarkerFile)
+    );
+}
+
+#[test]
+fn environment_opt_out_takes_precedence_over_marker_file() {
+    let _guard = lock_test_env();
+    assert!(set_usage_telemetry_enabled(false));
+    jcode_core::env::set_var("DO_NOT_TRACK", "1");
+
+    let snapshot = status();
+
+    assert!(!snapshot.enabled);
+    assert_eq!(
+        snapshot.opt_out_source,
+        Some(TelemetryOptOutSource::Environment)
+    );
 }
 
 #[test]

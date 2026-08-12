@@ -62,7 +62,7 @@
     "crates/jcode-render-core/src/math.rs": 1234,
     "crates/jcode-sdk/src/client.rs": 1379,
     "crates/jcode-setup-hints/src/lib.rs": 2635,
-    "crates/jcode-telemetry-core/src/lib.rs": 2340,
+    "crates/jcode-telemetry-core/src/lib.rs": 2386,
     "crates/jcode-terminal-launch/src/lib.rs": 1692,
     "crates/jcode-tui-markdown/src/markdown_latex_image.rs": 1294,
     "crates/jcode-tui-mermaid/src/lib.rs": 1497,

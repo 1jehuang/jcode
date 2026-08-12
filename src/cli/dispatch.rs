@@ -7,8 +7,7 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -300,6 +299,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Usage { json }) => {
             commands::run_usage_command(json).await?;
         }
+        Some(Command::Telemetry(action)) => super::telemetry::run(action)?,
         Some(Command::SelfDev { build }) => {
             selfdev::run_self_dev(build, args.resume).await?;
         }

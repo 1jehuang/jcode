@@ -113,8 +113,14 @@ pub async fn run() -> Result<()> {
     perf::init_background();
     startup_profile::mark("perf_init");
 
-    telemetry::record_install_if_first_run();
-    telemetry::record_upgrade_if_needed();
+    // Telemetry settings commands must run before they can cause telemetry. In
+    // particular, a first-ever `jcode telemetry disable` must not emit the
+    // install event that the command is trying to opt out of. Keep the normal
+    // startup ordering unchanged for every other invocation.
+    if !is_telemetry_subcommand_invocation(std::env::args_os()) {
+        telemetry::record_install_if_first_run();
+        telemetry::record_upgrade_if_needed();
+    }
     startup_profile::mark("telemetry_check");
 
     let args = parse_and_prepare_args()?;
@@ -126,6 +132,48 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_telemetry_subcommand_invocation(
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> bool {
+    let mut args = args.into_iter().skip(1);
+    while let Some(arg) = args.next() {
+        let arg = arg.as_ref();
+        if arg == std::ffi::OsStr::new("telemetry") {
+            return true;
+        }
+        let text = arg.to_string_lossy();
+        if !text.starts_with('-') {
+            return false;
+        }
+        if text == "--" {
+            return args
+                .next()
+                .is_some_and(|arg| arg.as_ref() == std::ffi::OsStr::new("telemetry"));
+        }
+        let option = text.split_once('=').map_or(text.as_ref(), |(name, _)| name);
+        let takes_separate_value = !text.contains('=')
+            && matches!(
+                option,
+                "-p" | "--provider"
+                    | "-C"
+                    | "--cwd"
+                    | "--remote-working-dir"
+                    | "--spawn-hotkey"
+                    | "--socket"
+                    | "-m"
+                    | "--model"
+                    | "--provider-profile"
+                    | "--tool-profile"
+                    | "--tools"
+                    | "--disabled-tools"
+            );
+        if takes_separate_value && args.next().is_none() {
+            return false;
+        }
+    }
+    false
 }
 
 /// Register provider runtimes that live downstream of `jcode-base` with the
@@ -417,6 +465,37 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn telemetry_subcommand_skips_startup_telemetry() {
+        assert!(is_telemetry_subcommand_invocation([
+            "jcode",
+            "telemetry",
+            "disable"
+        ]));
+        assert!(is_telemetry_subcommand_invocation([
+            "jcode",
+            "--no-update",
+            "telemetry",
+            "disable"
+        ]));
+        assert!(is_telemetry_subcommand_invocation([
+            "jcode",
+            "--provider",
+            "openai",
+            "telemetry",
+            "disable"
+        ]));
+    }
+
+    #[test]
+    fn telemetry_prompt_does_not_skip_normal_startup_telemetry() {
+        assert!(!is_telemetry_subcommand_invocation([
+            "jcode",
+            "run",
+            "telemetry"
+        ]));
     }
 
     #[test]

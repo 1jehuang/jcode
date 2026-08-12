@@ -231,6 +231,16 @@ pub(super) fn get_or_create_id() -> Option<String> {
     Some(id)
 }
 
+pub(super) fn read_existing_id() -> Option<String> {
+    let path = telemetry_id_path()?;
+    let id = match std::fs::read_to_string(path) {
+        Ok(id) => id,
+        Err(_) => return None,
+    };
+    let id = id.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 pub(super) fn read_install_conversion_id() -> Option<String> {
     let path = install_conversion_id_path()?;
     let fresh = std::fs::metadata(&path)
