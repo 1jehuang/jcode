@@ -313,8 +313,24 @@ fn redact_secrets_redacts_mixed_case_token_assignments() {
 
 #[test]
 fn redact_secrets_leaves_normal_output_unchanged() {
-    let input = "Found 5 files\nNo auth errors\nDone.";
+    let input = "Found 5 files\nfn token_count(input: &str) -> usize { input.len() }\nNo auth errors\nDone.";
     assert_eq!(redact_secrets(input), input);
+}
+
+#[test]
+fn redact_secrets_redacts_bearer_jwt_aws_and_private_keys() {
+    let input = concat!(
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789\n",
+        "aws=AKIAABCDEFGHIJKLMNOP\n",
+        "jwt=eyJabcdefghijk.abcdefghijkl.abcdefghijkl\n",
+        "-----BEGIN PRIVATE KEY-----\nsecret-material\n-----END PRIVATE KEY-----\n",
+    );
+    let out = redact_secrets(input);
+    assert!(!out.contains("abcdefghijklmnopqrstuvwxyz0123456789"));
+    assert!(!out.contains("AKIAABCDEFGHIJKLMNOP"));
+    assert!(!out.contains("eyJabcdefghijk"));
+    assert!(!out.contains("secret-material"));
+    assert!(out.matches("[REDACTED_SECRET]").count() >= 4);
 }
 
 #[test]

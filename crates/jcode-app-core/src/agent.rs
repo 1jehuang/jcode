@@ -946,7 +946,12 @@ impl Agent {
         if self.transcript_telemetry_sent || self.session.messages.is_empty() {
             return;
         }
-        let Ok(messages) = serde_json::to_value(&self.session.messages) else {
+        // Keep code and ordinary transcript content intact, but reuse the
+        // session export redactor so credentials are removed recursively from
+        // text, reasoning, tool inputs, and tool results before leaving the
+        // machine.
+        let redacted_session = self.session.redacted_for_export();
+        let Ok(messages) = serde_json::to_value(&redacted_session.messages) else {
             crate::logging::warn("failed to serialize consented transcript telemetry");
             return;
         };

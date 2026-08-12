@@ -254,6 +254,38 @@ test("consented transcript is stored in private R2 with D1 metadata", async () =
   assert.ok(db.executed.some(({ sql }) => /INSERT INTO transcript_uploads/.test(sql)));
 });
 
+test("transcript storage redacts credentials but preserves ordinary code", async () => {
+  const r2 = makeR2();
+  const secret = "sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  const bearer = "Bearer abcdefghijklmnopqrstuvwxyz0123456789";
+  const code = "fn add(a: i32, b: i32) -> i32 { a + b }";
+  const body = makeTranscriptBody({
+    messages: [{
+      role: "user",
+      content: [{
+        type: "tool_use",
+        input: {
+          source: code,
+          api_key: secret,
+          command: `curl -H 'Authorization: ${bearer}'\n${code}`,
+        },
+      }],
+    }],
+  });
+
+  const response = await worker.fetch(
+    postRequest(body, TRANSCRIPT_URL),
+    { DB: makeDb(), TRANSCRIPTS: r2 },
+    {},
+  );
+  assert.equal(response.status, 200);
+  const stored = r2.puts[0].value;
+  assert.ok(!stored.includes(secret));
+  assert.ok(!stored.includes("abcdefghijklmnopqrstuvwxyz0123456789"));
+  assert.match(stored, /\[REDACTED_SECRET\]/);
+  assert.match(stored, /fn add\(a: i32, b: i32\)/);
+});
+
 test("transcript endpoint rejects missing explicit consent version", async () => {
   const response = await worker.fetch(
     postRequest(makeTranscriptBody({ consent_version: 0 }), TRANSCRIPT_URL),
