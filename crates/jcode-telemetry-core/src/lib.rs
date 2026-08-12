@@ -407,16 +407,62 @@ enum DeliveryMode {
     Blocking(Duration),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelemetryOptOutSource {
+    Environment,
+    MarkerFile,
+}
+
+impl TelemetryOptOutSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::MarkerFile => "marker_file",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelemetryStatus {
+    pub enabled: bool,
+    pub content_sharing_enabled: bool,
+    pub opt_out_source: Option<TelemetryOptOutSource>,
+    pub telemetry_id: Option<String>,
+}
+
+pub fn opt_out_source() -> Option<TelemetryOptOutSource> {
+    if opt_out_forced_by_env() {
+        return Some(TelemetryOptOutSource::Environment);
+    }
+    opt_out_marker_path()
+        .is_some_and(|path| path.exists())
+        .then_some(TelemetryOptOutSource::MarkerFile)
+}
+
+/// Return the current telemetry state without creating a telemetry identity or
+/// changing any persisted state.
+pub fn status() -> TelemetryStatus {
+    let opt_out_source = opt_out_source();
+    TelemetryStatus {
+        enabled: opt_out_source.is_none(),
+        content_sharing_enabled: content_sharing_enabled(),
+        opt_out_source,
+        telemetry_id: read_existing_id(),
+    }
+}
+
 pub fn is_enabled() -> bool {
-    if std::env::var("JCODE_NO_TELEMETRY").is_ok() || std::env::var("DO_NOT_TRACK").is_ok() {
-        logging::debug("telemetry disabled by environment");
-        return false;
+    match opt_out_source() {
+        Some(TelemetryOptOutSource::Environment) => {
+            logging::debug("telemetry disabled by environment");
+            false
+        }
+        Some(TelemetryOptOutSource::MarkerFile) => {
+            logging::debug("telemetry disabled by no_telemetry marker");
+            false
+        }
+        None => true,
     }
-    if opt_out_marker_path().map(|p| p.exists()).unwrap_or(false) {
-        logging::debug("telemetry disabled by no_telemetry marker");
-        return false;
-    }
-    true
 }
 
 /// Marker file recording that the user opted out of anonymous usage telemetry.

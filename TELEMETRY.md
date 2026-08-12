@@ -352,13 +352,23 @@ Agent-time, autonomy, and pain-attribution fields require the D1 migration in `t
 Any of these methods will disable telemetry completely:
 
 ```bash
-# Option 1: Environment variable
+# Option 1: Persistent CLI setting
+jcode telemetry disable
+
+# Inspect the current setting without creating a telemetry ID
+jcode telemetry status
+jcode telemetry status --json
+
+# Re-enable telemetry
+jcode telemetry enable
+
+# Option 2: Environment variable
 export JCODE_NO_TELEMETRY=1
 
-# Option 2: Standard DO_NOT_TRACK (https://consoledonottrack.com/)
+# Option 3: Standard DO_NOT_TRACK (https://consoledonottrack.com/)
 export DO_NOT_TRACK=1
 
-# Option 3: File-based opt-out
+# Option 4: File-based opt-out
 touch ~/.jcode/no_telemetry
 ```
 
@@ -366,7 +376,7 @@ When opted out, zero network requests are made. The telemetry module short-circu
 
 ## Verification
 
-This is open source. The entire telemetry implementation is in [`src/telemetry.rs`](./src/telemetry.rs) - you can read exactly what gets sent. There are no other network calls related to telemetry anywhere in the codebase.
+This is open source. The telemetry implementation is in [`crates/jcode-telemetry-core/src/`](./crates/jcode-telemetry-core/src/) - you can read exactly what gets sent. There are no other network calls related to telemetry anywhere in the codebase.
 
 ## Data Retention
 

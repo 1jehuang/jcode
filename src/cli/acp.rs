@@ -103,6 +103,73 @@ struct SessionUiState {
     reasoning_effort: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct TurnUsage {
+    reported: bool,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_read_tokens: Option<u64>,
+    cached_write_tokens: Option<u64>,
+}
+
+impl TurnUsage {
+    fn add(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_read_tokens: Option<u64>,
+        cached_write_tokens: Option<u64>,
+    ) {
+        self.reported = true;
+        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
+        add_optional_tokens(&mut self.cached_read_tokens, cached_read_tokens);
+        add_optional_tokens(&mut self.cached_write_tokens, cached_write_tokens);
+    }
+
+    fn to_acp(&self) -> Option<Value> {
+        if !self.reported {
+            return None;
+        }
+
+        let total_tokens = self
+            .input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cached_read_tokens.unwrap_or(0))
+            .saturating_add(self.cached_write_tokens.unwrap_or(0));
+        let mut usage = json!({
+            "totalTokens": total_tokens,
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+        });
+        let object = usage.as_object_mut().expect("usage is an object");
+        if let Some(tokens) = self.cached_read_tokens {
+            object.insert("cachedReadTokens".to_string(), json!(tokens));
+        }
+        if let Some(tokens) = self.cached_write_tokens {
+            object.insert("cachedWriteTokens".to_string(), json!(tokens));
+        }
+        Some(usage)
+    }
+}
+
+fn add_optional_tokens(total: &mut Option<u64>, tokens: Option<u64>) {
+    if let Some(tokens) = tokens {
+        *total = Some(total.unwrap_or(0).saturating_add(tokens));
+    }
+}
+
+fn prompt_response(stop_reason: &str, usage: &TurnUsage) -> Value {
+    let mut response = json!({ "stopReason": stop_reason });
+    if let Some(usage) = usage.to_acp() {
+        response
+            .as_object_mut()
+            .expect("prompt response is an object")
+            .insert("usage".to_string(), usage);
+    }
+    response
+}
+
 impl SessionUiState {
     fn from_history_fields(
         provider_name: Option<String>,
@@ -859,7 +926,7 @@ impl AcpRuntime {
                 }),
             )
             .await?;
-            self.write_result(rpc_id, json!({ "stopReason": "end_turn" }))
+            self.write_result(rpc_id, prompt_response("end_turn", &TurnUsage::default()))
                 .await?;
             return Ok(());
         }
@@ -886,6 +953,7 @@ impl AcpRuntime {
 
         let mut mapper = EventMapper::new(session.session_id.clone(), self.profile);
         let mut stop_reason = "end_turn".to_string();
+        let mut turn_usage = TurnUsage::default();
         loop {
             let event = match session.read_event().await {
                 Ok(event) => event,
@@ -912,10 +980,11 @@ impl AcpRuntime {
                 }
                 ServerEvent::TokenUsage {
                     input,
-                    output: _,
+                    output,
                     cache_read_input,
                     cache_creation_input,
                 } => {
+                    turn_usage.add(input, output, cache_read_input, cache_creation_input);
                     let (provider_name, context_limit) = {
                         let state = session.ui_state.lock().await;
                         (
@@ -990,7 +1059,7 @@ impl AcpRuntime {
         }
 
         cleanup_prompt_state(&session).await;
-        self.write_result(rpc_id, json!({ "stopReason": stop_reason }))
+        self.write_result(rpc_id, prompt_response(&stop_reason, &turn_usage))
             .await?;
         Ok(())
     }
@@ -1839,6 +1908,49 @@ mod tests {
         assert!(text.contains("Embedded resource: file:///tmp/a.rs"));
         assert!(text.contains("Resource link: b.rs"));
         assert_eq!(images, vec![("image/png".to_string(), "abc".to_string())]);
+    }
+
+    #[test]
+    fn prompt_response_reports_usage_accumulated_across_the_turn() {
+        let mut usage = TurnUsage::default();
+        usage.add(10, 2, Some(4), Some(5));
+        usage.add(20, 3, Some(6), Some(7));
+
+        assert_eq!(
+            prompt_response("end_turn", &usage),
+            json!({
+                "stopReason": "end_turn",
+                "usage": {
+                    "totalTokens": 57,
+                    "inputTokens": 30,
+                    "outputTokens": 5,
+                    "cachedReadTokens": 10,
+                    "cachedWriteTokens": 12,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_response_omits_unreported_usage_and_cache_fields() {
+        assert_eq!(
+            prompt_response("end_turn", &TurnUsage::default()),
+            json!({ "stopReason": "end_turn" })
+        );
+
+        let mut usage = TurnUsage::default();
+        usage.add(10, 2, None, None);
+        assert_eq!(
+            prompt_response("cancelled", &usage),
+            json!({
+                "stopReason": "cancelled",
+                "usage": {
+                    "totalTokens": 12,
+                    "inputTokens": 10,
+                    "outputTokens": 2,
+                }
+            })
+        );
     }
 
     #[test]

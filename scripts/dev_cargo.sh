@@ -369,6 +369,49 @@ meminfo_kib() {
   awk -v key="$key" '$1 == key ":" { print $2; exit }' /proc/meminfo 2>/dev/null || true
 }
 
+macos_available_memory_kib() {
+  command -v vm_stat >/dev/null 2>&1 || return 1
+
+  local stats page_size free_pages inactive_pages speculative_pages
+  stats=$(LC_ALL=C vm_stat 2>/dev/null) || return 1
+  page_size=$(printf '%s\n' "$stats" \
+    | sed -n '1s/.*page size of \([0-9][0-9]*\) bytes.*/\1/p')
+  free_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "free:" { sub(/\.$/, "", $3); print $3; exit }')
+  inactive_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "inactive:" { sub(/\.$/, "", $3); print $3; exit }')
+  speculative_pages=$(printf '%s\n' "$stats" \
+    | awk '$1 == "Pages" && $2 == "speculative:" { sub(/\.$/, "", $3); print $3; exit }')
+
+  [[ "$page_size" =~ ^[0-9]+$ && "$page_size" -gt 0 ]] || return 1
+  [[ "$free_pages" =~ ^[0-9]+$ ]] || return 1
+  [[ "$inactive_pages" =~ ^[0-9]+$ ]] || return 1
+  [[ "$speculative_pages" =~ ^[0-9]+$ ]] || return 1
+
+  # Inactive and speculative pages are reclaimable without swapping. Purgeable
+  # pages are intentionally not added because they can already be represented in
+  # those categories, and double-counting would make the job limit less safe.
+  printf '%s\n' "$(( (free_pages + inactive_pages + speculative_pages) * page_size / 1024 ))"
+}
+
+available_memory_kib() {
+  local value
+  case "$(uname -s)" in
+    Linux)
+      [[ -r /proc/meminfo ]] || return 1
+      value=$(meminfo_kib MemAvailable)
+      ;;
+    Darwin)
+      value=$(macos_available_memory_kib) || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]] || return 1
+  printf '%s\n' "$value"
+}
+
 selfdev_low_memory_default_needed() {
   [[ "$(uname -s)" == "Linux" ]] || return 1
   [[ -r /proc/meminfo ]] || return 1
@@ -410,7 +453,8 @@ cpu_count() {
 # off before earlyoom SIGTERMs it. Clamp into [1, cpus]. On an idle 15 GiB
 # machine this still uses ~7 of 8 cores; under memory pressure a fresh build
 # backs off further. An explicit CARGO_BUILD_JOBS / JCODE_BUILD_JOBS always
-# wins, and non-Linux hosts fall back to the cargo/.cargo default.
+# wins. Linux reads MemAvailable; macOS conservatively sums reclaimable vm_stat
+# pages. Unsupported hosts and failed probes fall back to Cargo's configuration.
 select_build_jobs() {
   # Respect an explicit override from either env var.
   local override="${JCODE_BUILD_JOBS:-${CARGO_BUILD_JOBS:-}}"
@@ -425,17 +469,14 @@ select_build_jobs() {
     unset CARGO_BUILD_JOBS
   fi
 
-  # Adaptive sizing only on Linux where /proc/meminfo is available; elsewhere we
-  # leave cargo to honor the .cargo/config.toml default.
-  if [[ "$(uname -s)" != "Linux" || ! -r /proc/meminfo ]]; then
+  local mem_available_kib
+  if ! mem_available_kib=$(available_memory_kib); then
     build_jobs_status="cargo-default"
     return
   fi
 
-  local cpus mem_available_kib mib_per_job_default mib_per_job
+  local cpus mib_per_job_default mib_per_job
   cpus=$(cpu_count)
-  mem_available_kib=$(meminfo_kib MemAvailable)
-  [[ -n "$mem_available_kib" && "$mem_available_kib" =~ ^[0-9]+$ ]] || mem_available_kib=0
 
   # Per-job memory budget (MiB). Sized with a cushion above the largest measured
   # rustc unit (jcode-base, ~1.6 GiB RSS sampled) so an idle machine uses nearly

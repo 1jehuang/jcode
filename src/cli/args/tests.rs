@@ -23,6 +23,30 @@ fn server_start_and_internal_keepalive_parse() {
 }
 
 #[test]
+fn telemetry_subcommands_parse() {
+    let status = Args::try_parse_from(["jcode", "telemetry", "status", "--json"])
+        .expect("telemetry status should parse");
+    assert!(matches!(
+        status.command,
+        Some(Command::Telemetry(TelemetryCommand::Status { json: true }))
+    ));
+
+    let enable = Args::try_parse_from(["jcode", "telemetry", "enable"])
+        .expect("telemetry enable should parse");
+    assert!(matches!(
+        enable.command,
+        Some(Command::Telemetry(TelemetryCommand::Enable))
+    ));
+
+    let disable = Args::try_parse_from(["jcode", "telemetry", "disable"])
+        .expect("telemetry disable should parse");
+    assert!(matches!(
+        disable.command,
+        Some(Command::Telemetry(TelemetryCommand::Disable))
+    ));
+}
+
+#[test]
 fn test_provider_choice_aliases_parse() {
     let args = Args::try_parse_from(["jcode", "--provider", "z.ai", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Zai);
