@@ -333,6 +333,19 @@ mod tests {
     }
 
     #[test]
+    fn zai_login_identifies_coding_plan_subscription_key() {
+        let provider = resolve_login_provider("zai").expect("Z.AI provider");
+        assert_eq!(provider.auth_kind, LoginProviderAuthKind::ApiKey);
+        assert_eq!(provider.menu_detail, "Coding Plan subscription API key");
+
+        let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
+            panic!("Z.AI must use its OpenAI-compatible Coding Plan endpoint");
+        };
+        assert_eq!(profile.api_base, "https://api.z.ai/api/coding/paas/v4");
+        assert_eq!(profile.setup_url, "https://docs.z.ai/devpack/quick-start");
+    }
+
+    #[test]
     fn normalize_api_base_accepts_private_http_hosts() {
         assert_eq!(
             normalize_api_base("http://192.168.1.25:8000/v1/").as_deref(),
