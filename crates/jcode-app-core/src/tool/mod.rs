@@ -257,12 +257,6 @@ impl Registry {
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
-                "swarm",
-                communicate::CommunicateTool::new,
-            );
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
                 "session_search",
                 session_search::SessionSearchTool::new,
             );
@@ -295,6 +289,16 @@ impl Registry {
             &mut tools,
             "skill_manage",
             skill::SkillTool::new(skills.clone()),
+        );
+        // The swarm tool captures the user-editable swarm prompt in its
+        // description. Construct it once per session rather than sharing the
+        // process-wide instance. Existing sessions keep their stable tool
+        // definition (and provider KV cache), while newly created agents see
+        // prompt edits immediately.
+        Self::insert_tool(
+            &mut tools,
+            "swarm",
+            communicate::CommunicateTool::new(),
         );
         tools
     }

@@ -1127,6 +1127,23 @@ fn description_includes_swarm_prompt_guidance() {
 }
 
 #[test]
+fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
+    let project = tempfile::tempdir().unwrap();
+    let prompt_dir = project.path().join(".jcode");
+    std::fs::create_dir_all(&prompt_dir).unwrap();
+    let prompt_path = prompt_dir.join("swarm-prompt.md");
+    std::fs::write(&prompt_path, "first routing version").unwrap();
+
+    let existing = CommunicateTool::new_for_working_dir(Some(project.path()));
+    std::fs::write(&prompt_path, "second routing version").unwrap();
+    let newly_created = CommunicateTool::new_for_working_dir(Some(project.path()));
+
+    assert!(existing.description().contains("first routing version"));
+    assert!(!existing.description().contains("second routing version"));
+    assert!(newly_created.description().contains("second routing version"));
+}
+
+#[test]
 fn format_swarm_model_list_renders_routes_and_pin() {
     let routes = vec![
         jcode_provider_core::ModelRoute {
