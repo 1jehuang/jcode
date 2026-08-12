@@ -50,7 +50,6 @@ impl GrokBuildProcess {
             args: vec![
                 "agent".to_string(),
                 "stdio".to_string(),
-                "--no-auto-update".to_string(),
             ],
             env: BTreeMap::new(),
         }
