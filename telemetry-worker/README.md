@@ -39,6 +39,19 @@ Events are dual-written to two stores with different jobs:
    high-volume events (see `RETENTION_DAYS`). All the dashboard SQL in this
    repo (`users.sql`, `dau.sql`, `geo.sql`, `health.sql`) reads D1.
 
+Separately consented full transcripts do not enter either firehose or the
+ordinary `events` table. `POST /v1/transcript` writes the JSON body to the
+private `TRANSCRIPTS` R2 bucket and writes metadata to `transcript_uploads`.
+Create the bucket before deployment and configure a 30-day lifecycle deletion:
+
+```bash
+npx wrangler r2 bucket create jcode-consented-transcripts
+npm run migrate:transcript-uploads
+```
+
+The bucket must remain private. Deployment alone does not create the lifecycle
+rule; configure it in Cloudflare before enabling the program in a release.
+
 ### D1 size self-defense
 
 D1 hard-caps databases at 10 GB on Workers Paid (500 MB on Free). The first

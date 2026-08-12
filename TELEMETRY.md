@@ -1,6 +1,41 @@
 # jcode Telemetry
 
-jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. **We do not collect your prompts, your code, or your conversation transcripts.**
+jcode collects **anonymous, minimal usage statistics** to help understand how many people use jcode, what providers/models are popular, whether onboarding works, which feature families are used, how often sessions succeed, and whether performance/regressions are improving. This data helps prioritize development. Ordinary telemetry does **not** contain prompts, source code, model responses, or conversation transcripts.
+
+Jcode also offers a separate, optional transcript-sharing program. It is off by
+default and requires choosing **Share full transcripts** in the telemetry
+settings. This consent is independent of ordinary usage telemetry and is
+versioned so an older preference cannot silently opt a user into a newly
+introduced content program.
+
+### Optional Full Transcript Event
+
+When transcript sharing is explicitly enabled, one upload is queued when a
+non-empty session closes or crashes. The upload contains the complete structured
+conversation: user prompts, model responses and reasoning retained by Jcode,
+source code present in messages, tool names and inputs, and tool results. Images
+remain represented by their transcript content-block metadata; Jcode does not
+add local files that were not already present in the conversation.
+
+| Field | Purpose |
+|-------|---------|
+| `upload_id` | Random identifier for this upload |
+| `id` | Installation telemetry ID, used to honor deletion requests |
+| `consent_version` | Version of the explicit content-sharing consent |
+| `provider` / `model` / `end_reason` | Session metadata |
+| `message_count` / `messages` | Complete structured conversation |
+
+Transcript uploads use the dedicated `/v1/transcript` endpoint and are stored
+in a private R2 bucket, separate from Analytics Engine and ordinary D1 event
+rows. D1 stores only upload metadata and the private object key. Uploads are
+limited to 8 MiB and the R2 bucket must have a 30-day deletion lifecycle rule.
+Access should be restricted to specifically authorized maintainers working on
+quality evaluation. Transcript data must not be sold or shared with unrelated
+third parties.
+
+Disable transcript sharing at any time from `/telemetry` by selecting **No
+prompts or transcripts** or **Send nothing**. `JCODE_NO_TELEMETRY` and
+`DO_NOT_TRACK` override the content setting and prevent uploads.
 
 Recent telemetry additions also include: coarse onboarding steps, explicit thumbs-up / thumbs-down feedback, build-channel / dev-mode cleanup flags, session/workflow/tool-category summaries, coarse project language buckets, retention helpers like active days in the last 7 / 30 days, workflow cadence fields for session timing and multi-sessioning, privacy-safe per-turn timing/outcome metrics, schema v5 agent-time / autonomy / pain-attribution metrics, and numeric-only todo progress aggregates.
 

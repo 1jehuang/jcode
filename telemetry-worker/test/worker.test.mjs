@@ -10,6 +10,7 @@ import worker from "../src/worker.js";
 
 const EVENT_URL = "https://telemetry.example/v1/event";
 const HEALTH_URL = "https://telemetry.example/v1/health";
+const TRANSCRIPT_URL = "https://telemetry.example/v1/transcript";
 
 function makeBody(overrides = {}) {
   return {
@@ -89,6 +90,36 @@ function postRequest(body, url = EVENT_URL) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function makeTranscriptBody(overrides = {}) {
+  return {
+    id: "11111111-2222-4333-8444-555555555555",
+    event: "transcript",
+    upload_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    consent_version: 1,
+    schema_version: 6,
+    version: "0.0.0-test",
+    os: "linux",
+    arch: "x86_64",
+    provider: "test-provider",
+    model: "test-model",
+    end_reason: "normal_exit",
+    message_count: 1,
+    messages: [{ role: "user", content: [{ type: "text", text: "private prompt" }] }],
+    ...overrides,
+  };
+}
+
+function makeR2() {
+  const puts = [];
+  const deletes = [];
+  return {
+    puts,
+    deletes,
+    async put(key, value, options) { puts.push({ key, value, options }); },
+    async delete(key) { deletes.push(key); },
+  };
 }
 
 // Minimal D1 mock. `plan` lets tests fail specific statements or set the
@@ -205,6 +236,49 @@ function makeDb(plan = {}) {
     },
   };
 }
+
+test("consented transcript is stored in private R2 with D1 metadata", async () => {
+  const db = makeDb();
+  const r2 = makeR2();
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody(), TRANSCRIPT_URL),
+    { DB: db, TRANSCRIPTS: r2 },
+    {},
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(r2.puts.length, 1);
+  assert.match(r2.puts[0].key, /^transcripts\/\d{4}-\d{2}\/aaaaaaaa-/);
+  assert.match(r2.puts[0].value, /private prompt/);
+  assert.equal(r2.puts[0].options.customMetadata.consent_version, "1");
+  assert.ok(db.executed.some(({ sql }) => /INSERT INTO transcript_uploads/.test(sql)));
+});
+
+test("transcript endpoint rejects missing explicit consent version", async () => {
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody({ consent_version: 0 }), TRANSCRIPT_URL),
+    { DB: makeDb(), TRANSCRIPTS: makeR2() },
+    {},
+  );
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /Unsupported consent version/);
+});
+
+test("transcript endpoint fails closed when private storage is unavailable", async () => {
+  const response = await worker.fetch(
+    postRequest(makeTranscriptBody(), TRANSCRIPT_URL),
+    { DB: makeDb() },
+    {},
+  );
+  assert.equal(response.status, 503);
+});
+
+test("transcript endpoint rejects declared oversized payload before parsing", async () => {
+  const request = postRequest(makeTranscriptBody(), TRANSCRIPT_URL);
+  request.headers.set("content-length", String(9 * 1024 * 1024));
+  const response = await worker.fetch(request, { DB: makeDb(), TRANSCRIPTS: makeR2() }, {});
+  assert.equal(response.status, 413);
+});
 
 function makeFirehose() {
   const points = [];

@@ -21,6 +21,12 @@ binding = "DB"
 database_name = "jcode-telemetry"
 database_id = "abaa524c-3e90-4ba9-a569-027e78a083c6"
 
+# Separately consented prompt/transcript content. Keep this bucket private and
+# configure an R2 lifecycle rule that deletes objects after 30 days.
+[[r2_buckets]]
+binding = "TRANSCRIPTS"
+bucket_name = "jcode-consented-transcripts"
+
 # High-volume firehose: every event is also written to Workers Analytics
 # Engine (time-series store, ~90-day retention, no database size cap). This is
 # the primary store for raw turn_end / session_start / onboarding_step

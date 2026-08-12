@@ -44,6 +44,9 @@ const KNOWN_EVENTS = [
   ...SUBSCRIPTION_EVENTS,
 ];
 
+const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 // Origins the website beacon posts from. The default CORS policy stays the
 // permissive ALLOWED_ORIGIN var ("*", telemetry is anonymous and unauthed);
 // allowlisted origins are echoed back explicitly so the policy keeps working
@@ -437,6 +440,10 @@ export default {
       return jsonResponse({ error: "Method not allowed" }, 405, cors);
     }
 
+    if (url.pathname === "/v1/transcript") {
+      return ingestTranscript(request, env, cors);
+    }
+
     if (url.pathname !== "/v1/event") {
       return jsonResponse({ error: "Not found" }, 404, cors);
     }
@@ -563,6 +570,94 @@ export default {
     );
   },
 };
+
+async function ingestTranscript(request, env, cors) {
+  if (!env.TRANSCRIPTS || typeof env.TRANSCRIPTS.put !== "function") {
+    return jsonResponse({ error: "Transcript storage unavailable" }, 503, cors);
+  }
+  const declaredSize = Number(request.headers.get("content-length") || 0);
+  if (declaredSize > MAX_TRANSCRIPT_BYTES) {
+    return jsonResponse({ error: "Transcript payload too large" }, 413, cors);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON" }, 400, cors);
+  }
+  const problem = validateTranscript(body);
+  if (problem) {
+    return jsonResponse({ error: problem }, 400, cors);
+  }
+
+  const encoded = JSON.stringify(body);
+  const byteLength = new TextEncoder().encode(encoded).byteLength;
+  if (byteLength > MAX_TRANSCRIPT_BYTES) {
+    return jsonResponse({ error: "Transcript payload too large" }, 413, cors);
+  }
+
+  const month = new Date().toISOString().slice(0, 7);
+  const objectKey = `transcripts/${month}/${body.upload_id}.json`;
+  try {
+    await env.TRANSCRIPTS.put(objectKey, encoded, {
+      httpMetadata: { contentType: "application/json" },
+      customMetadata: {
+        consent_version: String(body.consent_version),
+        telemetry_id: body.id,
+      },
+    });
+    await env.DB.prepare(`
+      INSERT INTO transcript_uploads (
+        upload_id, telemetry_id, object_key, consent_version, schema_version,
+        version, provider, model, end_reason, message_count, byte_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      body.upload_id,
+      body.id,
+      objectKey,
+      body.consent_version,
+      body.schema_version,
+      body.version,
+      body.provider || null,
+      body.model || null,
+      body.end_reason,
+      body.message_count,
+      byteLength,
+    ).run();
+  } catch (err) {
+    try {
+      await env.TRANSCRIPTS.delete(objectKey);
+    } catch {
+      // Best effort rollback. R2 lifecycle retention remains the safety net.
+    }
+    console.error("transcript upload failed", err?.message || err);
+    return jsonResponse({ error: "Internal error" }, 500, cors);
+  }
+  return jsonResponse({ ok: true, upload_id: body.upload_id }, 200, cors);
+}
+
+function validateTranscript(body) {
+  if (!body || body.event !== "transcript") return "Invalid transcript event";
+  if (!UUID_RE.test(body.id || "") || !UUID_RE.test(body.upload_id || "")) {
+    return "Invalid transcript identifier";
+  }
+  if (body.consent_version !== 1) return "Unsupported consent version";
+  if (!Number.isInteger(body.schema_version) || body.schema_version < 1) {
+    return "Invalid schema version";
+  }
+  if (typeof body.version !== "string" || !body.version) return "Missing version";
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    return "Transcript messages must be a non-empty array";
+  }
+  if (!Number.isInteger(body.message_count) || body.message_count !== body.messages.length) {
+    return "Transcript message count mismatch";
+  }
+  if (!["normal_exit", "user_exit", "error", "unknown", "superseded"].includes(body.end_reason)) {
+    return "Invalid transcript end reason";
+  }
+  return null;
+}
 
 function observeDbSize(result) {
   const size = result?.meta?.size_after;
