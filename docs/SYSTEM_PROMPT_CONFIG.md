@@ -43,3 +43,6 @@ This replaces only the base prompt. AGENTS.md, overlays, skills, and memory stil
 - Editing the built-in `system_prompt.md` requires a rebuild (`selfdev build-reload`),
   since it is embedded with `include_str!`.
 - Swarm model-routing guidance has its own analogous file: `.jcode/swarm-prompt.md`.
+  Use `/swarm-prompt` to edit the active project or global file. New agents load
+  the latest contents immediately; already-running agents keep the prompt they
+  captured at session creation so their tool definition and context cache stay stable.

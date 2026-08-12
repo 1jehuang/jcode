@@ -3024,7 +3024,7 @@ pub(super) fn handle_swarm_prompt_command(app: &mut App, trimmed: &str) -> bool 
     match run_interactive_editor(&mut command) {
         Ok(status) if status.success() => {
             app.push_display_message(DisplayMessage::system(format!(
-                "Edited the active swarm routing prompt in {}:\n{}\n\nChanges apply after restarting or reloading Jcode because running agent tool registries cache the prompt.",
+                "Edited the active swarm routing prompt in {}:\n{}\n\nNew agents will use this prompt immediately. Existing agents retain their current prompt to preserve their context cache.",
                 editor,
                 path.display()
             )));
