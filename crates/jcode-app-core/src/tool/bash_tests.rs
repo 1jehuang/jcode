@@ -30,6 +30,30 @@ fn cargo_wrapper_path_is_shell_quoted() {
     assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
 }
 
+#[tokio::test]
+async fn background_command_stdin_is_null() {
+    let mut command =
+        build_shell_command("if IFS= read -r _; then printf inherited; else printf eof; fi");
+
+    // Start with a readable pipe so this test does not depend on, or modify, the
+    // test runner's process-wide stdin. Background configuration must replace it.
+    command.stdin(Stdio::piped());
+    configure_background_command_stdio(&mut command);
+
+    let child = command.spawn().expect("background command should spawn");
+    assert!(
+        child.stdin.is_none(),
+        "background commands must not retain a writable stdin pipe"
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(2), child.wait_with_output())
+        .await
+        .expect("background command should observe EOF instead of blocking")
+        .expect("background command should exit cleanly");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "eof");
+}
+
 fn make_ctx(stdin_tx: Option<mpsc::UnboundedSender<StdinInputRequest>>) -> ToolContext {
     ToolContext {
         session_id: "test-session".to_string(),
