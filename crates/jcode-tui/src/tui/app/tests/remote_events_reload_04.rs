@@ -1205,6 +1205,29 @@ fn test_tui_login_providers_have_real_tui_handlers() {
 }
 
 #[test]
+fn test_tui_grok_build_login_starts_managed_oauth_flow() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let _guard = runtime.enter();
+    let mut app = create_test_app();
+
+    app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
+
+    assert!(matches!(
+        app.pending_login,
+        Some(PendingLogin::GrokBuild)
+    ));
+    let rendered = app
+        .display_messages()
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("xAI sign-in URL and device code"));
+    assert!(rendered.contains("You do not need to install the Grok CLI"));
+    assert!(!rendered.contains("run `jcode login"));
+}
+
+#[test]
 fn test_info_widget_remote_openai_uses_remote_provider_for_usage_and_context() {
     let mut app = create_test_app();
     app.is_remote = true;
