@@ -963,17 +963,16 @@ pub const XAI_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor 
     order: LoginProviderSurfaceOrder::new(Some(33), Some(33), Some(33), Some(33), Some(33)),
 };
 
-/// Grok Build is intentionally a separate identity from `xai`: it delegates
-/// OAuth/token ownership to the installed Grok CLI and never consumes
-/// `XAI_API_KEY`.
+/// Grok Build is intentionally a separate identity from `xai`: Jcode manages
+/// its subscription backend and never consumes `XAI_API_KEY`.
 pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "grok-build",
     display_name: "Grok Build",
     auth_kind: LoginProviderAuthKind::Cli,
     auth_state_key: LoginProviderAuthStateKey::GrokBuild,
-    auth_status_method: "Grok CLI cached login",
+    auth_status_method: "Grok Build subscription login",
     aliases: &[],
-    menu_detail: "Grok Build subscription via installed Grok CLI",
+    menu_detail: "Grok Build subscription managed by Jcode",
     recommended: false,
     target: LoginProviderTarget::GrokBuild,
     order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),

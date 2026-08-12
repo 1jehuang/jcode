@@ -608,9 +608,9 @@ impl AuthStatus {
             }
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
                 if self.grok_build == AuthState::Available {
-                    "Grok CLI installed; cached subscription login is verified over ACP at request time".to_string()
+                    "Jcode-managed Grok Build backend; subscription login is verified over ACP at request time".to_string()
                 } else {
-                    "Grok CLI not installed or not found on PATH".to_string()
+                    "not configured (Jcode downloads the provider backend during login)".to_string()
                 }
             }
             crate::provider_catalog::LoginProviderTarget::OpenAiCompatible(profile) => {
@@ -844,9 +844,9 @@ impl AuthStatus {
                     AuthCredentialSource::None
                 },
                 if state == AuthState::Available {
-                    "Grok CLI cached login (credential remains owned by Grok CLI)".to_string()
+                    "Grok Build subscription login managed through Jcode".to_string()
                 } else {
-                    "Grok CLI unavailable".to_string()
+                    "Jcode-managed Grok Build backend not provisioned".to_string()
                 },
                 AuthExpiryConfidence::Unknown,
                 AuthRefreshSupport::ExternalManaged,

@@ -183,7 +183,14 @@ fn is_telemetry_subcommand_invocation(
 pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::GROK_BUILD_RUNTIME,
-        || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
+        || {
+            let mut process =
+                jcode_provider_grok_build_runtime::GrokBuildProcess::from_env();
+            process.command = crate::auth::grok_build::cli_path();
+            std::sync::Arc::new(
+                jcode_provider_grok_build_runtime::GrokBuildProvider::with_process(process),
+            )
+        },
     );
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
