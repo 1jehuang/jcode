@@ -261,6 +261,9 @@ prompt_entry_animation = true
 # error = "#ff6464"
 
 [features]
+# Check for and install updates during startup. Set to false for the persistent
+# equivalent of passing --no-update on every invocation.
+check_updates = true
 # Memory: retrieval + extraction sidecar features
 memory = true
 # Swarm: multi-session coordination features

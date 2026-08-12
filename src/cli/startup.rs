@@ -432,7 +432,15 @@ fn spawn_background_update_check(args: &Args) {
 }
 
 fn should_spawn_background_update_check(args: &Args) -> bool {
-    !args.quiet
+    should_spawn_background_update_check_with_config(
+        args,
+        crate::config::config().features.check_updates,
+    )
+}
+
+fn should_spawn_background_update_check_with_config(args: &Args, check_updates: bool) -> bool {
+    check_updates
+        && !args.quiet
         && !args.no_update
         && !matches!(
             args.command,
@@ -537,6 +545,17 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Update)));
         assert!(!should_spawn_background_update_check(&args));
         assert!(should_auto_install_update(&args));
+    }
+
+    #[test]
+    fn config_can_permanently_disable_background_update_checks() {
+        let args = parse_args(&["jcode", "login"]);
+        assert!(should_spawn_background_update_check_with_config(
+            &args, true
+        ));
+        assert!(!should_spawn_background_update_check_with_config(
+            &args, false
+        ));
     }
 
     #[test]

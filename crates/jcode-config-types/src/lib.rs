@@ -1064,6 +1064,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeatureConfig {
+    /// Check for and install jcode updates during startup (default: true).
+    /// Set this to false for the persistent equivalent of `--no-update`.
+    pub check_updates: bool,
     /// Enable memory retrieval/extraction features (default: true)
     pub memory: bool,
     /// Enable swarm coordination features (default: true)
@@ -1093,6 +1096,7 @@ pub struct FeatureConfig {
 impl Default for FeatureConfig {
     fn default() -> Self {
         Self {
+            check_updates: true,
             memory: true,
             swarm: true,
             mermaid: true,
