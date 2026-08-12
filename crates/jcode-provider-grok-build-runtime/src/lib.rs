@@ -47,10 +47,7 @@ impl GrokBuildProcess {
             .unwrap_or_else(|| PathBuf::from("grok"));
         Self {
             command,
-            args: vec![
-                "agent".to_string(),
-                "stdio".to_string(),
-            ],
+            args: vec!["agent".to_string(), "stdio".to_string()],
             env: BTreeMap::new(),
         }
     }
@@ -230,7 +227,7 @@ impl Provider for GrokBuildProvider {
                 provider: "Grok Build".to_string(),
                 api_method: "grok-build-acp".to_string(),
                 available: true,
-                detail: "Grok Build subscription via Grok CLI ACP".to_string(),
+                detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
                 cheapness: None,
             })
             .collect()
@@ -251,7 +248,7 @@ impl Provider for GrokBuildProvider {
     }
 
     fn active_auth_method_label(&self) -> Option<&'static str> {
-        Some("Grok CLI cached login")
+        Some("Grok Build subscription login")
     }
 
     fn handles_tools_internally(&self) -> bool {
