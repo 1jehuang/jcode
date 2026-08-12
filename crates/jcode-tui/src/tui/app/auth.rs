@@ -562,15 +562,7 @@ impl App {
             }
             crate::provider_catalog::LoginProviderTarget::Cursor => self.start_cursor_login(),
             crate::provider_catalog::LoginProviderTarget::GrokBuild => {
-                crate::telemetry::record_auth_surface_blocked(
-                    provider.id,
-                    provider.auth_kind.label(),
-                );
-                self.push_display_message(DisplayMessage::system(
-                    "Run `jcode login --provider grok-build` in a terminal. Jcode will provision the provider backend and open the Grok Build sign-in flow. You do not need to install the Grok CLI."
-                        .to_string(),
-                ));
-                self.set_status_notice("Grok Build: run jcode login in a terminal");
+                self.start_grok_build_login()
             }
             crate::provider_catalog::LoginProviderTarget::Copilot => self.start_copilot_login(),
             crate::provider_catalog::LoginProviderTarget::Gemini => self.start_gemini_login(),
@@ -1781,6 +1773,118 @@ impl App {
         ));
     }
 
+    fn start_grok_build_login(&mut self) {
+        self.set_status_notice("Grok Build: preparing sign-in...");
+        self.begin_pending_login(PendingLogin::GrokBuild);
+        self.push_display_message(DisplayMessage::system(
+            "Grok Build Login\n\nJcode is preparing the managed provider backend. The xAI sign-in URL and device code will appear here. You do not need to install the Grok CLI.\n\nType /cancel to dismiss this login."
+                .to_string(),
+        ));
+
+        let session_id = self.session.id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                provider: "grok-build".to_string(),
+                success: false,
+                message: "Grok Build login requires the async runtime.".to_string(),
+            }));
+            return;
+        };
+        handle.spawn(async move {
+            let publish_progress = |message: String, status: &'static str| {
+                Bus::global().publish(BusEvent::UiActivity(crate::bus::UiActivity::auth(
+                    Some(session_id.clone()),
+                    message,
+                    Some(status),
+                )));
+            };
+
+            let cli = match crate::auth::grok_build::ensure_cli().await {
+                Ok(cli) => cli,
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Failed to prepare Grok Build: {error:#}"),
+                    }));
+                    return;
+                }
+            };
+            publish_progress(
+                "Grok Build Login\n\nManaged backend ready. Requesting xAI authorization..."
+                    .to_string(),
+                "Grok Build: requesting authorization",
+            );
+
+            let mut child = match tokio::process::Command::new(&cli)
+                .arg("login")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!(
+                            "Failed to start Jcode's managed Grok Build backend: {error}"
+                        ),
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stderr) = child.stderr.take() {
+                let session_id = session_id.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let mut lines = tokio::io::BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        Bus::global().publish(BusEvent::UiActivity(
+                            crate::bus::UiActivity::auth(
+                                Some(session_id.clone()),
+                                line.to_string(),
+                                Some("Grok Build: waiting for browser approval"),
+                            ),
+                        ));
+                    }
+                });
+            }
+
+            match child.wait().await {
+                Ok(status) if status.success() => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: true,
+                        message: "Grok Build login complete. Jcode is refreshing the provider and model list."
+                            .to_string(),
+                    }));
+                }
+                Ok(status) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Grok Build login exited with status {status}."),
+                    }));
+                }
+                Err(error) => {
+                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                        provider: "grok-build".to_string(),
+                        success: false,
+                        message: format!("Grok Build login failed: {error}"),
+                    }));
+                }
+            }
+        });
+    }
+
     fn start_antigravity_login(&mut self) {
         let (verifier, challenge) = crate::auth::oauth::generate_pkce_public();
         let expected_state = crate::auth::oauth::generate_state_public();
@@ -2603,6 +2707,13 @@ impl App {
                         .to_string(),
                 ));
                 self.pending_login = Some(PendingLogin::Copilot);
+            }
+            PendingLogin::GrokBuild => {
+                self.push_display_message(DisplayMessage::system(
+                    "Grok Build login is waiting for browser authorization. Complete the xAI login in your browser, or type /cancel to dismiss."
+                        .to_string(),
+                ));
+                self.pending_login = Some(PendingLogin::GrokBuild);
             }
             PendingLogin::AutoImportSelection { candidates } => {
                 let selected = match crate::external_auth::parse_external_auth_review_selection(
