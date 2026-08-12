@@ -39,6 +39,37 @@ pub fn cli_available() -> bool {
     super::command_exists(cli_path().to_string_lossy().as_ref())
 }
 
+/// Whether the managed backend has a credential that it can attempt to use.
+/// Backend presence alone is not authentication and must not make `/login` or
+/// `jcode auth status` claim that Grok Build is ready.
+pub fn has_cached_login() -> bool {
+    if std::env::var("GROK_DEPLOYMENT_KEY")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return true;
+    }
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        return false;
+    };
+    let Ok(bytes) = std::fs::read(PathBuf::from(home).join(".grok").join("auth.json")) else {
+        return false;
+    };
+    credentials_json_has_login(&bytes)
+}
+
+fn credentials_json_has_login(bytes: &[u8]) -> bool {
+    let Ok(serde_json::Value::Object(scopes)) = serde_json::from_slice(bytes) else {
+        return false;
+    };
+    scopes.values().any(|credential| {
+        credential
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty())
+    })
+}
+
 fn platform_name() -> Result<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("linux", "x86_64") => Ok("linux-x86_64"),
@@ -137,7 +168,7 @@ pub async fn ensure_cli() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_cli, valid_version};
+    use super::{credentials_json_has_login, ensure_cli, valid_version};
 
     #[test]
     fn accepts_only_safe_release_versions() {
@@ -146,6 +177,17 @@ mod tests {
         assert!(!valid_version("latest"));
         assert!(!valid_version("1.2.3/../../bad"));
         assert!(!valid_version("1.2"));
+    }
+
+    #[test]
+    fn backend_presence_is_not_mistaken_for_login() {
+        assert!(!credentials_json_has_login(br#"{}"#));
+        assert!(!credentials_json_has_login(
+            br#"{"https://auth.x.ai::client":{"key":""}}"#
+        ));
+        assert!(credentials_json_has_login(
+            br#"{"https://auth.x.ai::client":{"key":"token"}}"#
+        ));
     }
 
     #[tokio::test]

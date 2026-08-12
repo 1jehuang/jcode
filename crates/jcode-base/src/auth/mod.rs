@@ -999,7 +999,7 @@ fn build_auth_status_uncached(mode: AuthProbeMode) -> (AuthStatus, Vec<(&'static
         probe_cursor_status(&mut status, mode)
     });
     record_auth_probe_step(&mut timings, "grok_build", || {
-        status.grok_build = if grok_build::cli_available() {
+        status.grok_build = if grok_build::cli_available() && grok_build::has_cached_login() {
             AuthState::Available
         } else {
             AuthState::NotConfigured
