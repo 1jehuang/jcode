@@ -60,8 +60,16 @@ pub fn redact_secrets(text: &str) -> String {
         && !text.contains("AIza")
         && !text.contains("ya29.")
         && !text.contains("xox")
+        && !text.contains("AKIA")
+        && !text.contains("-----BEGIN ")
+        && !text.contains("eyJ")
         && !lower.contains("api_key")
         && !lower.contains("token")
+        && !lower.contains("bearer ")
+        && !lower.contains("password")
+        && !lower.contains("secret")
+        && !lower.contains("authorization")
+        && !lower.contains("cookie")
     {
         logging::debug("secret redaction fast path skipped regex scan");
         return text.to_string();
@@ -84,6 +92,10 @@ pub fn redact_secrets(text: &str) -> String {
             r"ya29\.[A-Za-z0-9._-]{20,}",
             r"AIza[0-9A-Za-z_-]{20,}",
             r"xox[baprs]-[A-Za-z0-9-]{10,}",
+            r"AKIA[0-9A-Z]{16}",
+            r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]{20,}",
+            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            r"(?s)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
         ])
     });
 
@@ -120,6 +132,8 @@ pub fn redact_secrets(text: &str) -> String {
             r"(?m)^\s*(AZURE_OPENAI_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(CURSOR_API_KEY\s*=\s*)[^\r\n]+",
             r"(?m)^\s*(GITHUB_TOKEN\s*=\s*)[^\r\n]+",
+            r"(?im)^\s*([A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|COOKIE)\s*=\s*)[^\r\n]+",
+            r"(?im)^\s*(AUTHORIZATION\s*[:=]\s*)[^\r\n]+",
         ])
     });
 

@@ -591,6 +591,11 @@ async function ingestTranscript(request, env, cors) {
     return jsonResponse({ error: problem }, 400, cors);
   }
 
+  // Defense in depth: clients redact before upload, but the public endpoint
+  // must not trust callers to have done so. Preserve ordinary code and prose
+  // while removing high-confidence credentials and sensitive object fields.
+  redactSecretsInValue(body.messages);
+
   const encoded = JSON.stringify(body);
   const byteLength = new TextEncoder().encode(encoded).byteLength;
   if (byteLength > MAX_TRANSCRIPT_BYTES) {
@@ -657,6 +662,54 @@ function validateTranscript(body) {
     return "Invalid transcript end reason";
   }
   return null;
+}
+
+const SENSITIVE_KEY_RE = /^(?:authorization|cookie|setcookie|privatekey|clientsecret)$/;
+
+function isSensitiveKey(key) {
+  const normalized = String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized.includes("apikey")
+    || normalized.endsWith("token")
+    || normalized.endsWith("secret")
+    || normalized.includes("password")
+    || SENSITIVE_KEY_RE.test(normalized);
+}
+
+function redactSecretText(text) {
+  return text
+    .replace(/sk-ant-(?:oat|ort)01-[A-Za-z0-9_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/sk-or-v1-[A-Za-z0-9_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/ghp_[A-Za-z0-9]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/ya29\.[A-Za-z0-9._-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[REDACTED_SECRET]")
+    .replace(/xox[baprs]-[A-Za-z0-9-]{10,}/g, "[REDACTED_SECRET]")
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED_SECRET]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]{20,}/gi, "Bearer [REDACTED_SECRET]")
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[REDACTED_SECRET]")
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g, "[REDACTED_SECRET]")
+    .replace(/^\s*([A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|COOKIE)\s*=\s*)[^\r\n]+/gim, "$1[REDACTED_SECRET]")
+    .replace(/^\s*(AUTHORIZATION\s*[:=]\s*)[^\r\n]+/gim, "$1[REDACTED_SECRET]");
+}
+
+function redactSecretsInValue(value) {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      if (typeof value[index] === "string") value[index] = redactSecretText(value[index]);
+      else redactSecretsInValue(value[index]);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (isSensitiveKey(key)) {
+      value[key] = "[REDACTED_SECRET]";
+    } else if (typeof entry === "string") {
+      value[key] = redactSecretText(entry);
+    } else {
+      redactSecretsInValue(entry);
+    }
+  }
 }
 
 function observeDbSize(result) {

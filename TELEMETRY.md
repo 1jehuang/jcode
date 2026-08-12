@@ -17,6 +17,15 @@ source code present in messages, tool names and inputs, and tool results. Images
 remain represented by their transcript content-block metadata; Jcode does not
 add local files that were not already present in the conversation.
 
+Before upload, Jcode recursively replaces likely credentials with
+`[REDACTED_SECRET]`. This covers sensitive JSON fields (API keys, tokens,
+passwords, authorization headers, cookies, private keys, and client secrets),
+known provider-token formats, bearer tokens, JWTs, AWS access-key IDs, private
+key blocks, and common environment-variable assignments. The receiving Worker
+runs the same classes of checks again before writing to R2. Ordinary source code
+is retained. Secret detection is defense in depth rather than a mathematical
+guarantee, so users should still avoid intentionally pasting live credentials.
+
 | Field | Purpose |
 |-------|---------|
 | `upload_id` | Random identifier for this upload |

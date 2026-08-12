@@ -1132,7 +1132,9 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
             id: "tool_2".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({
-                "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+                "command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+                "api_key": "short-secret-value",
+                "source": "fn add(a: i32, b: i32) -> i32 { a + b }"
             }),
             thought_signature: None,
         }],
@@ -1154,6 +1156,8 @@ fn test_redacted_for_export_redacts_tool_result_and_tool_input() -> Result<()> {
     let input_str = input.to_string();
     assert!(input_str.contains("[REDACTED_SECRET]"));
     assert!(!input_str.contains("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"));
+    assert!(!input_str.contains("short-secret-value"));
+    assert!(input_str.contains("fn add(a: i32, b: i32)"));
     Ok(())
 }
 
