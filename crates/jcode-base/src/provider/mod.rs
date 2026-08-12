@@ -325,6 +325,8 @@ use self::selection::{ActiveProvider, ProviderAvailability};
 use self::state::ProviderState;
 pub use self::state::{ProviderModelSelectionSource, ProviderRuntimeState, ProviderStateEvent};
 
+pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
+
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
     /// Claude Code CLI provider
@@ -1456,6 +1458,16 @@ impl MultiProvider {
                 Some(Arc::new(bedrock::BedrockProvider::new()));
         }
 
+        let registry = ProviderRegistry::new(self);
+        if crate::auth::grok_build::has_cached_login()
+            && registry.compatible_profile(GROK_BUILD_PROFILE_ID).is_none()
+            && let Some(grok) =
+                external::instantiate_expected_external_provider(external::GROK_BUILD_RUNTIME)
+        {
+            crate::logging::info("Hot-initialized Grok Build provider after login");
+            registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, grok);
+        }
+
         if let Some(anthropic) = self.anthropic_provider() {
             self.spawn_post_auth_model_refresh(anthropic, "Anthropic");
         }
@@ -1479,6 +1491,9 @@ impl MultiProvider {
         }
         if let Some(bedrock) = self.bedrock_provider() {
             self.spawn_post_auth_model_refresh(bedrock, "AWS Bedrock");
+        }
+        if let Some(grok) = ProviderRegistry::new(self).compatible_profile(GROK_BUILD_PROFILE_ID) {
+            self.spawn_post_auth_model_refresh(grok, "Grok Build");
         }
         crate::logging::auth_event("auth_changed_completed", "multi-provider", &[]);
     }
@@ -1908,6 +1923,25 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        if let Some(target_model) = requested_model.strip_prefix("grok-build:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Grok Build model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = registry
+                .compatible_profile(GROK_BUILD_PROFILE_ID)
+                .or_else(|| {
+                    external::instantiate_expected_external_provider(external::GROK_BUILD_RUNTIME)
+                })
+                .ok_or_else(|| anyhow!("Grok Build is not authenticated"))?;
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
+            registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
         }
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)
