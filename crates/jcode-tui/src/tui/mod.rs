@@ -94,6 +94,7 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
         | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 /// Enable Kitty keyboard protocol for unambiguous key reporting.
@@ -1876,6 +1877,7 @@ mod tests {
 
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
         assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 }
