@@ -127,6 +127,28 @@ CREATE INDEX IF NOT EXISTS idx_events_feedback_rating ON events(feedback_rating)
 CREATE INDEX IF NOT EXISTS idx_events_account_id ON events(account_id);
 CREATE INDEX IF NOT EXISTS idx_events_event_tier_created ON events(event, tier, created_at);
 
+-- Metadata for separately consented transcript uploads. Transcript bodies live
+-- in the private R2 TRANSCRIPTS bucket, never in the ordinary events table.
+CREATE TABLE IF NOT EXISTS transcript_uploads (
+    upload_id TEXT PRIMARY KEY,
+    telemetry_id TEXT NOT NULL,
+    object_key TEXT NOT NULL UNIQUE,
+    consent_version INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL,
+    version TEXT NOT NULL,
+    provider TEXT,
+    model TEXT,
+    end_reason TEXT NOT NULL,
+    message_count INTEGER NOT NULL,
+    byte_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_uploads_telemetry_id
+    ON transcript_uploads(telemetry_id);
+CREATE INDEX IF NOT EXISTS idx_transcript_uploads_created_at
+    ON transcript_uploads(created_at);
+
 -- Website beacon detail rows (web_pageview / web_cta_click / web_vital /
 -- web_error), keyed by event_id like session_details / turn_details. Added in
 -- migration 0016 and extended with privacy-safe quality fields in 0018.

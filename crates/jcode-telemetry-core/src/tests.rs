@@ -99,6 +99,49 @@ fn background_delivery_queue_is_bounded() {
 #[test]
 fn telemetry_endpoint_uses_production_custom_domain() {
     assert_eq!(TELEMETRY_ENDPOINT, "https://telemetry.jcode.sh/v1/event");
+    assert_eq!(
+        TRANSCRIPT_ENDPOINT,
+        "https://telemetry.jcode.sh/v1/transcript"
+    );
+}
+
+#[test]
+fn transcript_upload_requires_separate_content_consent() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    assert!(!record_transcript(
+        "provider",
+        "model",
+        SessionEndReason::NormalExit,
+        serde_json::json!([{"role": "user", "content": "secret prompt"}]),
+    ));
+    assert!(TEST_EMITTED_PAYLOADS.lock().unwrap().is_empty());
+}
+
+#[test]
+fn opted_in_transcript_payload_contains_full_structured_messages() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+    assert!(set_content_sharing_enabled(true));
+    let messages = serde_json::json!([
+        {"role": "user", "content": [{"type": "text", "text": "secret prompt"}]},
+        {"role": "assistant", "content": [{"type": "reasoning", "text": "private reasoning"}]}
+    ]);
+
+    assert!(record_transcript(
+        "provider",
+        "model",
+        SessionEndReason::NormalExit,
+        messages.clone(),
+    ));
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let payload = payloads.last().expect("transcript payload");
+    assert_eq!(payload["event"], "transcript");
+    assert_eq!(payload["consent_version"], 1);
+    assert_eq!(payload["message_count"], 2);
+    assert_eq!(payload["messages"], messages);
+    assert!(uuid::Uuid::parse_str(payload["upload_id"].as_str().unwrap()).is_ok());
 }
 
 fn lock_test_env() -> TestEnvironment {

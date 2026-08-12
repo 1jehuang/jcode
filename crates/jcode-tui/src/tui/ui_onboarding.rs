@@ -185,8 +185,8 @@ fn telemetry_settings_lines(
     let options = [
         (
             Choice::Everything,
-            "Send everything, including prompts",
-            "Helps jcode the most",
+            "Share full transcripts (30-day retention)",
+            "Includes prompts, model responses, reasoning, code, and tool input/output",
         ),
         (
             Choice::NoContent,

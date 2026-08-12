@@ -37,6 +37,7 @@
     "migrate:geo-country": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0022_geo_country.sql",
     "migrate:model-prices": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0023_model_prices.sql",
     "migrate:todo-session-aggregates": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0024_todo_session_aggregates.sql",
+    "migrate:transcript-uploads": "npx wrangler d1 execute jcode-telemetry --remote --file=migrations/0025_transcript_uploads.sql",
     "geo": "npx wrangler d1 execute jcode-telemetry --remote --file=geo.sql",
     "conversion": "npx wrangler d1 execute jcode-telemetry --remote --file=conversion.sql"
   },
