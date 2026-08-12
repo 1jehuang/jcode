@@ -382,6 +382,11 @@ cross_provider_failover = "countdown"
 # This is the base budget: high reasoning efforts scale it up automatically
 # (high 2x, xhigh 3x, max/swarm 4x) since they think silently for much longer.
 # stream_idle_timeout_secs = 600
+# Maximum attempts for transient 429/5xx/network failures, including the first
+# request. Retries honor Retry-After and use capped exponential backoff.
+# Env overrides: JCODE_MAX_RETRIES, JCODE_RETRY_BACKOFF_CAP_SECS.
+# max_retries = 8
+# retry_backoff_cap_secs = 30
 
 [agents]
 # Defaults for spawned helper agents (swarm workers, subagents, sidecars).

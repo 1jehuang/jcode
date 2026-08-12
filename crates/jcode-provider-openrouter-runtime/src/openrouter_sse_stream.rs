@@ -39,27 +39,32 @@ pub(super) async fn run_stream_with_retries(
 ) {
     let mut last_error = None;
     let mut next_retry_delay = None;
+    let config = jcode_base::config::config();
+    let max_retries = config.provider.max_retries.max(1);
+    let retry_backoff_cap =
+        std::time::Duration::from_secs(config.provider.retry_backoff_cap_secs.max(1));
 
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..max_retries {
         if attempt > 0 {
             let delay = jcode_provider_core::retry_after::retry_delay(
                 attempt,
                 RETRY_BASE_DELAY_MS,
                 next_retry_delay.take(),
-            );
+            )
+            .min(retry_backoff_cap);
             tokio::time::sleep(delay).await;
             jcode_base::logging::info(&format!(
                 "Retrying API request using {} (attempt {}/{})",
                 auth.label(),
                 attempt + 1,
-                MAX_RETRIES
+                max_retries
             ));
         }
 
         jcode_base::logging::info(&format!(
             "API stream attempt {}/{} over HTTPS transport (model: {}, endpoint: {}, auth: {})",
             attempt + 1,
-            MAX_RETRIES,
+            max_retries,
             model,
             api_base,
             auth.label()
@@ -103,7 +108,7 @@ pub(super) async fn run_stream_with_retries(
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
                 let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -115,7 +120,7 @@ pub(super) async fn run_stream_with_retries(
                         let _ = tx
                             .send(Ok(StreamEvent::RetryRollback {
                                 attempt: attempt + 2,
-                                max: MAX_RETRIES,
+                                max: max_retries,
                             }))
                             .await;
                     } else {
@@ -139,7 +144,7 @@ pub(super) async fn run_stream_with_retries(
         let _ = tx
             .send(Err(anyhow::anyhow!(
                 "Failed after {} retries: {}",
-                MAX_RETRIES,
+                max_retries,
                 e
             )))
             .await;
