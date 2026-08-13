@@ -181,6 +181,27 @@ fn write_onboarding_svg(
     std::fs::write(output_dir.join(filename), onboarding_buffer_svg(&buffer)).unwrap();
 }
 
+/// Render the FULL app frame (welcome card, overlays, transcript, composer)
+/// exactly as the live TUI draws it, and write it as an SVG artifact.
+fn write_full_frame_svg(
+    output_dir: &std::path::Path,
+    filename: &str,
+    app: &App,
+    width: u16,
+    height: u16,
+) {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, app as &dyn crate::tui::TuiState))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    std::fs::write(output_dir.join(filename), onboarding_buffer_svg(&buffer)).unwrap();
+}
+
 /// Force the app into a specific onboarding phase, bypassing the on-disk
 /// new-user heuristic.
 fn app_in_phase(phase: OnboardingPhase) -> App {
@@ -513,10 +534,13 @@ fn onboarding_golden_telemetry_settings_page() {
     dump("Telemetry settings page", &text);
     assert!(text.contains("Telemetry settings"), "title: {text}");
     assert!(
-        text.contains("Send everything, including prompts"),
+        text.contains("Share full transcripts (30-day retention)"),
         "option 1: {text}"
     );
-    assert!(text.contains("Helps jcode the most"), "caption 1: {text}");
+    assert!(
+        text.contains("Includes prompts, model responses, reasoning, code, and tool"),
+        "caption 1: {text}"
+    );
     assert!(
         text.contains("No prompts or transcripts"),
         "option 2: {text}"
@@ -530,74 +554,167 @@ fn onboarding_golden_telemetry_settings_page() {
     );
 }
 
-/// Generate a reviewable image sequence for the successful "import all"
-/// onboarding path. This is ignored during normal test runs because it writes
-/// artifacts. `scripts/capture_onboarding.sh` is the supported entry point.
+/// Generate a reviewable image for every state in the onboarding graph
+/// (`onboarding_graph.rs`), rendered through the exact widget tree the live
+/// flow uses. Welcome-card states render via the onboarding welcome layout;
+/// picker-overlay and session states render the FULL app frame via
+/// `ui::draw`. Ignored during normal test runs because it writes artifacts.
+/// `scripts/capture_onboarding.sh` is the supported entry point.
 #[test]
 #[ignore = "artifact generator; run scripts/capture_onboarding.sh"]
 fn onboarding_import_happy_path_images() {
     use crate::external_auth::ExternalAuthReviewCandidate;
-    use crate::tui::app::onboarding_flow::ImportReview;
+    use crate::tui::app::onboarding_flow::{ImportReview, SummaryPill};
 
     let output_dir = std::env::var_os("JCODE_ONBOARDING_SCREENSHOT_DIR")
         .map(std::path::PathBuf::from)
         .expect("JCODE_ONBOARDING_SCREENSHOT_DIR must be set");
     std::fs::create_dir_all(&output_dir).unwrap();
 
-    let candidates = vec![
-        ExternalAuthReviewCandidate::fixture(
-            "OpenRouter/API-key providers",
-            "OpenCode auth.json",
-        ),
-        ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "pi auth.json"),
-        ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
-        ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
-        ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
-        ExternalAuthReviewCandidate::fixture(
-            "GitHub Copilot",
-            "GitHub Copilot CLI hosts.json",
-        ),
-        ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
-    ];
-
     let width = 110;
     let height = 38;
 
-    let mut review = ImportReview::new(candidates).unwrap();
-    review.focus_summary_pill(crate::tui::app::onboarding_flow::SummaryPill::Continue);
-    let app = app_in_phase(OnboardingPhase::Login {
-        import: Some(review),
-    });
-    write_onboarding_svg(
-        &output_dir,
-        "01-import-existing-logins.svg",
-        &app,
-        width,
-        height,
-    );
+    let many_candidates = || {
+        vec![
+            ExternalAuthReviewCandidate::fixture(
+                "OpenRouter/API-key providers",
+                "OpenCode auth.json",
+            ),
+            ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "pi auth.json"),
+            ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
+            ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
+            ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
+            ExternalAuthReviewCandidate::fixture(
+                "GitHub Copilot",
+                "GitHub Copilot CLI hosts.json",
+            ),
+            ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
+        ]
+    };
 
-    let mut app = app_in_phase(OnboardingPhase::Login { import: None });
-    app.onboarding_import_in_progress = Some(std::time::Instant::now());
-    write_onboarding_svg(
-        &output_dir,
-        "02-importing-logins.svg",
-        &app,
-        width,
-        height,
-    );
+    // ---- login_openai: fresh install, nothing importable detected ----
+    {
+        let app = app_in_phase(OnboardingPhase::LoginOpenAi {
+            yes_highlighted: true,
+        });
+        write_onboarding_svg(&output_dir, "login-openai.svg", &app, width, height);
+    }
 
-    let app = app_in_phase(OnboardingPhase::ContinuePrompt {
-        cli: ExternalCli::Codex,
-        yes_highlighted: true,
-        shown_at: std::time::Instant::now(),
-    });
-    write_onboarding_svg(
-        &output_dir,
-        "03-continue-codex-session.svg",
-        &app,
-        width,
-        height,
-    );
+    // ---- login_import: detected-logins summary, Import preselected ----
+    {
+        let mut review = ImportReview::new(many_candidates()).unwrap();
+        review.focus_summary_pill(SummaryPill::Continue);
+        let app = app_in_phase(OnboardingPhase::Login {
+            import: Some(review),
+        });
+        write_onboarding_svg(&output_dir, "login-import.svg", &app, width, height);
+    }
+
+    // ---- login_import (choose mode): per-login yes/no checkbox list ----
+    {
+        let mut review = ImportReview::new(many_candidates()).unwrap();
+        review.enter_choose_mode();
+        let app = app_in_phase(OnboardingPhase::Login {
+            import: Some(review),
+        });
+        write_onboarding_svg(&output_dir, "login-import-choose.svg", &app, width, height);
+    }
+
+    // ---- login_import (telemetry sub-page) ----
+    {
+        let mut review = ImportReview::new(many_candidates()).unwrap();
+        review.focus_summary_pill(SummaryPill::Telemetry);
+        review.open_telemetry();
+        let app = app_in_phase(OnboardingPhase::Login {
+            import: Some(review),
+        });
+        write_onboarding_svg(
+            &output_dir,
+            "login-import-telemetry.svg",
+            &app,
+            width,
+            height,
+        );
+    }
+
+    // ---- import committed, async import running (transient progress card) ----
+    {
+        let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+        app.onboarding_import_in_progress = Some(std::time::Instant::now());
+        write_onboarding_svg(&output_dir, "login-importing.svg", &app, width, height);
+    }
+
+    // ---- login_recovery: nothing imported, manual provider pick ----
+    {
+        let app = app_in_phase(OnboardingPhase::Login { import: None });
+        write_onboarding_svg(&output_dir, "login-recovery.svg", &app, width, height);
+    }
+
+    // ---- login_failed: classified failure with actionable recovery ----
+    {
+        let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+        app.onboarding_import_error =
+            Some("the OAuth flow did not complete".to_string());
+        write_onboarding_svg(&output_dir, "login-failed.svg", &app, width, height);
+    }
+
+    // ---- cred_rejected: a permanently rejected saved credential ----
+    {
+        let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+        app.onboarding_import_error = Some("the saved credential was rejected".to_string());
+        write_onboarding_svg(&output_dir, "cred-rejected.svg", &app, width, height);
+    }
+
+    // ---- continue_prompt (legacy): resume an external CLI session ----
+    {
+        let app = app_in_phase(OnboardingPhase::ContinuePrompt {
+            cli: ExternalCli::Codex,
+            yes_highlighted: true,
+            shown_at: std::time::Instant::now(),
+        });
+        write_onboarding_svg(&output_dir, "continue-prompt.svg", &app, width, height);
+    }
+
+    // ---- start_choice: the action-only picker overlay (full frame) ----
+    {
+        let mut app = create_test_app();
+        app.onboarding_preview_mode = true;
+        app.onboarding_flow = Some(OnboardingFlow {
+            phase: OnboardingPhase::StartChoice {
+                shown_at: std::time::Instant::now(),
+            },
+        });
+        app.onboarding_open_start_choice();
+        write_full_frame_svg(&output_dir, "start-choice.svg", &app, width, height);
+    }
+
+    // ---- suggestions: the resting new-session welcome with prompt cards ----
+    // The suggestion cards only render when some provider is authenticated
+    // (otherwise the welcome collapses to "Log in to get started"), so give
+    // the app a synthetic API-key credential for these two session renders.
+    crate::env::set_var("OPENROUTER_API_KEY", "sk-or-fixture-for-screenshots");
+    crate::auth::AuthStatus::invalidate_cached_status();
+    {
+        let mut app = create_test_app();
+        app.onboarding_preview_mode = true;
+        app.onboarding_flow = Some(OnboardingFlow {
+            phase: OnboardingPhase::Suggestions,
+        });
+        write_full_frame_svg(&output_dir, "suggestions.svg", &app, width, height);
+    }
+
+    // ---- done (review turn): the suggested architecture review accepted ----
+    {
+        let mut app = create_test_app();
+        let prompt = App::onboarding_recent_project_review_prompt(std::path::Path::new(
+            "~/projects/my-app",
+        ));
+        app.push_display_message(DisplayMessage::user(prompt));
+        app.is_processing = true;
+        write_full_frame_svg(&output_dir, "review-turn.svg", &app, width, height);
+    }
+    crate::env::remove_var("OPENROUTER_API_KEY");
+    crate::auth::AuthStatus::invalidate_cached_status();
 
     println!("wrote onboarding images to {}", output_dir.display());
 }

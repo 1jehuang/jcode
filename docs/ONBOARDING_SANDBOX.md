@@ -167,9 +167,12 @@ scripts/capture_onboarding.sh ~/onboarding-screenshots
 
 The generator renders the same `OnboardingFlow` phases and ratatui widget tree
 used by the live application into an offscreen `TestBackend`. It writes SVG
-images and, when `rsvg-convert` is installed, matching PNG files. The modeled
-happy path includes the detected-login summary, import progress, and Codex
-resume prompt. Accepting that final prompt hands off to the normal session UI.
+images and, when `rsvg-convert` is installed, matching PNG files. Every resting
+state in `onboarding_graph.rs` gets a render: the OpenAI login prompt, the
+detected-login summary (plus its choose-mode and telemetry sub-pages), the
+import progress card, the recovery and failure screens, the legacy continue
+prompt, and full-app frames for the start-choice picker, the new-session
+suggestions, and the accepted suggested-review turn.
 
 ## Why this is safer
 
