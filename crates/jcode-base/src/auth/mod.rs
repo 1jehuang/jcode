@@ -848,7 +848,8 @@ impl AuthStatus {
                 if state == AuthState::Available {
                     "Grok Build subscription login managed through Jcode".to_string()
                 } else if grok_build::cli_available() {
-                    "Jcode-managed backend provisioned; subscription login not configured".to_string()
+                    "Jcode-managed backend provisioned; subscription login not configured"
+                        .to_string()
                 } else {
                     "Jcode-managed Grok Build backend not provisioned".to_string()
                 },

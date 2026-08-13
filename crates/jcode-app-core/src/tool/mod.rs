@@ -295,11 +295,7 @@ impl Registry {
         // process-wide instance. Existing sessions keep their stable tool
         // definition (and provider KV cache), while newly created agents see
         // prompt edits immediately.
-        Self::insert_tool(
-            &mut tools,
-            "swarm",
-            communicate::CommunicateTool::new(),
-        );
+        Self::insert_tool(&mut tools, "swarm", communicate::CommunicateTool::new());
         tools
     }
 
