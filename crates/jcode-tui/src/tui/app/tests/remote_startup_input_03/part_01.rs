@@ -324,6 +324,85 @@ fn test_handle_paste_large() {
 }
 
 #[test]
+fn test_paste_again_expands_placeholder_in_place() {
+    let mut app = create_test_app();
+    let big = "α\nβ\nγ\nδ\nε".to_string();
+
+    app.handle_paste(big.clone());
+    app.handle_key(KeyCode::Char('!'), KeyModifiers::empty())
+        .unwrap();
+    app.handle_paste(big.clone());
+
+    assert_eq!(app.input(), format!("{big}!"));
+    assert_eq!(app.cursor_pos, big.len());
+    assert!(app.pasted_contents.is_empty());
+}
+
+#[test]
+fn test_paste_again_with_different_text_still_collapses() {
+    let mut app = create_test_app();
+
+    app.handle_paste("a\nb\nc\nd\ne".to_string());
+    app.handle_paste("f\ng\nh\ni\nj".to_string());
+
+    assert_eq!(app.input(), "[pasted 5 lines][pasted 5 lines]");
+    assert_eq!(app.pasted_contents.len(), 2);
+}
+
+#[test]
+fn test_paste_again_expands_matching_placeholder_not_newer_same_sized_paste() {
+    let mut app = create_test_app();
+    let first = "a\nb\nc\nd\ne".to_string();
+    let second = "f\ng\nh\ni\nj".to_string();
+
+    app.handle_paste(first.clone());
+    app.handle_key(KeyCode::Char(' '), KeyModifiers::empty())
+        .unwrap();
+    app.handle_paste(second.clone());
+    app.handle_paste(first.clone());
+
+    assert_eq!(app.input(), format!("{first} [pasted 5 lines]"));
+    assert_eq!(app.cursor_pos, first.len());
+    let visible_input = app.input().to_string();
+    assert_eq!(
+        crate::tui::app::input::expand_paste_placeholders(&mut app, &visible_input),
+        format!("{first} {second}")
+    );
+    assert_eq!(app.pasted_contents, vec![second]);
+}
+
+#[test]
+fn test_paste_again_expands_only_most_recent_identical_placeholder() {
+    let mut app = create_test_app();
+    let big = "a\nb\nc\nd\ne".to_string();
+
+    app.set_input_for_test("[pasted 5 lines] [pasted 5 lines]");
+    app.pasted_contents = vec![big.clone(), big.clone()];
+    app.handle_paste(big.clone());
+
+    assert_eq!(app.input(), format!("[pasted 5 lines] {big}"));
+    assert_eq!(app.pasted_contents, vec![big]);
+}
+
+#[test]
+fn test_paste_again_does_not_expand_an_edited_placeholder() {
+    let mut app = create_test_app();
+    let big = "a\nb\nc\nd\ne".to_string();
+
+    app.handle_paste(big.clone());
+    app.handle_key(KeyCode::Backspace, KeyModifiers::empty())
+        .unwrap();
+    app.handle_paste(big);
+
+    assert_eq!(
+        app.input(),
+        "[pasted 5 lines[pasted 5 lines]",
+        "an edited placeholder must not be mistaken for the original"
+    );
+    assert_eq!(app.pasted_contents.len(), 2);
+}
+
+#[test]
 fn test_paste_expansion_on_submit() {
     let mut app = create_test_app();
 
