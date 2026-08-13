@@ -212,6 +212,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 )
                 .await?;
             }
+            ServerCommand::Promote { version, json } => {
+                commands::run_server_promote_command(version.as_deref(), json)?;
+            }
             ServerCommand::Reload { force, json } => {
                 commands::run_server_reload_command(force, json).await?;
             }

@@ -601,6 +601,19 @@ pub(crate) enum ServerCommand {
     #[command(hide = true)]
     Keepalive,
 
+    /// Pin the shared server channel to an installed version.
+    ///
+    /// Defaults to the active `current` version. This only selects the daemon's
+    /// binary; run `jcode server reload` separately to apply it.
+    Promote {
+        /// Installed version to promote (defaults to the current channel)
+        version: Option<String>,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Gracefully reload the running background server onto the newest binary.
     ///
     /// This is the preferred way to pick up an upgrade: the daemon hands its
