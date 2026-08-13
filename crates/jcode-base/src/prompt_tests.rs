@@ -64,6 +64,61 @@ fn test_skill_prompt_integration() {
 }
 
 #[test]
+fn skill_description_collapses_whitespace_without_clipping_short_text() {
+    assert_eq!(
+        clip_skill_description("  Build\n\tand   test the project.  "),
+        "Build and test the project."
+    );
+}
+
+#[test]
+fn skill_description_clips_to_the_character_limit_with_ellipsis() {
+    let clipped = clip_skill_description(&"a".repeat(SKILL_DESC_MAX_CHARS + 20));
+
+    assert_eq!(clipped.chars().count(), SKILL_DESC_MAX_CHARS);
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn skill_description_clipping_is_utf8_safe() {
+    let clipped = clip_skill_description(&"ж".repeat(SKILL_DESC_MAX_CHARS + 20));
+
+    assert_eq!(clipped.chars().count(), SKILL_DESC_MAX_CHARS);
+    assert_eq!(
+        clipped
+            .chars()
+            .filter(|character| *character == 'ж')
+            .count(),
+        SKILL_DESC_MAX_CHARS - 1
+    );
+    assert!(clipped.ends_with('…'));
+}
+
+#[test]
+fn full_and_split_prompt_builders_use_the_same_one_line_skill_descriptions() {
+    let skills = vec![SkillInfo {
+        name: "example".to_string(),
+        description: format!("First line\n\t{}", "д".repeat(SKILL_DESC_MAX_CHARS + 20)),
+    }];
+    let expected = build_available_skills_section(&skills).expect("skills section");
+
+    let (full, full_info) = build_system_prompt_full(None, &skills, false, None, None);
+    let (split, split_info) = build_system_prompt_split(None, &skills, false, None, None);
+
+    assert!(full.contains(&expected));
+    assert!(split.static_part.contains(&expected));
+    assert_eq!(full_info.skills_chars, expected.len());
+    assert_eq!(split_info.skills_chars, expected.len());
+    assert!(expected.contains("First line "));
+    assert!(!expected.contains("First line\n"));
+    let entry = expected
+        .lines()
+        .find(|line| line.starts_with("- `/example `"))
+        .expect("example skill entry");
+    assert!(entry.ends_with('…'));
+}
+
+#[test]
 fn test_load_agents_md_files_uses_sandboxed_global_files() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -86,11 +141,96 @@ fn test_load_agents_md_files_uses_sandboxed_global_files() {
     assert!(!content.contains("~/.AGENTS.md"));
     assert!(content.contains("sandboxed global agents instructions"));
 
+    let sandboxed_home = temp.path().join("external");
+    let (content, info) = load_agents_md_files_from_dir(Some(&sandboxed_home));
+    let content = content.expect("deduplicated home instructions");
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("# Project Instructions (AGENTS.md)"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+    assert_eq!(
+        content
+            .matches("sandboxed global agents instructions")
+            .count(),
+        1
+    );
+
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
     } else {
         crate::env::remove_var("JCODE_HOME");
     }
+}
+
+#[test]
+fn agents_md_same_canonical_file_is_loaded_only_as_project_instructions() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let agents_md = project_dir.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "shared instructions").unwrap();
+
+    let (content, info) = load_agents_md_files_from_dirs(project_dir.path(), Some(&agents_md));
+    let content = content.expect("project instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("# Project Instructions (AGENTS.md)"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+    assert_eq!(content.matches("shared instructions").count(), 1);
+}
+
+#[test]
+fn agents_md_distinct_project_and_global_files_are_both_loaded() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let global_agents_md = global_dir.path().join("AGENTS.md");
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project instructions").unwrap();
+    std::fs::write(&global_agents_md, "global instructions").unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+    let content = content.expect("project and global instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(info.has_global_agents_md);
+    assert!(content.contains("project instructions"));
+    assert!(content.contains("global instructions"));
+}
+
+#[test]
+fn agents_md_missing_global_file_keeps_project_instructions() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let missing_global_agents_md = global_dir.path().join("missing-AGENTS.md");
+    std::fs::write(project_dir.path().join("AGENTS.md"), "project only").unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&missing_global_agents_md));
+    let content = content.expect("project instructions");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert!(content.contains("project only"));
+    assert!(!content.contains("# Global Instructions (~/AGENTS.md)"));
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_md_symlink_alias_is_deduplicated_by_canonical_file_path() {
+    use std::os::unix::fs::symlink;
+
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let global_dir = tempfile::TempDir::new().unwrap();
+    let global_agents_md = global_dir.path().join("AGENTS.md");
+    std::fs::write(&global_agents_md, "symlinked instructions").unwrap();
+    symlink(&global_agents_md, project_dir.path().join("AGENTS.md")).unwrap();
+
+    let (content, info) =
+        load_agents_md_files_from_dirs(project_dir.path(), Some(&global_agents_md));
+    let content = content.expect("project instructions through symlink");
+
+    assert!(info.has_project_agents_md);
+    assert!(!info.has_global_agents_md);
+    assert_eq!(content.matches("symlinked instructions").count(), 1);
 }
 
 #[test]
