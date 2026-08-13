@@ -222,12 +222,8 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
     let mut routes = Vec::new();
     let mut openrouter_stats = OpenRouterRouteStats::default();
 
-    let has_oauth = provider.has_claude_runtime();
-    let has_api_key = crate::provider_catalog::load_api_key_from_env_or_config(
-        "ANTHROPIC_API_KEY",
-        "anthropic.env",
-    )
-    .is_some();
+    let has_oauth = crate::auth::claude::load_credentials().is_ok();
+    let has_api_key = crate::provider::anthropic::has_anthropic_api_key();
     let openai_auth = crate::auth::AuthStatus::check_fast();
 
     append_anthropic_routes(provider, &mut routes, has_oauth, has_api_key);
@@ -1376,6 +1372,33 @@ mod tests {
             route.api_method_kind(),
             jcode_provider_core::ModelRouteApiMethod::OpenAiCompatible { .. }
         ));
+    }
+
+    #[test]
+    fn named_anthropic_profile_preserves_profile_identity_in_picker_switch() {
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "corp-claude".to_string(),
+            crate::config::NamedProviderConfig {
+                provider_type: crate::config::NamedProviderType::AnthropicCompatible,
+                base_url: "https://gateway.example/anthropic/v1".to_string(),
+                default_model: Some("claude-custom".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let route = named_provider_profile_route_for_model_in("claude-custom", &providers)
+            .expect("Anthropic-compatible model must resolve to its profile");
+        assert_eq!(route.provider, "corp-claude");
+        assert_eq!(route.api_method, "openai-compatible:corp-claude");
+        assert_eq!(
+            MultiProvider::model_switch_request_for_session_route(
+                &route.model,
+                Some(&route.provider),
+                Some(&route.api_method),
+            ),
+            "corp-claude:claude-custom"
+        );
     }
 
     #[test]

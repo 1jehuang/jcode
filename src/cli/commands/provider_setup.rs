@@ -167,6 +167,7 @@ pub(crate) fn configure_provider_profile(
                 .map(ToString::to_string),
             _ => None,
         },
+        headers: std::collections::BTreeMap::new(),
         api_key_env: api_key_env.clone(),
         api_key: None,
         env_file: env_file.clone(),

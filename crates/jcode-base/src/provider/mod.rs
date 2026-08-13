@@ -966,6 +966,25 @@ impl MultiProvider {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Unknown provider profile '{}'", profile_name))?;
 
+        if matches!(
+            config.provider_type,
+            crate::config::NamedProviderType::AnthropicCompatible
+        ) {
+            crate::provider_catalog::apply_named_provider_profile_env(profile_name)?;
+            let provider =
+                external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic runtime is not registered"))?;
+            crate::provider_catalog::clear_anthropic_profile_env();
+            provider.set_model(model)?;
+            *self
+                .anthropic
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(provider);
+            self.clear_active_openai_compatible_profile();
+            self.set_active_provider(ActiveProvider::Claude);
+            return Ok(());
+        }
+
         let expected_api_method = format!("openai-compatible:{}", profile_name);
         let registry = ProviderRegistry::new(self);
         let provider = {
@@ -1056,6 +1075,41 @@ impl MultiProvider {
 
         match provider {
             ActiveProvider::Claude => {
+                let switching_from_named_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                    .ok()
+                    .and_then(|name| crate::config::config().providers.get(&name))
+                    .is_some_and(|profile| {
+                        matches!(
+                            profile.provider_type,
+                            crate::config::NamedProviderType::AnthropicCompatible
+                        )
+                    });
+                if switching_from_named_anthropic {
+                    crate::env::remove_var("JCODE_NAMED_PROVIDER_PROFILE");
+                    crate::env::remove_var("JCODE_PROVIDER_PROFILE_ACTIVE");
+                    crate::env::remove_var("JCODE_PROVIDER_PROFILE_NAME");
+                    crate::provider_catalog::clear_anthropic_profile_env();
+                    crate::env::set_var(
+                        "JCODE_RUNTIME_PROVIDER",
+                        match anthropic_credential_mode {
+                            Some(mode) => match mode {
+                                anthropic::AnthropicCredentialMode::ApiKey => "anthropic-api",
+                                anthropic::AnthropicCredentialMode::OAuth => "claude-oauth",
+                                anthropic::AnthropicCredentialMode::Auto => "claude",
+                            },
+                            None => "claude",
+                        },
+                    );
+                    let official = external::instantiate_expected_external_provider(
+                        external::ANTHROPIC_RUNTIME,
+                    )
+                    .ok_or_else(|| anyhow::anyhow!("Anthropic runtime is not registered"))?;
+                    *self
+                        .anthropic
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(official);
+                }
+                crate::provider_catalog::clear_anthropic_profile_env();
                 let model = model_name_for_provider(provider, model);
                 if let Some(anthropic) = self.anthropic_provider() {
                     if let Some(mode) = anthropic_credential_mode {
@@ -1551,7 +1605,7 @@ impl MultiProvider {
             // Same reasoning for user-defined named provider profiles from
             // config: bind the named profile runtime directly instead of the
             // generic OpenRouter slot path.
-            if let selection::ConfigProviderSelection::NamedProfile(profile_name) = &selection {
+            if let selection::ConfigProviderSelection::NamedProfile(profile_name, _) = &selection {
                 return self.set_model_on_named_provider_profile(profile_name, model);
             }
 

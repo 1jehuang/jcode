@@ -536,8 +536,18 @@ fn named_provider_config_accepts_openai_compatible_spelling() {
 }
 
 #[test]
-fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() {
+fn named_anthropic_compatible_profile_maps_endpoint_auth_headers_and_model() {
     let _lock = crate::storage::lock_test_env();
+    let _guard = EnvGuard::save(&[
+        "JCODE_NAMED_PROVIDER_PROFILE",
+        "JCODE_ANTHROPIC_API_BASE",
+        "JCODE_ANTHROPIC_API_KEY_NAME",
+        "JCODE_ANTHROPIC_AUTH",
+        "JCODE_ANTHROPIC_AUTH_HEADER",
+        "JCODE_ANTHROPIC_HEADERS",
+        "JCODE_ANTHROPIC_MODEL",
+        "JCODE_RUNTIME_PROVIDER",
+    ]);
     let previous_home = std::env::var_os("JCODE_HOME");
     let temp = tempfile::TempDir::new().expect("tempdir");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -549,32 +559,53 @@ fn named_provider_profile_reports_malformed_config_instead_of_unknown_profile() 
     std::fs::write(
         &config_path,
         r#"
-        [providers.antigravity]
+        [providers.corporate-claude]
         type = "anthropic-compatible"
-        base_url = "http://192.168.1.202:8080"
-        api_key_env = "ANTIGRAVITY_API_KEY"
-        default_model = "gemini-3.1-pro-low"
+        base_url = "https://gateway.example.com/anthropic/v1/"
+        auth = "bearer"
+        api_key_env = "CORPORATE_CLAUDE_TOKEN"
+        default_model = "claude-custom"
 
-        [[providers.antigravity.models]]
-        id = "gemini-3.1-pro-low"
+        [providers.corporate-claude.headers]
+        x-tenant-id = "tenant-42"
+
+        [[providers.corporate-claude.models]]
+        id = "claude-custom"
         context_window = 128000
         "#,
     )
     .expect("write config");
 
-    let err = apply_named_provider_profile_env("antigravity").expect_err("malformed config");
-    let message = err.to_string();
-    assert!(
-        message.contains("Failed to parse config file"),
-        "unexpected error: {message}"
+    apply_named_provider_profile_env("corporate-claude").expect("apply Anthropic profile");
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_API_BASE").ok().as_deref(),
+        Some("https://gateway.example.com/anthropic/v1")
     );
-    assert!(
-        message.contains("anthropic-compatible"),
-        "unexpected error: {message}"
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_API_KEY_NAME")
+            .ok()
+            .as_deref(),
+        Some("CORPORATE_CLAUDE_TOKEN")
     );
-    assert!(
-        !message.contains("Unknown provider profile"),
-        "unexpected error: {message}"
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_AUTH").ok().as_deref(),
+        Some("bearer")
+    );
+    assert_eq!(
+        std::env::var("JCODE_ANTHROPIC_MODEL").ok().as_deref(),
+        Some("claude-custom")
+    );
+    let headers: std::collections::BTreeMap<String, String> = serde_json::from_str(
+        &std::env::var("JCODE_ANTHROPIC_HEADERS").expect("custom headers env"),
+    )
+    .expect("headers JSON");
+    assert_eq!(
+        headers.get("x-tenant-id").map(String::as_str),
+        Some("tenant-42")
+    );
+    assert_eq!(
+        std::env::var("JCODE_RUNTIME_PROVIDER").ok().as_deref(),
+        Some("anthropic-api")
     );
 
     if let Some(previous_home) = previous_home {
