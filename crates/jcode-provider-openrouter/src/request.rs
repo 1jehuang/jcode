@@ -21,6 +21,26 @@ pub fn sanitize_tool_parameters_schema(schema: &Value) -> Value {
     jcode_schema_dialect::normalize(schema, &jcode_schema_dialect::registry::OPENROUTER)
 }
 
+fn orphan_tool_output_to_user_message(
+    tool_use_id: &str,
+    output: &str,
+    missing_output: &str,
+) -> Option<Value> {
+    let output = output.trim();
+    if output.is_empty() || output == missing_output {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "role": "user",
+        "content": format!(
+            "[Recovered orphaned tool output: {}]\n{}",
+            sanitize_tool_id(tool_use_id),
+            output
+        )
+    }))
+}
+
 /// Build OpenAI-compatible chat `messages` for OpenRouter/direct compatible providers.
 ///
 /// This stays in the OpenRouter leaf crate so provider-specific message normalization,
@@ -300,14 +320,34 @@ pub fn build_chat_messages(
         ));
     }
 
+    let mut rewritten_pending_orphans = 0usize;
     if !pending_tool_results.is_empty() {
-        skipped_results += pending_tool_results.len();
+        let mut pending_entries: Vec<(String, String)> = std::mem::take(&mut pending_tool_results)
+            .into_iter()
+            .collect();
+        pending_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (tool_use_id, output) in pending_entries {
+            if let Some(message) =
+                orphan_tool_output_to_user_message(&tool_use_id, &output, &missing_output)
+            {
+                api_messages.push(message);
+                rewritten_pending_orphans += 1;
+            } else {
+                skipped_results += 1;
+            }
+        }
     }
 
     if injected_missing > 0 {
         jcode_logging::info(&format!(
             "[openrouter] Injected {} synthetic tool output(s) to prevent API error",
             injected_missing
+        ));
+    }
+    if rewritten_pending_orphans > 0 {
+        jcode_logging::info(&format!(
+            "[openrouter] Rewrote {} pending orphaned tool output(s) as user messages",
+            rewritten_pending_orphans
         ));
     }
     if skipped_results > 0 {
@@ -532,6 +572,28 @@ pub fn build_chat_messages(
     }
 
     api_messages
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::build_chat_messages;
+    use jcode_message_types::Message;
+    use serde_json::json;
+
+    #[test]
+    fn orphaned_tool_output_is_recovered_as_a_user_message() {
+        let messages = vec![Message::tool_result("call_orphan", "orphan result", false)];
+
+        let api_messages = build_chat_messages(&messages, "", false, false, false);
+
+        assert_eq!(
+            api_messages,
+            vec![json!({
+                "role": "user",
+                "content": "[Recovered orphaned tool output: call_orphan]\norphan result"
+            })]
+        );
+    }
 }
 
 #[cfg(test)]
