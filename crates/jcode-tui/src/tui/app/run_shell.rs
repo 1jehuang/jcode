@@ -275,7 +275,7 @@ fn idle_animation_fast_path_blocked_reason(
 pub(super) struct StatusSpinnerRenderer {
     last_frame: Option<Buffer>,
     last_full_frame_at: Option<Instant>,
-    /// Animated rectangle whose surrounding cells are already seeded into
+    /// Animated rectangle whose surrounding cells are currently seeded into
     /// ratatui's working buffer.
     ///
     /// The animation-only repaint used to `clone_from` the whole previous frame
@@ -283,8 +283,9 @@ pub(super) struct StatusSpinnerRenderer {
     /// second at 60fps on a 160x48 terminal, to update ~2200 cells. Once the
     /// working buffer has been seeded for a given rectangle, everything outside it
     /// is already correct (this path is the only writer between full frames), so
-    /// later ticks copy just those rows. Cleared by [`Self::invalidate`] and
-    /// re-seeded whenever the rectangle changes.
+    /// later work can copy just those rows while that seed remains live. Cleared
+    /// by [`Self::invalidate`] and after every buffer swap, because ratatui resets
+    /// the next working buffer as part of the swap.
     seeded_animation_area: Option<Rect>,
     /// Composer contents as of the last full frame.
     ///
@@ -310,6 +311,18 @@ impl StatusSpinnerRenderer {
         // rows again.
         self.seeded_animation_area = None;
         self.last_full_frame_input.clear();
+    }
+
+    /// Present an animation frame and forget its working-buffer seed.
+    ///
+    /// `Terminal::swap_buffers` resets the buffer that the next tick will draw
+    /// into, so cells outside the animation area are no longer seeded there.
+    fn swap_after_animation_frame<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+    ) {
+        terminal.swap_buffers();
+        self.seeded_animation_area = None;
     }
 
     /// Whether the decorative idle-animation rows can be repainted on their own,
@@ -395,10 +408,9 @@ impl StatusSpinnerRenderer {
             }
             // Seed the working buffer from the last known frame. Only the
             // animated rows can differ once this path owns the screen (it is the
-            // only writer between full frames), so after the first pass we copy
-            // just those rows instead of the whole screen. `seeded_animation_area`
-            // records which rows that invariant covers, and any change to it (or
-            // to the frame identity) forces one full seed again.
+            // only writer between full frames), so a live seed can reuse just
+            // those rows. `swap_buffers` resets the next working buffer, and the
+            // presentation hook below invalidates the seed at that boundary.
             if self.seeded_animation_area == Some(area) {
                 copy_cells_in(previous_frame, current_buffer, area);
             } else {
@@ -426,7 +438,7 @@ impl StatusSpinnerRenderer {
             RestorePosition,
             EndSynchronizedUpdate
         )?;
-        terminal.swap_buffers();
+        self.swap_after_animation_frame(terminal);
         terminal.backend_mut().flush()?;
         // Keep the remembered frame current without cloning the whole screen: it
         // already matches everywhere except the rows just re-rendered. Re-render
@@ -1353,5 +1365,47 @@ mod tests {
             !render_status_spinner_into_buffer(&buffer, area, "⠙"),
             "late overlays own the status cell until the next full frame"
         );
+    }
+
+    #[test]
+    fn presented_animation_frame_requires_reseeding() {
+        let animation_area = Rect::new(0, 1, 10, 2);
+        let mut renderer = StatusSpinnerRenderer {
+            seeded_animation_area: Some(animation_area),
+            ..Default::default()
+        };
+        let backend = ratatui::backend::TestBackend::new(10, 3);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+        renderer.swap_after_animation_frame(&mut terminal);
+
+        assert_eq!(renderer.seeded_animation_area, None);
+    }
+
+    #[test]
+    fn idle_animation_repaint_preserves_cells_outside_animation_after_swap() {
+        let area = Rect::new(0, 0, 20, 4);
+        let animation_area = Rect::new(0, 3, 20, 1);
+        let mut previous_frame = Buffer::empty(area);
+        previous_frame.set_string(0, 0, "transcript", Style::default());
+        previous_frame.set_string(0, 2, "> composer", Style::default());
+        let mut renderer = StatusSpinnerRenderer::default();
+        let backend = ratatui::backend::TestBackend::new(area.width, area.height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+
+        for _ in 0..3 {
+            let working = terminal.current_buffer_mut();
+            if renderer.seeded_animation_area == Some(animation_area) {
+                copy_cells_in(&previous_frame, working, animation_area);
+            } else {
+                working.clone_from(&previous_frame);
+                renderer.seeded_animation_area = Some(animation_area);
+            }
+
+            assert_eq!(working[(0, 0)].symbol(), "t");
+            assert_eq!(working[(0, 2)].symbol(), ">");
+
+            renderer.swap_after_animation_frame(&mut terminal);
+        }
     }
 }
