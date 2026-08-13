@@ -93,9 +93,9 @@ fn valid_version(version: &str) -> bool {
     });
     suffix_ok
         && core.split('.').count() == 3
-        && core.split('.').all(|part| {
-            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        && core
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 async fn download_from_base(client: &reqwest::Client, base: &str) -> Result<Vec<u8>> {
@@ -111,10 +111,7 @@ async fn download_from_base(client: &reqwest::Client, base: &str) -> Result<Vec<
         bail!("xAI returned an invalid Grok Build version: {version:?}");
     }
     let extension = if cfg!(windows) { ".exe" } else { "" };
-    let url = format!(
-        "{base}/grok-{version}-{}{extension}",
-        platform_name()?
-    );
+    let url = format!("{base}/grok-{version}-{}{extension}", platform_name()?);
     Ok(client
         .get(&url)
         .send()

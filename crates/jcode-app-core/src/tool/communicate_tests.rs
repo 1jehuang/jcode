@@ -1140,7 +1140,11 @@ fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
 
     assert!(existing.description().contains("first routing version"));
     assert!(!existing.description().contains("second routing version"));
-    assert!(newly_created.description().contains("second routing version"));
+    assert!(
+        newly_created
+            .description()
+            .contains("second routing version")
+    );
 }
 
 #[test]

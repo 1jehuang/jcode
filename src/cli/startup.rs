@@ -184,8 +184,7 @@ pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::GROK_BUILD_RUNTIME,
         || {
-            let mut process =
-                jcode_provider_grok_build_runtime::GrokBuildProcess::from_env();
+            let mut process = jcode_provider_grok_build_runtime::GrokBuildProcess::from_env();
             process.command = crate::auth::grok_build::cli_path();
             std::sync::Arc::new(
                 jcode_provider_grok_build_runtime::GrokBuildProvider::with_process(process),
