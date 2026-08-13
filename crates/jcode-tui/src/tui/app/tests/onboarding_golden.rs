@@ -709,6 +709,21 @@ fn onboarding_import_happy_path_images() {
         // the generator has unseen changelog entries, which makes the artifact
         // depend on developer-local state. Force it empty for determinism.
         crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
+        // The git info widget would otherwise capture the live ahead/behind and
+        // dirty counts of the repo the generator runs in. Pin it to a clean
+        // fixture branch. (The version label is compile-time build meta, which
+        // is deterministic for a given checkout and expected to advance.)
+        crate::tui::app::helpers::seed_git_info_cache_for_tests(Some(
+            crate::tui::info_widget::GitInfo {
+                branch: "main".to_string(),
+                modified: 0,
+                staged: 0,
+                untracked: 0,
+                ahead: 0,
+                behind: 0,
+                dirty_files: Vec::new(),
+            },
+        ));
         let mut app = create_test_app();
         // The header shows a randomly drawn session mascot ("client: Goat 🐐"),
         // which would make the artifact differ run to run. Pin it.
