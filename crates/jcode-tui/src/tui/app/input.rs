@@ -801,15 +801,54 @@ pub(super) fn handle_text_paste(app: &mut App, text: String) {
     let line_count = text.lines().count().max(1);
     if line_count < 5 {
         insert_input_text(app, &text);
-    } else {
-        app.pasted_contents.push(text);
-        let placeholder = format!(
-            "[pasted {} line{}]",
-            line_count,
-            if line_count == 1 { "" } else { "s" }
-        );
-        insert_input_text(app, &placeholder);
+        return;
     }
+    if expand_matching_paste(app, &text) {
+        return;
+    }
+
+    let placeholder = paste_placeholder(&text);
+    app.pasted_contents.push(text);
+    insert_input_text(app, &placeholder);
+}
+
+fn expand_matching_paste(app: &mut App, text: &str) -> bool {
+    let Some(content_index) = app
+        .pasted_contents
+        .iter()
+        .rposition(|content| content == text)
+    else {
+        return false;
+    };
+
+    let placeholder = paste_placeholder(text);
+    // Placeholders only encode a line count. Skip placeholders belonging to
+    // newer stored pastes with the same shape so equal-length, different text
+    // cannot cause the wrong placeholder to expand.
+    let newer_same_placeholder_count = app.pasted_contents[content_index + 1..]
+        .iter()
+        .filter(|content| paste_placeholder(content) == placeholder)
+        .count();
+    let Some(placeholder_start) = app
+        .input
+        .rmatch_indices(placeholder.as_str())
+        .map(|(position, _)| position)
+        .nth(newer_same_placeholder_count)
+    else {
+        return false;
+    };
+
+    app.follow_chat_bottom_for_typing();
+    app.remember_input_undo_state();
+    app.input.replace_range(
+        placeholder_start..placeholder_start + placeholder.len(),
+        text,
+    );
+    app.cursor_pos = placeholder_start + text.len();
+    app.pasted_contents.remove(content_index);
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    true
 }
 
 impl App {
