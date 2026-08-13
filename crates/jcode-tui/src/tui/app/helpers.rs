@@ -75,6 +75,19 @@ pub(crate) fn invalidate_git_info_cache() {
     }
 }
 
+/// Pin the git-status widget to a fixed value for deterministic renders.
+///
+/// Full-frame artifact generators (onboarding screenshots) would otherwise
+/// capture the live ahead/behind/dirty counts of whatever repo the generator
+/// happens to run in. Marking the entry as `refreshing` keeps the TTL path
+/// from spawning a background probe that overwrites the seed mid-render.
+#[cfg(test)]
+pub(crate) fn seed_git_info_cache_for_tests(info: Option<GitInfo>) {
+    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+        *guard = Some((std::time::Instant::now(), info, true));
+    }
+}
+
 /// Force the todos widget cache to refetch the given session on its next read.
 ///
 /// Call this right after the app persists a local todo write so the info widget
