@@ -47,6 +47,140 @@ fn render_onboarding_text(app: &App, width: u16, height: u16) -> String {
     rows.join("\n")
 }
 
+/// Render the onboarding screen and return its styled offscreen buffer.
+fn render_onboarding_buffer(
+    app: &App,
+    width: u16,
+    height: u16,
+) -> ratatui::buffer::Buffer {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            crate::tui::ui::draw_onboarding_welcome_for_tests(frame, app, area);
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn svg_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn svg_color(color: ratatui::style::Color, fallback: &str) -> String {
+    use ratatui::style::Color;
+    match color {
+        Color::Reset => fallback.to_string(),
+        Color::Black => "#101419".to_string(),
+        Color::Red => "#e06c75".to_string(),
+        Color::Green => "#98c379".to_string(),
+        Color::Yellow => "#e5c07b".to_string(),
+        Color::Blue => "#61afef".to_string(),
+        Color::Magenta => "#c678dd".to_string(),
+        Color::Cyan => "#56b6c2".to_string(),
+        Color::Gray => "#abb2bf".to_string(),
+        Color::DarkGray => "#5c6370".to_string(),
+        Color::LightRed => "#ff7b86".to_string(),
+        Color::LightGreen => "#b4e88a".to_string(),
+        Color::LightYellow => "#f2d18b".to_string(),
+        Color::LightBlue => "#7fc1ff".to_string(),
+        Color::LightMagenta => "#dc8cf2".to_string(),
+        Color::LightCyan => "#70d7e2".to_string(),
+        Color::White => "#f2f4f8".to_string(),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(index) => {
+            // The onboarding palette uses named/RGB colors today. Keep indexed
+            // colors deterministic if one is introduced later.
+            let level = 48u8.saturating_add(index.saturating_mul(207) / 255);
+            format!("#{level:02x}{level:02x}{level:02x}")
+        }
+    }
+}
+
+/// Serialize a ratatui TestBackend buffer as a standalone terminal-like SVG.
+/// This keeps screenshot generation headless and, importantly, renders the
+/// exact same state model and widget tree as the interactive onboarding flow.
+fn onboarding_buffer_svg(buffer: &ratatui::buffer::Buffer) -> String {
+    use ratatui::style::Modifier;
+    use std::fmt::Write;
+
+    const CELL_W: u32 = 12;
+    const CELL_H: u32 = 24;
+    const FONT_SIZE: u32 = 18;
+    const DEFAULT_BG: &str = "#0b0f14";
+    const DEFAULT_FG: &str = "#d8dee9";
+
+    let area = buffer.area;
+    let pixel_width = u32::from(area.width) * CELL_W;
+    let pixel_height = u32::from(area.height) * CELL_H;
+    let mut svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{pixel_width}" height="{pixel_height}" viewBox="0 0 {pixel_width} {pixel_height}"><rect width="100%" height="100%" fill="{DEFAULT_BG}"/><g font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="{FONT_SIZE}px">"#
+    );
+
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buffer[(x, y)];
+            let bg = svg_color(cell.bg, DEFAULT_BG);
+            if bg != DEFAULT_BG {
+                let _ = write!(
+                    svg,
+                    r#"<rect x="{}" y="{}" width="{CELL_W}" height="{CELL_H}" fill="{bg}"/>"#,
+                    u32::from(x) * CELL_W,
+                    u32::from(y) * CELL_H
+                );
+            }
+            let symbol = cell.symbol();
+            if symbol.is_empty() || symbol == " " {
+                continue;
+            }
+            let fg = svg_color(cell.fg, DEFAULT_FG);
+            let weight = if cell.modifier.contains(Modifier::BOLD) {
+                "bold"
+            } else {
+                "normal"
+            };
+            let opacity = if cell.modifier.contains(Modifier::DIM) {
+                "0.62"
+            } else {
+                "1"
+            };
+            let decoration = if cell.modifier.contains(Modifier::UNDERLINED) {
+                "underline"
+            } else {
+                "none"
+            };
+            let _ = write!(
+                svg,
+                r#"<text x="{}" y="{}" fill="{fg}" font-weight="{weight}" opacity="{opacity}" text-decoration="{decoration}" xml:space="preserve">{}</text>"#,
+                u32::from(x) * CELL_W,
+                u32::from(y) * CELL_H + 19,
+                svg_escape(symbol)
+            );
+        }
+    }
+    svg.push_str("</g></svg>");
+    svg
+}
+
+fn write_onboarding_svg(
+    output_dir: &std::path::Path,
+    filename: &str,
+    app: &App,
+    width: u16,
+    height: u16,
+) {
+    let buffer = render_onboarding_buffer(app, width, height);
+    std::fs::write(output_dir.join(filename), onboarding_buffer_svg(&buffer)).unwrap();
+}
+
 /// Force the app into a specific onboarding phase, bypassing the on-disk
 /// new-user heuristic.
 fn app_in_phase(phase: OnboardingPhase) -> App {
@@ -394,4 +528,76 @@ fn onboarding_golden_telemetry_settings_page() {
         !text.contains("We found 1 existing login"),
         "summary hidden: {text}"
     );
+}
+
+/// Generate a reviewable image sequence for the successful "import all"
+/// onboarding path. This is ignored during normal test runs because it writes
+/// artifacts. `scripts/capture_onboarding.sh` is the supported entry point.
+#[test]
+#[ignore = "artifact generator; run scripts/capture_onboarding.sh"]
+fn onboarding_import_happy_path_images() {
+    use crate::external_auth::ExternalAuthReviewCandidate;
+    use crate::tui::app::onboarding_flow::ImportReview;
+
+    let output_dir = std::env::var_os("JCODE_ONBOARDING_SCREENSHOT_DIR")
+        .map(std::path::PathBuf::from)
+        .expect("JCODE_ONBOARDING_SCREENSHOT_DIR must be set");
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    let candidates = vec![
+        ExternalAuthReviewCandidate::fixture(
+            "OpenRouter/API-key providers",
+            "OpenCode auth.json",
+        ),
+        ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "pi auth.json"),
+        ExternalAuthReviewCandidate::fixture("OpenAI/Codex", "Codex auth.json"),
+        ExternalAuthReviewCandidate::fixture("Claude", "Claude Code"),
+        ExternalAuthReviewCandidate::fixture("Gemini", "Gemini CLI"),
+        ExternalAuthReviewCandidate::fixture(
+            "GitHub Copilot",
+            "GitHub Copilot CLI hosts.json",
+        ),
+        ExternalAuthReviewCandidate::fixture("Cursor", "Cursor auth.json"),
+    ];
+
+    let width = 110;
+    let height = 38;
+
+    let mut review = ImportReview::new(candidates).unwrap();
+    review.focus_summary_pill(crate::tui::app::onboarding_flow::SummaryPill::Continue);
+    let app = app_in_phase(OnboardingPhase::Login {
+        import: Some(review),
+    });
+    write_onboarding_svg(
+        &output_dir,
+        "01-import-existing-logins.svg",
+        &app,
+        width,
+        height,
+    );
+
+    let mut app = app_in_phase(OnboardingPhase::Login { import: None });
+    app.onboarding_import_in_progress = Some(std::time::Instant::now());
+    write_onboarding_svg(
+        &output_dir,
+        "02-importing-logins.svg",
+        &app,
+        width,
+        height,
+    );
+
+    let app = app_in_phase(OnboardingPhase::ContinuePrompt {
+        cli: ExternalCli::Codex,
+        yes_highlighted: true,
+        shown_at: std::time::Instant::now(),
+    });
+    write_onboarding_svg(
+        &output_dir,
+        "03-continue-codex-session.svg",
+        &app,
+        width,
+        height,
+    );
+
+    println!("wrote onboarding images to {}", output_dir.display());
 }

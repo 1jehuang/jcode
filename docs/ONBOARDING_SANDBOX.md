@@ -154,6 +154,23 @@ Supported scenarios today:
 - `pairing_ready`
 - `connected_chat`
 
+## Headless screenshots
+
+Generate the successful import-logins onboarding sequence without launching a
+terminal or reading real credentials:
+
+```bash
+scripts/capture_onboarding.sh
+# Or choose an output directory:
+scripts/capture_onboarding.sh ~/onboarding-screenshots
+```
+
+The generator renders the same `OnboardingFlow` phases and ratatui widget tree
+used by the live application into an offscreen `TestBackend`. It writes SVG
+images and, when `rsvg-convert` is installed, matching PNG files. The modeled
+happy path includes the detected-login summary, import progress, and Codex
+resume prompt. Accepting that final prompt hands off to the normal session UI.
+
 ## Why this is safer
 
 A fresh sandbox means:
