@@ -705,13 +705,21 @@ fn onboarding_import_happy_path_images() {
 
     // ---- done (review turn): the suggested architecture review accepted ----
     {
+        // The full frame includes the "Updates" box when the machine running
+        // the generator has unseen changelog entries, which makes the artifact
+        // depend on developer-local state. Force it empty for determinism.
+        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
         let mut app = create_test_app();
+        // The header shows a randomly drawn session mascot ("client: Goat 🐐"),
+        // which would make the artifact differ run to run. Pin it.
+        app.session.short_name = Some("sauropod".to_string());
         let prompt = App::onboarding_recent_project_review_prompt(std::path::Path::new(
             "~/projects/my-app",
         ));
         app.push_display_message(DisplayMessage::user(prompt));
         app.is_processing = true;
         write_full_frame_svg(&output_dir, "review-turn.svg", &app, width, height);
+        crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     }
     crate::env::remove_var("OPENROUTER_API_KEY");
     crate::auth::AuthStatus::invalidate_cached_status();
