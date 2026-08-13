@@ -23,6 +23,33 @@ fn server_start_and_internal_keepalive_parse() {
 }
 
 #[test]
+fn server_promote_parses_default_and_explicit_version() {
+    let current = Args::try_parse_from(["jcode", "server", "promote", "--json"])
+        .expect("server promote should default to current");
+    assert!(matches!(
+        current.command,
+        Some(Command::Server {
+            action: ServerCommand::Promote {
+                version: None,
+                json: true,
+            }
+        })
+    ));
+
+    let explicit = Args::try_parse_from(["jcode", "server", "promote", "abc1234-dirty-deadbeef"])
+        .expect("server promote should accept an installed version label");
+    assert!(matches!(
+        explicit.command,
+        Some(Command::Server {
+            action: ServerCommand::Promote {
+                version: Some(ref version),
+                json: false,
+            }
+        }) if version == "abc1234-dirty-deadbeef"
+    ));
+}
+
+#[test]
 fn telemetry_subcommands_parse() {
     let status = Args::try_parse_from(["jcode", "telemetry", "status", "--json"])
         .expect("telemetry status should parse");
