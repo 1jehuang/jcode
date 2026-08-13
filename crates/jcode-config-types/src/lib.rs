@@ -405,6 +405,8 @@ pub enum NamedProviderType {
     #[serde(alias = "openai-compatible", alias = "openai_compatible")]
     #[default]
     OpenAiCompatible,
+    #[serde(alias = "anthropic-compatible", alias = "anthropic_compatible")]
+    AnthropicCompatible,
     OpenRouter,
 }
 
@@ -443,6 +445,9 @@ pub struct NamedProviderConfig {
     pub api: Option<String>,
     pub auth: NamedProviderAuth,
     pub auth_header: Option<String>,
+    /// Extra HTTP headers sent with every request to this provider.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub headers: std::collections::BTreeMap<String, String>,
     pub api_key_env: Option<String>,
     pub api_key: Option<String>,
     pub env_file: Option<String>,
@@ -485,6 +490,7 @@ impl Default for NamedProviderConfig {
             api: None,
             auth: NamedProviderAuth::Bearer,
             auth_header: None,
+            headers: std::collections::BTreeMap::new(),
             api_key_env: None,
             api_key: None,
             env_file: None,

@@ -144,7 +144,21 @@ impl MultiProvider {
         };
 
         let anthropic = if has_claude_creds && !use_claude_cli {
-            external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME)
+            let provider =
+                external::instantiate_expected_external_provider(external::ANTHROPIC_RUNTIME);
+            let active_profile_is_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+                .ok()
+                .and_then(|name| cfg.providers.get(&name))
+                .is_some_and(|profile| {
+                    matches!(
+                        profile.provider_type,
+                        crate::config::NamedProviderType::AnthropicCompatible
+                    )
+                });
+            if active_profile_is_anthropic {
+                crate::provider_catalog::clear_anthropic_profile_env();
+            }
+            provider
         } else {
             None
         };
@@ -198,7 +212,17 @@ impl MultiProvider {
             None
         };
 
-        let openrouter = if has_openrouter_creds {
+        let active_named_profile_is_anthropic = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+            .ok()
+            .or_else(|| default_named_provider_profile.clone())
+            .and_then(|name| cfg.providers.get(&name))
+            .is_some_and(|profile| {
+                matches!(
+                    profile.provider_type,
+                    crate::config::NamedProviderType::AnthropicCompatible
+                )
+            });
+        let openrouter = if has_openrouter_creds && !active_named_profile_is_anthropic {
             let named_profile = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
                 .ok()
                 .or_else(|| default_named_provider_profile.clone());

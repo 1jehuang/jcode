@@ -6,14 +6,15 @@ pub(super) use jcode_provider_core::{ActiveProvider, ProviderAvailability};
 pub(crate) enum ConfigProviderSelection {
     BuiltIn(ActiveProvider),
     OpenAiCompatibleProfile(&'static str),
-    NamedProfile(String),
+    NamedProfile(String, ActiveProvider),
 }
 
 impl ConfigProviderSelection {
     pub(crate) fn active_provider(&self) -> ActiveProvider {
         match self {
             Self::BuiltIn(provider) => *provider,
-            Self::OpenAiCompatibleProfile(_) | Self::NamedProfile(_) => ActiveProvider::OpenRouter,
+            Self::OpenAiCompatibleProfile(_) => ActiveProvider::OpenRouter,
+            Self::NamedProfile(_, provider) => *provider,
         }
     }
 
@@ -31,7 +32,7 @@ impl ConfigProviderSelection {
                     None => format!("OpenAI-compatible profile {}", profile_id),
                 }
             }
-            Self::NamedProfile(profile) => format!("provider profile '{}'", profile),
+            Self::NamedProfile(profile, _) => format!("provider profile '{}'", profile),
         }
     }
 }
@@ -500,8 +501,19 @@ impl MultiProvider {
             return Some(ConfigProviderSelection::OpenAiCompatibleProfile(profile.id));
         }
 
-        if cfg.providers.contains_key(trimmed) {
-            return Some(ConfigProviderSelection::NamedProfile(trimmed.to_string()));
+        if let Some(profile) = cfg.providers.get(trimmed) {
+            let provider = if matches!(
+                profile.provider_type,
+                crate::config::NamedProviderType::AnthropicCompatible
+            ) {
+                ActiveProvider::Claude
+            } else {
+                ActiveProvider::OpenRouter
+            };
+            return Some(ConfigProviderSelection::NamedProfile(
+                trimmed.to_string(),
+                provider,
+            ));
         }
 
         // Accept the dual-auth `--provider` vocabulary (`anthropic-api`,

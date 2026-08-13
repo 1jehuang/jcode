@@ -456,6 +456,34 @@ id = "my-model-id"
 context_window = 128000
 ```
 
+Anthropic Messages-compatible gateways use the same named-profile surface with
+`type = "anthropic-compatible"`. The profile can select bearer, custom-header,
+or no authentication and attach gateway-specific headers to every request:
+
+```toml
+[provider]
+default_provider = "corp-claude"
+default_model = "claude-sonnet-4-6"
+
+[providers.corp-claude]
+type = "anthropic-compatible"
+base_url = "https://gateway.example.com/anthropic/v1"
+auth = "bearer"
+api_key_env = "CORP_CLAUDE_TOKEN"
+default_model = "claude-sonnet-4-6"
+
+[providers.corp-claude.headers]
+x-tenant-id = "tenant-42"
+
+[[providers.corp-claude.models]]
+id = "claude-sonnet-4-6"
+context_window = 200000
+```
+
+For direct environment-based configuration, `ANTHROPIC_BASE_URL` overrides the
+non-OAuth Messages endpoint and `ANTHROPIC_AUTH_TOKEN` is sent as a bearer token.
+Claude OAuth traffic always continues to use Anthropic's official endpoints.
+
 ##### Extra request-body fields (`extra_body`)
 
 Some OpenAI-compatible backends require non-standard top-level request fields. For example, NVIDIA NIM DeepSeek-V4 reasoning models (`deepseek-ai/deepseek-v4-flash`, `deepseek-ai/deepseek-v4-pro`) only enable thinking when the request includes `chat_template_kwargs`; without it they reply without reasoning (or, for some deployments, hang). jcode lets you inject arbitrary top-level fields two ways.
