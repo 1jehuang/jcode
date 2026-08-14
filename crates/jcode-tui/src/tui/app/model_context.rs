@@ -195,7 +195,7 @@ impl App {
 
     /// The api_method string of the route currently in use, used to exclude the
     /// failed route and to recognize same-model/different-method alternatives.
-    fn current_route_api_method(&self) -> Option<String> {
+    pub(super) fn current_route_api_method(&self) -> Option<String> {
         if self.is_remote {
             return self.session.route_api_method.clone();
         }
