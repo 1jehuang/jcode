@@ -189,9 +189,8 @@ impl McpManagementTool {
             } else {
                 for (_, tool) in server_tools {
                     output.push_str(&format!(
-                        "  - mcp__{}__{}: {}\n",
-                        server,
-                        tool.name,
+                        "  - {}: {}\n",
+                        crate::mcp::dispatch_name(server, &tool.name),
                         tool.description.as_deref().unwrap_or("(no description)")
                     ));
                 }
@@ -280,9 +279,8 @@ impl McpManagementTool {
                 );
                 for (_, tool) in &server_tools {
                     output.push_str(&format!(
-                        "  - mcp__{}__{}: {}\n",
-                        server_name,
-                        tool.name,
+                        "  - {}: {}\n",
+                        crate::mcp::dispatch_name(&server_name, &tool.name),
                         tool.description.as_deref().unwrap_or("(no description)")
                     ));
                 }
@@ -291,8 +289,9 @@ impl McpManagementTool {
                 // Register the new tools in the registry
                 if let Some(ref registry) = self.registry {
                     let mcp_tools = crate::mcp::create_mcp_tools(Arc::clone(&self.manager)).await;
+                    let server_prefix = crate::mcp::dispatch_name(&server_name, "");
                     for (name, tool) in mcp_tools {
-                        if name.starts_with(&format!("mcp__{}__", server_name)) {
+                        if name.starts_with(&server_prefix) {
                             registry.register(name, tool).await;
                         }
                     }
@@ -347,7 +346,7 @@ impl McpManagementTool {
         // Unregister tools for this server
         if let Some(ref registry) = self.registry {
             let removed = registry
-                .unregister_prefix(&format!("mcp__{}__", server_name))
+                .unregister_prefix(&crate::mcp::dispatch_name(&server_name, ""))
                 .await;
             crate::logging::event_info(
                 "MCP_LIFECYCLE",
