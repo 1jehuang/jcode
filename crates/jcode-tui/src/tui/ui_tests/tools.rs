@@ -1169,7 +1169,11 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
     let rendered: Vec<String> = lines.iter().map(extract_line_text).collect();
 
     assert!(!rendered.is_empty(), "rendered={rendered:?}");
-    assert_eq!(rendered.len(), 2, "Bash output should add one line: {rendered:?}");
+    assert_eq!(
+        rendered.len(),
+        2,
+        "Bash output should add one line: {rendered:?}"
+    );
     assert!(
         rendered
             .iter()
