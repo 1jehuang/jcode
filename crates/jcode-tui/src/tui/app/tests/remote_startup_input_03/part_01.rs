@@ -426,9 +426,9 @@ fn test_paste_expansion_on_submit() {
     // Submit expands placeholder
     app.submit_input();
 
-    // Display shows placeholder (user sees condensed view)
+    // Sent transcript renders the actual pasted content, while the composer above stayed compact.
     assert_eq!(app.display_messages().len(), 1);
-    assert_eq!(app.display_messages()[0].content, "A: [pasted 5 lines] B");
+    assert_eq!(app.display_messages()[0].content, "A: 1\n2\n3\n4\n5 B");
 
     // Model receives expanded content (actual pasted text). Local sessions keep the
     // provider message cache lazy, so inspect the materialized provider view.
