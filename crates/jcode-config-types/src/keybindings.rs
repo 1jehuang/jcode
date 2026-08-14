@@ -277,6 +277,12 @@ pub const KEYBINDING_DEFAULTS: &[KeybindingDefault] = &[
         other: PlatformDefault::dev("ctrl+g"),
     },
     KeybindingDefault {
+        id: "auto_poke_toggle",
+        description: "Toggle auto-poke",
+        macos: PlatformDefault::dev("ctrl+p"),
+        other: PlatformDefault::dev("ctrl+p"),
+    },
+    KeybindingDefault {
         id: "scroll_up_fallback",
         description: "Optional fallback scroll-up binding",
         // Left unbound on every platform by default: on macOS Cmd+K is reserved

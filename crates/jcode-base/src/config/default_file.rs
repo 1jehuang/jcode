@@ -56,6 +56,9 @@ scroll_prompt_down = "ctrl+]"
 # Scroll bookmark toggle (stash position, jump to bottom, press again to return)
 scroll_bookmark = "ctrl+g"
 
+# Auto-poke toggle. Set "" to disable.
+auto_poke_toggle = "ctrl+p"
+
 # Optional fallback scroll bindings (useful on macOS terminals that forward Command)
 # Leave unset by default; on macOS Cmd+K / Cmd+J move up / down by prompt instead.
 scroll_up_fallback = ""
