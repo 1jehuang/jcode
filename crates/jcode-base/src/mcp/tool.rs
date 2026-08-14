@@ -106,6 +106,10 @@ impl Tool for McpTool {
     }
 }
 
+pub fn dispatch_name(server_name: &str, tool_name: &str) -> String {
+    format!("mcp__{}__{}", server_name, tool_name).replace('-', "_")
+}
+
 /// Create tools from an MCP manager
 pub async fn create_mcp_tools(manager: Arc<RwLock<McpManager>>) -> Vec<(String, Arc<dyn Tool>)> {
     let mgr = manager.read().await;
@@ -114,7 +118,7 @@ pub async fn create_mcp_tools(manager: Arc<RwLock<McpManager>>) -> Vec<(String, 
 
     let mut tools = Vec::new();
     for (server_name, tool_def) in all_tools {
-        let prefixed_name = format!("mcp__{}__{}", server_name, tool_def.name);
+        let prefixed_name = dispatch_name(&server_name, &tool_def.name);
         let mcp_tool = McpTool::new(server_name, tool_def, Arc::clone(&manager));
         tools.push((prefixed_name, Arc::new(mcp_tool) as Arc<dyn Tool>));
     }
@@ -133,7 +137,7 @@ pub fn create_mcp_tools_from_cached(
     tool_defs
         .iter()
         .map(|tool_def| {
-            let prefixed_name = format!("mcp__{}__{}", server_name, tool_def.name);
+            let prefixed_name = dispatch_name(server_name, &tool_def.name);
             let mcp_tool = McpTool::new(
                 server_name.to_string(),
                 tool_def.clone(),
@@ -142,4 +146,21 @@ pub fn create_mcp_tools_from_cached(
             (prefixed_name, Arc::new(mcp_tool) as Arc<dyn Tool>)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch_name;
+
+    #[test]
+    fn hyphenated_mcp_names_are_safe_for_the_standard_dispatcher() {
+        assert_eq!(
+            dispatch_name("context7", "resolve-library-id"),
+            "mcp__context7__resolve_library_id"
+        );
+        assert_eq!(
+            dispatch_name("hyphenated-server", "query-docs"),
+            "mcp__hyphenated_server__query_docs"
+        );
+    }
 }
