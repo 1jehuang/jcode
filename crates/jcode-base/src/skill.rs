@@ -477,6 +477,17 @@ impl SkillRegistry {
 
     /// Parse a SKILL.md file
     fn parse_skill(path: &Path) -> Result<Skill> {
+        Self::parse_skill_inner(path).map_err(|error| {
+            crate::logging::warn(&format!(
+                "Failed to parse skill file '{}': {}",
+                path.display(),
+                error
+            ));
+            error
+        })
+    }
+
+    fn parse_skill_inner(path: &Path) -> Result<Skill> {
         let content = std::fs::read_to_string(path)?;
 
         // Parse YAML frontmatter
@@ -962,6 +973,14 @@ mod tests {
         .expect("write skill");
     }
 
+    fn write_skill_file(skills_dir: &Path, name: &str, content: &str) -> PathBuf {
+        let dir = skills_dir.join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        let path = dir.join("SKILL.md");
+        std::fs::write(&path, content).expect("write skill");
+        path
+    }
+
     #[test]
     fn parse_invocation_supports_a_trailing_prompt() {
         assert_eq!(
@@ -1099,6 +1118,37 @@ mod tests {
             .expect("project-local .agents skill should load");
         assert_eq!(skill.description, "Test skill agents-only");
         assert!(skill.path.starts_with(temp.path()));
+    }
+
+    #[test]
+    fn malformed_skill_does_not_block_directory_loaders() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = temp.path().join("skills");
+        write_skill_file(
+            &skills_dir,
+            "valid",
+            "---\nname: valid\ndescription: Valid skill\n---\n\nUse valid.\n",
+        );
+        write_skill_file(
+            &skills_dir,
+            "malformed",
+            "---\nname: malformed\ndescription: Triggers: invalid yaml\n---\n\nBroken.\n",
+        );
+
+        let mut registry = SkillRegistry::default();
+        registry
+            .load_from_dir(&skills_dir)
+            .expect("load skills while skipping malformed file");
+        assert!(registry.contains("valid"));
+        assert!(!registry.contains("malformed"));
+
+        let mut counted_registry = SkillRegistry::default();
+        let count = counted_registry
+            .load_from_dir_count(&skills_dir)
+            .expect("count skills while skipping malformed file");
+        assert_eq!(count, 1);
+        assert!(counted_registry.contains("valid"));
+        assert!(!counted_registry.contains("malformed"));
     }
 
     #[test]
