@@ -623,6 +623,8 @@ pub struct InfoWidgetData {
     pub background_info: Option<BackgroundInfo>,
     /// Subscription usage info
     pub usage_info: Option<UsageInfo>,
+    /// Show consumed rather than remaining percentages in usage limits.
+    pub usage_display_used: bool,
     /// Streaming output tokens per second (approximate)
     pub tokens_per_second: Option<f32>,
     /// Active provider name (openrouter/openai/anthropic/...)
@@ -2080,7 +2082,11 @@ fn render_sections(
     if let Some(info) = &data.usage_info
         && info.available
     {
-        lines.extend(render_usage_compact(info, inner.width));
+        lines.extend(render_usage_compact(
+            info,
+            inner.width,
+            data.usage_display_used,
+        ));
     }
 
     if let Some(cache) = data.cache_hit_info.as_ref() {

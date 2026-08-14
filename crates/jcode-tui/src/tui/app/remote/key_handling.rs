@@ -390,6 +390,42 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        if app.auto_poke_incomplete_todos {
+            let cleared = app_mod::commands::disable_auto_poke(app);
+            app.set_status_notice("Poke: OFF");
+            app.push_display_message(DisplayMessage::system(
+                app_mod::commands::poke_disabled_message(cleared),
+            ));
+        } else {
+            match app_mod::commands::activate_auto_poke(app) {
+                app_mod::commands::PokeActivation::EnabledNoIncomplete => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_enabled_without_incomplete_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::Queued => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_queued_display_message(),
+                    ));
+                }
+                app_mod::commands::PokeActivation::SendNow {
+                    incomplete_count,
+                    poke_msg,
+                } => {
+                    app.push_display_message(DisplayMessage::system(
+                        app_mod::commands::poke_triggered_display_message(incomplete_count),
+                    ));
+
+                    let _ =
+                        begin_remote_send(app, remote, poke_msg, vec![], true, None, true, 0).await;
+                    app.visible_turn_started = Some(Instant::now());
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
         return Ok(());
@@ -698,50 +734,6 @@ async fn handle_remote_key_internal(
             }
             KeyCode::Char('s') => {
                 app.toggle_input_stash();
-                return Ok(());
-            }
-            KeyCode::Char('p') => {
-                if app.auto_poke_incomplete_todos {
-                    let cleared = app_mod::commands::disable_auto_poke(app);
-                    app.set_status_notice("Poke: OFF");
-                    app.push_display_message(DisplayMessage::system(
-                        app_mod::commands::poke_disabled_message(cleared),
-                    ));
-                } else {
-                    match app_mod::commands::activate_auto_poke(app) {
-                        app_mod::commands::PokeActivation::EnabledNoIncomplete => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_enabled_without_incomplete_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::Queued => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_queued_display_message(),
-                            ));
-                        }
-                        app_mod::commands::PokeActivation::SendNow {
-                            incomplete_count,
-                            poke_msg,
-                        } => {
-                            app.push_display_message(DisplayMessage::system(
-                                app_mod::commands::poke_triggered_display_message(incomplete_count),
-                            ));
-
-                            let _ = begin_remote_send(
-                                app,
-                                remote,
-                                poke_msg,
-                                vec![],
-                                true,
-                                None,
-                                true,
-                                0,
-                            )
-                            .await;
-                            app.visible_turn_started = Some(Instant::now());
-                        }
-                    }
-                }
                 return Ok(());
             }
             KeyCode::Char('v') => {

@@ -758,6 +758,62 @@ fn legacy_claude_config_is_live_and_deletions_do_not_leave_a_snapshot() {
 }
 
 #[test]
+fn disabling_claude_mcp_skips_both_live_sources_but_preserves_jcode_sources() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_home = std::env::var_os("JCODE_HOME");
+    let previous_disable = std::env::var_os("JCODE_DISABLE_CLAUDE_MCP");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::env::set_var("JCODE_DISABLE_CLAUDE_MCP", "1");
+
+    std::fs::write(
+        home.path().join("mcp.json"),
+        r#"{"mcpServers":{"jcode-global":{"command":"jcode-global"}}}"#,
+    )
+    .expect("write jcode global config");
+    std::fs::create_dir_all(project.path().join(".jcode")).expect("create jcode project dir");
+    std::fs::write(
+        project.path().join(".jcode/mcp.json"),
+        r#"{"mcpServers":{"jcode-project":{"command":"jcode-project"}}}"#,
+    )
+    .expect("write jcode project config");
+
+    let external = home.path().join("external");
+    std::fs::create_dir_all(external.join(".claude")).expect("create Claude config dirs");
+    std::fs::write(
+        external.join(".claude.json"),
+        r#"{"mcpServers":{"claude-current":{"command":"claude-current"}}}"#,
+    )
+    .expect("write current Claude config");
+    std::fs::write(
+        external.join(".claude/mcp.json"),
+        r#"{"mcpServers":{"claude-legacy":{"command":"claude-legacy"}}}"#,
+    )
+    .expect("write legacy Claude config");
+
+    let result = std::panic::catch_unwind(|| {
+        let config = McpConfig::load_for_dir(Some(project.path()));
+        assert!(config.servers.contains_key("jcode-global"));
+        assert!(config.servers.contains_key("jcode-project"));
+        assert!(!config.servers.contains_key("claude-current"));
+        assert!(!config.servers.contains_key("claude-legacy"));
+    });
+
+    if let Some(previous_home) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    if let Some(previous_disable) = previous_disable {
+        crate::env::set_var("JCODE_DISABLE_CLAUDE_MCP", previous_disable);
+    } else {
+        crate::env::remove_var("JCODE_DISABLE_CLAUDE_MCP");
+    }
+    result.expect("Claude MCP opt-out assertions");
+}
+
+#[test]
 fn mcp_source_logs_explain_provenance_without_config_values() {
     let live = McpConfig::live_claude_log_message(2, "~/.claude.json");
     assert!(live.contains("Loaded 2 server(s) live from Claude Code (~/.claude.json)"));

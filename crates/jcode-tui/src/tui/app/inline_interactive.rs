@@ -97,13 +97,16 @@ use placeholder_routes::route_supports_reasoning_effort;
 /// "openai-compatible:myprofile"), or a bare openai-compatible profile id
 /// ("myprofile"). Matching is case/format-insensitive via the shared provider
 /// label normalizer. Routes for the active model are always kept so the
-/// current selection never disappears from the picker, and a filter that
+/// current selection never disappears from the picker, but only when their
+/// provider and API method match the active route. A filter that
 /// matches nothing falls back to the unfiltered list instead of an empty
 /// picker.
 fn filter_routes_by_provider_allowlist(
     routes: Vec<crate::provider::ModelRoute>,
     allowlist: Option<&[String]>,
     current_model: &str,
+    current_provider: &str,
+    current_api_method: Option<&str>,
 ) -> Vec<crate::provider::ModelRoute> {
     use crate::provider::normalize_model_route_provider_label as normalize;
 
@@ -137,9 +140,17 @@ fn filter_routes_by_provider_allowlist(
         })
     };
 
+    let route_is_current = |route: &crate::provider::ModelRoute| {
+        route.model == current_model
+            && crate::provider::model_route_provider_labels_match(&route.provider, current_provider)
+            && current_api_method.is_none_or(|api_method| {
+                crate::provider::ModelRouteApiMethod::parse(&route.api_method)
+                    == crate::provider::ModelRouteApiMethod::parse(api_method)
+            })
+    };
     let filtered: Vec<crate::provider::ModelRoute> = routes
         .iter()
-        .filter(|route| route.model == current_model || route_matches(route))
+        .filter(|route| route_is_current(route) || route_matches(route))
         .cloned()
         .collect();
     if filtered.is_empty() {
@@ -1401,6 +1412,14 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
+        let current_provider = if self.is_remote {
+            self.remote_provider_name
+                .clone()
+                .unwrap_or_else(|| "remote".to_string())
+        } else {
+            self.provider.display_name()
+        };
+        let current_api_method = self.current_route_api_method();
         let config = crate::config::config();
         let config_default_model = config.provider.default_model.clone();
         let config_default_provider = config.provider.default_provider.clone();
@@ -1454,6 +1473,8 @@ impl App {
             routes,
             config.provider.model_picker_providers.as_deref(),
             &current_model,
+            &current_provider,
+            current_api_method.as_deref(),
         );
 
         if routes.is_empty() {
@@ -1534,13 +1555,6 @@ impl App {
             }
         }
 
-        let current_provider = if self.is_remote {
-            self.remote_provider_name
-                .clone()
-                .unwrap_or_else(|| "remote".to_string())
-        } else {
-            self.provider.name().to_string()
-        };
         let recent_auth_provider = self
             .recent_authenticated_provider
             .as_ref()
@@ -4273,6 +4287,8 @@ mod tests {
             routes.clone(),
             Some(&["Llama.CPP".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].model, "qwen3-coder");
@@ -4282,6 +4298,8 @@ mod tests {
             routes.clone(),
             Some(&["llamacpp".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].provider, "llama.cpp");
@@ -4291,6 +4309,8 @@ mod tests {
             routes.clone(),
             Some(&["claude-oauth".to_string(), "openrouter".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         let models: Vec<&str> = filtered.iter().map(|r| r.model.as_str()).collect();
         assert_eq!(models, ["claude-fable-5", "deepseek/deepseek-v4-pro"]);
@@ -4308,6 +4328,8 @@ mod tests {
             routes.clone(),
             Some(&["llamacpp".to_string()]),
             "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth"),
         );
         let models: Vec<&str> = filtered.iter().map(|r| r.model.as_str()).collect();
         assert_eq!(models, ["gpt-5.5", "qwen3-coder"]);
@@ -4317,21 +4339,90 @@ mod tests {
             routes.clone(),
             Some(&["nonexistent".to_string()]),
             "unrelated-current",
+            "OpenAI",
+            None,
         );
         assert_eq!(filtered.len(), routes.len());
 
         // None / empty / blank-entry allowlists are no-ops.
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes.clone(), None, "x").len(),
+            filter_routes_by_provider_allowlist(routes.clone(), None, "x", "OpenAI", None).len(),
             2
         );
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes.clone(), Some(&[]), "x").len(),
+            filter_routes_by_provider_allowlist(routes.clone(), Some(&[]), "x", "OpenAI", None,)
+                .len(),
             2
         );
         assert_eq!(
-            filter_routes_by_provider_allowlist(routes, Some(&["  ".to_string()]), "x").len(),
+            filter_routes_by_provider_allowlist(
+                routes,
+                Some(&["  ".to_string()]),
+                "x",
+                "OpenAI",
+                None,
+            )
+            .len(),
             2
+        );
+    }
+
+    #[test]
+    fn provider_allowlist_does_not_keep_disallowed_route_sharing_current_model() {
+        let routes = vec![
+            model_route(
+                "moonshotai/Kimi-K3",
+                "my-provider",
+                "openai-compatible:my-provider",
+            ),
+            model_route("moonshotai/Kimi-K3", "Copilot", "copilot"),
+        ];
+
+        let filtered = filter_routes_by_provider_allowlist(
+            routes,
+            Some(&["my-provider".to_string()]),
+            "moonshotai/Kimi-K3",
+            "my-provider",
+            Some("openai-compatible:my-provider"),
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].provider, "my-provider");
+    }
+
+    #[test]
+    fn provider_allowlist_keeps_only_exact_active_route_when_model_and_provider_overlap() {
+        let routes = vec![
+            model_route("gpt-5.5", "OpenAI", "openai-oauth"),
+            model_route("gpt-5.5", "OpenAI", "openai-api-key"),
+            model_route("gpt-5.5", "Copilot", "copilot"),
+            model_route("qwen3-coder", "llama.cpp", "openai-compatible:llamacpp"),
+        ];
+
+        let filtered = filter_routes_by_provider_allowlist(
+            routes,
+            Some(&["llamacpp".to_string()]),
+            "gpt-5.5",
+            "OpenAI",
+            Some("openai-oauth"),
+        );
+
+        let routes: Vec<(&str, &str, &str)> = filtered
+            .iter()
+            .map(|route| {
+                (
+                    route.model.as_str(),
+                    route.provider.as_str(),
+                    route.api_method.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            routes,
+            [
+                ("gpt-5.5", "OpenAI", "openai-oauth"),
+                ("qwen3-coder", "llama.cpp", "openai-compatible:llamacpp"),
+            ]
         );
     }
 }
