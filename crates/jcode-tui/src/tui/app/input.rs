@@ -1948,10 +1948,6 @@ pub(super) fn handle_control_key(app: &mut App, code: KeyCode) -> bool {
             app.toggle_input_stash();
             true
         }
-        KeyCode::Char('p') => {
-            super::commands::toggle_auto_poke_hotkey_local(app);
-            true
-        }
         KeyCode::Char('v') => {
             paste_from_clipboard(app);
             true
@@ -2278,6 +2274,10 @@ pub(super) fn handle_pre_control_shortcuts(
 
     let macos_option_shortcut =
         crate::tui::keybind::shortcut_char_for_macos_option_key(code, modifiers);
+    if app.toggle_keys.auto_poke.matches(code, modifiers) {
+        super::commands::toggle_auto_poke_hotkey_local(app);
+        return true;
+    }
     if app.toggle_keys.copy_selection.matches(code, modifiers) {
         app.toggle_copy_selection_mode();
         return true;
