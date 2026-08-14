@@ -4152,6 +4152,24 @@ pub(crate) fn render_tool_message(
         }
     }
 
+    if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && msg.content.trim() != "Command completed successfully (no output)"
+    {
+        const MAX_COLLAPSED_OUTPUT_LINES: usize = 3;
+        let output_lines = msg.content.lines().filter(|line| !line.trim().is_empty());
+        let total = output_lines.clone().count();
+        for output in output_lines.skip(total.saturating_sub(MAX_COLLAPSED_OUTPUT_LINES)) {
+            let output_line = Line::from(vec![
+                Span::styled("    │ ", Style::default().fg(dim_color())),
+                Span::styled(output.to_string(), Style::default().fg(dim_color())),
+            ]);
+            lines.push(super::truncate_line_with_ellipsis_to_width(
+                &output_line,
+                row_width,
+            ));
+        }
+    }
+
     if tc.name == "batch"
         && let Some(calls) = tc.input.get("tool_calls").and_then(|v| v.as_array())
     {
