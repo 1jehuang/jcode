@@ -387,6 +387,7 @@ impl WsTestClient {
             content: content.to_string(),
             images: vec![],
             system_reminder: None,
+            active_skill: None,
             no_reply: false,
         })
         .await
