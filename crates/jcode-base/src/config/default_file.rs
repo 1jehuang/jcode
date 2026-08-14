@@ -154,6 +154,9 @@ debug_socket = false
 # Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
 emoji = true
 
+# Usage percentage wording: "left" (default) or "used".
+usage_display = "left"
+
 # Show thinking/reasoning content (default: false)
 show_thinking = false
 

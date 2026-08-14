@@ -73,6 +73,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                     five_hr_left,
                     five_hr_reset.as_deref(),
                     inner.width,
+                    data.usage_display_used,
                 ));
             }
             if let Some(secondary_label) = info.secondary_limit_label.as_deref() {
@@ -82,6 +83,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                     seven_day_left,
                     seven_day_reset.as_deref(),
                     inner.width,
+                    data.usage_display_used,
                 ));
             }
             if let Some(spark_usage) = info.spark {
@@ -97,6 +99,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                     spark_left,
                     spark_reset.as_deref(),
                     inner.width,
+                    data.usage_display_used,
                 ));
             }
             lines
@@ -104,7 +107,11 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
     }
 }
 
-pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'static>> {
+pub(super) fn render_usage_compact(
+    info: &UsageInfo,
+    width: u16,
+    usage_display_used: bool,
+) -> Vec<Line<'static>> {
     if !info.available {
         return Vec::new();
     }
@@ -151,6 +158,7 @@ pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'st
             five_hr_left,
             five_hr_reset.as_deref(),
             width,
+            usage_display_used,
         ));
     }
     if let Some(secondary_label) = info.secondary_limit_label.as_deref() {
@@ -160,6 +168,7 @@ pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'st
             seven_day_left,
             seven_day_reset.as_deref(),
             width,
+            usage_display_used,
         ));
     }
     if let Some(spark_usage) = info.spark {
@@ -175,6 +184,7 @@ pub(super) fn render_usage_compact(info: &UsageInfo, width: u16) -> Vec<Line<'st
             spark_left,
             spark_reset.as_deref(),
             width,
+            usage_display_used,
         ));
     }
     lines
@@ -186,6 +196,7 @@ fn render_labeled_bar(
     left_pct: u8,
     reset_time: Option<&str>,
     width: u16,
+    usage_display_used: bool,
 ) -> Line<'static> {
     let color = if left_pct <= 20 {
         rgb(255, 100, 100)
@@ -198,25 +209,26 @@ fn render_labeled_bar(
     const LABEL_WIDTH: usize = 7;
     const MIN_BAR_WIDTH: usize = 4;
 
+    let (display_pct, display_word) = if usage_display_used {
+        (used_pct, "used")
+    } else {
+        (left_pct, "left")
+    };
+    let percentage_suffix = format!(" {}% {}", display_pct, display_word);
     let full_suffix = match reset_time {
         Some(reset) if left_pct == 0 => format!(" resets {}", reset),
-        Some(reset) => format!(" {}% left · {}", left_pct, reset),
-        None => format!(" {}% left", left_pct),
+        Some(reset) => format!("{} · {}", percentage_suffix, reset),
+        None => percentage_suffix.clone(),
     };
-    // On narrow widgets keep the reset visible and progressively shorten the
-    // percentage wording before sacrificing the bar. The exhausted wording is
-    // already compact and remains unchanged.
+    // On narrow widgets keep the percentage wording unambiguous, dropping the
+    // reset countdown before sacrificing the bar. Exhausted wording is unchanged.
     let suffix = match reset_time {
-        Some(reset) if left_pct > 0 => {
-            let compact = format!(" {}% · {}", left_pct, reset);
-            let reset_only = format!(" · {}", reset);
+        Some(_) if left_pct > 0 => {
             let budget = usize::from(width).saturating_sub(LABEL_WIDTH + MIN_BAR_WIDTH);
             if UnicodeWidthStr::width(full_suffix.as_str()) <= budget {
                 full_suffix
-            } else if UnicodeWidthStr::width(compact.as_str()) <= budget {
-                compact
             } else {
-                reset_only
+                percentage_suffix
             }
         }
         _ => full_suffix,
@@ -257,27 +269,54 @@ mod tests {
 
     #[test]
     fn usage_bar_shows_reset_countdown_before_exhaustion() {
-        let text = line_text(&render_labeled_bar("5-hour", 38, 62, Some("4h 5m"), 40));
+        let text = line_text(&render_labeled_bar(
+            "5-hour",
+            38,
+            62,
+            Some("4h 5m"),
+            40,
+            false,
+        ));
 
         assert!(text.contains("62% left · 4h 5m"));
         assert!(UnicodeWidthStr::width(text.as_str()) <= 40);
     }
 
     #[test]
-    fn usage_bar_keeps_countdown_within_narrow_width() {
-        let text = line_text(&render_labeled_bar("Weekly", 19, 81, Some("1d 4h"), 23));
+    fn usage_bar_keeps_wording_unambiguous_within_narrow_width() {
+        let text = line_text(&render_labeled_bar(
+            "Weekly",
+            19,
+            81,
+            Some("1d 4h"),
+            23,
+            true,
+        ));
 
-        assert!(text.contains("81% · 1d 4h"));
+        assert!(text.contains("19% used"));
+        assert!(!text.contains("1d 4h"));
         assert!(UnicodeWidthStr::width(text.as_str()) <= 23);
         assert!(text.contains('▰') || text.contains('▱'));
     }
 
     #[test]
+    fn used_wording_does_not_change_remaining_budget_color_thresholds() {
+        let left = render_labeled_bar("5-hour", 85, 15, None, 24, false);
+        let used = render_labeled_bar("5-hour", 85, 15, None, 24, true);
+
+        assert!(line_text(&left).contains("15% left"));
+        assert!(line_text(&used).contains("85% used"));
+        assert_eq!(left.spans[1].style.fg, Some(rgb(255, 100, 100)));
+        assert_eq!(used.spans[1].style.fg, left.spans[1].style.fg);
+    }
+
+    #[test]
     fn exhausted_usage_bar_preserves_resets_wording_and_width() {
-        let text = line_text(&render_labeled_bar("5-hour", 100, 0, Some("12m"), 24));
+        let text = line_text(&render_labeled_bar("5-hour", 100, 0, Some("12m"), 24, true));
 
         assert!(text.contains("resets 12m"));
         assert!(!text.contains("0% left"));
+        assert!(!text.contains("100% used"));
         assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
     }
 
@@ -291,7 +330,7 @@ mod tests {
             ..Default::default()
         };
 
-        let lines = render_usage_compact(&info, 40);
+        let lines = render_usage_compact(&info, 40, false);
         let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
 
         assert!(text.contains("Monthly"));
