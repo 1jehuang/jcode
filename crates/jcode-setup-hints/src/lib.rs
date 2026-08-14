@@ -673,6 +673,9 @@ pub fn run_setup_hotkey(
         if _listen_macos_hotkey {
             return run_macos_hotkey_listener();
         }
+        if _uninstall {
+            return uninstall_macos_hotkey_listener();
+        }
 
         let mut state = SetupHintsState::load();
         let terminal = effective_macos_terminal();
@@ -712,6 +715,10 @@ pub fn run_setup_hotkey(
 
     #[cfg(target_os = "linux")]
     {
+        if _uninstall {
+            return uninstall_linux_launch_hotkeys();
+        }
+
         let mut state = SetupHintsState::load();
         eprintln!("\x1b[1mjcode setup-hotkey\x1b[0m");
         eprintln!();
@@ -1674,6 +1681,16 @@ fn install_linux_launch_hotkeys(comp: linux_env::LinuxCompositor) -> Result<bool
         LinuxCompositor::Xfce => install_xfce_launch_hotkeys(),
         other => install_flat_launch_hotkeys(other),
     }
+}
+
+/// Refuse to run the installer for an uninstall request. Linux hotkeys are
+/// written through several compositor-specific stores, and no safe common
+/// removal operation exists yet.
+#[cfg(target_os = "linux")]
+fn uninstall_linux_launch_hotkeys() -> Result<()> {
+    anyhow::bail!(
+        "automatic launch-hotkey removal is not supported for this Linux desktop; no changes were made"
+    )
 }
 
 /// Install (or refresh) the niri launch-hotkey binds into the user's
