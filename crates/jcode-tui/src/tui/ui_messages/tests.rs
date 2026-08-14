@@ -1951,11 +1951,8 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     let rendered = extract_line_text(&lines[0]);
 
     assert!(rendered.contains("bash · Verify compact progress card · $ cargo test"));
-    assert_eq!(
-        lines.len(),
-        1,
-        "intent should not add vertical space: {rendered}"
-    );
+    assert_eq!(lines.len(), 2, "only Bash output should add a detail line");
+    assert!(extract_line_text(&lines[1]).contains("ok"));
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
@@ -1993,7 +1990,8 @@ fn render_tool_message_hides_technical_preview_by_default() {
         !rendered.contains("cargo test"),
         "technical detail should be hidden by default: {rendered}"
     );
-    assert_eq!(lines.len(), 1, "no extra detail line expected: {rendered}");
+    assert_eq!(lines.len(), 2, "only Bash output should add a detail line");
+    assert!(extract_line_text(&lines[1]).contains("ok"));
 }
 
 /// Even with details off, a failed tool row keeps its error summary so
@@ -2052,6 +2050,32 @@ fn render_tool_message_shows_token_badge() {
         .expect("missing token badge");
 
     assert_eq!(badge_span.style.fg, Some(rgb(118, 118, 118)));
+}
+
+#[test]
+fn render_tool_message_shows_trimmed_bash_output() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_bash_output".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({
+                "command": "python3 -c \"s='pale'; t='bale'; print(type(zip(s,t))); print(list(zip(s,t)))\""
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+    let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("<class 'zip'>")));
+    assert!(rendered.iter().any(|line| line.contains("[('p', 'b')")));
 }
 
 fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {
