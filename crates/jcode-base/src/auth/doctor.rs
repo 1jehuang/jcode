@@ -170,10 +170,32 @@ pub fn recommended_actions(
                 "Run runtime verification: jcode auth-test --provider {}",
                 provider.id
             )),
-            Some(record) if !record.success => actions.push(format!(
-                "Inspect runtime readiness: jcode auth-test --provider {}",
-                provider.id
-            )),
+            Some(record) if !record.success => {
+                let summary = record.summary.to_ascii_lowercase();
+                if summary.contains("402")
+                    || summary.contains("payment required")
+                    || summary.contains("balance exhausted")
+                {
+                    actions.push(
+                        "Restore the provider's billing or usage balance. Re-authenticating will not fix this failure."
+                            .to_string(),
+                    );
+                } else if summary.contains("429")
+                    || summary.contains("quota exhausted")
+                    || summary.contains("rate limit")
+                    || summary.contains("too many requests")
+                {
+                    actions.push(
+                        "Wait for or increase the provider quota before retrying. Re-authenticating will not fix this failure."
+                            .to_string(),
+                    );
+                } else {
+                    actions.push(format!(
+                        "Inspect runtime readiness: jcode auth-test --provider {}",
+                        provider.id
+                    ));
+                }
+            }
             Some(record) if validation_is_stale(record.checked_at_ms) => actions.push(format!(
                 "Refresh stale runtime verification: jcode auth-test --provider {}",
                 provider.id
@@ -260,6 +282,40 @@ mod tests {
             )
             .iter()
             .any(|line| line.contains("Replace the stale OAuth account/token"))
+        );
+    }
+
+    #[test]
+    fn billing_validation_failure_does_not_recommend_reauthentication() {
+        let mut assessment = base_assessment();
+        let validation = assessment.last_validation.as_mut().unwrap();
+        validation.success = false;
+        validation.provider_smoke_ok = Some(false);
+        validation.summary = "provider_smoke: API error (status 402 Payment Required): Grok Build usage balance exhausted".to_string();
+
+        let actions = recommended_actions(
+            crate::provider_catalog::login_providers()
+                .iter()
+                .copied()
+                .find(|provider| provider.id == "grok-build")
+                .unwrap(),
+            &assessment,
+            None,
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("billing or usage balance"))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.contains("Re-authenticating will not fix"))
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.contains("Inspect runtime readiness"))
         );
     }
 

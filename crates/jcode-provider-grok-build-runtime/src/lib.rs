@@ -154,10 +154,7 @@ impl Provider for GrokBuildProvider {
                     tx.clone(),
                     cancel_rx,
                 ) {
-                    let _ = tx.blocking_send(Ok(StreamEvent::Error {
-                        message: format!("{error:#}"),
-                        retry_after_secs: None,
-                    }));
+                    let _ = tx.blocking_send(Err(error));
                 }
             })
             .context("Failed to start Grok Build ACP runtime thread")?;
@@ -576,28 +573,57 @@ where
         .take()
         .context("Grok CLI stderr was unavailable")?;
     let stderr_capture = Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_task = tokio::task::spawn_local(capture_stderr(stderr, Arc::clone(&stderr_capture)));
+    let mut stderr_task =
+        tokio::task::spawn_local(capture_stderr(stderr, Arc::clone(&stderr_capture)));
 
-    let client = GrokAcpClient { tx: event_tx };
+    let received_message = Arc::new(AtomicBool::new(false));
+    let client = GrokAcpClient {
+        tx: event_tx,
+        received_message: Arc::clone(&received_message),
+    };
     let (connection, io) =
         acp::ClientSideConnection::new(client, stdin.compat_write(), stdout.compat(), |future| {
             tokio::task::spawn_local(future);
         });
     let io_task = tokio::task::spawn_local(io);
     let result = operation(connection).await;
-    drop(child);
+    let _ = child.kill().await;
     io_task.abort();
+    let _ = tokio::time::timeout(Duration::from_millis(100), &mut stderr_task).await;
     stderr_task.abort();
+    let stderr = stderr_capture
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .trim()
+        .to_string();
+    if result.is_ok()
+        && !received_message.load(Ordering::Acquire)
+        && stderr_reports_provider_failure(&stderr)
+    {
+        bail!("Grok CLI provider request failed: {stderr}");
+    }
     result.map_err(|error| {
-        let stderr = stderr_capture
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if stderr.trim().is_empty() {
+        if stderr.is_empty() {
             error
         } else {
-            error.context(format!("Grok CLI stderr: {}", stderr.trim()))
+            error.context(format!("Grok CLI stderr: {stderr}"))
         }
     })
+}
+
+fn stderr_reports_provider_failure(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "api error",
+        "payment required",
+        "balance exhausted",
+        "quota exhausted",
+        "too many requests",
+        "rate limit",
+        "http_status",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 async fn capture_stderr(
@@ -624,6 +650,7 @@ async fn capture_stderr(
 
 struct GrokAcpClient {
     tx: mpsc::Sender<Result<StreamEvent>>,
+    received_message: Arc<AtomicBool>,
 }
 
 #[async_trait(?Send)]
@@ -653,6 +680,7 @@ impl acp::Client for GrokAcpClient {
     ) -> acp::Result<()> {
         let event = match notification.update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                self.received_message.store(true, Ordering::Release);
                 text_from_acp_content(chunk.content).map(StreamEvent::TextDelta)
             }
             acp::SessionUpdate::AgentThoughtChunk(chunk) => {

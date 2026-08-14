@@ -90,6 +90,13 @@ fn main() {
                 if std::env::var_os("JCODE_FAKE_GROK_ACP_HANG").is_some() {
                     continue;
                 }
+                if std::env::var_os("JCODE_FAKE_GROK_ACP_PAYMENT_REQUIRED").is_some() {
+                    eprintln!(
+                        "Error: Internal error: {{\"message\":\"API error (status 402 Payment Required): Grok Build usage balance exhausted\",\"http_status\":402}}"
+                    );
+                    response(id, json!({"stopReason":"end_turn"}));
+                    continue;
+                }
                 send(json!({
                     "jsonrpc":"2.0",
                     "method":"_x.ai/settings/update",
