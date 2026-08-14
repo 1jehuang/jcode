@@ -1041,6 +1041,7 @@ mod tests {
             ("effort_increase", Some(&["effort_increase"])),
             ("effort_decrease", Some(&["effort_decrease"])),
             ("centered_toggle", Some(&["centered_toggle"])),
+            ("auto_poke_toggle", Some(&["auto_poke_toggle"])),
             ("scroll_prompt_up", Some(&["prompt_jump_up"])),
             ("scroll_prompt_down", Some(&["prompt_jump_down"])),
             ("scroll_bookmark", Some(&["scroll_bookmark"])),
