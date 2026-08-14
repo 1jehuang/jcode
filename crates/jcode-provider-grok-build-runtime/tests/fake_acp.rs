@@ -19,6 +19,24 @@ fn fake_process(log: &Path) -> GrokBuildProcess {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn provider_surfaces_payment_failure_written_to_subprocess_stderr() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut process = fake_process(&temp.path().join("requests.jsonl"));
+    process
+        .env
+        .insert("JCODE_FAKE_GROK_ACP_PAYMENT_REQUIRED".into(), "1".into());
+    let provider = GrokBuildProvider::with_process(process);
+
+    let error = provider
+        .complete_simple("Reply exactly AUTH_TEST_OK", "")
+        .await
+        .unwrap_err();
+    let detail = format!("{error:#}");
+    assert!(detail.contains("402 Payment Required"), "{detail}");
+    assert!(detail.contains("usage balance exhausted"), "{detail}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn fake_subprocess_covers_handshake_models_new_prompt_and_auth_isolation() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("acp.jsonl");

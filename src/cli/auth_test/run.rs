@@ -38,7 +38,11 @@ async fn maybe_run_auth_test_smoke(
                     },
                 );
             }
-            Err(err) => report.push_step(kind.step_name(), false, format!("{err:#}")),
+            Err(err) => {
+                let detail = format!("{err:#}");
+                kind.set_output(report, detail.clone());
+                report.push_step(kind.step_name(), false, detail);
+            }
         }
     } else if !target.supports_smoke() {
         report.push_step(kind.step_name(), true, kind.unsupported_detail());
@@ -79,7 +83,11 @@ async fn maybe_run_auth_test_smoke_for_choice(
                             },
                         );
                     }
-                    Err(err) => report.push_step(kind.step_name(), false, format!("{err:#}")),
+                    Err(err) => {
+                        let detail = format!("{err:#}");
+                        kind.set_output(report, detail.clone());
+                        report.push_step(kind.step_name(), false, detail);
+                    }
                 }
             }
             Ok(AuthTestChoicePlan::Skip(detail)) => {
