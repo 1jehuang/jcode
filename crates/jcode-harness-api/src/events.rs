@@ -254,6 +254,8 @@ pub struct SessionInfo {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
+    /// The effective persisted display title. A custom rename takes precedence
+    /// over the generated or imported title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: String,
