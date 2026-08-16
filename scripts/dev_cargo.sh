@@ -1065,7 +1065,7 @@ acquire_cargo_gate() {
     return 0
   fi
 
-  local gate_dir gate_path wait_started_ns wait_finished_ns
+  local gate_dir gate_path wait_started_ns wait_finished_ns waited_seconds
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
@@ -1073,7 +1073,13 @@ acquire_cargo_gate() {
   if ! flock -n "$cargo_gate_fd"; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
     wait_started_ns=$(date +%s%N)
-    flock "$cargo_gate_fd"
+    waited_seconds=0
+    # Avoid one silent, unbounded flock call. Periodic notes make it clear that
+    # the process is alive and blocked behind another compiler rather than hung.
+    while ! flock -w 30 "$cargo_gate_fd"; do
+      waited_seconds=$((waited_seconds + 30))
+      log "still waiting for the host-wide Cargo gate (${waited_seconds}s elapsed)"
+    done
     wait_finished_ns=$(date +%s%N)
     cargo_gate_wait_ms=$(( (wait_finished_ns - wait_started_ns) / 1000000 ))
   fi
