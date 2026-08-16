@@ -96,6 +96,17 @@ pub const OPENROUTER_OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiComp
     requires_api_key: true,
 };
 
+pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "orcarouter",
+    display_name: "OrcaRouter",
+    api_base: "https://api.orcarouter.ai/v1",
+    api_key_env: "ORCAROUTER_API_KEY",
+    env_file: "orcarouter.env",
+    setup_url: "https://www.orcarouter.ai",
+    default_model: None,
+    requires_api_key: true,
+};
+
 // Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
 // endpoints, so they can be driven by `provider-doctor` /
 // `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
@@ -443,7 +454,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 38] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 39] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -455,6 +466,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 38] = [
     BASETEN_PROFILE,
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
+    ORCAROUTER_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     GEMINI_OPENAI_COMPAT_PROFILE,
@@ -578,6 +590,19 @@ pub const OPENROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     recommended: false,
     target: LoginProviderTarget::OpenRouter,
     order: LoginProviderSurfaceOrder::new(Some(4), Some(3), Some(4), Some(3), Some(3)),
+};
+
+pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "orcarouter",
+    display_name: "OrcaRouter",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["orca-router"],
+    menu_detail: "API key, OpenAI-compatible gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(ORCAROUTER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
 };
 
 pub const BEDROCK_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1152,7 +1177,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 50] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 51] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1160,6 +1185,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 50] = [
     OPENAI_API_LOGIN_PROVIDER,
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
+    ORCAROUTER_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
     AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,
