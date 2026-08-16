@@ -361,7 +361,8 @@ pub(super) fn draw_messages(
     let viewport_height = render_area.height as usize;
     // Pinned todo band (display.pin_todos): the full todo card rendered beneath
     // the sticky previous-prompt preview, including at the top of the transcript.
-    let pinned_todo_band = pinned_todo_band_lines(app, text_render_area.width, render_area.height);
+    let (pinned_todo_band, pinned_todo_has_more) =
+        pinned_todo_band_lines(app, text_render_area.width, render_area.height);
     let max_scroll = compute_max_scroll_with_prompt_preview(
         total_lines,
         wrapped_user_prompt_starts,
@@ -413,6 +414,19 @@ pub(super) fn draw_messages(
         0u16
     };
     let pinned_todo_lines = pinned_todo_band.len() as u16;
+    set_pinned_todo_more_area(if pinned_todo_has_more {
+        Some(Rect {
+            x: text_render_area.x,
+            y: render_area
+                .y
+                .saturating_add(prompt_preview_lines)
+                .saturating_add(pinned_todo_lines.saturating_sub(1)),
+            width: text_render_area.width,
+            height: 1,
+        })
+    } else {
+        None
+    });
     // Total synthetic rows reserved at the top of the viewport (previous-prompt
     // preview first, then the todo band, then transcript content).
     let top_band_lines = pinned_todo_lines + prompt_preview_lines;
@@ -573,6 +587,7 @@ pub(super) fn draw_messages(
             kind_label: target.kind.label(),
             copied_notice: target.kind.copied_notice(),
             content: target.content.clone(),
+            badge_rect: None,
         });
         // Prefer a line in the block with enough free width so the badge
         // doesn't cut off content (full-width blockquote lines especially).
@@ -596,7 +611,6 @@ pub(super) fn draw_messages(
         &copy_badge_ui,
         copy_badge_now,
     );
-    set_visible_copy_targets(visible_copy_targets);
     super::note_viewport_metrics(super::ViewportMetrics {
         scroll,
         visible_end,
@@ -836,6 +850,8 @@ pub(super) fn draw_messages(
                 line.spans.push(Span::raw(" "));
             }
 
+            let shortcut_start = line.width();
+
             line.spans
                 .push(Span::styled(copy_badge_alt_badge(), alt_style));
             line.spans.push(Span::raw(" "));
@@ -845,8 +861,31 @@ pub(super) fn draw_messages(
                 format!("[{}]", key.to_ascii_uppercase()),
                 key_style,
             ));
+
+            let final_width = line.width();
+            let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
+                Alignment::Center => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
+                Alignment::Right => content_area
+                    .x
+                    .saturating_add(content_area.width.saturating_sub(final_width as u16)),
+                Alignment::Left => content_area.x,
+            };
+            if let Some(target) = visible_copy_targets
+                .iter_mut()
+                .find(|target| target.key.eq_ignore_ascii_case(&key))
+            {
+                target.badge_rect = Some(Rect {
+                    x: aligned_x.saturating_add(shortcut_start as u16),
+                    y: content_area.y.saturating_add(rel_idx as u16),
+                    width: final_width.saturating_sub(shortcut_start) as u16,
+                    height: 1,
+                });
+            }
         }
     }
+    set_visible_copy_targets(visible_copy_targets);
 
     if let Some(range) = app.copy_selection_range().filter(|range| {
         range.start.pane == crate::tui::CopySelectionPane::Chat
@@ -1314,15 +1353,15 @@ fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
     viewport_height: u16,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, bool) {
     if !crate::config::config().display.pin_todos {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let Some(payload) = app.pinned_todos_payload() else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     if width < 8 || viewport_height < 9 {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let msg = crate::tui::DisplayMessage::todos(payload.to_string());
     let card_lines = super::messages::get_cached_message_lines(
@@ -1332,13 +1371,14 @@ fn pinned_todo_band_lines(
         super::messages::render_todos_message,
     );
     if card_lines.is_empty() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     // Band budget: about a third of the viewport.
     let budget = ((viewport_height as usize) / 3).clamp(2, 12);
     let content_budget = budget;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if card_lines.len() > content_budget {
+    let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
+    if has_more {
         let shown = content_budget.saturating_sub(1);
         let hidden = card_lines.len() - shown;
         lines.extend(card_lines.into_iter().take(shown));
@@ -1349,7 +1389,24 @@ fn pinned_todo_band_lines(
     } else {
         lines.extend(card_lines);
     }
-    lines
+    (lines, has_more)
+}
+
+static PINNED_TODO_MORE_AREA: std::sync::Mutex<Option<Rect>> = std::sync::Mutex::new(None);
+
+fn set_pinned_todo_more_area(area: Option<Rect>) {
+    if let Ok(mut current) = PINNED_TODO_MORE_AREA.lock() {
+        *current = area;
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_pinned_todo_more_area_for_test(area: Option<Rect>) {
+    set_pinned_todo_more_area(area);
+}
+
+pub(crate) fn pinned_todo_more_area() -> Option<Rect> {
+    PINNED_TODO_MORE_AREA.lock().ok().and_then(|area| *area)
 }
 
 fn compute_prompt_preview_line_count(

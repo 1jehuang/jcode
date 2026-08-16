@@ -87,7 +87,7 @@ pub(crate) mod tools_ui;
 #[path = "ui_transitions.rs"]
 mod transitions;
 #[path = "ui_viewport.rs"]
-mod viewport;
+pub(crate) mod viewport;
 use crate::tui::mermaid;
 #[cfg(test)]
 pub(crate) use box_utils::truncate_line_to_width;
@@ -588,6 +588,8 @@ pub(crate) struct VisibleCopyTarget {
     pub kind_label: String,
     pub copied_notice: String,
     pub content: String,
+    /// Screen cells occupied by the rendered shortcut badge in the latest frame.
+    pub badge_rect: Option<Rect>,
 }
 
 // Copy badges intentionally avoid h/j/k/l so they never shadow vi-style
@@ -710,6 +712,29 @@ pub(crate) fn visible_copy_target_for_key(key: char) -> Option<VisibleCopyTarget
             .iter()
             .find(|target| target.key.eq_ignore_ascii_case(&key))
             .cloned()
+    }
+}
+
+pub(crate) fn visible_copy_target_at(column: u16, row: u16) -> Option<VisibleCopyTarget> {
+    let contains = |target: &&VisibleCopyTarget| {
+        target.badge_rect.is_some_and(|rect| {
+            column >= rect.x
+                && column < rect.x.saturating_add(rect.width)
+                && row >= rect.y
+                && row < rect.y.saturating_add(rect.height)
+        })
+    };
+    #[cfg(test)]
+    {
+        TEST_VISIBLE_COPY_TARGETS.with(|state| state.borrow().iter().find(contains).cloned())
+    }
+    #[cfg(not(test))]
+    {
+        let state = match visible_copy_targets_state().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.iter().find(contains).cloned()
     }
 }
 

@@ -1484,6 +1484,15 @@ impl App {
             self.set_diff_pane_focus(false);
         }
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && crate::tui::ui::viewport::pinned_todo_more_area().is_some_and(|area| {
+                super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
+            })
+        {
+            self.pinned_todos_expanded = true;
+            finish_mouse_event!(false, "pinned_todos_expand");
+        }
+
         // A left press in the composer moves the caret first (native text-field
         // behavior), then falls through so the shared copy-selection machinery
         // can arm a drag anchor: click repositions the cursor, drag selects the
@@ -1646,6 +1655,20 @@ impl App {
             && self.try_toggle_swarm_expand_at(mouse.column, mouse.row)
         {
             finish_mouse_event!(false, "toggle_swarm_expand");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && let Some(target) = crate::tui::ui::visible_copy_target_at(mouse.column, mouse.row)
+        {
+            let success = super::helpers::copy_to_clipboard(&target.content);
+            self.record_copy_badge_key_press(target.key);
+            self.record_copy_badge_feedback(target.key, success);
+            if success {
+                self.set_status_notice(target.copied_notice);
+            } else {
+                self.set_status_notice(format!("Failed to copy {}", target.kind_label));
+            }
+            finish_mouse_event!(false, "copy_badge_click");
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
