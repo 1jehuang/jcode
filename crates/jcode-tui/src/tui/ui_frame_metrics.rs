@@ -1261,6 +1261,7 @@ pub(crate) fn recent_flicker_copy_target_for_key(key: char) -> Option<VisibleCop
         kind_label: "flicker hint".to_string(),
         copied_notice: "Copied flicker hint".to_string(),
         content: notice.hint,
+        badge_rect: None,
     })
 }
 
