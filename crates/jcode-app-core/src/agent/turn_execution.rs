@@ -210,6 +210,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.refresh_agents_md_snapshot();
         self.reconcile_explicit_provider_pin_route();
         self.reset_runtime_state_for_session_change();
         self.provider_session_id = None;
@@ -627,6 +628,7 @@ impl Agent {
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
+        self.refresh_agents_md_snapshot();
         crate::tool::clear_session_tool_policy(&previous_session_id);
         crate::tool::set_session_tool_policy(
             &self.session.id,

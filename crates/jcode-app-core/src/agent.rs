@@ -233,6 +233,9 @@ pub struct Agent {
     mcp_late_register_resolved: bool,
     /// Override system prompt (used by ambient mode to inject a custom prompt)
     system_prompt_override: Option<String>,
+    /// AGENTS.md is session bootstrap input. Keep the captured text stable so
+    /// tool writes do not mutate the provider's cacheable prefix mid-session.
+    agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
     /// Whether memory features are enabled for this session
     memory_enabled: bool,
     /// One-step undo snapshot captured before the most recent rewind.
@@ -255,6 +258,15 @@ pub struct Agent {
 }
 
 impl Agent {
+    fn refresh_agents_md_snapshot(&mut self) {
+        let working_dir = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new);
+        self.agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
+    }
+
     fn should_track_client_cache(&self) -> bool {
         match std::env::var("JCODE_TRACK_CLIENT_CACHE") {
             Ok(value) => {
@@ -273,6 +285,8 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let skills = SkillRegistry::shared_snapshot();
+        let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
+        let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
         let agent = Self {
             provider,
@@ -299,6 +313,7 @@ impl Agent {
             locked_tools: None,
             mcp_late_register_resolved: false,
             system_prompt_override: None,
+            agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
             stdin_request_tx: None,

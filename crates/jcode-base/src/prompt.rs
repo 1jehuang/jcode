@@ -531,6 +531,51 @@ pub fn build_system_prompt_split_with_capabilities(
     working_dir: Option<&Path>,
     capabilities: PromptCapabilities,
 ) -> (SplitSystemPrompt, ContextInfo) {
+    let agents_md = load_agents_md_files_from_dir(working_dir);
+    build_system_prompt_split_with_capabilities_and_agents_md(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        capabilities,
+        agents_md,
+    )
+}
+
+/// Build a split prompt using an already captured AGENTS.md snapshot.
+///
+/// Long-lived agents use this to keep their provider-cache prefix stable when a
+/// tool edits AGENTS.md during the session. New sessions still capture the
+/// latest instructions.
+pub fn build_system_prompt_split_with_agents_md(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    agents_md: (Option<String>, ContextInfo),
+) -> (SplitSystemPrompt, ContextInfo) {
+    build_system_prompt_split_with_capabilities_and_agents_md(
+        skill_prompt,
+        available_skills,
+        is_selfdev,
+        memory_prompt,
+        working_dir,
+        PromptCapabilities::current(),
+        agents_md,
+    )
+}
+
+fn build_system_prompt_split_with_capabilities_and_agents_md(
+    skill_prompt: Option<&str>,
+    available_skills: &[SkillInfo],
+    is_selfdev: bool,
+    memory_prompt: Option<&str>,
+    working_dir: Option<&Path>,
+    capabilities: PromptCapabilities,
+    agents_md: (Option<String>, ContextInfo),
+) -> (SplitSystemPrompt, ContextInfo) {
     let mut static_parts = base_system_prompt_parts(capabilities, working_dir);
     let mut dynamic_parts = Vec::new();
     let mut info = ContextInfo {
@@ -549,7 +594,7 @@ pub fn build_system_prompt_split_with_capabilities(
     }
 
     // Add AGENTS.md instructions (static per project)
-    let (md_content, md_info) = load_agents_md_files_from_dir(working_dir);
+    let (md_content, md_info) = agents_md;
     if let Some(content) = md_content {
         static_parts.push(content);
     }
