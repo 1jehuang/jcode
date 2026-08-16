@@ -79,6 +79,10 @@ pub struct DisplayConfig {
     /// just the one-line summary (default: false)
     #[serde(default)]
     pub show_agentgrep_output: bool,
+    /// Show up to the last three non-empty bash output lines beneath the tool
+    /// summary (default: false).
+    #[serde(default)]
+    pub show_bash_output: bool,
     /// Show the dimmed technical detail (command, path, args) after the
     /// model-provided intent on tool rows (default: false). When off, rows
     /// that have an intent show only the intent; rows without an intent
@@ -152,6 +156,7 @@ impl Default for DisplayConfig {
             compact_notifications: false,
             copy_badge_alt_label: String::new(),
             show_agentgrep_output: false,
+            show_bash_output: false,
             tool_call_details: false,
             native_scrollbars: NativeScrollbarConfig::default(),
             keybinding_hints: true,
