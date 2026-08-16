@@ -816,6 +816,65 @@ fn session_matches_query_searches_jcode_transcript_contents() {
 }
 
 #[test]
+fn jcode_search_index_keeps_late_turns_after_reaching_its_budget() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    invalidate_session_list_cache();
+
+    let mut session = Session::create_with_id(
+        "session_late_transcript_search".to_string(),
+        Some("/tmp/transcript-search".to_string()),
+        Some("Late Transcript Search".to_string()),
+    );
+    for index in 0..12 {
+        let text = if index == 11 {
+            format!("{} final-turn-platypus", "x".repeat(7_500))
+        } else {
+            format!("turn-{index} {}", "x".repeat(7_500))
+        };
+        session.append_stored_message(crate::session::StoredMessage {
+            id: format!("msg{index}"),
+            role: crate::message::Role::User,
+            content: vec![crate::message::ContentBlock::Text {
+                text,
+                cache_control: None,
+            }],
+            display_role: None,
+            timestamp: None,
+            tool_duration_ms: None,
+            token_usage: None,
+        });
+    }
+    session.save().expect("save session");
+
+    let sessions = load_sessions().expect("load sessions");
+    let loaded = sessions
+        .iter()
+        .find(|candidate| candidate.id == "session_late_transcript_search")
+        .expect("session present");
+    assert!(loaded.search_index.len() <= INITIAL_TRANSCRIPT_SEARCH_BUDGET_BYTES + 256);
+    assert!(session_matches_picker_query(loaded, "final-turn-platypus"));
+    invalidate_session_list_cache();
+}
+
+#[test]
+fn raw_search_excerpt_samples_suffix_of_one_long_message_without_splitting_utf8() {
+    let suffix = "晚い-message-needle";
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_str(&format!(
+        "{}",
+        serde_json::to_string(&format!("{} {suffix}", "─".repeat(6_000)))
+            .expect("serialize content")
+    ))
+    .expect("raw value");
+
+    let excerpt =
+        raw_value_search_excerpt(&raw, MESSAGE_SEARCH_EXCERPT_BYTES).expect("search excerpt");
+    assert!(excerpt.contains(suffix));
+    assert!(excerpt.len() <= MESSAGE_SEARCH_EXCERPT_BYTES);
+}
+
+#[test]
 fn session_matches_query_searches_external_codex_transcript_contents() {
     let _env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("temp dir");
