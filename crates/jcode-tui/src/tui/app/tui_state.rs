@@ -1334,8 +1334,6 @@ impl crate::tui::TuiState for App {
             }
         });
 
-        let memory_info = gather_memory_info(self.memory_enabled, self.session.working_dir.clone());
-
         // Gather swarm info
         let swarm_info = if self.swarm_enabled {
             let subagent_status = self.subagent_status.clone();
@@ -1589,7 +1587,9 @@ impl crate::tui::TuiState for App {
             session_name,
             working_dir: self.session.working_dir.clone(),
             client_count,
-            memory_info,
+            // Memory remains available through commands and tools, but no longer
+            // occupies a dedicated info widget.
+            memory_info: None,
             swarm_info,
             background_info,
             usage_info,
