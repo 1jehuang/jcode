@@ -4174,6 +4174,7 @@ pub(crate) fn render_tool_message(
     }
 
     if tools_ui::canonical_tool_name(&tc.name) == "bash"
+        && tools_ui::show_bash_output()
         && msg.content.trim() != "Command completed successfully (no output)"
     {
         const MAX_COLLAPSED_OUTPUT_LINES: usize = 3;

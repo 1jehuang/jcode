@@ -1941,8 +1941,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     let rendered = extract_line_text(&lines[0]);
 
     assert!(rendered.contains("bash · Verify compact progress card · $ cargo test"));
-    assert_eq!(lines.len(), 2, "only Bash output should add a detail line");
-    assert!(extract_line_text(&lines[1]).contains("ok"));
+    assert_eq!(lines.len(), 1, "Bash output is hidden by default");
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(false);
 }
 
@@ -1980,8 +1979,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
         !rendered.contains("cargo test"),
         "technical detail should be hidden by default: {rendered}"
     );
-    assert_eq!(lines.len(), 2, "only Bash output should add a detail line");
-    assert!(extract_line_text(&lines[1]).contains("ok"));
+    assert_eq!(lines.len(), 1, "Bash output is hidden by default");
 }
 
 /// Even with details off, a failed tool row keeps its error summary so
@@ -2043,7 +2041,7 @@ fn render_tool_message_shows_token_badge() {
 }
 
 #[test]
-fn render_tool_message_shows_trimmed_bash_output() {
+fn render_tool_message_hides_bash_output() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
@@ -2064,15 +2062,38 @@ fn render_tool_message_shows_trimmed_bash_output() {
     let lines = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
     let rendered = lines.iter().map(extract_line_text).collect::<Vec<_>>();
 
-    assert!(rendered.iter().any(|line| line.contains("<class 'zip'>")));
-    assert!(rendered.iter().any(|line| line.contains("[('p', 'b')")));
-    for output_line in &rendered[rendered.len() - 2..] {
-        assert!(output_line.starts_with("      "), "{output_line:?}");
-        assert!(
-            !output_line.contains('│'),
-            "bash output should not have a vertical gutter: {output_line:?}"
-        );
-    }
+    assert!(!rendered.iter().any(|line| line.contains("<class 'zip'>")));
+    assert!(!rendered.iter().any(|line| line.contains("[('p', 'b')")));
+}
+
+#[test]
+fn render_tool_message_shows_bash_output_when_enabled() {
+    crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "one\ntwo\nthree\nfour".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: None,
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_bash_output_enabled".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "printf output"}),
+            intent: Some("Print output".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let rendered = render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off)
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered.len(), 4);
+    assert!(!rendered.iter().any(|line| line.trim() == "one"));
+    assert!(rendered.iter().any(|line| line.trim() == "two"));
+    assert!(rendered.iter().any(|line| line.trim() == "four"));
+    crate::tui::ui::tools_ui::tests_show_bash_output_override::set(false);
 }
 
 fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {

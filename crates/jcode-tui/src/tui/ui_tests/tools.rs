@@ -1171,8 +1171,8 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
     assert!(!rendered.is_empty(), "rendered={rendered:?}");
     assert_eq!(
         rendered.len(),
-        2,
-        "Bash output should add one line: {rendered:?}"
+        1,
+        "Bash output is hidden by default: {rendered:?}"
     );
     assert!(
         rendered
@@ -1180,7 +1180,6 @@ fn test_render_tool_message_with_intent_never_adds_second_command_line() {
             .all(|line| !line.trim_start().starts_with('$')),
         "rendered={rendered:?}"
     );
-    assert!(rendered[1].contains("ok"), "rendered={rendered:?}");
 }
 
 #[test]
