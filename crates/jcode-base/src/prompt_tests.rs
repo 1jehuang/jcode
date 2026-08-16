@@ -197,6 +197,40 @@ fn agents_md_distinct_project_and_global_files_are_both_loaded() {
 }
 
 #[test]
+fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
+    let project_dir = tempfile::TempDir::new().unwrap();
+    let agents_md = project_dir.path().join("AGENTS.md");
+    std::fs::write(&agents_md, "original session instructions").unwrap();
+    let snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+
+    let (before, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot.clone(),
+    );
+    std::fs::write(&agents_md, "instructions written during the session").unwrap();
+    let (after, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        snapshot,
+    );
+
+    assert_eq!(before.static_part, after.static_part);
+    assert!(after.static_part.contains("original session instructions"));
+    assert!(
+        !after
+            .static_part
+            .contains("instructions written during the session")
+    );
+}
+
+#[test]
 fn agents_md_missing_global_file_keeps_project_instructions() {
     let project_dir = tempfile::TempDir::new().unwrap();
     let global_dir = tempfile::TempDir::new().unwrap();
