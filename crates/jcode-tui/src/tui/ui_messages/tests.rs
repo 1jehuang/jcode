@@ -588,12 +588,9 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     }
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
-    // Plan-level intent renders once, above the groups.
+    // Only the plan-level assessment renders above the groups.
     assert!(plain.contains("Understands user intent clear"), "{plain}");
-    assert!(
-        plain.contains("User intention · Keep the agent aligned with the user's request"),
-        "{plain}"
-    );
+    assert!(!plain.contains("Keep the agent aligned"), "{plain}");
     assert!(!plain.contains("Feedback ·"), "{plain}");
     assert!(!plain.contains("Inspect a debug frame"), "{plain}");
     assert!(plain.contains("● Render the card · plausible"), "{plain}");
@@ -601,7 +598,7 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
 }
 
 #[test]
-fn render_todos_message_compacts_long_details_at_narrow_widths() {
+fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     let long_text = "This deliberately long assessment detail should not consume several rows in a narrow terminal window";
     let todos = vec![crate::todo::TodoItem {
         id: "1".to_string(),
@@ -617,6 +614,7 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
     }];
     let plan = crate::todo::TodoPlan {
         user_intention: Some(long_text.to_string()),
+        understands_user_intent: Some(crate::todo::IntentUnderstanding::Partial),
         ..Default::default()
     };
     let goals = vec![crate::todo::TodoGoal {
@@ -637,9 +635,7 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
             .iter()
             .filter(|line| line.contains("User intention"))
             .count(),
-        1,
-        "{}",
-        narrow.join("\n")
+        1
     );
     assert_eq!(
         narrow
@@ -648,11 +644,6 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
             .count(),
         0,
         "verbose goal feedback should stay out of inline cards: {}",
-        narrow.join("\n")
-    );
-    assert!(
-        narrow.iter().any(|line| line.contains('…')),
-        "{}",
         narrow.join("\n")
     );
     assert!(
@@ -668,8 +659,7 @@ fn render_todos_message_compacts_long_details_at_narrow_widths() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
     assert!(
-        wide.iter()
-            .any(|line| line.contains("narrow terminal window")),
+        wide.iter().any(|line| line.contains(long_text)),
         "wide={wide:?}"
     );
     assert!(
