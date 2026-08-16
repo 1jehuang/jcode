@@ -4181,7 +4181,7 @@ pub(crate) fn render_tool_message(
         let total = output_lines.clone().count();
         for output in output_lines.skip(total.saturating_sub(MAX_COLLAPSED_OUTPUT_LINES)) {
             let output_line = Line::from(vec![
-                Span::styled("    │ ", Style::default().fg(dim_color())),
+                Span::raw("      "),
                 Span::styled(output.to_string(), Style::default().fg(dim_color())),
             ]);
             lines.push(super::truncate_line_with_ellipsis_to_width(
