@@ -52,6 +52,16 @@ impl Drop for ScopedJcodeHome {
 }
 
 fn write_session_record(home: &Path, session_id: &str, working_dir: &Path) -> PathBuf {
+    write_session_record_with_titles(home, session_id, working_dir, None, None)
+}
+
+fn write_session_record_with_titles(
+    home: &Path,
+    session_id: &str,
+    working_dir: &Path,
+    title: Option<&str>,
+    custom_title: Option<&str>,
+) -> PathBuf {
     let sessions = home.join("sessions");
     std::fs::create_dir_all(&sessions).expect("create sessions directory");
     let path = sessions.join(format!("{session_id}.json"));
@@ -59,6 +69,8 @@ fn write_session_record(home: &Path, session_id: &str, working_dir: &Path) -> Pa
         &path,
         json!({
             "working_dir": working_dir,
+            "title": title,
+            "custom_title": custom_title,
             "messages": [{"role": "user", "content": "hello"}],
         })
         .to_string(),
@@ -114,6 +126,16 @@ fn create_session_maps_to_subscribe() {
 
 #[test]
 fn state_event_answers_pending_attach() {
+    let home = ScopedJcodeHome::new("attach-title");
+    let project = home.path.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    write_session_record_with_titles(
+        &home.path,
+        "abc",
+        &project,
+        Some("Generated attach title"),
+        Some("Persisted attach rename"),
+    );
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 5}));
     assert_eq!(
@@ -138,7 +160,11 @@ fn state_event_answers_pending_attach() {
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].reply_to, Some(5));
     match &frames[0].event {
-        ApiEvent::Attached { session } => assert_eq!(session.session_id, "abc"),
+        ApiEvent::Attached { session } => {
+            assert_eq!(session.session_id, "abc");
+            assert_eq!(session.title.as_deref(), Some("Persisted attach rename"));
+            assert_eq!(session.working_dir.as_deref(), project.to_str());
+        }
         other => panic!("unexpected: {other:?}"),
     }
     assert_eq!(state.session_id.as_deref(), Some("abc"));
@@ -1032,8 +1058,20 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
     let second_root = home.path.join("second-project");
     std::fs::create_dir_all(&first_root).unwrap();
     std::fs::create_dir_all(&second_root).unwrap();
-    write_session_record(&home.path, "persisted_one", &first_root);
-    write_session_record(&home.path, "persisted_two", &second_root);
+    write_session_record_with_titles(
+        &home.path,
+        "persisted_one",
+        &first_root,
+        Some("  Generated first title  "),
+        None,
+    );
+    write_session_record_with_titles(
+        &home.path,
+        "persisted_two",
+        &second_root,
+        Some("Generated second title"),
+        Some("  Custom second title  "),
+    );
     std::fs::write(home.path.join("sessions/not-a-session.txt"), "ignored").unwrap();
 
     let event = only_reply_event(
@@ -1051,6 +1089,8 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
     );
     assert_eq!(sessions[0].working_dir.as_deref(), first_root.to_str());
     assert_eq!(sessions[1].working_dir.as_deref(), second_root.to_str());
+    assert_eq!(sessions[0].title.as_deref(), Some("Generated first title"));
+    assert_eq!(sessions[1].title.as_deref(), Some("Custom second title"));
 }
 
 #[test]
