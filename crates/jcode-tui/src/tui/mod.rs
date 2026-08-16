@@ -208,6 +208,10 @@ pub trait TuiState {
     fn pinned_todos_payload(&self) -> Option<&str> {
         None
     }
+    /// Whether the pinned todo band is temporarily expanded to show every row.
+    fn pinned_todos_expanded(&self) -> bool {
+        false
+    }
 
     // ---- Input ----
     fn input(&self) -> &str;

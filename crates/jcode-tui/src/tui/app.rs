@@ -1347,6 +1347,8 @@ pub struct App {
     /// Last time the pinned todo band re-read todos from disk (1s throttle).
     #[allow(dead_code)]
     pinned_todos_checked_at: Option<Instant>,
+    /// User-expanded state for the pinned todo band's `+N more` row.
+    pinned_todos_expanded: bool,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
     last_client_focus_recorded_at: Option<Instant>,
