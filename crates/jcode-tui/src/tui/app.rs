@@ -950,6 +950,9 @@ pub struct App {
     /// has sent. Without a budget, a model that stops updating its todos gets
     /// nudged on every turn forever, silently burning an API call per tick.
     todo_completion_gate_attempts: u8,
+    /// Whether the clean completion handoff has already requested a user-facing
+    /// final response for the current todo cycle.
+    todo_final_response_requested: bool,
     /// Exact continuation sent for the last incomplete todo state. An unchanged
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
