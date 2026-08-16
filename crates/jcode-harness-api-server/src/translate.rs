@@ -985,13 +985,26 @@ impl BridgeState {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // Remember the new effort even when the change was requested by
                 // another client, so later identity events stay truthful.
-                if event["error"].as_str().is_none()
-                    && let Some(effort) = event["effort"].as_str()
-                {
-                    self.current_effort = Some(effort.to_string());
-                }
+                let changed = event["error"].as_str().is_none()
+                    && event["effort"].as_str().is_some_and(|effort| {
+                        let effort = Some(effort.to_string());
+                        let moved = self.current_effort != effort;
+                        self.current_effort = effort;
+                        moved
+                    });
+                // A successful change is also broadcast as identity, mirroring
+                // model_changed: every attached client needs to know the
+                // effort moved under it, not only the one that asked.
+                let info = changed.then(|| {
+                    ServerFrame::event(ApiEvent::ModelInfo {
+                        session_id: session(self),
+                        provider: self.current_provider.clone(),
+                        model: self.current_model.clone(),
+                        reasoning_effort: self.current_effort.clone(),
+                    })
+                });
                 let Some(api_id) = self.take_simple(id, SimpleKind::ReasoningEffort) else {
-                    return vec![];
+                    return info.into_iter().collect();
                 };
                 match event["error"].as_str() {
                     Some(error) => vec![ServerFrame::reply(
@@ -1001,7 +1014,9 @@ impl BridgeState {
                             message: error.to_string(),
                         },
                     )],
-                    None => vec![ServerFrame::reply(api_id, ApiEvent::Ok)],
+                    None => std::iter::once(ServerFrame::reply(api_id, ApiEvent::Ok))
+                        .chain(info)
+                        .collect(),
                 }
             }
             // Compaction is scheduled, not performed inline, and the daemon
