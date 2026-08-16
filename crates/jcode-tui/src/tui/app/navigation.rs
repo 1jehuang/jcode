@@ -1658,6 +1658,13 @@ impl App {
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+            && crate::tui::ui::visible_expand_edit_badge_at(mouse.column, mouse.row)
+            && super::input::handle_expand_edit_badge_shortcut(self, 'e')
+        {
+            finish_mouse_event!(false, "expand_edit_badge_click");
+        }
+
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
             && let Some(target) = crate::tui::ui::visible_copy_target_at(mouse.column, mouse.row)
         {
             let success = super::helpers::copy_to_clipboard(&target.content);

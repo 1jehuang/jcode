@@ -2488,7 +2488,7 @@ fn handle_inline_image_toggle_shortcut(app: &mut App, key: char) -> bool {
     true
 }
 
-fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
+pub(super) fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
     if !key.eq_ignore_ascii_case(&'e') {
         return false;
     }
