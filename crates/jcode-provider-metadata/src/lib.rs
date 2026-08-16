@@ -347,7 +347,8 @@ mod tests {
 
     #[test]
     fn orcarouter_login_identifies_openai_compatible_endpoint() {
-        let provider = resolve_login_provider("orcarouter").expect("OrcaRouter provider");
+        let provider = resolve_login_selection("orcarouter", &cli_login_providers())
+            .expect("OrcaRouter CLI login provider");
         let LoginProviderTarget::OpenAiCompatible(profile) = provider.target else {
             panic!("OrcaRouter should use the OpenAI-compatible runtime");
         };
