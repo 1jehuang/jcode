@@ -1435,7 +1435,7 @@ fn wrap_todo_detail(value: &str, width: usize) -> Vec<String> {
     chunks
 }
 
-/// Plan-level intent lines shown once above the todo groups.
+/// Plan-level assessment lines shown once above the todo groups.
 fn push_todo_plan_details(
     lines: &mut Vec<Line<'static>>,
     plan: &crate::todo::TodoPlan,
@@ -1459,20 +1459,22 @@ fn push_todo_plan_details(
             inner_width,
         ));
     }
-    if let Some(intention) = plan
-        .user_intention
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        push_todo_detail(
-            lines,
-            "User intention",
-            intention,
-            base_indent,
-            inner_width,
-            compact_details,
-        );
+    if !crate::todo::intent_understanding_passes(plan.understands_user_intent) {
+        if let Some(intention) = plan
+            .user_intention
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            push_todo_detail(
+                lines,
+                "User intention",
+                intention,
+                base_indent,
+                inner_width,
+                compact_details,
+            );
+        }
     }
 }
 
@@ -1642,6 +1644,22 @@ fn render_todo_plan_update(
     let Some(update) = plan_update else {
         return Vec::new();
     };
+    let intent_is_unclear = !crate::todo::intent_understanding_passes(
+        update
+            .after
+            .as_ref()
+            .and_then(|plan| plan.understands_user_intent),
+    );
+    if !update
+        .fields
+        .contains(&crate::todo::TodoPlanField::UnderstandsUserIntent)
+        && !(intent_is_unclear
+            && update
+                .fields
+                .contains(&crate::todo::TodoPlanField::UserIntention))
+    {
+        return Vec::new();
+    }
     let centered = markdown::center_code_blocks();
     let card_width = if centered {
         (width.saturating_sub(4) as usize).min(120)
@@ -1678,16 +1696,19 @@ fn render_todo_plan_update(
                 base_indent,
                 inner_width,
             ),
-            crate::todo::TodoPlanField::UserIntention => push_todo_text_update(
-                &mut lines,
-                "User intention",
-                update
-                    .after
-                    .as_ref()
-                    .and_then(|plan| plan.user_intention.as_deref()),
-                base_indent,
-                inner_width,
-            ),
+            crate::todo::TodoPlanField::UserIntention if intent_is_unclear => {
+                push_todo_text_update(
+                    &mut lines,
+                    "User intention",
+                    update
+                        .after
+                        .as_ref()
+                        .and_then(|plan| plan.user_intention.as_deref()),
+                    base_indent,
+                    inner_width,
+                )
+            }
+            crate::todo::TodoPlanField::UserIntention => {}
         }
     }
 
