@@ -2066,6 +2066,13 @@ fn render_tool_message_shows_trimmed_bash_output() {
 
     assert!(rendered.iter().any(|line| line.contains("<class 'zip'>")));
     assert!(rendered.iter().any(|line| line.contains("[('p', 'b')")));
+    for output_line in &rendered[rendered.len() - 2..] {
+        assert!(output_line.starts_with("      "), "{output_line:?}");
+        assert!(
+            !output_line.contains('│'),
+            "bash output should not have a vertical gutter: {output_line:?}"
+        );
+    }
 }
 
 fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {
