@@ -281,6 +281,19 @@ fn push_sampled_search_text(dst: &mut String, src: &str, limit: usize) {
         return;
     }
 
+    // An oversized first message has no existing session head to preserve. Keep
+    // both ends of that message instead of retaining only its suffix.
+    if dst.is_empty() {
+        let head_budget = limit / 2;
+        let mut head_end = src.len().min(head_budget);
+        while head_end > 0 && !src.is_char_boundary(head_end) {
+            head_end -= 1;
+        }
+        dst.push_str(&src[..head_end]);
+        dst.push_str(suffix_at_most(src, limit.saturating_sub(head_end)));
+        return;
+    }
+
     let head_budget = limit / 2;
     let mut head_end = dst.len().min(head_budget);
     while head_end > 0 && !dst.is_char_boundary(head_end) {
