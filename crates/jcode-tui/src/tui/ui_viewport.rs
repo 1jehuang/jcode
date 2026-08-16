@@ -730,6 +730,7 @@ pub(super) fn draw_messages(
         })
         .flatten();
     super::set_visible_expand_edit_badge(expand_edit_badge_visible, visible_expand_badge_line);
+    super::set_visible_expand_edit_badge_rect(None);
 
     let expand_badge_line = if expand_feedback_active {
         copy_badge_ui.expand_feedback_line.or_else(|| {
@@ -788,6 +789,7 @@ pub(super) fn draw_messages(
                     Style::default().fg(dim_color())
                 };
 
+                let badge_start = line.width().saturating_add(1);
                 line.spans.push(Span::raw(" "));
                 line.spans
                     .push(Span::styled(copy_badge_alt_badge(), alt_style));
@@ -801,6 +803,23 @@ pub(super) fn draw_messages(
                     Style::default().fg(dim_color())
                 };
                 line.spans.push(Span::styled(badge_text, badge_text_style));
+
+                let final_width = line.width();
+                let aligned_x = match line.alignment.unwrap_or(Alignment::Left) {
+                    Alignment::Center => content_area
+                        .x
+                        .saturating_add(content_area.width.saturating_sub(final_width as u16) / 2),
+                    Alignment::Right => content_area
+                        .x
+                        .saturating_add(content_area.width.saturating_sub(final_width as u16)),
+                    Alignment::Left => content_area.x,
+                };
+                super::set_visible_expand_edit_badge_rect(Some(Rect {
+                    x: aligned_x.saturating_add(badge_start as u16),
+                    y: content_area.y.saturating_add(rel_idx as u16),
+                    width: final_width.saturating_sub(badge_start) as u16,
+                    height: 1,
+                }));
             }
         }
     }

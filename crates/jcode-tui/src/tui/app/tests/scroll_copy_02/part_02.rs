@@ -371,6 +371,44 @@ fn test_expand_badge_rendered_shortcut_expands_with_alt_lowercase_event() {
 }
 
 #[test]
+fn test_clicking_expand_edit_badge_expands_to_full_diff() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = make_edit_badge_test_app(20);
+    render_and_snap(&app, &mut terminal);
+
+    let buf = terminal.backend().buffer();
+    let area = *buf.area();
+    let mut badge = None;
+    'rows: for row in 0..area.height {
+        let line = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if let Some(byte) = line.find("[E] expand") {
+            badge = Some((line[..byte].chars().count() as u16, row));
+            break 'rows;
+        }
+    }
+    let (column, row) = badge.expect("expand edit badge must be visible");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        app.handle_mouse_event(MouseEvent {
+            kind,
+            column: column + 1,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::FullInline);
+    assert_eq!(
+        app.status_notice(),
+        Some("Expanded edit diffs · Diffs: Inline Full".to_string())
+    );
+}
+
+#[test]
 fn test_expand_badge_shortcut_works_while_diff_pane_focused() {
     use crossterm::event::{KeyCode, KeyModifiers};
 

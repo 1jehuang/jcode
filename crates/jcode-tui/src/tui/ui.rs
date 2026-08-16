@@ -240,6 +240,7 @@ thread_local! {
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
     static TEST_VISIBLE_EXPAND_EDIT_BADGE_LINE: Cell<Option<usize>> = const { Cell::new(None) };
+    static TEST_VISIBLE_EXPAND_EDIT_BADGE_RECT: Cell<Option<Rect>> = const { Cell::new(None) };
     static TEST_PROMPT_VIEWPORT_STATE: RefCell<PromptViewportState> = RefCell::new(PromptViewportState::default());
     static TEST_COPY_VIEWPORT: RefCell<CopyViewportSnapshots> = RefCell::new(CopyViewportSnapshots::default());
 }
@@ -606,6 +607,9 @@ static VISIBLE_EXPAND_EDIT_BADGE: OnceLock<Mutex<bool>> = OnceLock::new();
 static VISIBLE_EXPAND_EDIT_BADGE_LINE: OnceLock<Mutex<Option<usize>>> = OnceLock::new();
 
 #[cfg(not(test))]
+static VISIBLE_EXPAND_EDIT_BADGE_RECT: OnceLock<Mutex<Option<Rect>>> = OnceLock::new();
+
+#[cfg(not(test))]
 fn visible_copy_targets_state() -> &'static Mutex<Vec<VisibleCopyTarget>> {
     VISIBLE_COPY_TARGETS.get_or_init(|| Mutex::new(Vec::new()))
 }
@@ -618,6 +622,41 @@ fn visible_expand_edit_badge_state() -> &'static Mutex<bool> {
 #[cfg(not(test))]
 fn visible_expand_edit_badge_line_state() -> &'static Mutex<Option<usize>> {
     VISIBLE_EXPAND_EDIT_BADGE_LINE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(not(test))]
+fn visible_expand_edit_badge_rect_state() -> &'static Mutex<Option<Rect>> {
+    VISIBLE_EXPAND_EDIT_BADGE_RECT.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn set_visible_expand_edit_badge_rect(rect: Option<Rect>) {
+    #[cfg(test)]
+    {
+        TEST_VISIBLE_EXPAND_EDIT_BADGE_RECT.with(|state| state.set(rect));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = visible_expand_edit_badge_rect_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *state = rect;
+    }
+}
+
+pub(crate) fn visible_expand_edit_badge_at(column: u16, row: u16) -> bool {
+    #[cfg(test)]
+    let rect = TEST_VISIBLE_EXPAND_EDIT_BADGE_RECT.with(Cell::get);
+    #[cfg(not(test))]
+    let rect = *visible_expand_edit_badge_rect_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    rect.is_some_and(|rect| {
+        column >= rect.x
+            && column < rect.x.saturating_add(rect.width)
+            && row >= rect.y
+            && row < rect.y.saturating_add(rect.height)
+    })
 }
 
 pub(crate) fn set_visible_expand_edit_badge(visible: bool, line: Option<usize>) {
