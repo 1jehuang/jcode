@@ -1352,6 +1352,13 @@ mod tests {
         assert!(is_auto_poke_message(
             TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE
         ));
+        assert!(is_auto_poke_message(
+            TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE
+        ));
+        assert_eq!(
+            auto_poke_display_summary(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE),
+            Some("✅ Preparing the final response...")
+        );
         assert!(is_auto_poke_message(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX));
     }
 
