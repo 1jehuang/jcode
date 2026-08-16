@@ -405,3 +405,26 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
 
     let _ = crate::todo::save_todos(&session_id, &[]);
 }
+
+#[test]
+fn clicking_pinned_todo_more_row_expands_the_band() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = create_test_app();
+    app.pinned_todos_expanded = false;
+    crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(Some(ratatui::layout::Rect {
+        x: 2,
+        y: 4,
+        width: 20,
+        height: 1,
+    }));
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 8,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(app.pinned_todos_expanded);
+}
