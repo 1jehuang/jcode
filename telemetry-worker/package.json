@@ -23,6 +23,7 @@
     "health:size": "curl -s https://telemetry.jcode.sh/v1/health",
     "dau": "node scripts/run-dashboard.mjs dau.sql",
     "users": "node scripts/run-dashboard.mjs users.sql",
+    "prompt-users": "node scripts/run-dashboard.mjs prompt-users.sql",
     "token-value": "node scripts/run-dashboard.mjs token-value.sql",
     "token-value:fresh": "npm run sync:model-prices && npm run token-value",
     "token-value:daily": "node scripts/run-dashboard.mjs token-value-daily.sql",

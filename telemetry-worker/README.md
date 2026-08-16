@@ -230,6 +230,16 @@ Three things to know before quoting the number:
   If coverage drops, re-run the sync before trusting the dollar figure.
 
 
+## Prompt-user dashboard
+
+`npm run prompt-users` uses the strict product definition requested for user
+metrics: one distinct non-CI machine that ran at least one prompt. It reports
+rolling prompt DAU and WAU from the union of `turn_end` and prompted lifecycle
+rows, including in-flight or unclosed sessions. Since raw `turn_end` rows have
+30-day retention, monthly growth and the all-time lower bound use durable
+`session_end` / `session_crash` rows with `had_user_prompt > 0` so both monthly
+windows have equivalent coverage.
+
 ## Reading DAU without fooling yourself
 
 `npm run dau` leads with `headline_users_24h` (= `meaningful_release_24h_noci`):
