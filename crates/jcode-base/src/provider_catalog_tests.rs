@@ -1141,7 +1141,7 @@ fn open_weight_family_context_limits_match_published_windows() {
 }
 
 #[test]
-fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
+fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
     // Regression for #407: `default_provider = "minimax"` (the built-in MiniMax
     // profile) must resolve credentials from the profile's documented
     // OPENAI_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
@@ -1181,8 +1181,8 @@ fn minimax_default_provider_applies_openai_api_key_env_not_openrouter() {
         std::env::var("JCODE_OPENROUTER_API_KEY_NAME")
             .ok()
             .as_deref(),
-        Some("OPENAI_API_KEY"),
-        "MiniMax profile must use OPENAI_API_KEY, not OPENROUTER_API_KEY"
+        Some("MINIMAX_API_KEY"),
+        "MiniMax profile must use MINIMAX_API_KEY, not OPENROUTER_API_KEY"
     );
     assert_eq!(
         std::env::var("JCODE_OPENROUTER_ENV_FILE").ok().as_deref(),
