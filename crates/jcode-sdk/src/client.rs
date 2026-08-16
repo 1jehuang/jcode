@@ -780,6 +780,7 @@ impl JcodeClient {
                 session_id,
                 provider,
                 model,
+                reasoning_effort,
                 routes,
             } => {
                 let mut providers = Vec::new();
@@ -799,6 +800,7 @@ impl JcodeClient {
                     session_id,
                     provider,
                     model,
+                    reasoning_effort,
                     providers,
                     routes,
                 })
@@ -1084,6 +1086,8 @@ pub struct RuntimeInfo {
     pub session_id: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Reasoning effort, e.g. `high`, when the provider exposes it.
+    pub reasoning_effort: Option<String>,
     pub providers: Vec<String>,
     pub routes: Vec<ModelRouteInfo>,
 }
