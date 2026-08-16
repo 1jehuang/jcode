@@ -3,7 +3,8 @@ use crate::side_panel::SidePanelSnapshot;
 use crate::todo::TodoItem;
 pub use jcode_background_types::{
     BackgroundTaskCompleted, BackgroundTaskProgress, BackgroundTaskProgressEvent,
-    BackgroundTaskProgressKind, BackgroundTaskProgressSource, BackgroundTaskStatus,
+    BackgroundTaskProgressKind, BackgroundTaskProgressSource, BackgroundTaskStalled,
+    BackgroundTaskStatus,
 };
 pub use jcode_batch_types::{BatchProgress, BatchSubcallProgress, BatchSubcallState};
 use serde::{Deserialize, Serialize};
@@ -405,6 +406,8 @@ pub enum BusEvent {
     BackgroundTaskCompleted(BackgroundTaskCompleted),
     /// Background task reported progress
     BackgroundTaskProgress(BackgroundTaskProgressEvent),
+    /// Background task stall watchdog fired: no output/progress for its window
+    BackgroundTaskStalled(BackgroundTaskStalled),
     /// A backgrounded `swarm await_members` watcher reached a terminal result.
     SwarmAwaitCompleted(SwarmAwaitCompleted),
     /// Usage report fetched from providers

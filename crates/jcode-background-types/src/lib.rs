@@ -89,6 +89,29 @@ pub struct BackgroundTaskCompleted {
     pub wake: bool,
 }
 
+/// Event sent when a stall watchdog notices a background task has produced no
+/// output bytes and no progress events for its configured stall window.
+///
+/// This is a "check on me" signal, not a terminal event: the task is still
+/// running as far as the manager can tell. The watchdog fires at most once per
+/// silence episode; new output or progress re-arms it.
+#[derive(Debug, Clone)]
+pub struct BackgroundTaskStalled {
+    pub task_id: String,
+    pub tool_name: String,
+    pub display_name: Option<String>,
+    pub session_id: String,
+    /// Configured stall window in seconds.
+    pub stall_wake_seconds: u64,
+    /// How long the task has been running when the watchdog fired.
+    pub running_secs: f64,
+    /// Tail of the output file at fire time (already truncated).
+    pub output_tail: String,
+    pub output_file: PathBuf,
+    pub notify: bool,
+    pub wake: bool,
+}
+
 /// Render a one-line human-readable progress display: an optional progress bar,
 /// a textual summary, and the source label (for example `[##--] 50% (reported)`).
 pub fn format_progress_display(progress: &BackgroundTaskProgress, width: usize) -> String {

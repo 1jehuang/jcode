@@ -80,6 +80,10 @@ pub struct TaskStatusFile {
     pub progress: Option<BackgroundTaskProgress>,
     #[serde(default)]
     pub event_history: Vec<BackgroundTaskEventRecord>,
+    /// Stall watchdog window in seconds, when armed: the agent is woken after
+    /// this long with no new output bytes and no progress events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_wake_seconds: Option<u64>,
 }
 
 fn default_true() -> bool {
@@ -201,6 +205,8 @@ pub enum BackgroundTaskWaitReason {
     Finished,
     Progress,
     Checkpoint,
+    /// The task's stall watchdog fired while this wait was blocked.
+    Stalled,
     Timeout,
 }
 

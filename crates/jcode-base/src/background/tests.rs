@@ -287,6 +287,7 @@ fn running_status_fixture(task_id: &str, session_id: &str) -> TaskStatusFile {
         wake: false,
         progress: None,
         event_history: Vec::new(),
+        stall_wake_seconds: None,
     }
 }
 
@@ -560,5 +561,129 @@ async fn abort_live_tasks_for_reload_keeps_naturally_finished_status() -> Result
         BackgroundTaskStatus::Completed,
         "a task that finished before the sweep must keep its real status"
     );
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn stall_watchdog_fires_and_wait_returns_stalled() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            Some("quiet task".to_string()),
+            "session-stall-fire",
+            false,
+            false,
+            |_output_path| async move {
+                // Hang well past the stall window without producing output.
+                sleep(Duration::from_secs(3600)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    // Requested window below the minimum is clamped up.
+    let effective = manager
+        .arm_stall_watchdog(&info.task_id, 1)
+        .await
+        .ok_or_else(|| anyhow!("watchdog should arm on a running task"))?;
+    assert_eq!(effective, BackgroundTaskManager::MIN_STALL_WAKE_SECONDS);
+
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(status.stall_wake_seconds, Some(effective));
+
+    let wait_result = manager
+        .wait(&info.task_id, Duration::from_secs(600), false)
+        .await
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    assert_eq!(wait_result.reason, BackgroundTaskWaitReason::Stalled);
+    assert_eq!(wait_result.task.status, BackgroundTaskStatus::Running);
+
+    manager.cancel(&info.task_id).await?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn stall_watchdog_does_not_fire_for_task_that_finishes() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let mut bus_rx = Bus::global().subscribe();
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-stall-no-fire",
+            false,
+            false,
+            |output_path| async move {
+                sleep(Duration::from_secs(10)).await;
+                tokio::fs::write(&output_path, "done").await?;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    manager
+        .arm_stall_watchdog(&info.task_id, 30)
+        .await
+        .ok_or_else(|| anyhow!("watchdog should arm on a running task"))?;
+
+    let wait_result = manager
+        .wait(&info.task_id, Duration::from_secs(600), false)
+        .await
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    assert_eq!(wait_result.reason, BackgroundTaskWaitReason::Finished);
+
+    // Give the watchdog time to notice the terminal status and exit.
+    sleep(Duration::from_secs(30)).await;
+    while let Ok(event) = bus_rx.try_recv() {
+        if let BusEvent::BackgroundTaskStalled(event) = event {
+            assert_ne!(
+                event.task_id, info.task_id,
+                "watchdog must not fire for a task that finished within its window"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn disarm_stall_watchdog_clears_state() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-stall-disarm",
+            false,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_secs(3600)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    manager
+        .arm_stall_watchdog(&info.task_id, 45)
+        .await
+        .ok_or_else(|| anyhow!("watchdog should arm"))?;
+    assert!(manager.disarm_stall_watchdog(&info.task_id).await);
+
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("status should exist"))?;
+    assert_eq!(status.stall_wake_seconds, None);
+
+    manager.cancel(&info.task_id).await?;
     Ok(())
 }

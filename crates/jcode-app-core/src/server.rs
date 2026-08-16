@@ -52,6 +52,7 @@ mod util;
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
     dispatch_background_task_completion, dispatch_background_task_progress,
+    dispatch_background_task_stalled,
     dispatch_swarm_await_completion, dispatch_swarm_batch_progress, dispatch_swarm_output_tail,
     dispatch_swarm_runtime_status, dispatch_swarm_todo_progress, dispatch_swarm_tool_activity,
     dispatch_ui_activity,
@@ -2177,6 +2178,19 @@ impl Server {
                 }
                 Ok(BusEvent::BackgroundTaskProgress(task)) => {
                     dispatch_background_task_progress(&task, &swarm_members).await;
+                }
+                Ok(BusEvent::BackgroundTaskStalled(task)) => {
+                    dispatch_background_task_stalled(
+                        &task,
+                        &sessions,
+                        &soft_interrupt_queues,
+                        &swarm_members,
+                        &swarms_by_id,
+                        &event_history,
+                        &event_counter,
+                        &swarm_event_tx,
+                    )
+                    .await;
                 }
                 Ok(BusEvent::SwarmAwaitCompleted(event)) => {
                     dispatch_swarm_await_completion(
