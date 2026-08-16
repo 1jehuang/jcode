@@ -148,6 +148,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
                 session_id: "s1".to_string(),
                 provider: Some("anthropic".to_string()),
                 model: Some("claude".to_string()),
+                reasoning_effort: Some("high".to_string()),
                 routes: reply_routes.clone(),
             },
             ApiRequest::SetApiKey { provider, .. } => ApiEvent::CredentialUpdated {

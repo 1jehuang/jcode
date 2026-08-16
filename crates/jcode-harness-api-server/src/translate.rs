@@ -122,6 +122,9 @@ pub struct BridgeState {
     /// a picker can mark the active entry.
     current_model: Option<String>,
     current_provider: Option<String>,
+    /// Reasoning effort last reported by the daemon, so identity events can
+    /// carry it without a round trip.
+    current_effort: Option<String>,
     available_routes: Vec<ModelRouteInfo>,
 }
 
@@ -540,6 +543,7 @@ impl BridgeState {
                     session_id: self.session_id.clone().unwrap_or_default(),
                     provider: self.current_provider.clone(),
                     model: self.current_model.clone(),
+                    reasoning_effort: self.current_effort.clone(),
                     routes: self.available_routes.clone(),
                 },
             ))],
@@ -964,6 +968,7 @@ impl BridgeState {
                     session_id: session(self),
                     provider: event["provider_name"].as_str().map(str::to_string),
                     model: event["model"].as_str().map(str::to_string),
+                    reasoning_effort: self.current_effort.clone(),
                 };
                 // Both a reply and a broadcast: the caller needs its request
                 // resolved, and every other client watching the session needs
@@ -978,6 +983,13 @@ impl BridgeState {
             }
             "reasoning_effort_changed" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                // Remember the new effort even when the change was requested by
+                // another client, so later identity events stay truthful.
+                if event["error"].as_str().is_none()
+                    && let Some(effort) = event["effort"].as_str()
+                {
+                    self.current_effort = Some(effort.to_string());
+                }
                 let Some(api_id) = self.take_simple(id, SimpleKind::ReasoningEffort) else {
                     return vec![];
                 };
@@ -1149,6 +1161,9 @@ impl BridgeState {
         if let Some(provider) = event["provider_name"].as_str() {
             self.current_provider = Some(provider.to_string());
         }
+        if let Some(effort) = event["reasoning_effort"].as_str() {
+            self.current_effort = Some(effort.to_string());
+        }
         if let Some(routes) = event["available_model_routes"].as_array() {
             self.available_routes = routes
                 .iter()
@@ -1170,6 +1185,10 @@ impl BridgeState {
             session_id,
             provider: event["provider_name"].as_str().map(str::to_string),
             model: event["provider_model"].as_str().map(str::to_string),
+            reasoning_effort: event["reasoning_effort"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| self.current_effort.clone()),
         }
     }
 

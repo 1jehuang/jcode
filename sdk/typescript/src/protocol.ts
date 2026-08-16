@@ -152,13 +152,20 @@ export type ApiEvent =
     }
   | { ev: "session_status"; session_id: string; status: string }
   | { ev: "connection_phase"; session_id: string; phase: string }
-  | { ev: "model_info"; session_id: string; provider?: string; model?: string }
+  | {
+      ev: "model_info";
+      session_id: string;
+      provider?: string;
+      model?: string;
+      reasoning_effort?: string;
+    }
   | { ev: "models"; session_id: string; models: string[]; current?: string }
   | {
       ev: "runtime_info";
       session_id: string;
       provider?: string;
       model?: string;
+      reasoning_effort?: string;
       routes: ModelRouteInfo[];
     }
   | { ev: "credential_updated"; provider: string; configured: boolean }
