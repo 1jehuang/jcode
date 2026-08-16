@@ -75,6 +75,10 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
                 "type": "boolean",
                 "description": "Wake on completion."
             },
+            "stall_wake_seconds": {
+                "type": "integer",
+                "description": "With run_in_background: wake the agent after this many seconds of no output/progress (min 30, resets on activity). Use for long jobs that may hang silently."
+            },
             "justification": {
                 "type": "string",
                 "description": "Only when re-issuing a command the destructive gate refused; explain which user request it serves."

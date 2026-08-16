@@ -151,3 +151,5 @@ global-hotkey = "0.7"
 # MultiProvider routing tests exercise the real OpenRouter/OpenAI-compatible
 # runtime through the composition-root registry, exactly like the binary.
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
+# Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
+tokio = { version = "1", features = ["test-util"] }

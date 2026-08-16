@@ -696,6 +696,10 @@ struct BashInput {
     notify: bool,
     #[serde(default)]
     wake: bool,
+    /// For background runs: wake the agent after this many seconds with no
+    /// new output and no progress events. Resets on activity.
+    #[serde(default)]
+    stall_wake_seconds: Option<u64>,
     /// Set only when re-issuing a call the gate refused (#604).
     #[serde(default)]
     justification: Option<String>,
@@ -1289,6 +1293,23 @@ impl BashTool {
         } else {
             "Notifications disabled. Use `bg` tool to check status."
         };
+
+        let stall_msg = match params.stall_wake_seconds {
+            Some(requested) => {
+                match crate::background::global()
+                    .arm_stall_watchdog(&info.task_id, requested)
+                    .await
+                {
+                    Some(effective) => format!(
+                        "Stall watchdog armed: you will be woken after {}s with no output or progress (resets on activity).\n",
+                        effective
+                    ),
+                    None => String::new(),
+                }
+            }
+            None => String::new(),
+        };
+
         let output = format!(
             "Command started in background.\n\n\
              Task ID: {}\n\
@@ -1296,7 +1317,7 @@ impl BashTool {
              Output file: {}\n\
              Status file: {}\n\n\
              {}\n\
-             To wait for completion/checkpoints: use the `bg` tool with action=\"wait\" and task_id=\"{}\"\n\
+             {}To wait for completion/checkpoints: use the `bg` tool with action=\"wait\" and task_id=\"{}\"\n\
              To check progress immediately: use the `bg` tool with action=\"status\" and task_id=\"{}\"\n\
              To see output: use the `read` tool on the output file, or `bg` with action=\"output\"\n\n\
              {}",
@@ -1305,6 +1326,7 @@ impl BashTool {
             info.output_file.display(),
             info.status_file.display(),
             notify_msg,
+            stall_msg,
             info.task_id,
             info.task_id,
             BACKGROUND_PROGRESS_GUIDANCE,

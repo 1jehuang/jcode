@@ -74,6 +74,10 @@ struct BgInput {
     /// Whether to wake on completion when using watch/delivery (default: true)
     #[serde(default)]
     wake: Option<bool>,
+    /// For watch/delivery: also arm a stall watchdog that wakes the agent after
+    /// this many seconds with no new output or progress (resets on activity)
+    #[serde(default)]
+    stall_wake_seconds: Option<u64>,
     /// Max seconds to block when using wait (default: 60, capped at 3600)
     #[serde(default)]
     max_wait_seconds: Option<u64>,
@@ -333,6 +337,7 @@ fn wait_reason_label(reason: background::BackgroundTaskWaitReason) -> &'static s
         background::BackgroundTaskWaitReason::Finished => "finished",
         background::BackgroundTaskWaitReason::Progress => "progress",
         background::BackgroundTaskWaitReason::Checkpoint => "checkpoint",
+        background::BackgroundTaskWaitReason::Stalled => "stalled",
         background::BackgroundTaskWaitReason::Timeout => "timeout",
     }
 }
@@ -491,6 +496,7 @@ impl Tool for BgTool {
                 "dry_run": { "type": "boolean", "description": "For cleanup, report what would be removed without deleting." },
                 "notify": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to notify on completion. Defaults to true." },
                 "wake": { "type": "boolean", "description": "When using delivery/watch/subscribe, whether to wake on completion. Defaults to true." },
+                "stall_wake_seconds": { "type": "integer", "description": "For delivery/watch: also wake the agent after this many seconds of no output/progress (min 30, resets on activity). Use for long jobs that may hang silently." },
                 "max_wait_seconds": { "type": "integer", "description": "For wait: max seconds to block. Default 60, cap 3600, 0 = immediate check." },
                 "return_on_progress": { "type": "boolean", "description": "For wait: return on the first progress/checkpoint event too. Defaults to true." },
                 "wait_mode": { "type": "string", "enum": ["any", "all", "first_failure"], "description": "For multi-task wait, return on any completion, all completions, or first failure. Defaults to any." },
@@ -663,22 +669,37 @@ impl Tool for BgTool {
                     .remove(0);
                 let notify = params.notify.unwrap_or_else(default_watch_notify);
                 let wake = params.wake.unwrap_or_else(default_watch_wake);
+                let stall_armed = match params.stall_wake_seconds {
+                    Some(requested) => manager.arm_stall_watchdog(&task_id, requested).await,
+                    None => None,
+                };
                 match manager.update_delivery(&task_id, notify, wake).await? {
-                    Some(task) => Ok(ToolOutput::new(format!(
-                        "Updated background task delivery for {}.\nStatus: {}\nNotify: {}\nWake: {}",
-                        task_id,
-                        status_label(&task.status),
-                        task.notify,
-                        task.wake
-                    ))
-                    .with_title(format!("bg delivery {}", task_id))
-                    .with_metadata(json!({
-                        "task_id": task.task_id,
-                        "task": task_metadata(manager, &task),
-                        "status": status_label(&task.status),
-                        "notify": task.notify,
-                        "wake": task.wake,
-                    }))),
+                    Some(task) => {
+                        let stall_line = match stall_armed {
+                            Some(effective) => format!(
+                                "\nStall watchdog: wake after {}s of no output/progress (resets on activity)",
+                                effective
+                            ),
+                            None => String::new(),
+                        };
+                        Ok(ToolOutput::new(format!(
+                            "Updated background task delivery for {}.\nStatus: {}\nNotify: {}\nWake: {}{}",
+                            task_id,
+                            status_label(&task.status),
+                            task.notify,
+                            task.wake,
+                            stall_line
+                        ))
+                        .with_title(format!("bg delivery {}", task_id))
+                        .with_metadata(json!({
+                            "task_id": task.task_id,
+                            "task": task_metadata(manager, &task),
+                            "status": status_label(&task.status),
+                            "notify": task.notify,
+                            "wake": task.wake,
+                            "stall_wake_seconds": stall_armed,
+                        })))
+                    }
                     None => Err(anyhow::anyhow!("Task not found: {}", task_id)),
                 }
             }
@@ -759,6 +780,9 @@ impl Tool for BgTool {
                             }
                             background::BackgroundTaskWaitReason::Checkpoint => {
                                 "Background task emitted a checkpoint event.\n\n".to_string()
+                            }
+                            background::BackgroundTaskWaitReason::Stalled => {
+                                "Background task stall watchdog fired: no output or progress for its stall window. The task is still running; inspect it and decide whether to keep waiting or cancel.\n\n".to_string()
                             }
                             background::BackgroundTaskWaitReason::Timeout => format!(
                                 "No terminal event before max wait of {}s. Check again with `bg action=\"wait\" task_id=\"{}\"` or inspect status/output.\n\n",

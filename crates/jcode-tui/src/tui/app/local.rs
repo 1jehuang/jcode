@@ -165,6 +165,10 @@ pub(super) fn handle_bus_event(
             handle_background_task_progress(app, progress);
             true
         }
+        Ok(BusEvent::BackgroundTaskStalled(task)) => {
+            handle_background_task_stalled(app, task);
+            true
+        }
         Ok(BusEvent::InputShellCompleted(shell)) => {
             handle_input_shell_completed(app, shell);
             true
@@ -445,6 +449,54 @@ fn handle_background_task_completed(app: &mut App, task: BackgroundTaskCompleted
             Role::User,
             vec![ContentBlock::Text {
                 text: format_background_task_notification_markdown(&task),
+                cache_control: None,
+            }],
+            Some(StoredDisplayRole::BackgroundTask),
+        );
+        let _ = app.session.save();
+
+        if task.wake {
+            app.pending_turn = true;
+            app.is_processing = true;
+            app.status = ProcessingStatus::Sending;
+            if app.processing_started.is_none() {
+                app.processing_started = Some(std::time::Instant::now());
+            }
+            app.visible_turn_started = Some(std::time::Instant::now());
+        }
+    }
+}
+
+fn handle_background_task_stalled(app: &mut App, task: crate::bus::BackgroundTaskStalled) {
+    if task.session_id != app.session.id {
+        return;
+    }
+
+    let notification = crate::message::format_background_task_stalled_markdown(&task);
+    app.push_display_message(DisplayMessage::background_task(notification.clone()));
+    app.set_status_notice(format!(
+        "Background task stalled · {} · no output for {}s",
+        crate::message::background_task_display_label(
+            &task.tool_name,
+            task.display_name.as_deref()
+        ),
+        task.stall_wake_seconds
+    ));
+
+    if !app.is_processing {
+        app.add_provider_message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: notification.clone(),
+                cache_control: None,
+            }],
+            timestamp: Some(chrono::Utc::now()),
+            tool_duration_ms: None,
+        });
+        app.session.add_message_with_display_role(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: notification,
                 cache_control: None,
             }],
             Some(StoredDisplayRole::BackgroundTask),

@@ -89,6 +89,86 @@ pub(super) async fn dispatch_background_task_completion(
     }
 }
 
+/// Deliver a stall-watchdog wake for a background task that has gone quiet.
+///
+/// Mirrors completion delivery: optionally notify attached clients, then wake
+/// an idle agent or queue a soft interrupt for a busy one. The task is still
+/// running; the message tells the agent to inspect and decide.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "background task stall delivery needs session, interrupt, and swarm status state"
+)]
+pub(super) async fn dispatch_background_task_stalled(
+    task: &crate::bus::BackgroundTaskStalled,
+    sessions: &SessionAgents,
+    soft_interrupt_queues: &SessionInterruptQueues,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    swarms_by_id: &Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    event_history: &Arc<RwLock<VecDeque<SwarmEvent>>>,
+    event_counter: &Arc<AtomicU64>,
+    swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+) {
+    let notification = crate::message::format_background_task_stalled_markdown(task);
+
+    if task.notify
+        && fanout_session_event(
+            swarm_members,
+            &task.session_id,
+            ServerEvent::Notification {
+                from_session: "background_task".to_string(),
+                from_name: Some("background task".to_string()),
+                notification_type: NotificationType::Message {
+                    scope: Some("background_task".to_string()),
+                    channel: None,
+                    tldr: None,
+                },
+                message: notification.clone(),
+            },
+        )
+        .await
+            == 0
+    {
+        crate::logging::warn(&format!(
+            "Failed to notify attached clients for background task stall on session {}",
+            task.session_id
+        ));
+    }
+
+    if task.wake
+        && !run_live_turn_if_idle(
+            &task.session_id,
+            &notification,
+            Some(
+                "A background task for this session has produced no output or progress for its stall window. Inspect it and decide whether to keep waiting, fix it, or cancel it."
+                    .to_string(),
+            ),
+            sessions,
+            LiveTurnSwarmContext::new(
+                swarm_members,
+                swarms_by_id,
+                event_history,
+                event_counter,
+                swarm_event_tx,
+            ),
+        )
+        .await
+        && !queue_soft_interrupt_for_session(
+            &task.session_id,
+            notification.clone(),
+            false,
+            SoftInterruptSource::BackgroundTask,
+            soft_interrupt_queues,
+            sessions,
+        )
+        .await
+    {
+        crate::logging::warn(&format!(
+            "Failed to deliver background task stall to session {}",
+            task.session_id
+        ));
+    }
+}
+
 /// Deliver the result of a backgrounded `swarm await_members` watcher to the
 /// requesting session. Mirrors background-task completion delivery: optionally
 /// notify attached clients, then wake an idle agent or queue a soft interrupt
