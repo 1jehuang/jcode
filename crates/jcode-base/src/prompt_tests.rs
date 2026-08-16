@@ -228,6 +228,24 @@ fn captured_agents_md_keeps_split_prompt_stable_after_file_write() {
             .static_part
             .contains("instructions written during the session")
     );
+
+    // A new session/workspace boundary captures a fresh snapshot rather than
+    // pinning the old instructions forever.
+    let fresh_snapshot = load_agents_md_files_from_dirs(project_dir.path(), None);
+    let (next_session, _) = build_system_prompt_split_with_agents_md(
+        None,
+        &[],
+        false,
+        None,
+        Some(project_dir.path()),
+        fresh_snapshot,
+    );
+    assert!(
+        next_session
+            .static_part
+            .contains("instructions written during the session")
+    );
+    assert_ne!(before.static_part, next_session.static_part);
 }
 
 #[test]
