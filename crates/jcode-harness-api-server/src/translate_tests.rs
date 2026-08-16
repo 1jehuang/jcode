@@ -881,6 +881,54 @@ fn reasoning_effort_reports_provider_refusal() {
     assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
 }
 
+/// An effort change is identity, like a model change: every attached client
+/// needs to hear it, not only the requester. A change made by another client
+/// (no pending request here) must still arrive as a `model_info` broadcast,
+/// and the requester's own change gets the broadcast after its `Ok`.
+#[test]
+fn reasoning_effort_changes_are_broadcast_as_model_info() {
+    let mut state = state_with_session();
+
+    // Unsolicited change (another client's request id): broadcast only.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": 999, "effort": "high",
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, None);
+    match &frames[0].event {
+        ApiEvent::ModelInfo {
+            reasoning_effort, ..
+        } => assert_eq!(reasoning_effort.as_deref(), Some("high")),
+        other => panic!("expected model_info, got {other:?}"),
+    }
+
+    // The same effort again is not news: no broadcast.
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": 999, "effort": "high",
+    }));
+    assert!(frames.is_empty(), "unchanged effort must not re-broadcast");
+
+    // This client's own change: Ok reply first, then the broadcast.
+    let out = state.api_request_to_legacy(&json!({
+        "id": 7, "req": "set_reasoning_effort", "effort": "low",
+    }));
+    let legacy_id = match &out[0] {
+        Outbound::Legacy(value) => value["id"].as_u64().unwrap(),
+        _ => unreachable!(),
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": legacy_id, "effort": "low",
+    }));
+    assert_eq!(frames.len(), 2);
+    assert_eq!(frames[0].reply_to, Some(7));
+    assert!(matches!(frames[0].event, ApiEvent::Ok));
+    assert!(matches!(
+        &frames[1].event,
+        ApiEvent::ModelInfo { reasoning_effort, .. }
+            if reasoning_effort.as_deref() == Some("low")
+    ));
+}
+
 /// Compaction can be refused (nothing to compact, a turn in flight) and the
 /// daemon says so with `success: false`, not an error frame. Telling the
 /// client "done" would claim work that never happened.
