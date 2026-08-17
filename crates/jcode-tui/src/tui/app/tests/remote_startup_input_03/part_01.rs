@@ -385,6 +385,22 @@ fn test_paste_again_expands_only_most_recent_identical_placeholder() {
 }
 
 #[test]
+fn test_paste_again_does_not_replace_user_typed_placeholder_literal() {
+    let mut app = create_test_app();
+    let big = "a\nb\nc\nd\ne".to_string();
+
+    app.handle_paste(big.clone());
+    app.set_input_for_test("[pasted 5 lines] [pasted 5 lines]");
+    app.handle_paste(big.clone());
+
+    assert_eq!(
+        app.input(),
+        "[pasted 5 lines] [pasted 5 lines][pasted 5 lines]"
+    );
+    assert_eq!(app.pasted_contents, vec![big.clone(), big]);
+}
+
+#[test]
 fn test_paste_again_does_not_expand_an_edited_placeholder() {
     let mut app = create_test_app();
     let big = "a\nb\nc\nd\ne".to_string();

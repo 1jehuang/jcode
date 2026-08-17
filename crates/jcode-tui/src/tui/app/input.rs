@@ -822,6 +822,18 @@ fn expand_matching_paste(app: &mut App, text: &str) -> bool {
     };
 
     let placeholder = paste_placeholder(text);
+    let stored_placeholder_count = app
+        .pasted_contents
+        .iter()
+        .filter(|content| paste_placeholder(content) == placeholder)
+        .count();
+    let rendered_placeholder_count = app.input.match_indices(placeholder.as_str()).count();
+    // Placeholder text can also be typed by the user. If the rendered and
+    // stored counts differ, there is no reliable way to identify which
+    // occurrence belongs to this paste, so preserve both the input and store.
+    if rendered_placeholder_count != stored_placeholder_count {
+        return false;
+    }
     // Placeholders only encode a line count. Skip placeholders belonging to
     // newer stored pastes with the same shape so equal-length, different text
     // cannot cause the wrong placeholder to expand.
