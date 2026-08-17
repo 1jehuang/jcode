@@ -5,6 +5,10 @@
 >
 > Ambient mode is disabled by default. Enable it with `[ambient] enabled = true`
 > and configure an available subscription or API provider before use.
+>
+> The core ambient runner is implemented. Later sections also retain forward-looking
+> design ideas; examples such as cold-start gating, warm-up bypass, and per-project
+> policy fields are not all available configuration options yet.
 
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
 
