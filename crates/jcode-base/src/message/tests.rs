@@ -856,8 +856,8 @@ fn reasoning_trace_serde_round_trip() {
 
 #[test]
 fn format_background_task_stalled_markdown_renders_tail_and_guidance() {
-    let rendered = format_background_task_stalled_markdown(
-        &jcode_background_types::BackgroundTaskStalled {
+    let rendered =
+        format_background_task_stalled_markdown(&jcode_background_types::BackgroundTaskStalled {
             task_id: "stall01".to_string(),
             tool_name: "bash".to_string(),
             display_name: Some("long training run".to_string()),
@@ -868,8 +868,7 @@ fn format_background_task_stalled_markdown_renders_tail_and_guidance() {
             output_file: std::path::PathBuf::from("/tmp/output.log"),
             notify: true,
             wake: true,
-        },
-    );
+        });
 
     assert!(rendered.contains(
         "**Background task stalled** `stall01` · `long training run` (`bash`) · no output or progress for 300s (running 1234s total)"
@@ -882,8 +881,8 @@ fn format_background_task_stalled_markdown_renders_tail_and_guidance() {
 
 #[test]
 fn format_background_task_stalled_markdown_handles_empty_tail() {
-    let rendered = format_background_task_stalled_markdown(
-        &jcode_background_types::BackgroundTaskStalled {
+    let rendered =
+        format_background_task_stalled_markdown(&jcode_background_types::BackgroundTaskStalled {
             task_id: "stall02".to_string(),
             tool_name: "bash".to_string(),
             display_name: None,
@@ -894,9 +893,10 @@ fn format_background_task_stalled_markdown_handles_empty_tail() {
             output_file: std::path::PathBuf::from("/tmp/output.log"),
             notify: true,
             wake: true,
-        },
-    );
+        });
 
-    assert!(rendered.contains("**Background task stalled** `stall02` · `bash` · no output or progress for 60s"));
+    assert!(rendered.contains(
+        "**Background task stalled** `stall02` · `bash` · no output or progress for 60s"
+    ));
     assert!(rendered.contains("_No output captured yet._"));
 }

@@ -52,10 +52,9 @@ mod util;
 pub(super) use self::await_members_state::AwaitMembersRuntime;
 use self::background_tasks::{
     dispatch_background_task_completion, dispatch_background_task_progress,
-    dispatch_background_task_stalled,
-    dispatch_swarm_await_completion, dispatch_swarm_batch_progress, dispatch_swarm_output_tail,
-    dispatch_swarm_runtime_status, dispatch_swarm_todo_progress, dispatch_swarm_tool_activity,
-    dispatch_ui_activity,
+    dispatch_background_task_stalled, dispatch_swarm_await_completion,
+    dispatch_swarm_batch_progress, dispatch_swarm_output_tail, dispatch_swarm_runtime_status,
+    dispatch_swarm_todo_progress, dispatch_swarm_tool_activity, dispatch_ui_activity,
 };
 use self::debug::{ClientConnectionInfo, ClientDebugState};
 use self::debug_jobs::DebugJob;
