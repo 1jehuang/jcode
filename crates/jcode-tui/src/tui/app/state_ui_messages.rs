@@ -178,6 +178,16 @@ impl App {
             return false;
         };
 
+        // A tool moved to the background finishes its foreground card with the
+        // background lifecycle notification returned by the tool. The same
+        // notification also drives the retained row in the pinned status band,
+        // so remove the transient tool card instead of turning it into a second
+        // transcript representation.
+        if is_background_task_lifecycle_message(&content) {
+            self.remove_display_message(idx);
+            return true;
+        }
+
         self.replace_display_message_title_and_content(idx, title, content)
     }
 

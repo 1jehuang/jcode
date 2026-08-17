@@ -118,6 +118,36 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
 }
 
 #[test]
+fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() {
+    let mut app = create_test_app();
+    app.push_display_message(DisplayMessage {
+        role: "tool".to_string(),
+        content: "running bash".to_string(),
+        tool_calls: vec![],
+        duration_secs: None,
+        title: Some("bash".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "tool-bg".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "cargo test"}),
+            intent: None,
+            thought_signature: None,
+        }),
+    });
+    let before = app.display_messages_version;
+
+    assert!(app.replace_latest_tool_display_message(
+        "tool-bg",
+        Some("bash".to_string()),
+        "**Background task started** `bg123` · `cargo test`\n\nJcode is running this in the background."
+            .to_string(),
+    ));
+
+    assert!(app.display_messages().is_empty());
+    assert_ne!(app.display_messages_version, before);
+}
+
+#[test]
 fn test_push_display_message_coalesces_repeated_single_line_system_messages() {
     let mut app = create_test_app();
 
