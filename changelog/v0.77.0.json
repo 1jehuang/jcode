@@ -1,0 +1,26 @@
+{
+  "version": "0.77.0",
+  "date": "2026-08-17",
+  "title": "Background visibility and expanded authentication",
+  "highlights": [
+    "Background tasks now appear in the pinned status band, report intermediate progress reliably, and wake stalled agents automatically",
+    "Cursor and Grok Build now support native authentication flows, with OrcaRouter available as a provider profile",
+    "Duplicate provider accounts now receive memorable animal names in the account picker"
+  ],
+  "improvements": [
+    "Todo intent and understanding are shown inline with clearer status colors and expandable pinned details",
+    "Pinned todo, copy, and edit-expand controls can now be activated with the mouse",
+    "Session search finds late transcript content and preserves longer search prefixes",
+    "The SDK now exposes persisted session titles and reasoning-effort updates",
+    "Bash output is collapsed by default with a cleaner presentation",
+    "Users can submit privacy-conscious maintainer feedback after explicit consent"
+  ],
+  "fixes": [
+    "Pasted content remains visible after sending",
+    "Hyphenated MCP tool names dispatch correctly",
+    "Repeated OpenRouter tool outputs are preserved",
+    "Provider selection honors an explicitly requested CLI provider",
+    "Setup hotkey uninstall actions are honored",
+    "macOS swarm Option shortcuts work correctly"
+  ]
+}
