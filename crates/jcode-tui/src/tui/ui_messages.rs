@@ -1443,38 +1443,30 @@ fn push_todo_plan_details(
     inner_width: usize,
     compact_details: bool,
 ) {
+    let intention = plan
+        .user_intention
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     if let Some(state) = plan.understands_user_intent {
-        lines.push(todo_card_line(
-            vec![
-                Span::styled(
-                    "Understands user intent ",
-                    Style::default().fg(todo_label_color()),
-                ),
-                Span::styled(
-                    state.as_str().to_string(),
-                    Style::default().fg(todo_score_color()),
-                ),
-            ],
+        let label = format!("Intent {}: ", state.as_str());
+        let mut spans = vec![Span::styled(label, Style::default().fg(todo_label_color()))];
+        if let Some(intention) = intention {
+            spans.push(Span::styled(
+                intention.to_string(),
+                Style::default().fg(todo_meta_color()),
+            ));
+        }
+        lines.push(todo_card_line(spans, base_indent, inner_width));
+    } else if let Some(intention) = intention {
+        push_todo_detail(
+            lines,
+            "Intent",
+            intention,
             base_indent,
             inner_width,
-        ));
-    }
-    if !crate::todo::intent_understanding_passes(plan.understands_user_intent) {
-        if let Some(intention) = plan
-            .user_intention
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            push_todo_detail(
-                lines,
-                "User intention",
-                intention,
-                base_indent,
-                inner_width,
-                compact_details,
-            );
-        }
+            compact_details,
+        );
     }
 }
 
