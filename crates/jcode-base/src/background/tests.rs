@@ -156,6 +156,46 @@ async fn update_progress_persists_status_and_emits_bus_event() -> Result<()> {
 }
 
 #[tokio::test]
+async fn update_progress_keeps_the_determinate_high_water_mark() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-monotonic-progress",
+            false,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_secs(2)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    let progress = |percent| BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(percent),
+        message: None,
+        current: None,
+        total: None,
+        unit: None,
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::Reported,
+    };
+
+    manager.update_progress(&info.task_id, progress(60.0)).await?;
+    let status = manager
+        .update_progress(&info.task_id, progress(25.0))
+        .await?
+        .ok_or_else(|| anyhow!("task should exist"))?;
+
+    assert_eq!(status.progress.and_then(|value| value.percent), Some(60.0));
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_returns_when_task_finishes() -> Result<()> {
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());

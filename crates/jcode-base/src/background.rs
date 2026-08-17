@@ -1058,6 +1058,18 @@ impl BackgroundTaskManager {
                 return Ok(Some(status));
             }
 
+            // A determinate bar represents progress through the whole task. A
+            // lower later value would make that representation knowingly
+            // inconsistent, regardless of whether it was explicitly reported
+            // or inferred from output. Keep the last trustworthy high-water
+            // mark instead of allowing the UI to move backwards.
+            if let (Some(existing_percent), Some(new_percent)) =
+                (existing.percent, progress.percent)
+                && new_percent < existing_percent
+            {
+                return Ok(Some(status));
+            }
+
             let existing_is_more_determinate = existing.percent.is_some()
                 || matches!((existing.current, existing.total), (_, Some(total)) if total > 0);
             let new_is_less_determinate = progress.percent.is_none()
@@ -1324,7 +1336,7 @@ impl BackgroundTaskManager {
                 wake: wake_flag,
                 progress: None,
                 event_history: Vec::new(),
-            stall_wake_seconds: None,
+                stall_wake_seconds: None,
             };
             let event_status = final_status.status.clone();
             let event_exit_code = final_status.exit_code;
