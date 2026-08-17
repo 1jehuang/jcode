@@ -196,7 +196,9 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
 #[test]
 fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_international_default() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&["MINIMAX_API_KEY", "OPENAI_API_KEY"]);
+    let _guard = EnvGuard::save(&["JCODE_HOME", "MINIMAX_API_KEY", "OPENAI_API_KEY"]);
+    let home = tempfile::tempdir().expect("temporary JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", home.path());
     crate::env::remove_var("MINIMAX_API_KEY");
     crate::env::remove_var("OPENAI_API_KEY");
 
@@ -213,6 +215,11 @@ fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_internatio
     );
     assert_eq!(china.api_base, MINIMAX_CHINA_API_BASE);
     assert_eq!(china.setup_url, MINIMAX_CHINA_SETUP_URL);
+
+    crate::env::set_var("OPENAI_API_KEY", "sk-cp-legacy-token");
+    let legacy = resolve_openai_compatible_profile(MINIMAX_PROFILE);
+    assert_eq!(legacy.api_key_env, "OPENAI_API_KEY");
+    assert_eq!(legacy.api_base, MINIMAX_CHINA_API_BASE);
 }
 
 #[test]
