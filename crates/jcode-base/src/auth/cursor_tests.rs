@@ -233,44 +233,28 @@ fn load_access_token_from_auth_file_does_not_change_external_permissions() {
 }
 
 #[test]
-fn status_output_detects_authenticated_session() {
-    assert!(status_output_indicates_authenticated(
-        true,
-        b"Authenticated\nAccount: user@example.com\nEndpoint: production",
-        b""
-    ));
-}
+fn reads_cursor_state_with_embedded_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("state.vscdb");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO ItemTable (key, value) VALUES (?1, ?2)",
+            ("cursorAuth/accessToken", "native-token"),
+        )
+        .unwrap();
+    drop(connection);
 
-#[test]
-fn status_output_detects_missing_authentication() {
-    assert!(!status_output_indicates_authenticated(
-        true,
-        b"Not authenticated. Run cursor-agent login.",
-        b""
-    ));
-}
-
-#[test]
-fn status_output_requires_successful_exit_for_authentication_keywords() {
-    assert!(!status_output_indicates_authenticated(
-        false,
-        b"Account: user@example.com\nEndpoint: production",
-        b"cursor-agent status failed"
-    ));
-}
-
-#[cfg(unix)]
-#[test]
-fn external_auth_command_timeout_returns_none() {
-    let mut command = std::process::Command::new("sh");
-    command.arg("-c").arg("sleep 2; echo late");
-
-    let start = std::time::Instant::now();
-    let output = command_output_with_timeout(&mut command, std::time::Duration::from_millis(50))
-        .expect("timeout helper should not error");
-
-    assert!(output.is_none());
-    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(
+        read_vscdb_key(&path, "cursorAuth/accessToken").unwrap(),
+        "native-token"
+    );
 }
 
 fn load_key_from_file(path: &PathBuf) -> Result<String> {

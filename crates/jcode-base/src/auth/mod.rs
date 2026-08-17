@@ -1161,9 +1161,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
         AuthProbeMode::Full => {
             let cursor_has_api_key = cursor::has_cursor_api_key();
             let cursor_has_native_auth = cursor::has_cursor_native_auth();
-            let cursor_has_cli_auth =
-                !cursor_has_native_auth && cursor::has_authenticated_cli_session();
-            status.cursor = if cursor_has_native_auth || cursor_has_cli_auth {
+            status.cursor = if cursor_has_native_auth {
                 AuthState::Available
             } else if cursor_has_api_key {
                 AuthState::Expired
@@ -1172,7 +1170,7 @@ fn probe_cursor_status(status: &mut AuthStatus, mode: AuthProbeMode) {
             };
         }
         AuthProbeMode::Fast => {
-            // Avoid the vscdb/sqlite and CLI probes in fast UI paths.
+            // Avoid the vscdb probe in fast UI paths.
             let cursor_has_api_key = cursor::has_cursor_api_key();
             let cursor_has_file_or_env_auth = cursor::load_access_token_from_env_or_file().is_ok();
             status.cursor = if cursor_has_file_or_env_auth || cursor_has_api_key {
