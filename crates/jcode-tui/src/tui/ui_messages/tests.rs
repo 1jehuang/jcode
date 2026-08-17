@@ -730,6 +730,43 @@ fn render_todos_message_uses_readable_semantic_colors() {
 }
 
 #[test]
+fn render_todos_message_color_codes_every_intent_state() {
+    let cases = [
+        (crate::todo::IntentUnderstanding::Uncertain, todo_failure_color()),
+        (crate::todo::IntentUnderstanding::Partial, todo_warning_color()),
+        (crate::todo::IntentUnderstanding::Clear, todo_score_color()),
+        (crate::todo::IntentUnderstanding::Complete, todo_score_color()),
+    ];
+
+    for (state, expected_color) in cases {
+        let state_text = state.as_str().to_string();
+        let msg = DisplayMessage::todos(
+            serde_json::json!({
+                "todos": [],
+                "plan": {
+                    "user_intention": "Keep intent visible",
+                    "understands_user_intent": state,
+                },
+                "goals": [],
+            })
+            .to_string(),
+        );
+        let lines = render_todos_message(&msg, 100, crate::config::DiffDisplayMode::Off);
+        let rendered_color = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.as_ref() == state_text)
+            .and_then(|span| span.style.fg);
+
+        assert_eq!(
+            rendered_color,
+            Some(expected_color),
+            "intent state {state_text} should keep its semantic color in the todo renderer"
+        );
+    }
+}
+
+#[test]
 fn render_todos_message_collapses_passing_quality_gates() {
     let todos = vec![crate::todo::TodoItem {
         id: "1".to_string(),
