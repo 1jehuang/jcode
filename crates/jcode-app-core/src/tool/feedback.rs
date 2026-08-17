@@ -164,4 +164,28 @@ mod tests {
         });
         assert!(oversized.unwrap_err().to_string().contains("at most 240"));
     }
+
+    #[test]
+    fn schema_requires_provenance_and_carries_privacy_guidance() {
+        let tool = MaintainerFeedbackTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["required"], json!(["category", "origin", "summary"]));
+        assert_eq!(
+            schema["properties"]["origin"]["enum"],
+            json!(["user", "agent", "mixed"])
+        );
+        assert!(
+            schema["properties"]["summary"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Paraphrase")
+        );
+        assert!(
+            schema["properties"]["details"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Never include private data")
+        );
+        assert!(tool.description().contains("telemetry settings"));
+    }
 }
