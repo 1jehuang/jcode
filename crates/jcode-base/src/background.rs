@@ -5,7 +5,7 @@
 
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgress, BackgroundTaskProgressEvent,
-    BackgroundTaskProgressSource, BackgroundTaskStatus, Bus, BusEvent,
+    BackgroundTaskStatus, Bus, BusEvent,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant as TokioInstant, MissedTickBehavior};
 
@@ -35,6 +35,9 @@ use model::{
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
+    /// Serializes progress status read-modify-write cycles so concurrent output
+    /// readers cannot overwrite a newer high-water mark with a stale update.
+    progress_updates: Arc<Mutex<()>>,
     /// Live stall watchdogs by task id. Each entry is a spawned monitor that
     /// fires a [`BusEvent::BackgroundTaskStalled`] after its task produces no
     /// output bytes and no progress events for the configured window.
@@ -50,6 +53,7 @@ impl BackgroundTaskManager {
         std::fs::create_dir_all(&output_dir).ok();
         Self {
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            progress_updates: Arc::new(Mutex::new(())),
             stall_watchdogs: Arc::new(RwLock::new(HashMap::new())),
             output_dir,
         }
@@ -1047,12 +1051,13 @@ impl BackgroundTaskManager {
         progress: BackgroundTaskProgress,
         event_kind: BackgroundTaskEventKind,
     ) -> Result<Option<TaskStatusFile>> {
+        let _progress_update_guard = self.progress_updates.lock().await;
         let status_path = self.status_path_for(task_id);
         let Some(mut status) = self.read_status_file(&status_path).await else {
             return Ok(None);
         };
 
-        let progress = progress.normalize();
+        let mut progress = progress.normalize();
         if let Some(existing) = status.progress.as_ref() {
             if progress_equivalent(existing, &progress) {
                 return Ok(Some(status));
@@ -1074,11 +1079,16 @@ impl BackgroundTaskManager {
                 || matches!((existing.current, existing.total), (_, Some(total)) if total > 0);
             let new_is_less_determinate = progress.percent.is_none()
                 && !matches!((progress.current, progress.total), (_, Some(total)) if total > 0);
-            if existing_is_more_determinate
-                && new_is_less_determinate
-                && matches!(progress.source, BackgroundTaskProgressSource::ParsedOutput)
-            {
-                return Ok(Some(status));
+            if existing_is_more_determinate && new_is_less_determinate {
+                // Preserve the measurable high-water mark while still allowing
+                // a new checkpoint/phase message to reach status and clients.
+                progress.kind = existing.kind.clone();
+                progress.percent = existing.percent;
+                progress.current = existing.current;
+                progress.total = existing.total;
+                if progress.unit.is_none() {
+                    progress.unit.clone_from(&existing.unit);
+                }
             }
         }
 

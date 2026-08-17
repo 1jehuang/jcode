@@ -196,6 +196,97 @@ async fn update_progress_keeps_the_determinate_high_water_mark() -> Result<()> {
 }
 
 #[tokio::test]
+async fn update_progress_preserves_high_water_mark_through_reported_checkpoint() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-checkpoint-progress",
+            false,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_secs(2)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    let mut progress = BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(60.0),
+        message: Some("running".into()),
+        current: Some(6),
+        total: Some(10),
+        unit: Some("tests".into()),
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::Reported,
+    };
+    manager.update_progress(&info.task_id, progress.clone()).await?;
+
+    progress.kind = BackgroundTaskProgressKind::Indeterminate;
+    progress.percent = None;
+    progress.current = None;
+    progress.total = None;
+    progress.unit = None;
+    progress.message = Some("linking".into());
+    let status = manager
+        .update_checkpoint(&info.task_id, progress)
+        .await?
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    let stored = status.progress.ok_or_else(|| anyhow!("progress missing"))?;
+
+    assert_eq!(stored.percent, Some(60.0));
+    assert_eq!(stored.current, Some(6));
+    assert_eq!(stored.total, Some(10));
+    assert_eq!(stored.message.as_deref(), Some("linking"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_progress_updates_cannot_overwrite_the_high_water_mark() -> Result<()> {
+    let tmp = tempdir()?;
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf()));
+    let info = manager
+        .spawn_with_notify(
+            "bash",
+            None,
+            "session-concurrent-progress",
+            false,
+            false,
+            |_output_path| async move {
+                sleep(Duration::from_secs(2)).await;
+                Ok(TaskResult::completed(Some(0)))
+            },
+        )
+        .await;
+
+    let update = |percent| BackgroundTaskProgress {
+        kind: BackgroundTaskProgressKind::Determinate,
+        percent: Some(percent),
+        message: None,
+        current: None,
+        total: None,
+        unit: None,
+        eta_seconds: None,
+        updated_at: Utc::now().to_rfc3339(),
+        source: BackgroundTaskProgressSource::Reported,
+    };
+    let first = manager.update_progress(&info.task_id, update(80.0));
+    let second = manager.update_progress(&info.task_id, update(20.0));
+    tokio::try_join!(first, second)?;
+
+    let status = manager
+        .status(&info.task_id)
+        .await
+        .ok_or_else(|| anyhow!("task should exist"))?;
+    assert_eq!(status.progress.and_then(|value| value.percent), Some(80.0));
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_returns_when_task_finishes() -> Result<()> {
     let tmp = tempdir()?;
     let manager = BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf());
