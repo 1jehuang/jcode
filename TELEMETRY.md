@@ -103,7 +103,9 @@ The `maintainer_feedback` tool is available only as another explicit telemetry
 path: it obeys the same telemetry opt-out as `/feedback` and sends no event when
 telemetry is disabled. Its schema tells the agent to paraphrase, omit secrets and
 private data, and label whether the report originated with the user, the agent,
-or both. Jcode does not attach transcript content, repository files, or paths.
+or both. User-originated and mixed reports are rejected unless the user explicitly
+approved sharing them; agent-only technical observations do not need per-report
+approval. Jcode does not attach transcript content, repository files, or paths.
 
 ### Sponsored Discovery Event
 

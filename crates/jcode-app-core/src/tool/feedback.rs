@@ -20,6 +20,7 @@ impl MaintainerFeedbackTool {
 struct FeedbackInput {
     category: FeedbackCategory,
     origin: FeedbackOrigin,
+    user_confirmed: bool,
     summary: String,
     #[serde(default)]
     details: Option<String>,
@@ -55,6 +56,10 @@ fn limited(value: &str, label: &str, max: usize) -> Result<String> {
 }
 
 fn payload(input: FeedbackInput) -> Result<String> {
+    if matches!(input.origin, FeedbackOrigin::User | FeedbackOrigin::Mixed) && !input.user_confirmed
+    {
+        bail!("user_confirmed must be true for user or mixed-origin feedback");
+    }
     let summary = limited(&input.summary, "summary", MAX_SUMMARY_CHARS)?;
     let details = input
         .details
@@ -84,7 +89,7 @@ impl Tool for MaintainerFeedbackTool {
     fn parameters_schema(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["category", "origin", "summary"],
+            "required": ["category", "origin", "user_confirmed", "summary"],
             "properties": {
                 "intent": super::intent_schema_property(),
                 "category": {
@@ -96,6 +101,10 @@ impl Tool for MaintainerFeedbackTool {
                     "type": "string",
                     "enum": ["user", "agent", "mixed"],
                     "description": "Whether this reflects the user's words, the agent's observation, or both."
+                },
+                "user_confirmed": {
+                    "type": "boolean",
+                    "description": "True only if the user approved sharing user-originated feedback. Agent observations may use false."
                 },
                 "summary": {
                     "type": "string",
@@ -136,6 +145,7 @@ mod tests {
         let text = payload(FeedbackInput {
             category: FeedbackCategory::Praise,
             origin: FeedbackOrigin::Mixed,
+            user_confirmed: true,
             summary: "The new picker is much easier to use".into(),
             details: Some("The labels make model differences clear.".into()),
         })
@@ -151,6 +161,7 @@ mod tests {
         let empty = payload(FeedbackInput {
             category: FeedbackCategory::Bug,
             origin: FeedbackOrigin::Agent,
+            user_confirmed: false,
             summary: "  ".into(),
             details: None,
         });
@@ -159,6 +170,7 @@ mod tests {
         let oversized = payload(FeedbackInput {
             category: FeedbackCategory::Other,
             origin: FeedbackOrigin::User,
+            user_confirmed: true,
             summary: "x".repeat(MAX_SUMMARY_CHARS + 1),
             details: None,
         });
@@ -169,7 +181,10 @@ mod tests {
     fn schema_requires_provenance_and_carries_privacy_guidance() {
         let tool = MaintainerFeedbackTool::new();
         let schema = tool.parameters_schema();
-        assert_eq!(schema["required"], json!(["category", "origin", "summary"]));
+        assert_eq!(
+            schema["required"],
+            json!(["category", "origin", "user_confirmed", "summary"])
+        );
         assert_eq!(
             schema["properties"]["origin"]["enum"],
             json!(["user", "agent", "mixed"])
@@ -187,5 +202,29 @@ mod tests {
                 .contains("Never include private data")
         );
         assert!(tool.description().contains("telemetry settings"));
+    }
+
+    #[test]
+    fn user_origin_requires_explicit_confirmation() {
+        let error = payload(FeedbackInput {
+            category: FeedbackCategory::Praise,
+            origin: FeedbackOrigin::User,
+            user_confirmed: false,
+            summary: "The user likes the new workflow".into(),
+            details: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("user_confirmed must be true"));
+
+        assert!(
+            payload(FeedbackInput {
+                category: FeedbackCategory::Bug,
+                origin: FeedbackOrigin::Agent,
+                user_confirmed: false,
+                summary: "The agent observed a reproducible tool error".into(),
+                details: None,
+            })
+            .is_ok()
+        );
     }
 }
