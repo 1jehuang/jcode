@@ -336,6 +336,9 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             .as_ref()
             .expect("inline account picker should open")
             .selected;
+        let picker = app.inline_interactive_state.as_ref().unwrap();
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Otter"));
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Fox"));
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
