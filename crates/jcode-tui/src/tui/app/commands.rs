@@ -2186,9 +2186,12 @@ pub(super) fn build_fast_macos_release_prompt() -> String {
 }
 
 pub(super) fn build_remote_release_prompt() -> String {
-    build_release_prompt(
+    let jcode_release = build_release_prompt(
         "",
         "Then run scripts/quick-release.sh --remote v<version> to push the tag immediately without any local build. Let the release workflow build, sign, checksum, and publish every platform, and leave publication gated on those remote checks.",
+    );
+    format!(
+        "First identify the repository in the current working directory from its git remote, release documentation, package manifests, existing tags, and CI workflows. Only use the following Jcode-specific procedure when this is the Jcode self-development repository and scripts/quick-release.sh exists: {jcode_release} Otherwise, use the repository's own established release conventions. Inspect its release documentation, workflows, scripts, manifests, tag format, and recent releases before changing anything. Make logical commits for current work without disturbing unrelated changes and push them normally. Determine the next version from this repository's versioning scheme and user-visible changes, update only the version files and changelog formats it actually uses, validate the metadata, commit and push it, then trigger the repository's documented remote release mechanism. Prefer a tag-triggered or workflow-dispatch CI release that performs builds and publication remotely. Do not assume the project uses Cargo, changelog JSON, v-prefixed tags, or scripts/quick-release.sh. Do not build release artifacts locally unless this repository explicitly requires it and no remote release path exists. Never force-push, move an existing tag, bypass remote release gates, or invent a release process. Report the detected release convention, version, commits, tag or workflow invocation, and remote release status."
     )
 }
 

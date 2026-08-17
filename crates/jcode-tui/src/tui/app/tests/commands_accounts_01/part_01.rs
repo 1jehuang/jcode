@@ -711,6 +711,10 @@ fn test_remote_release_command_uses_tag_only_ci_path() {
     assert!(prompt.contains("quick-release.sh --remote"));
     assert!(prompt.contains("without any local build"));
     assert!(prompt.contains("publication gated"));
+    assert!(prompt.contains("Only use the following Jcode-specific procedure"));
+    assert!(prompt.contains("repository's own established release conventions"));
+    assert!(prompt.contains("Do not assume the project uses Cargo"));
+    assert!(prompt.contains("tag-triggered or workflow-dispatch CI release"));
 }
 
 #[test]
