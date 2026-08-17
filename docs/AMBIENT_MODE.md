@@ -1,7 +1,14 @@
 # Ambient Mode
 
-> **Status:** Design
-> **Updated:** 2026-02-08
+> **Status:** Implemented
+> **Updated:** 2026-08-16
+>
+> Ambient mode is disabled by default. Enable it with `[ambient] enabled = true`
+> and configure an available subscription or API provider before use.
+>
+> The core ambient runner is implemented. Later sections also retain forward-looking
+> design ideas; examples such as cold-start gating, warm-up bypass, and per-project
+> policy fields are not all available configuration options yet.
 
 A proactive, always-on agent mode that works autonomously without user prompting. Like a brain consolidating memories during sleep, ambient mode tends to the memory graph, identifies useful work, and acts on the user's behalf — all while staying within resource limits.
 
@@ -919,48 +926,14 @@ This is a distributed systems problem that will be addressed once ambient is sta
 
 ---
 
-## Implementation Phases
+## Implementation Status
 
-### Phase 1: Foundation
-- [ ] Ambient agent loop (spawn, run, sleep)
-- [ ] Single-instance guard
-- [ ] Basic scheduling (fixed interval with max ceiling)
-- [ ] Provider selection chain (OpenAI OAuth → Anthropic OAuth → pay-per-token opt-in → disabled)
-- [ ] Configuration (`[ambient]` section in config)
-- [ ] Storage layout
-
-### Phase 2: Memory Consolidation — Garden
-- [ ] Full graph-wide dedup scan
-- [ ] Fact verification against codebase
-- [ ] Retroactive session extraction (crashed/missed sessions)
-- [ ] Pruning dead memories (low confidence + low strength)
-- [ ] Relationship discovery across sessions
-- [ ] Embedding backfill
-- [ ] Contradiction resolution
-
-### Phase 3: Scheduling
-- [ ] `schedule_ambient` tool for agent self-scheduling
-- [ ] Scheduled queue (persistent, with context)
-- [ ] Adaptive resource calculator
-- [ ] Usage history tracking
-- [ ] Rate limit awareness (from provider response headers)
-- [ ] Event triggers (session close, crash, git push)
-- [ ] Active session detection → pause/throttle
-
-### Phase 4: Proactive Work
-- [ ] Scout: analyze recent sessions + git history
-- [ ] Infer user priorities from memories
-- [ ] Identify actionable work
-- [ ] Execute on separate branch
-- [ ] Report results
-
-### Phase 5: Info Widget
-- [ ] Ambient status display in TUI
-- [ ] Queue preview
-- [ ] Last cycle summary
-- [ ] Next wake estimate
-- [ ] Budget bar (user vs ambient vs remaining)
+Ambient mode is shipped. The runtime loop, persistent scheduling, memory garden,
+proactive work flow, channel integration, configuration, tools, and TUI status
+display are implemented. The source of truth for current behavior is
+`crates/jcode-app-core/src/ambient/`; remaining enhancements are tracked as
+GitHub issues rather than in the original design checklist.
 
 ---
 
-*Last updated: 2026-02-08*
+*Last updated: 2026-08-16*

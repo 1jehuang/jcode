@@ -45,6 +45,16 @@ pub fn resolve_openai_compatible_profile_with_api_key_hint(
         requires_api_key: profile.requires_api_key,
     };
 
+    // MiniMax historically used OPENAI_API_KEY because it exposes an
+    // OpenAI-compatible API. Prefer the dedicated key, but keep existing
+    // installations working when only the legacy binding is configured.
+    if profile.id == MINIMAX_PROFILE.id
+        && load_env_value_from_env_or_config(profile.api_key_env, profile.env_file).is_none()
+        && load_env_value_from_env_or_config("OPENAI_API_KEY", profile.env_file).is_some()
+    {
+        resolved.api_key_env = "OPENAI_API_KEY".to_string();
+    }
+
     apply_profile_key_based_endpoint_overrides(profile, &mut resolved, api_key_hint);
 
     if profile.id != OPENAI_COMPAT_PROFILE.id {
@@ -222,7 +232,7 @@ fn apply_profile_key_based_endpoint_overrides(
         .map(str::trim)
         .filter(|key| !key.is_empty())
         .map(ToString::to_string)
-        .or_else(|| load_env_value_from_env_or_config(profile.api_key_env, profile.env_file));
+        .or_else(|| load_env_value_from_env_or_config(&resolved.api_key_env, &resolved.env_file));
 
     if key
         .as_deref()
