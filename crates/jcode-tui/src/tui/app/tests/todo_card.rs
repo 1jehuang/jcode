@@ -446,7 +446,9 @@ fn background_task_rows_render_without_todos_or_transcript_cards() {
         "missing failed task row:\n{rendered}"
     );
     assert!(!rendered.contains("Background tasks"));
-    assert!(!rendered.contains("╭") && !rendered.contains("╰"));
+    assert!(!rendered.contains("Background task started"));
+    assert!(!rendered.contains("Background task progress"));
+    assert!(!rendered.contains("Background task completed"));
 }
 
 #[test]
