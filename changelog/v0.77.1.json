@@ -1,0 +1,7 @@
+{
+  "version": "0.77.1",
+  "date": "2026-08-17",
+  "fixes": [
+    "The remote release command now detects the current repository and follows its own release conventions instead of assuming Jcode-specific tooling"
+  ]
+}
