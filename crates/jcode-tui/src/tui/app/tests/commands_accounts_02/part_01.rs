@@ -266,9 +266,11 @@ fn test_account_command_opens_account_picker() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "claude" && label == "claude-1"
+                }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
+        assert!(picker.entries.iter().any(|entry| entry.name == "Claude"));
+        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI"));
         assert!(picker.entries.iter().any(|entry| {
             matches!(
                 entry.action,
@@ -451,7 +453,7 @@ fn test_account_command_combines_claude_and_openai_accounts() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "claude" && label == "claude-1"
+                }) if provider_id == "claude" && label == "claude-otter"
             )
         }));
         assert!(picker.entries.iter().any(|entry| {
@@ -460,7 +462,7 @@ fn test_account_command_combines_claude_and_openai_accounts() {
                 crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                     ref provider_id,
                     ref label
-                }) if provider_id == "openai" && label == "openai-1"
+                }) if provider_id == "openai" && label == "openai-otter"
             )
         }));
         assert!(
