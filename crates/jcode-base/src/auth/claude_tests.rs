@@ -82,7 +82,7 @@ fn jcode_path_respects_jcode_home() {
 }
 
 #[test]
-fn load_auth_file_renames_existing_labels_to_numbered_scheme() {
+fn load_auth_file_renames_existing_labels_to_animal_scheme() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
@@ -117,9 +117,9 @@ fn load_auth_file_renames_existing_labels_to_numbered_scheme() {
             .iter()
             .map(|account| account.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["claude-1", "claude-2"]
+        vec!["claude-otter", "claude-fox"]
     );
-    assert_eq!(auth.active_anthropic_account.as_deref(), Some("claude-2"));
+    assert_eq!(auth.active_anthropic_account.as_deref(), Some("claude-fox"));
 }
 
 #[test]

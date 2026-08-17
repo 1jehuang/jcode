@@ -36,7 +36,7 @@ impl App {
 
         if accounts.is_empty() {
             return "OpenAI Accounts: none configured\n\n\
-                 Use /account openai add to add the next numbered account, or /login openai to refresh the active one."
+                 Use /account openai add to add another account, or /login openai to refresh the active one."
                 .to_string();
         }
 
@@ -57,7 +57,7 @@ impl App {
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             let active_mark = if is_active { "active" } else { "" };
             rows.push([
-                account.label.clone(),
+                account_display_name("OpenAI", &account.label, accounts.len()),
                 email,
                 status.to_string(),
                 account_id.to_string(),
@@ -83,11 +83,11 @@ impl App {
 
         if accounts.is_empty() {
             return "Anthropic Accounts: none configured\n\n\
-                 Use /account claude add to add the next numbered account, or /login claude to refresh the active one."
+                 Use /account claude add to add another account, or /login claude to refresh the active one."
                 .to_string();
         }
 
-        let headers = ["Account", "Email", "Status", "Subscription", "Active"];
+        let headers = ["Account", "Email", "Status", "Use", "Subscription"];
         let mut rows: Vec<[String; 5]> = Vec::new();
         for account in &accounts {
             let is_active = active_label.as_deref() == Some(&account.label);
@@ -102,13 +102,18 @@ impl App {
                 .map(mask_email)
                 .unwrap_or_else(|| "unknown".to_string());
             let sub = account.subscription_type.as_deref().unwrap_or("unknown");
-            let active_mark = if is_active { "active" } else { "" };
+            let account_use = anthropic_account_use(account.subscription_type.as_deref());
+            let sub = if is_active {
+                format!("{sub} (active)")
+            } else {
+                sub.to_string()
+            };
             rows.push([
-                account.label.clone(),
+                account_display_name("Claude", &account.label, accounts.len()),
                 email,
                 status.to_string(),
-                sub.to_string(),
-                active_mark.to_string(),
+                account_use.to_string(),
+                sub,
             ]);
         }
 
@@ -130,7 +135,8 @@ impl App {
     ) {
         let active_label = crate::auth::claude::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        for account in crate::auth::claude::list_accounts().unwrap_or_default() {
+        let accounts = crate::auth::claude::list_accounts().unwrap_or_default();
+        for account in &accounts {
             let status = if account.expires > now_ms {
                 "valid"
             } else {
@@ -142,7 +148,9 @@ impl App {
                 .map(mask_email)
                 .unwrap_or_else(|| "unknown".to_string());
             let plan = account.subscription_type.as_deref().unwrap_or("unknown");
+            let account_use = anthropic_account_use(account.subscription_type.as_deref());
             let label = account.label.clone();
+            let display_name = account_display_name("Claude", &label, accounts.len());
             let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
                 " - active"
             } else {
@@ -151,8 +159,8 @@ impl App {
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                format!("Switch account `{label}`"),
-                format!("{email} - {status} - plan {plan}{active_suffix}"),
+                format!("Switch {display_name}"),
+                format!("{email} - {account_use} - {status} - plan {plan}{active_suffix}"),
                 crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
                     "/account {} switch {}",
                     provider.id, label
@@ -188,7 +196,8 @@ impl App {
     ) {
         let active_label = crate::auth::codex::active_account_label();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+        let accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+        for account in &accounts {
             let status = match account.expires_at {
                 Some(expires_at) if expires_at > now_ms => "valid",
                 Some(_) => "expired",
@@ -201,6 +210,7 @@ impl App {
                 .unwrap_or_else(|| "unknown".to_string());
             let account_id = account.account_id.as_deref().unwrap_or("unknown");
             let label = account.label.clone();
+            let display_name = account_display_name("OpenAI", &label, accounts.len());
             let active_suffix = if active_label.as_deref() == Some(label.as_str()) {
                 " - active"
             } else {
@@ -209,7 +219,7 @@ impl App {
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
-                format!("Switch account `{label}`"),
+                format!("Switch {display_name}"),
                 format!("{email} - {status} - acct {account_id}{active_suffix}"),
                 crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
                     "/account {} switch {}",
@@ -237,6 +247,60 @@ impl App {
                 )),
             ));
         }
+    }
+}
+
+/// A provider name is enough when there is only one login. Animal names are
+/// useful only when multiple logins of that provider need distinguishing.
+pub(super) fn account_display_name(provider: &str, label: &str, account_count: usize) -> String {
+    if account_count <= 1 {
+        return provider.to_string();
+    }
+    let animal = label
+        .rsplit_once('-')
+        .map(|(_, animal)| animal)
+        .unwrap_or(label);
+    let mut chars = animal.chars();
+    let animal = chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_else(|| "Account".to_string());
+    format!("{provider} {animal}")
+}
+
+/// Anthropic exposes the subscription kind but not an explicit work/personal
+/// flag. Team and enterprise plans are organizational; individual plans are
+/// personal. Unknown values stay unknown rather than being guessed from email.
+pub(super) fn anthropic_account_use(subscription_type: Option<&str>) -> &'static str {
+    match subscription_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("team" | "enterprise" | "business") => "work",
+        Some("free" | "pro" | "max") => "personal",
+        _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod account_display_tests {
+    use super::*;
+
+    #[test]
+    fn animals_only_distinguish_duplicate_provider_logins() {
+        assert_eq!(account_display_name("Claude", "claude-otter", 1), "Claude");
+        assert_eq!(
+            account_display_name("Claude", "claude-otter", 2),
+            "Claude Otter"
+        );
+        assert_eq!(
+            account_display_name("Claude", "claude-fox", 2),
+            "Claude Fox"
+        );
+    }
+
+    #[test]
+    fn known_anthropic_plans_identify_personal_and_work_accounts() {
+        assert_eq!(anthropic_account_use(Some("max")), "personal");
+        assert_eq!(anthropic_account_use(Some("team")), "work");
+        assert_eq!(anthropic_account_use(None), "unknown");
     }
 }
 

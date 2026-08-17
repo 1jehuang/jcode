@@ -327,7 +327,7 @@ pub fn load_auth_file() -> Result<JcodeAuthFile> {
 
     if relabel_accounts(&mut auth) {
         crate::logging::info(
-            "Renaming Claude accounts to numbered labels (claude-1, claude-2, ...)",
+            "Renaming Claude accounts to animal labels (claude-otter, claude-fox, ...)",
         );
         save_auth_file(&auth)?;
     }
