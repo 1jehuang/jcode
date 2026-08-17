@@ -589,8 +589,10 @@ fn render_todos_message_shows_goal_scores_without_verbose_feedback() {
     assert!(!plain.contains("Relevance representative"), "{plain}");
     assert!(!plain.contains("Coverage main_paths"), "{plain}");
     // Only the plan-level assessment renders above the groups.
-    assert!(plain.contains("Understands user intent clear"), "{plain}");
-    assert!(!plain.contains("Keep the agent aligned"), "{plain}");
+    assert!(
+        plain.contains("Intent clear: Keep the agent aligned"),
+        "{plain}"
+    );
     assert!(!plain.contains("Feedback ·"), "{plain}");
     assert!(!plain.contains("Inspect a debug frame"), "{plain}");
     assert!(plain.contains("● Render the card · plausible"), "{plain}");
@@ -633,7 +635,7 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
     assert_eq!(
         narrow
             .iter()
-            .filter(|line| line.contains("User intention"))
+            .filter(|line| line.contains("Intent partial:"))
             .count(),
         1
     );
@@ -667,6 +669,10 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
             .iter()
             .any(|line| line.contains("narrow terminal window")),
         "narrow={narrow:?}"
+    );
+    assert!(
+        narrow.iter().any(|line| line.contains('…')),
+        "narrow intent should be ellipsized: {narrow:?}"
     );
 }
 
