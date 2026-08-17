@@ -95,9 +95,15 @@ Recent telemetry additions also include: coarse onboarding steps, explicit thumb
 | Field | Example | Purpose |
 |-------|---------|----------|
 | `event` | `"feedback"` | Event type |
-| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback explicitly submitted with `/feedback ...` |
+| `feedback_text` | `"The model switcher is confusing"` | Freeform feedback submitted with `/feedback ...` or the `maintainer_feedback` agent tool |
 | `feedback_rating` | `"up"` / `"down"` | Legacy explicit product sentiment, if present |
 | `feedback_reason` | `"slow"` | Legacy optional coarse reason bucket, if present |
+
+The `maintainer_feedback` tool is available only as another explicit telemetry
+path: it obeys the same telemetry opt-out as `/feedback` and sends no event when
+telemetry is disabled. Its schema tells the agent to paraphrase, omit secrets and
+private data, and label whether the report originated with the user, the agent,
+or both. Jcode does not attach transcript content, repository files, or paths.
 
 ### Sponsored Discovery Event
 
