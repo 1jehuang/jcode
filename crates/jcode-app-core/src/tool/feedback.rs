@@ -78,7 +78,7 @@ impl Tool for MaintainerFeedbackTool {
     }
 
     fn description(&self) -> &str {
-        "Send useful product feedback to the Jcode maintainer, including bugs, suggestions, usability issues, and positive sentiment. Use this for concrete feedback worth acting on, not routine status updates. Write a fresh concise report and never include secrets, credentials, personal data, private paths, or copied transcript content. Delivery follows the user's telemetry setting."
+        "Send product feedback to Jcode's maintainer. Respects telemetry settings."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -107,7 +107,7 @@ impl Tool for MaintainerFeedbackTool {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": MAX_DETAILS_CHARS,
-                    "description": "Optional actionable detail, such as reproduction steps and expected versus actual behavior. Never include private data."
+                    "description": "Optional reproduction steps or expected versus actual behavior. Never include private data."
                 }
             }
         })
