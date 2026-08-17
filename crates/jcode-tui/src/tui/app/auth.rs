@@ -1799,79 +1799,44 @@ impl App {
                 )));
             };
 
-            let cli = match crate::auth::grok_build::ensure_cli().await {
-                Ok(cli) => cli,
+            let client = crate::provider::shared_http_client();
+            let authorization = match crate::auth::grok_build::initiate_device_login(&client).await {
+                Ok(authorization) => authorization,
                 Err(error) => {
                     Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                         provider: "grok-build".to_string(),
                         success: false,
-                        message: format!("Failed to prepare Grok Build: {error:#}"),
+                        message: format!("Failed to start Grok Build login: {error:#}"),
                     }));
                     return;
                 }
             };
-            publish_progress(
-                "Grok Build Login\n\nManaged backend ready. Requesting xAI authorization..."
-                    .to_string(),
-                "Grok Build: requesting authorization",
-            );
+            let url = authorization.verification_uri_complete.as_deref()
+                .unwrap_or(&authorization.verification_uri);
+            let _ = Self::open_auth_browser(url);
+            publish_progress(format!(
+                "Grok Build Login\n\nOpen: {}\n\nConfirm code: {}\n\nWaiting for authorization...",
+                authorization.verification_uri, authorization.user_code
+            ), "Grok Build: waiting for browser approval");
 
-            let mut child = match tokio::process::Command::new(&cli)
-                .arg("login")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(error) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "grok-build".to_string(),
-                        success: false,
-                        message: format!(
-                            "Failed to start Jcode's managed Grok Build backend: {error}"
-                        ),
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stderr) = child.stderr.take() {
-                let session_id = session_id.clone();
-                tokio::spawn(async move {
-                    use tokio::io::AsyncBufReadExt;
-                    let mut lines = tokio::io::BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-                        Bus::global().publish(BusEvent::UiActivity(
-                            crate::bus::UiActivity::auth(
-                                Some(session_id.clone()),
-                                line.to_string(),
-                                Some("Grok Build: waiting for browser approval"),
-                            ),
-                        ));
+            match crate::auth::grok_build::complete_device_login(&client, &authorization).await {
+                Ok(()) => {
+                    // The ACP executable is a private provider backend, not an
+                    // authentication dependency. Provision it only after the
+                    // native OAuth flow has completed.
+                    if let Err(error) = crate::auth::grok_build::ensure_cli().await {
+                        Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
+                            provider: "grok-build".to_string(),
+                            success: false,
+                            message: format!("Grok Build login succeeded, but its managed runtime could not be prepared: {error:#}"),
+                        }));
+                        return;
                     }
-                });
-            }
-
-            match child.wait().await {
-                Ok(status) if status.success() => {
                     Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
                         provider: "grok-build".to_string(),
                         success: true,
                         message: "Grok Build login complete. Jcode is refreshing the provider and model list."
                             .to_string(),
-                    }));
-                }
-                Ok(status) => {
-                    Bus::global().publish(BusEvent::LoginCompleted(LoginCompleted {
-                        provider: "grok-build".to_string(),
-                        success: false,
-                        message: format!("Grok Build login exited with status {status}."),
                     }));
                 }
                 Err(error) => {

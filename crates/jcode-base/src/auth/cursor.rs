@@ -4,8 +4,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
-use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
@@ -15,7 +13,6 @@ const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
 // `JCODE_CURSOR_CLIENT_VERSION` if Cursor moves the floor again.
 const CURSOR_DIRECT_CLIENT_VERSION_DEFAULT: &str = "3.8.24";
 const CURSOR_OAUTH_CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
-const CURSOR_EXTERNAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 pub const CURSOR_AUTH_FILE_SOURCE_ID: &str = "cursor_auth_json";
 pub const CURSOR_VSCDB_SOURCE_ID: &str = "cursor_vscdb";
 
@@ -99,29 +96,6 @@ pub fn has_cursor_api_key() -> bool {
 /// Whether direct Cursor native auth is available without relying on cursor-agent runtime.
 pub fn has_cursor_native_auth() -> bool {
     load_access_token_from_env_or_file().is_ok() || has_cursor_vscdb_token() || has_cursor_api_key()
-}
-
-/// Check whether the local Cursor Agent CLI reports an authenticated session.
-///
-/// Full auth status may spend a little time probing external commands, while
-/// `AuthStatus::check_fast()` intentionally skips this path for UI responsiveness.
-pub fn has_authenticated_cli_session() -> bool {
-    let command = std::env::var_os("JCODE_CURSOR_CLI_PATH")
-        .unwrap_or_else(|| std::ffi::OsString::from("cursor-agent"));
-    let command_label = command.to_string_lossy();
-    if !super::command_exists(&command_label) {
-        return false;
-    }
-
-    let mut status_command = Command::new(&command);
-    status_command.arg("status");
-    let Ok(Some(output)) =
-        command_output_with_timeout(&mut status_command, CURSOR_EXTERNAL_COMMAND_TIMEOUT)
-    else {
-        return false;
-    };
-
-    status_output_indicates_authenticated(output.status.success(), &output.stdout, &output.stderr)
 }
 
 /// Check whether a trusted Cursor auth.json contains a usable direct access token.
@@ -262,47 +236,26 @@ fn cursor_vscdb_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-/// Read a key from a vscdb file using the sqlite3 CLI.
+/// Read a key from Cursor's SQLite state directly. Authentication must not
+/// depend on an external `sqlite3` executable being installed.
 fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
-    let mut command = Command::new("sqlite3");
-    command.arg(db_path).arg(format!(
-        "SELECT value FROM ItemTable WHERE key = '{}';",
-        key
-    ));
-    let output = command_output_with_timeout(&mut command, CURSOR_EXTERNAL_COMMAND_TIMEOUT)
-        .context("Failed to run sqlite3 (is it installed?)")?
-        .ok_or_else(|| anyhow::anyhow!("sqlite3 timed out reading {}", db_path.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("sqlite3 failed: {}", stderr.trim());
-    }
-
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let connection = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .with_context(|| format!("Failed to open Cursor state at {}", db_path.display()))?;
+    let value: String = connection
+        .query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .with_context(|| format!("Key '{key}' not found in {}", db_path.display()))?;
+    let value = value.trim().to_string();
     if value.is_empty() {
         anyhow::bail!("Key '{}' not found or empty in {}", key, db_path.display());
     }
     Ok(value)
-}
-
-fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Option<Output>> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let start = std::time::Instant::now();
-
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output().map(Some).map_err(Into::into);
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
 }
 
 /// Load Cursor API key. Checks in order:
@@ -698,37 +651,6 @@ fn timestamp_header_now() -> String {
         prev = *byte;
     }
     URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn status_output_indicates_authenticated(success: bool, stdout: &[u8], stderr: &[u8]) -> bool {
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(stdout),
-        String::from_utf8_lossy(stderr)
-    )
-    .to_ascii_lowercase();
-
-    if combined.contains("not authenticated")
-        || combined.contains("login required")
-        || combined.contains("not logged in")
-        || combined.contains("unauthenticated")
-    {
-        return false;
-    }
-
-    if !success {
-        return false;
-    }
-
-    if combined.contains("authenticated")
-        || combined.contains("account")
-        || combined.contains("email")
-        || combined.contains("endpoint")
-    {
-        return true;
-    }
-
-    success
 }
 
 #[cfg(test)]

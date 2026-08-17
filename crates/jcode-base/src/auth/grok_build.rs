@@ -6,11 +6,188 @@
 //! not need to install the `grok` CLI or put it on `PATH`.
 
 use anyhow::{Context, Result, bail};
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const CLI_PATH_ENV: &str = "JCODE_GROK_CLI_PATH";
 const PRIMARY_BASE_URL: &str = "https://x.ai/cli";
 const FALLBACK_BASE_URL: &str = "https://storage.googleapis.com/grok-build-public-artifacts/cli";
+const OAUTH_ISSUER: &str = "https://auth.x.ai";
+const OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const OAUTH_SCOPES: &str = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    #[serde(default = "default_poll_interval")]
+    pub interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenError {
+    error: String,
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct JwtClaims {
+    sub: Option<String>,
+    email: Option<String>,
+    given_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoredCredential {
+    key: String,
+    auth_mode: &'static str,
+    create_time: String,
+    user_id: String,
+    email: Option<String>,
+    coding_data_retention_opt_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+    oidc_issuer: &'static str,
+    oidc_client_id: &'static str,
+}
+
+fn default_poll_interval() -> u64 {
+    5
+}
+
+fn oauth_headers(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request
+        .header("x-grok-client-version", "1.0.3")
+        .header("x-grok-client-surface", "ui")
+        .header(
+            "user-agent",
+            format!("jcode/{} grok-shell/1.0.3", env!("CARGO_PKG_VERSION")),
+        )
+}
+
+pub async fn initiate_device_login(client: &reqwest::Client) -> Result<DeviceAuthorization> {
+    oauth_headers(client.post(format!("{OAUTH_ISSUER}/oauth2/device/code")))
+        .form(&[
+            ("client_id", OAUTH_CLIENT_ID),
+            ("scope", OAUTH_SCOPES),
+            ("referrer", "grok-build"),
+        ])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .context("invalid xAI device authorization response")
+}
+
+pub async fn complete_device_login(
+    client: &reqwest::Client,
+    authorization: &DeviceAuthorization,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(authorization.expires_in.max(600));
+    let mut interval = authorization.interval.max(1);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+        if tokio::time::Instant::now() >= deadline {
+            bail!("xAI device authorization expired");
+        }
+        let response = oauth_headers(client.post(format!("{OAUTH_ISSUER}/oauth2/token")))
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", authorization.device_code.as_str()),
+                ("client_id", OAUTH_CLIENT_ID),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.bytes().await?;
+        if status.is_success() {
+            let tokens: TokenResponse =
+                serde_json::from_slice(&body).context("invalid xAI token response")?;
+            return save_tokens(tokens);
+        }
+        let error: TokenError = serde_json::from_slice(&body)
+            .with_context(|| format!("xAI token request failed with {status}"))?;
+        match error.error.as_str() {
+            "authorization_pending" => continue,
+            "slow_down" => {
+                interval += 5;
+                continue;
+            }
+            _ => bail!(
+                "xAI login failed: {}",
+                error.error_description.unwrap_or(error.error)
+            ),
+        }
+    }
+}
+
+fn save_tokens(tokens: TokenResponse) -> Result<()> {
+    let claims = tokens
+        .access_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(part)
+                .ok()
+        })
+        .and_then(|bytes| serde_json::from_slice::<JwtClaims>(&bytes).ok())
+        .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let credential = StoredCredential {
+        key: tokens.access_token,
+        auth_mode: "oidc",
+        create_time: now.to_rfc3339(),
+        user_id: claims.sub.unwrap_or_default(),
+        email: claims.email,
+        coding_data_retention_opt_out: false,
+        first_name: claims.given_name,
+        refresh_token: tokens.refresh_token,
+        expires_at: tokens
+            .expires_in
+            .map(|seconds| (now + chrono::Duration::seconds(seconds as i64)).to_rfc3339()),
+        oidc_issuer: OAUTH_ISSUER,
+        oidc_client_id: OAUTH_CLIENT_ID,
+    };
+    let home = std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
+        .context("No home directory available for Grok Build credentials")?;
+    std::fs::create_dir_all(&home)?;
+    let path = home.join("auth.json");
+    let mut credentials = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&bytes).ok()
+        })
+        .unwrap_or_default();
+    credentials.insert(
+        format!("{OAUTH_ISSUER}::{OAUTH_CLIENT_ID}"),
+        serde_json::to_value(credential)?,
+    );
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    std::fs::write(&temporary, serde_json::to_vec_pretty(&credentials)?)?;
+    crate::platform::set_permissions_owner_only(&temporary)?;
+    std::fs::rename(&temporary, &path)?;
+    Ok(())
+}
 
 fn managed_cli_path() -> Result<PathBuf> {
     let name = if cfg!(windows) { "grok.exe" } else { "grok" };
