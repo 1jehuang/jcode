@@ -1449,8 +1449,17 @@ fn push_todo_plan_details(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     if let Some(state) = plan.understands_user_intent {
-        let label = format!("Intent {}: ", state.as_str());
-        let mut spans = vec![Span::styled(label, Style::default().fg(todo_label_color()))];
+        let state_color = match state {
+            crate::todo::IntentUnderstanding::Uncertain => todo_failure_color(),
+            crate::todo::IntentUnderstanding::Partial => todo_warning_color(),
+            crate::todo::IntentUnderstanding::Clear
+            | crate::todo::IntentUnderstanding::Complete => todo_score_color(),
+        };
+        let mut spans = vec![
+            Span::styled("Intent ", Style::default().fg(todo_label_color())),
+            Span::styled(state.as_str().to_string(), Style::default().fg(state_color)),
+            Span::styled(": ", Style::default().fg(todo_label_color())),
+        ];
         if let Some(intention) = intention {
             spans.push(Span::styled(
                 intention.to_string(),
