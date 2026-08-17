@@ -719,6 +719,7 @@ fn render_todos_message_uses_readable_semantic_colors() {
     };
 
     assert_eq!(color_for("todo rendering"), Some(todo_group_color()));
+    assert_eq!(color_for("clear"), Some(todo_score_color()));
     assert_eq!(color_for("Readable metadata"), Some(todo_meta_color()));
     assert_eq!(color_for("● "), Some(asap_color()));
     assert_eq!(color_for(" (high)"), None);
