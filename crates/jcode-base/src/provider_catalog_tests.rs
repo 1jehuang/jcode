@@ -196,7 +196,8 @@ fn resolved_named_profile_skips_non_chat_models_when_picking_newest_default() {
 #[test]
 fn minimax_token_plan_keys_resolve_to_china_endpoint_without_changing_international_default() {
     let _lock = crate::storage::lock_test_env();
-    let _guard = EnvGuard::save(&["OPENAI_API_KEY"]);
+    let _guard = EnvGuard::save(&["MINIMAX_API_KEY", "OPENAI_API_KEY"]);
+    crate::env::remove_var("MINIMAX_API_KEY");
     crate::env::remove_var("OPENAI_API_KEY");
 
     let international = resolve_openai_compatible_profile(MINIMAX_PROFILE);
@@ -1144,7 +1145,7 @@ fn open_weight_family_context_limits_match_published_windows() {
 fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
     // Regression for #407: `default_provider = "minimax"` (the built-in MiniMax
     // profile) must resolve credentials from the profile's documented
-    // OPENAI_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
+    // MINIMAX_API_KEY / minimax.env, not the generic OPENROUTER_API_KEY /
     // openrouter.env. The earlier bug surfaced as
     // "OPENROUTER_API_KEY not found ..." when applying the configured
     // default_model.
