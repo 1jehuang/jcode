@@ -704,7 +704,7 @@ fn test_handle_server_event_soft_interrupt_injected_unrelated_content_keeps_pend
 }
 
 #[test]
-fn test_handle_server_event_soft_interrupt_injected_background_task_renders_card_role() {
+fn test_handle_server_event_soft_interrupt_injected_background_task_retains_row_only() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
@@ -720,19 +720,20 @@ fn test_handle_server_event_soft_interrupt_injected_background_task_renders_card
         &mut remote,
     );
 
-    let last = app
-        .display_messages()
-        .last()
-        .expect("missing injected background task message");
-    assert_eq!(last.role, "background_task");
-    assert!(last.content.contains("**Background task** `abc123`"));
+    assert!(app.display_messages().is_empty());
+    assert_eq!(
+        app.background_task_rows_ref()[0].status,
+        crate::tui::BackgroundTaskRowStatus::Completed
+    );
 }
 
 #[test]
-fn test_handle_server_event_notification_background_task_scope_uses_card_rendering() {
+fn test_handle_server_event_notification_background_task_scope_uses_failed_row() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
@@ -751,26 +752,21 @@ fn test_handle_server_event_notification_background_task_scope_uses_card_renderi
         &mut remote,
     );
 
-    let last = app
-        .display_messages()
-        .last()
-        .expect("missing background task notification message");
-    assert_eq!(last.role, "background_task");
-
     let backend = ratatui::backend::TestBackend::new(42, 12);
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(
-        text.contains("╭") && text.contains("╰"),
-        "expected rounded background-task card in render, got:\n{}",
-        text
+    assert_eq!(app.display_messages().len(), 1);
+    assert!(!app
+        .display_messages()
+        .iter()
+        .any(|message| message.role == "background_task"));
+    assert_eq!(
+        app.background_task_rows_ref()[0].status,
+        crate::tui::BackgroundTaskRowStatus::Failed
     );
-    assert!(
-        !text.contains("◦ Background task"),
-        "background-task notifications should not render as generic swarm items:\n{}",
-        text
-    );
+    assert!(text.contains("× bg bash"), "missing compact failed row:\n{text}");
+    assert!(!text.contains("╭") && !text.contains("Background task failed"));
 }
 
 #[test]
@@ -880,7 +876,7 @@ fn test_swarm_await_notification_inserts_only_compact_summary() {
 }
 
 #[test]
-fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
+fn test_background_task_markdown_is_suppressed_even_if_role_was_lost() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.set_centered(true);
@@ -893,21 +889,8 @@ fn test_background_task_markdown_renders_card_even_if_role_was_lost() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    assert!(
-        text.contains("╭") && text.contains("╰"),
-        "expected inferred background-task card rendering, got:\n{}",
-        text
-    );
-    assert!(
-        text.contains("✗ bg Run jcode library tests afte failed · 594967sj63"),
-        "expected background-task card title, got:\n{}",
-        text
-    );
-    assert!(
-        !text.contains("**Background task**"),
-        "raw markdown should not be shown when the background-task role is inferred:\n{}",
-        text
-    );
+    assert!(!text.contains("╭") && !text.contains("594967sj63"));
+    assert!(app.display_messages().is_empty());
     assert_eq!(app.display_user_message_count(), 0);
 }
 

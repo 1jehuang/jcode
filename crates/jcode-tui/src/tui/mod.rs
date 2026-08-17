@@ -8,6 +8,22 @@ pub struct ContextSnapshot {
     pub fresh: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundTaskRowStatus {
+    Running,
+    Completed,
+    Failed,
+}
+
+/// Compact presentation state for one retained background task.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundTaskRow {
+    pub task_id: String,
+    pub label: String,
+    pub percent: Option<f32>,
+    pub status: BackgroundTaskRowStatus,
+}
+
 pub mod backend;
 pub(crate) mod color_support;
 mod core;
@@ -211,6 +227,10 @@ pub trait TuiState {
     /// Whether the pinned todo band is temporarily expanded to show every row.
     fn pinned_todos_expanded(&self) -> bool {
         false
+    }
+    /// Running and recently completed background tasks rendered beneath pinned todos.
+    fn background_task_rows(&self) -> &[BackgroundTaskRow] {
+        &[]
     }
 
     // ---- Input ----

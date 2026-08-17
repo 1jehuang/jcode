@@ -1349,6 +1349,8 @@ pub struct App {
     pinned_todos_checked_at: Option<Instant>,
     /// User-expanded state for the pinned todo band's `+N more` row.
     pinned_todos_expanded: bool,
+    /// Running and terminal background tasks shown beneath the pinned todo band.
+    background_task_rows: Vec<crate::tui::BackgroundTaskRow>,
     last_side_panel_refresh: Option<Instant>,
     // Most recently persisted focus target for dictation routing.
     last_client_focus_recorded_at: Option<Instant>,

@@ -286,6 +286,28 @@ pub fn format_background_task_progress_markdown(task: &BackgroundTaskProgressEve
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedBackgroundTaskStartedNotification {
+    pub task_id: String,
+    pub label: String,
+}
+
+pub fn parse_background_task_started_notification_markdown(
+    content: &str,
+) -> Option<ParsedBackgroundTaskStartedNotification> {
+    let header = content.trim().lines().next()?.trim();
+    let rest = header.strip_prefix("**Background task started** `")?;
+    let (task_id, label) = rest.split_once("` · `")?;
+    let label = label.strip_suffix('`')?;
+    if task_id.is_empty() || label.is_empty() {
+        return None;
+    }
+    Some(ParsedBackgroundTaskStartedNotification {
+        task_id: task_id.to_string(),
+        label: label.to_string(),
+    })
+}
+
 pub fn format_background_task_stalled_markdown(
     task: &jcode_background_types::BackgroundTaskStalled,
 ) -> String {
