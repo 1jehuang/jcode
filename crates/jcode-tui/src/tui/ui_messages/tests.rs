@@ -661,8 +661,13 @@ fn render_todos_message_shows_user_intention_when_understanding_is_unclear() {
         .map(extract_line_text)
         .collect::<Vec<_>>();
     assert!(
-        wide.iter().any(|line| line.contains(long_text)),
+        wide.iter()
+            .any(|line| line.contains("Intent partial: This deliberately long assessment detail")),
         "wide={wide:?}"
+    );
+    assert!(
+        wide.iter().any(|line| line.contains('…')),
+        "wide intent should remain on one ellipsized line: {wide:?}"
     );
     assert!(
         !narrow
