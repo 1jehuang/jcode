@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::*;
+
 use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
@@ -29,6 +30,19 @@ impl Provider for MockProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(MockProvider)
     }
+}
+
+#[tokio::test]
+async fn maintainer_feedback_tool_is_registered() {
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider).await;
+    assert!(
+        registry
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "maintainer_feedback")
+    );
 }
 
 #[tokio::test]
