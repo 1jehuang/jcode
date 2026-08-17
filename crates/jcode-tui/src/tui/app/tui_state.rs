@@ -593,6 +593,10 @@ impl crate::tui::TuiState for App {
         self.pinned_todos_expanded
     }
 
+    fn background_task_rows(&self) -> &[crate::tui::BackgroundTaskRow] {
+        self.background_task_rows_ref()
+    }
+
     fn input(&self) -> &str {
         &self.input
     }

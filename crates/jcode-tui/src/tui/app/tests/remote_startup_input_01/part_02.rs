@@ -103,12 +103,13 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("cerebras-fast"));
     assert!(last.content.contains("cerebras-large"));
     assert!(last.content.contains("cerebras-reasoning"));
-    assert!(app.display_messages.iter().any(|message| {
-        message.role == "background_task"
-            && message
-                .content
-                .contains("**Background task progress** `refresh-model-list`")
-            && message.content.contains("Model list refresh")
+    assert!(!app
+        .display_messages
+        .iter()
+        .any(|message| message.role == "background_task"));
+    assert!(app.background_task_rows_ref().iter().any(|row| {
+        row.task_id == "refresh-model-list"
+            && row.status == crate::tui::BackgroundTaskRowStatus::Completed
     }));
 }
 
@@ -333,7 +334,7 @@ fn test_remote_onboarding_catalog_activity_completes_model_setup_without_chat_no
 }
 
 #[test]
-fn test_remote_catalog_activity_notification_upserts_progress_card() {
+fn test_remote_catalog_activity_notification_upserts_compact_row() {
     let mut app = create_test_app();
     app.auth_catalog_refresh_pending = true;
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -365,15 +366,18 @@ fn test_remote_catalog_activity_notification_upserts_progress_card() {
         );
     }
 
-    let cards: Vec<_> = app
-        .display_messages
-        .iter()
-        .filter(|message| message.role == "background_task")
-        .collect();
-    assert_eq!(cards.len(), 1, "progress updates should upsert one card");
+    assert!(app.display_messages.is_empty());
+    assert_eq!(app.background_task_rows_ref().len(), 1);
     assert!(app.auth_catalog_refresh_pending);
-    assert!(cards[0].content.contains("refresh-model-list"));
-    assert!(cards[0].content.contains("Waiting on provider APIs"));
+    assert_eq!(
+        app.background_task_rows_ref()[0],
+        crate::tui::BackgroundTaskRow {
+            task_id: "refresh-model-list".to_string(),
+            label: "Model list refresh".to_string(),
+            percent: Some(20.0),
+            status: crate::tui::BackgroundTaskRowStatus::Running,
+        }
+    );
     let status = app.status_notice().expect("status notice");
     assert!(
         status.contains("Waiting on provider APIs (2s elapsed)"),

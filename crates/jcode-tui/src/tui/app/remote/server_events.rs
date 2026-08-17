@@ -2438,14 +2438,31 @@ pub(in crate::tui::app) fn handle_server_event(
             }
             app.mark_soft_interrupt_injected(&content);
             let role = display_role.unwrap_or_else(|| "user".to_string());
-            app.push_display_message(DisplayMessage {
-                role,
-                content: content.clone(),
-                tool_calls: vec![],
-                duration_secs: None,
-                title: None,
-                tool_data: None,
-            });
+            if role == "background_task" {
+                if let Some(completed) =
+                    crate::message::parse_background_task_notification_markdown(&content)
+                {
+                    let status = if completed.status.contains("completed") {
+                        crate::tui::BackgroundTaskRowStatus::Completed
+                    } else {
+                        crate::tui::BackgroundTaskRowStatus::Failed
+                    };
+                    let label = crate::message::background_task_display_label(
+                        &completed.tool_name,
+                        completed.display_name.as_deref(),
+                    );
+                    app.finish_background_task(completed.task_id, label, status);
+                }
+            } else {
+                app.push_display_message(DisplayMessage {
+                    role,
+                    content: content.clone(),
+                    tool_calls: vec![],
+                    duration_secs: None,
+                    title: None,
+                    tool_data: None,
+                });
+            }
             if let Some(n) = tools_skipped {
                 app.set_status_notice(format!("⚡ {} tool(s) skipped", n));
             }
@@ -2526,11 +2543,23 @@ pub(in crate::tui::app) fn handle_server_event(
                 if crate::message::parse_background_task_progress_notification_markdown(&message)
                     .is_some()
                 {
-                    app.upsert_background_task_progress_message(message.clone());
+                    app.upsert_running_background_task_progress(&message);
                 } else {
-                    app.push_display_message(DisplayMessage::background_task(message.clone()));
+                    if let Some(completed) =
+                        crate::message::parse_background_task_notification_markdown(&message)
+                    {
+                        let status = if completed.status.contains("completed") {
+                            crate::tui::BackgroundTaskRowStatus::Completed
+                        } else {
+                            crate::tui::BackgroundTaskRowStatus::Failed
+                        };
+                        let label = crate::message::background_task_display_label(
+                            &completed.tool_name,
+                            completed.display_name.as_deref(),
+                        );
+                        app.finish_background_task(completed.task_id, label, status);
+                    }
                 }
-                persist_replay_display_message(app, "background_task", None, &message);
                 app.set_status_notice(presentation.status_notice);
                 return false;
             }
@@ -2559,13 +2588,14 @@ pub(in crate::tui::app) fn handle_server_event(
                         )
                 {
                     let status_notice = progress.summary.clone();
-                    app.upsert_background_task_progress_message(message.clone());
-                    persist_replay_display_message(app, "background_task", None, &message);
+                    app.upsert_running_background_task_progress(&message);
                     app.set_status_notice(status_notice);
                     return false;
                 } else if scope == "background_activity" {
-                    app.push_display_message(DisplayMessage::background_task(message.clone()));
-                    persist_replay_display_message(app, "background_task", None, &message);
+                    if !app.upsert_running_background_task_started(&message) {
+                        app.push_display_message(DisplayMessage::background_task(message.clone()));
+                        persist_replay_display_message(app, "background_task", None, &message);
+                    }
                 } else {
                     app.push_display_message(DisplayMessage::system(message.clone()));
                     persist_replay_display_message(app, "system", None, &message);
