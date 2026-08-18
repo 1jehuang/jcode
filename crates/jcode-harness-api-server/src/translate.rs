@@ -421,6 +421,7 @@ impl BridgeState {
                     ApiEvent::History {
                         session_id: session_id.to_string(),
                         messages: Self::stored_tail(session_id, limit),
+                        images: Vec::new(),
                     },
                 ))]
             }
@@ -855,6 +856,13 @@ impl BridgeState {
                 output: event["output"].as_str().unwrap_or("").to_string(),
                 error: event["error"].as_str().map(str::to_string),
             })],
+            "side_pane_images" => vec![ServerFrame::event(ApiEvent::SidePaneImages {
+                session_id: event["session_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session(self)),
+                images: serde_json::from_value(event["images"].clone()).unwrap_or_default(),
+            })],
             "tokens" => vec![ServerFrame::event(ApiEvent::TokenUsage {
                 session_id: session(self),
                 input: event["input"].as_u64().unwrap_or(0),
@@ -931,11 +939,13 @@ impl BridgeState {
                             .collect()
                     })
                     .unwrap_or_default();
+                let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
                 vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::History {
                         session_id: session(self),
                         messages,
+                        images,
                     },
                 )]
             }
