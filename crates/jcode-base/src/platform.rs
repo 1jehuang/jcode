@@ -424,6 +424,26 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     cmd.spawn()
 }
 
+/// Reap a detached child without blocking the caller.
+pub fn reap_detached(child: std::process::Child) {
+    #[cfg(unix)]
+    {
+        let mut child = child;
+        let _ = std::thread::Builder::new()
+            .name("jcode-detached-child".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+
+    #[cfg(windows)]
+    {
+        // Closing the process handle is sufficient on Windows. Unlike Unix,
+        // the child does not need to be waited on to avoid a zombie process.
+        drop(child);
+    }
+}
+
 #[cfg(windows)]
 fn spawn_replacement_process(
     cmd: &mut std::process::Command,
