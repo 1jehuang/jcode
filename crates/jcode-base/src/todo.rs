@@ -280,9 +280,9 @@ const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo comple
 /// Model-facing continuation for private completion-confidence checks.
 pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Do more validation on the work below. Keep the todo up to date; do not reply or wait for the user.";
 
-/// Model-facing continuation requesting an independent recheck without saying
-/// why the private evaluator selected it.
-pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Independently recheck the work below. Keep the todo up to date; do not reply or wait for the user.";
+/// Model-facing continuation requesting evidence-backed verification without
+/// exposing why the private evaluator selected it.
+pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Verify the work below with concrete evidence from relevant checks, not an unsupported assessment. Keep the todo up to date; do not reply or wait for the user.";
 
 /// Final synthetic turn after every todo completion check has passed. Gate
 /// continuations tell the model not to reply, so without this handoff a cycle
@@ -521,6 +521,9 @@ const LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE: &str =
     "Your completion confidence is missing or not high enough.";
 const LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str =
     "Your completion confidence rose too sharply to count as independently validated.";
+/// Wording used immediately before the evidence-backed framing. Persisted
+/// sessions can still contain it and must keep treating it as a hidden gate.
+const PRE_EVIDENCE_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Independently recheck the work below. Keep the todo up to date; do not reply or wait for the user.";
 
 fn normalized_group(group: Option<&str>) -> Option<String> {
     group
@@ -712,12 +715,12 @@ pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String 
     message
 }
 
-/// Spike-gate continuation naming the completed todos whose confidence jumped,
-/// so the recheck targets those items.
+/// Spike-gate continuation naming the completed todos that need evidence-backed
+/// verification, so the recheck targets those items.
 pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> String {
     let spiked = spike_completed_todos(todos);
     let mut message = String::from(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE);
-    append_named_todos(&mut message, "Recheck:", &spiked);
+    append_named_todos(&mut message, "Verify with evidence:", &spiked);
     message
 }
 
@@ -746,6 +749,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_EVIDENCE_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
         || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
         || trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE)
@@ -764,8 +768,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     }
     if trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_EVIDENCE_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
     {
-        return Some("🔍 Double-checking a confidence jump for you...");
+        return Some("🔍 Checking that completion is backed by evidence...");
     }
     if trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE) {
         return Some("✅ Preparing the final response...");
@@ -1377,7 +1382,7 @@ mod tests {
             (TODO_COMPLETION_CONTINUATION_MESSAGE, "more validation"),
             (
                 TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
-                "independently recheck",
+                "concrete evidence",
             ),
         ] {
             let lower = message.to_ascii_lowercase();

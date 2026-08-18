@@ -2674,7 +2674,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| { msg.content.contains("Double-checking a confidence jump") })
+                .any(|msg| { msg.content.contains("completion is backed by evidence") })
         );
 
         app.queued_messages.clear();
@@ -2687,7 +2687,11 @@ fn test_finish_turn_challenges_confidence_spike_once() {
 
         assert!(!app.auto_poke_incomplete_todos);
         assert!(!app.todo_confidence_spike_challenged);
-        assert!(!app.pending_queued_dispatch);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
     });
 }
 
