@@ -694,13 +694,23 @@ impl JcodeClient {
     }
 
     pub fn get_history(&self, session_id: &str) -> Result<Vec<HistoryMessage>> {
+        self.get_history_with_images(session_id)
+            .map(|(messages, _)| messages)
+    }
+
+    pub fn get_history_with_images(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<HistoryMessage>, Vec<jcode_harness_api::RenderedImage>)> {
         match self
             .request_ok(ApiRequest::GetHistory {
                 session_id: session_id.to_string(),
             })?
             .event
         {
-            ApiEvent::History { messages, .. } => Ok(messages),
+            ApiEvent::History {
+                messages, images, ..
+            } => Ok((messages, images)),
             other => Err(unexpected("history", &other)),
         }
     }
