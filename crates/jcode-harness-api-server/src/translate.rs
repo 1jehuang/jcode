@@ -1383,7 +1383,7 @@ impl BridgeState {
         let Ok(entries) = std::fs::read_dir(home.join("sessions")) else {
             return Vec::new();
         };
-        let mut ids: Vec<(SystemTime, String)> = entries
+        let candidates: Vec<(String, std::path::PathBuf)> = entries
             .flatten()
             .filter_map(|entry| {
                 let kind = entry.file_type().ok()?;
@@ -1391,16 +1391,39 @@ impl BridgeState {
                 if !kind.is_file() || path.extension()?.to_str()? != "json" {
                     return None;
                 }
-                let id = path.file_stem()?.to_str()?;
-                Self::session_record_path(id).is_some().then(|| {
-                    let modified = entry
-                        .metadata()
-                        .and_then(|metadata| metadata.modified())
-                        .unwrap_or(UNIX_EPOCH);
-                    (modified, id.to_string())
-                })
+                let id = path.file_stem()?.to_str()?.to_string();
+                Self::session_record_path(&id)
+                    .is_some()
+                    .then_some((id, path))
             })
             .collect();
+        // `stat` is the dominant cost with 100k+ sessions. Match the TUI picker
+        // by doing those independent filesystem calls concurrently rather than
+        // serially blocking the API reply long enough for clients to time out.
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(candidates.len().max(1));
+        let chunk_size = candidates.len().div_ceil(workers);
+        let mut ids = std::thread::scope(|scope| {
+            let handles = candidates.chunks(chunk_size).map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|(id, path)| {
+                            let modified = path
+                                .metadata()
+                                .and_then(|metadata| metadata.modified())
+                                .unwrap_or(UNIX_EPOCH);
+                            (modified, id.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
+            handles
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect::<Vec<_>>()
+        });
         ids.sort_unstable_by(|left, right| right.0.cmp(&left.0));
         if let Some(limit) = limit {
             ids.truncate(limit);
