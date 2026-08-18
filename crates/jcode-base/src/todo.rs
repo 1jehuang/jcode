@@ -167,8 +167,12 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
 const LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the plan and its stated user intention to represent every material item. Then map each item to an explicit observation or check in a feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
 
 /// Model-facing continuation for the private intent-understanding check.
-/// Deliberately small: think more about the user's intent, do not ask the user.
-pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your understanding of the user's intent is not high enough. Re-read the request and think harder about what the user actually wants and left implicit, using the conversation and codebase as evidence. Form a requirement inventory covering outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through, and check the plan represents every material item. Do not ask the user; resolve the ambiguity yourself, then update the plan's user intention and understands_user_intent.";
+pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str =
+    "Understand the user's intent better. Try to avoid asking the user.";
+
+/// Previous verbose wording, retained so persisted sessions still classify it
+/// as a hidden quality-gate message after the concise rewrite.
+const PRE_CONCISE_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your understanding of the user's intent is not high enough. Re-read the request and think harder about what the user actually wants and left implicit, using the conversation and codebase as evidence. Form a requirement inventory covering outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through, and check the plan represents every material item. Do not ask the user; resolve the ambiguity yourself, then update the plan's user intention and understands_user_intent.";
 
 /// Model-facing continuation for the private closed-feedback-loop check. Names
 /// the assessment category without disclosing the score or threshold.
@@ -742,6 +746,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_CONCISE_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
@@ -792,7 +797,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     {
         return Some("🔍 Checking the delivery state of the finished work...");
     }
-    if trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE) {
+    if trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_CONCISE_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
+    {
         return Some("🔍 Re-checking the request was understood...");
     }
     if trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
@@ -1376,7 +1383,7 @@ mod tests {
             ),
             (
                 TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
-                "understanding of the user's intent",
+                "understand the user's intent better",
             ),
             (TODO_OWNERSHIP_CONTINUATION_MESSAGE, "continue the work"),
             (TODO_COMPLETION_CONTINUATION_MESSAGE, "more validation"),
@@ -1410,12 +1417,7 @@ mod tests {
         assert!(
             TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task")
         );
-        // Deliberately terse: think harder about intent, never block on the user.
-        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("think harder"));
-        assert!(
-            TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("what the user actually wants")
-        );
-        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Do not ask the user"));
+        assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Try to avoid asking"));
         for message in [
             TODO_OWNERSHIP_CONTINUATION_MESSAGE,
             TODO_COMPLETION_CONTINUATION_MESSAGE,
