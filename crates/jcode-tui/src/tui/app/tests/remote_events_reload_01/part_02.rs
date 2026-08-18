@@ -179,12 +179,12 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
             app.queued_messages[0]
                 .starts_with(crate::todo::TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         );
-        // The continuation names the specific todo that needs evidence-backed verification.
+        // The continuation names the specific todo whose confidence jumped.
         assert!(app.queued_messages[0].contains("Finished work"));
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| { msg.content.contains("completion is backed by evidence") })
+                .any(|msg| { msg.content.contains("Double-checking confidence jumps") })
         );
     });
 }

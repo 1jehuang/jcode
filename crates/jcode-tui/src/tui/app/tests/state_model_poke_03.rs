@@ -2674,7 +2674,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| { msg.content.contains("completion is backed by evidence") })
+                .any(|msg| { msg.content.contains("Double-checking confidence jumps") })
         );
 
         app.queued_messages.clear();
