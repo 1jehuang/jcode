@@ -920,14 +920,22 @@ impl Registry {
         // Drop the lock before executing
         drop(tools);
 
+        let working_dir = ctx
+            .working_dir
+            .as_ref()
+            .map(|dir| dir.display().to_string());
+        let input = crate::hooks::transform_tool_input(
+            &ctx.session_id,
+            working_dir.as_deref(),
+            resolved_name,
+            input,
+        )
+        .await;
+
         // User-configured pre_tool gate: external policy hook that can block
         // this call (exit 2). Skipped entirely when not configured.
         if crate::hooks::hook_configured("pre_tool") {
             let input_json = input.to_string();
-            let working_dir = ctx
-                .working_dir
-                .as_ref()
-                .map(|dir| dir.display().to_string());
             let decision = crate::hooks::run_pre_tool_gate(
                 &ctx.session_id,
                 working_dir.as_deref(),

@@ -21,6 +21,7 @@
 //! Hook processes get `JCODE_HOOKS_DISABLED=1` in their environment so a
 //! hook that itself invokes jcode does not recursively trigger hooks.
 
+use serde_json::Value;
 use std::path::PathBuf;
 
 tokio::task_local! {
@@ -126,6 +127,95 @@ pub fn hook_command(event: &str) -> Option<String> {
 /// skip payload construction entirely when no hook is set.
 pub fn hook_configured(event: &str) -> bool {
     !hook_commands(event).is_empty()
+}
+
+/// Run configured tool-input transformers in declaration order. Transformers
+/// receive the current JSON tool input on stdin and may print a complete
+/// replacement JSON object to stdout. Invalid output, errors, and timeouts
+/// fail open and leave the current input untouched.
+pub async fn transform_tool_input(
+    session_id: &str,
+    working_dir: Option<&str>,
+    tool_name: &str,
+    input: Value,
+) -> Value {
+    if hooks_suppressed() {
+        return input;
+    }
+    let commands: Vec<String> = crate::config::config()
+        .hooks
+        .pre_tool_transform
+        .as_ref()
+        .into_iter()
+        .flat_map(|commands| commands.iter())
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if commands.is_empty() {
+        return input;
+    }
+
+    let mut event = HookEvent::new("pre_tool_transform")
+        .session_id(session_id)
+        .field("TOOL_NAME", tool_name);
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
+    }
+
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config()
+            .hooks
+            .pre_tool_transform_timeout_ms
+            .max(1),
+    );
+    let mut current = input;
+    for command_line in commands {
+        let serialized = current.to_string();
+        let std_cmd = match build_hook_process(&command_line, &event) {
+            Ok(cmd) => cmd,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Tool transformer '{command_line}' is invalid: {error} (leaving input unchanged)"
+                ));
+                continue;
+            }
+        };
+        let mut cmd = tokio::process::Command::from(std_cmd);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                crate::logging::warn(&format!(
+                    "Tool transformer '{command_line}' failed to start: {error} (leaving input unchanged)"
+                ));
+                continue;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(serialized.as_bytes()).await;
+        }
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) if output.status.success() => output,
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => continue,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let candidate = stdout.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(candidate) {
+            Ok(value) if value.is_object() => current = value,
+            Ok(_) | Err(_) => crate::logging::warn(&format!(
+                "Tool transformer '{command_line}' returned invalid JSON object (leaving input unchanged)"
+            )),
+        }
+    }
+    current
 }
 
 /// True when running inside a hook process (recursion guard).
@@ -440,6 +530,94 @@ mod tests {
         crate::env::set_var("JCODE_HOOK_PRE_TOOL", hook);
         crate::env::set_var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS", timeout_ms.to_string());
         reset
+    }
+
+    #[cfg(unix)]
+    fn transform_test_config(hook: &str, timeout_ms: u64) -> impl Drop + use<> {
+        struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => crate::env::set_var(key, value),
+                        None => crate::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let reset = EnvReset(vec![
+            (
+                "JCODE_HOOK_PRE_TOOL_TRANSFORM",
+                std::env::var_os("JCODE_HOOK_PRE_TOOL_TRANSFORM"),
+            ),
+            (
+                "JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
+                std::env::var_os("JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS"),
+            ),
+        ]);
+        crate::env::set_var("JCODE_HOOK_PRE_TOOL_TRANSFORM", hook);
+        crate::env::set_var(
+            "JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS",
+            timeout_ms.to_string(),
+        );
+        reset
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformers_compose_json_replacements() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = write_executable_script(
+            temp.path(),
+            "first.sh",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s' '{\"command\":\"first\"}'\n",
+        );
+        let second = write_executable_script(
+            temp.path(),
+            "second.sh",
+            "#!/bin/sh\ninput=$(cat)\n[ \"$input\" = '{\"command\":\"first\"}' ] || exit 1\nprintf '%s' '{\"command\":\"second\"}'\n",
+        );
+        let commands = serde_json::to_string(&vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize transformer commands");
+        let _env = transform_test_config(&commands, 500);
+
+        let output = transform_tool_input(
+            "ses_transform",
+            Some("/work"),
+            "bash",
+            serde_json::json!({"command": "original"}),
+        )
+        .await;
+        assert_eq!(output, serde_json::json!({"command": "second"}));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformer_fails_open_for_invalid_output_and_timeout() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let invalid = write_executable_script(
+            temp.path(),
+            "invalid.sh",
+            "#!/bin/sh\ncat >/dev/null\necho nope\n",
+        );
+        let hang = write_executable_script(temp.path(), "hang.sh", "#!/bin/sh\nsleep 30\n");
+        let commands = serde_json::to_string(&vec![
+            invalid.to_string_lossy().into_owned(),
+            hang.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize transformer commands");
+        let _env = transform_test_config(&commands, 50);
+        let input = serde_json::json!({"command": "original"});
+
+        assert_eq!(
+            transform_tool_input("ses_transform", None, "bash", input.clone()).await,
+            input
+        );
     }
 
     #[cfg(unix)]
