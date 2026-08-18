@@ -1,5 +1,5 @@
-use super::*;
 use super::auth_account_picker_saved_accounts::{account_display_name, anthropic_account_use};
+use super::*;
 
 impl App {
     pub(crate) fn open_account_center(&mut self, provider_filter: Option<&str>) {
