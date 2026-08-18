@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -119,6 +120,45 @@ async fn runner_stays_alive_to_service_schedules_when_ambient_disabled() {
 
     task.abort();
     let _ = task.await;
+}
+
+async fn assert_visible_launch_error_falls_back(error_kind: std::io::ErrorKind) {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(StreamingTestProvider::default());
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    let launch_attempted = Arc::new(AtomicBool::new(false));
+    let launch_attempted_in_callback = launch_attempted.clone();
+
+    let result = runner
+        .run_cycle_with_visible_launcher(&provider, true, move || {
+            launch_attempted_in_callback.store(true, Ordering::SeqCst);
+            Err(std::io::Error::from(error_kind))
+        })
+        .await
+        .expect("failed visible launch should continue as a headless cycle");
+
+    assert!(launch_attempted.load(Ordering::SeqCst));
+    assert!(
+        result.conversation.is_some(),
+        "headless fallback should capture an agent conversation"
+    );
+    assert!(
+        result.summary.contains("forced end after 2 attempts"),
+        "headless fallback should return the headless agent result"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_visible_launch_falls_back_to_headless() {
+    assert_visible_launch_error_falls_back(std::io::ErrorKind::Unsupported).await;
+}
+
+#[tokio::test]
+async fn missing_visible_launcher_falls_back_to_headless() {
+    assert_visible_launch_error_falls_back(std::io::ErrorKind::NotFound).await;
 }
 
 #[tokio::test]
