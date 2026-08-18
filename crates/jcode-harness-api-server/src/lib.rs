@@ -61,6 +61,24 @@ where
     Ok(read)
 }
 
+/// Cancellation-safe variant for the multiplexed client loop. Tokio guarantees
+/// `read_until` retains bytes already appended to `frame` when another select
+/// branch wins, unlike `read_line` with a temporary String.
+async fn read_frame_bytes<R>(reader: &mut R, frame: &mut Vec<u8>) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut limited = tokio::io::AsyncReadExt::take(reader, MAX_FRAME_BYTES);
+    let read = limited.read_until(b'\n', frame).await?;
+    if frame.len() as u64 == MAX_FRAME_BYTES && !frame.ends_with(b"\n") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame exceeds {MAX_FRAME_BYTES} byte limit"),
+        ));
+    }
+    Ok(read)
+}
+
 /// Run the bridge accept loop forever.
 #[cfg(unix)]
 pub(crate) struct InstanceLock {
@@ -244,11 +262,15 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
-    let mut api_line = String::new();
+    let mut api_frame = Vec::new();
     let mut legacy_line = String::new();
     loop {
         tokio::select! {
-            n = read_frame(&mut reader, &mut api_line) => {
+            // A busy daemon can keep the legacy socket continuously readable.
+            // Prefer client requests so locally answered operations such as
+            // list_sessions cannot sit behind an unbounded event broadcast.
+            biased;
+            n = read_frame_bytes(&mut reader, &mut api_frame) => {
                 let n = match n {
                     Ok(n) => n,
                     // An oversized frame is unrecoverable: the stream is now
@@ -263,8 +285,13 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
                     }
                 };
                 if n == 0 { return Ok(()); }
-                if api_line.trim().is_empty() { continue; }
-                let request: Value = match serde_json::from_str(api_line.trim()) {
+                if api_frame.iter().all(u8::is_ascii_whitespace) {
+                    api_frame.clear();
+                    continue;
+                }
+                let parsed = serde_json::from_slice(&api_frame);
+                api_frame.clear();
+                let request: Value = match parsed {
                     Ok(value) => value,
                     Err(error) => {
                         // No `reply_to`: the id lived in the frame that failed

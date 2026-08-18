@@ -577,6 +577,21 @@ impl JcodeClient {
         match self
             .request_ok(ApiRequest::ListSessions {
                 include_archived: false,
+                limit: None,
+            })?
+            .event
+        {
+            ApiEvent::Sessions { sessions } => Ok(sessions),
+            other => Err(unexpected("sessions", &other)),
+        }
+    }
+
+    /// List only the newest persisted sessions, for bounded dashboard startup.
+    pub fn list_sessions_limited(&self, limit: u32) -> Result<Vec<SessionInfo>> {
+        match self
+            .request_ok(ApiRequest::ListSessions {
+                include_archived: false,
+                limit: Some(limit),
             })?
             .event
         {
@@ -1166,6 +1181,7 @@ fn discover_global_sessions(
         let sessions = match parent
             .request_ok(ApiRequest::ListSessions {
                 include_archived: true,
+                limit: None,
             })
             .and_then(|frame| match frame.event {
                 ApiEvent::Sessions { sessions } => Ok(sessions),
