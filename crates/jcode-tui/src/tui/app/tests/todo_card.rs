@@ -452,6 +452,38 @@ fn background_task_rows_render_without_todos_or_transcript_cards() {
 }
 
 #[test]
+fn completed_background_tasks_clear_after_they_stop_being_relevant() {
+    let mut app = create_test_app();
+    app.finish_background_task(
+        "done".to_string(),
+        "release build".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Completed,
+    );
+    app.finish_background_task(
+        "failed".to_string(),
+        "integration tests".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Failed,
+    );
+    app.upsert_running_background_task("running".to_string(), "cargo test".to_string(), None);
+
+    app.background_task_rows
+        .iter_mut()
+        .find(|row| row.task_id == "done")
+        .unwrap()
+        .completed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(13));
+
+    assert!(app.prune_irrelevant_background_tasks());
+    assert_eq!(
+        app.background_task_rows_ref()
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["failed", "running"]
+    );
+    assert!(!app.prune_irrelevant_background_tasks());
+}
+
+#[test]
 fn clicking_pinned_todo_more_row_expands_the_band() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 

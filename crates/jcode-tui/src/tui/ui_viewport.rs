@@ -1363,8 +1363,8 @@ fn windowed_min(widths: &[u16], window: usize) -> Vec<u16> {
 }
 
 /// Lines for the pinned status band: optional todos followed by exactly one
-/// compact row per retained background task. Todo content is capped so the
-/// transcript stays usable; tasks are never folded into a summary row.
+/// compact row per relevant background task. Completed tasks are shown briefly
+/// as confirmation, while running and failed tasks remain actionable.
 fn pinned_todo_band_lines(
     app: &dyn TuiState,
     width: u16,
