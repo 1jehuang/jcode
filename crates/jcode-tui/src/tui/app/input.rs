@@ -1723,7 +1723,6 @@ impl App {
             // it stays armed so the next batch of work is covered too; only an
             // explicit /poke off (or a circuit breaker above) disarms it.
             self.auto_poke_incomplete_todos = self.auto_poke_default_on;
-            self.todo_confidence_spike_challenged = false;
             // A finished cycle re-arms the review for whatever work comes next;
             // without this a session could only ever deliver one digest.
             self.todo_gate_digest_delivered = false;
@@ -1745,6 +1744,10 @@ impl App {
 
         let poke_message = super::commands::build_poke_message(&incomplete);
         self.todo_final_response_requested = false;
+        // Open work begins a new completion cycle. Keep the prior spike check
+        // latched until this point so the synthetic final-response turn cannot
+        // retrigger the same evidence gate against unchanged completed todos.
+        self.todo_confidence_spike_challenged = false;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {
