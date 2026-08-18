@@ -1727,12 +1727,12 @@ impl App {
             // without this a session could only ever deliver one digest.
             self.todo_gate_digest_delivered = false;
             self.todo_completion_gate_attempts = 0;
-            self.push_display_message(DisplayMessage::system(format!(
-                "✅ All todos done. Completion confidence: {}.",
-                confidence_label
-            )));
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
+                self.push_display_message(DisplayMessage::system(format!(
+                    "✅ All todos done. Completion confidence: {}.",
+                    confidence_label
+                )));
                 self.queued_messages
                     .push(crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string());
                 self.pending_queued_dispatch = true;

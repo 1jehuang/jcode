@@ -2701,6 +2701,13 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(app.todo_confidence_spike_challenged);
         assert!(!app.pending_queued_dispatch);
         assert!(app.queued_messages.is_empty());
+        assert_eq!(
+            app.display_messages()
+                .iter()
+                .filter(|message| message.content.contains("All todos done"))
+                .count(),
+            1
+        );
     });
 }
 
