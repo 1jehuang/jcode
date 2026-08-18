@@ -2540,18 +2540,7 @@ pub(super) fn handle_modal_key(
         return Ok(true);
     }
 
-    if app.changelog_scroll.is_some() {
-        app.handle_changelog_key(code)?;
-        return Ok(true);
-    }
-
-    if app.help_scroll.is_some() {
-        app.handle_help_key(code)?;
-        return Ok(true);
-    }
-
-    if app.model_status_scroll.is_some() {
-        app.handle_model_status_key(code)?;
+    if handle_scroll_overlay_key(app, code)? {
         return Ok(true);
     }
 
@@ -2609,6 +2598,20 @@ pub(super) fn handle_modal_key(
     }
 
     Ok(false)
+}
+
+pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
+    if app.changelog_scroll.is_some() {
+        app.handle_changelog_key(code)?;
+    } else if app.help_scroll.is_some() {
+        app.handle_help_key(code)?;
+    } else if app.model_status_scroll.is_some() {
+        app.handle_model_status_key(code)?;
+    } else {
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 pub(super) fn handle_global_control_shortcuts(
