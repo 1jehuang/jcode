@@ -1442,8 +1442,7 @@ fn active_background_task_line(task: &crate::tui::BackgroundTaskRow, width: u16)
         format!("{}%", rounded_percent)
     };
     let filled = ((percent / 100.0) * BAR_WIDTH as f32).round() as usize;
-    let (active_bar, remaining_bar) = if task.status
-        == crate::tui::BackgroundTaskRowStatus::Failed
+    let (active_bar, remaining_bar) = if task.status == crate::tui::BackgroundTaskRowStatus::Failed
     {
         (
             "━".repeat(filled.min(BAR_WIDTH)),

@@ -732,10 +732,19 @@ fn render_todos_message_uses_readable_semantic_colors() {
 #[test]
 fn render_todos_message_color_codes_every_intent_state() {
     let cases = [
-        (crate::todo::IntentUnderstanding::Uncertain, todo_failure_color()),
-        (crate::todo::IntentUnderstanding::Partial, todo_warning_color()),
+        (
+            crate::todo::IntentUnderstanding::Uncertain,
+            todo_failure_color(),
+        ),
+        (
+            crate::todo::IntentUnderstanding::Partial,
+            todo_warning_color(),
+        ),
         (crate::todo::IntentUnderstanding::Clear, todo_score_color()),
-        (crate::todo::IntentUnderstanding::Complete, todo_score_color()),
+        (
+            crate::todo::IntentUnderstanding::Complete,
+            todo_score_color(),
+        ),
     ];
 
     for (state, expected_color) in cases {
