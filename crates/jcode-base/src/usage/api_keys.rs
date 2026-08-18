@@ -51,9 +51,12 @@ async fn probe_openai_compatible_key(api_base: &str, api_key: &str) -> String {
         return "configured (no endpoint to probe)".to_string();
     }
     let client = crate::provider::shared_http_client();
-    let response = client
-        .get(format!("{}/models", base))
-        .header("Authorization", format!("Bearer {}", api_key))
+    let request = crate::provider_catalog::apply_openai_compatible_catalog_auth(
+        client.get(format!("{}/models", base)),
+        base,
+        api_key,
+    );
+    let response = request
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)
         .send()
