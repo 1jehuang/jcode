@@ -174,10 +174,8 @@ pub fn delivery_state_passes(goal: &TodoGoal) -> bool {
 const LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE: &str = "Your alignment score is not high enough. Build a requirement inventory from the user's request, including outcomes, deliverables, constraints, prohibited actions, integration paths, edge cases, and necessary follow-through. Revise the plan and its stated user intention to represent every material item. Then map each item to an explicit observation or check in a feedback loop. Generic instructions to run tests, verify, or review count only for requirements those checks actually enforce; add separate checks for non-testable requirements. Reassess the weaker link before continuing the task.";
 
 /// Model-facing continuation for the private intent-understanding check.
-pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str =
-    "[auto] Understand the user's intent better. Try to avoid asking the user. Make sure the todo is up to date.";
-const PRE_COMPACT_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str =
-    "Understand the user's intent better. Try to avoid asking the user. Make sure the todo is up to date.";
+pub const TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "[auto] Understand the user's intent better. Try to avoid asking the user. Make sure the todo is up to date.";
+const PRE_COMPACT_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Understand the user's intent better. Try to avoid asking the user. Make sure the todo is up to date.";
 
 /// Previous verbose wording, retained so persisted sessions still classify it
 /// as a hidden quality-gate message after the concise rewrite.
@@ -199,7 +197,8 @@ const LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE: &str = "Your hill-clim
 
 /// Model-facing continuation for the private end-to-end ownership check. It
 /// asks for more work without revealing that an evaluator triggered it.
-pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[auto] Continue the work below. Keep the todo up to date; do not reply or wait for the user.";
+pub const TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str =
+    "[auto] Continue the work below. Keep the todo up to date; do not reply or wait for the user.";
 const PRE_COMPACT_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Continue the work below. Keep the todo up to date; do not reply or wait for the user.";
 
 /// Build an ownership continuation that directs work toward each affected goal
@@ -1478,7 +1477,10 @@ mod tests {
         }
         let spike = TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_ascii_lowercase();
         for evaluator_term in ["gate", "flagged", "failed", "threshold", "score"] {
-            assert!(!spike.contains(evaluator_term), "disclosed {evaluator_term}");
+            assert!(
+                !spike.contains(evaluator_term),
+                "disclosed {evaluator_term}"
+            );
         }
     }
 
@@ -1486,11 +1488,20 @@ mod tests {
     fn static_quality_gate_messages_stay_within_token_budget() {
         for (name, message) in [
             ("long session review", TODO_LONG_SESSION_REVIEW_MESSAGE),
-            ("intent understanding", TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE),
-            ("closed feedback loop", TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE),
+            (
+                "intent understanding",
+                TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
+            ),
+            (
+                "closed feedback loop",
+                TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
+            ),
             ("ownership", TODO_OWNERSHIP_CONTINUATION_MESSAGE),
             ("completion", TODO_COMPLETION_CONTINUATION_MESSAGE),
-            ("confidence jump", TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE),
+            (
+                "confidence jump",
+                TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
+            ),
             ("final response", TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE),
             ("turn digest", TODO_GATE_DIGEST_PREFIX),
         ] {
@@ -1510,11 +1521,20 @@ mod tests {
     fn working_quality_gates_remind_the_model_to_update_todos() {
         for (name, message) in [
             ("long session review", TODO_LONG_SESSION_REVIEW_MESSAGE),
-            ("intent understanding", TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE),
-            ("closed feedback loop", TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE),
+            (
+                "intent understanding",
+                TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
+            ),
+            (
+                "closed feedback loop",
+                TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
+            ),
             ("ownership", TODO_OWNERSHIP_CONTINUATION_MESSAGE),
             ("completion", TODO_COMPLETION_CONTINUATION_MESSAGE),
-            ("confidence jump", TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE),
+            (
+                "confidence jump",
+                TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
+            ),
         ] {
             assert!(
                 message.to_ascii_lowercase().contains("todo"),
