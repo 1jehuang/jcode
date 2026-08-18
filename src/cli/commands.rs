@@ -2450,25 +2450,49 @@ pub async fn run_single_message_command(
         wait_for_cold_cache_mcp_tools(&registry).await;
     }
     let mut agent = crate::agent::Agent::new(provider.clone(), registry);
-    restore_agent_session_if_requested(&mut agent, resume_session)?;
-
-    if emit_json {
-        let text = run_single_message_command_capture_with_auto_poke(&mut agent, message).await?;
-        let report = RunCommandReport {
-            session_id: agent.session_id().to_string(),
-            provider: provider.name().to_string(),
-            model: provider.model(),
-            text,
-            usage: agent.last_usage().clone(),
-        };
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if emit_ndjson {
-        run_single_message_command_ndjson(&mut agent, provider.clone(), message).await?;
-    } else {
-        run_single_message_command_plain_with_auto_poke(&mut agent, message).await?;
+    if let Err(error) = restore_agent_session_if_requested(&mut agent, resume_session) {
+        agent.mark_closed();
+        return Err(error);
     }
 
-    Ok(())
+    run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
+}
+
+async fn run_single_message_with_agent(
+    agent: &mut crate::agent::Agent,
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+    message: &str,
+    emit_json: bool,
+    emit_ndjson: bool,
+) -> Result<()> {
+    let result: Result<()> = async {
+        if emit_json {
+            let text = run_single_message_command_capture_with_auto_poke(agent, message).await?;
+            let report = RunCommandReport {
+                session_id: agent.session_id().to_string(),
+                provider: provider.name().to_string(),
+                model: provider.model(),
+                text,
+                usage: agent.last_usage().clone(),
+            };
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else if emit_ndjson {
+            run_single_message_command_ndjson(agent, provider, message).await?;
+        } else {
+            run_single_message_command_plain_with_auto_poke(agent, message).await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    // `Agent::new` and session restore both register this process as the active
+    // owner. Unlike the interactive lifecycle, `jcode run` has no later quit
+    // path to close the session. Finalize after output has been emitted, while
+    // returning the original command result unchanged. This prevents a normal
+    // one-shot exit from looking like a stale-PID crash on the next startup
+    // (issue #988).
+    agent.mark_closed();
+    result
 }
 
 fn run_command_auto_poke_enabled() -> bool {

@@ -70,6 +70,29 @@ impl Provider for TestProvider {
     }
 }
 
+struct FailingTestProvider;
+
+#[async_trait]
+impl Provider for FailingTestProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        Err(anyhow::anyhow!("one-shot sentinel failure"))
+    }
+
+    fn name(&self) -> &str {
+        "failing-test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self)
+    }
+}
+
 fn spawn_single_response_http_server(status: u16, body: &str) -> String {
     spawn_single_response_http_server_on_host("127.0.0.1", status, body)
 }
@@ -1299,4 +1322,161 @@ async fn restore_agent_session_if_requested_restores_resumed_session() {
         .expect("restore session");
 
     assert_eq!(resumed.session_id(), original_session_id);
+}
+
+#[tokio::test]
+async fn one_shot_output_modes_close_sessions_and_clear_active_pid_markers() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    for (mode, emit_json, emit_ndjson) in [
+        ("plain", false, false),
+        ("json", true, false),
+        ("ndjson", false, true),
+    ] {
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+        let session_id = agent.session_id().to_string();
+        let marker = crate::storage::active_pids_dir()
+            .expect("active PID directory")
+            .join(&session_id);
+        assert!(marker.exists(), "{mode} session should start active");
+
+        run_single_message_with_agent(
+            &mut agent,
+            provider,
+            "Return the test response.",
+            emit_json,
+            emit_ndjson,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{mode} run failed: {error:#}"));
+
+        assert!(
+            !marker.exists(),
+            "{mode} run left an active PID marker behind"
+        );
+        let persisted = crate::session::Session::load(&session_id)
+            .unwrap_or_else(|error| panic!("load {mode} session: {error:#}"));
+        assert!(
+            matches!(persisted.status, crate::session::SessionStatus::Closed),
+            "{mode} run persisted status {:?}",
+            persisted.status
+        );
+        assert!(
+            !crate::session::find_recent_crashed_sessions()
+                .iter()
+                .any(|(id, _)| id == &session_id),
+            "{mode} run was rediscovered as a stale-PID crash"
+        );
+    }
+}
+
+#[tokio::test]
+async fn resumed_one_shot_closes_the_restored_session() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut original = crate::agent::Agent::new(provider.clone(), registry);
+    original
+        .run_once_capture("Seed the resumed one-shot session.")
+        .await
+        .expect("seed resumed session");
+    let session_id = original.session_id().to_string();
+    original.mark_closed();
+
+    let registry = Registry::new(provider.clone()).await;
+    let mut resumed = crate::agent::Agent::new(provider.clone(), registry);
+    restore_agent_session_if_requested(&mut resumed, Some(&session_id))
+        .expect("restore one-shot session");
+    let marker = crate::storage::active_pids_dir()
+        .expect("active PID directory")
+        .join(&session_id);
+    assert!(
+        marker.exists(),
+        "restored session should be active while running"
+    );
+
+    run_single_message_with_agent(
+        &mut resumed,
+        provider,
+        "Finish the resumed one-shot session.",
+        true,
+        false,
+    )
+    .await
+    .expect("run resumed one-shot session");
+
+    assert!(!marker.exists(), "resumed run left its active PID marker");
+    let persisted = crate::session::Session::load(&session_id).expect("load resumed session");
+    assert!(matches!(
+        persisted.status,
+        crate::session::SessionStatus::Closed
+    ));
+    assert!(
+        !crate::session::find_recent_crashed_sessions()
+            .iter()
+            .any(|(id, _)| id == &session_id),
+        "resumed run was rediscovered as a stale-PID crash"
+    );
+}
+
+#[tokio::test]
+async fn one_shot_cleanup_preserves_the_original_command_error() {
+    let _guard = crate::storage::lock_test_env();
+    let _saved = SavedEnv::capture(&["JCODE_HOME", "JCODE_RUN_AUTO_POKE"]);
+    let temp = tempfile::tempdir().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::env::set_var("JCODE_RUN_AUTO_POKE", "0");
+
+    for (mode, emit_json, emit_ndjson) in [
+        ("plain", false, false),
+        ("json", true, false),
+        ("ndjson", false, true),
+    ] {
+        let provider: Arc<dyn Provider> = Arc::new(FailingTestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent = crate::agent::Agent::new(provider.clone(), registry);
+        let session_id = agent.session_id().to_string();
+        let marker = crate::storage::active_pids_dir()
+            .expect("active PID directory")
+            .join(&session_id);
+
+        let error = match run_single_message_with_agent(
+            &mut agent,
+            provider,
+            "Fail this run.",
+            emit_json,
+            emit_ndjson,
+        )
+        .await
+        {
+            Ok(()) => panic!("{mode} provider failure should remain the command result"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("one-shot sentinel failure"),
+            "{mode} changed the original error: {error:#}"
+        );
+        assert!(
+            !marker.exists(),
+            "failed {mode} run left an active PID marker"
+        );
+        let persisted = crate::session::Session::load(&session_id)
+            .unwrap_or_else(|error| panic!("load failed {mode} session: {error:#}"));
+        assert!(matches!(
+            persisted.status,
+            crate::session::SessionStatus::Closed
+        ));
+    }
 }
