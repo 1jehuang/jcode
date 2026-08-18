@@ -588,6 +588,31 @@ pub fn force_apply_openai_compatible_profile_env(profile: Option<OpenAiCompatibl
     apply_openai_compatible_profile_env_impl(profile, false);
 }
 
+/// Whether an OpenAI-compatible API base points at Anthropic's API host.
+pub fn api_base_is_anthropic(api_base: &str) -> bool {
+    api_base.to_ascii_lowercase().contains("api.anthropic.com")
+}
+
+pub const ANTHROPIC_VERSION_HEADER_VALUE: &str = "2023-06-01";
+
+/// Apply the authentication headers required for an OpenAI-compatible request.
+///
+/// Anthropic's compatibility API requires `x-api-key` and
+/// `anthropic-version`; other compatible providers use Bearer authentication.
+pub fn apply_openai_compatible_catalog_auth(
+    request: reqwest::RequestBuilder,
+    api_base: &str,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    if api_base_is_anthropic(api_base) {
+        return request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION_HEADER_VALUE);
+    }
+
+    request.bearer_auth(api_key)
+}
+
 fn apply_openai_compatible_profile_env_impl(
     profile: Option<OpenAiCompatibleProfile>,
     respect_named_profile_lock: bool,

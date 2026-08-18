@@ -157,7 +157,11 @@ async fn discover_openai_compatible_validation_model(
         &profile.api_key_env,
         &profile.env_file,
     ) {
-        request = request.bearer_auth(api_key);
+        request = crate::provider_catalog::apply_openai_compatible_catalog_auth(
+            request,
+            &profile.api_base,
+            &api_key,
+        );
     }
 
     let response = request.send().await.with_context(|| {
