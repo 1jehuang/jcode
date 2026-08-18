@@ -294,12 +294,8 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
-    if app.changelog_scroll.is_some() {
-        return app.handle_changelog_key(code);
-    }
-
-    if app.help_scroll.is_some() {
-        return app.handle_help_key(code);
+    if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
     }
 
     if app.session_picker_overlay.is_some() {
