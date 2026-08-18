@@ -19,6 +19,21 @@ fn level(command: &str) -> RiskLevel {
 }
 
 #[test]
+fn issue_922_heredoc_payload_does_not_trip_the_gate() {
+    for command in [
+        "cat >> log.md <<'EOF'\nO(n^2) time and O(n) space\nEOF",
+        "cat > helper.sh <<'EOF'\n#!/bin/bash\nrm -f \"$SOME_VAR\"\nEOF",
+    ] {
+        assert!(level(command).runs_immediately(), "{command:?}");
+    }
+
+    assert_eq!(
+        level("cat <<'EOF'\nrm -rf ~\nEOF\nrm -rf ~"),
+        RiskLevel::Catastrophic
+    );
+}
+
+#[test]
 fn the_issue_604_command_is_blocked_outright() {
     // The reported incident: "jcode just deleted everything in my ~".
     for command in [
