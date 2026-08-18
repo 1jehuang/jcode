@@ -209,6 +209,7 @@ impl App {
             task.label = label;
             task.percent = percent;
             task.status = crate::tui::BackgroundTaskRowStatus::Running;
+            task.completed_at = None;
             return;
         }
         self.background_task_rows
@@ -217,6 +218,7 @@ impl App {
                 label,
                 percent,
                 status: crate::tui::BackgroundTaskRowStatus::Running,
+                completed_at: None,
             });
     }
 
@@ -257,6 +259,8 @@ impl App {
         {
             task.label = label;
             task.status = status;
+            task.completed_at = (status == crate::tui::BackgroundTaskRowStatus::Completed)
+                .then(std::time::Instant::now);
             if status == crate::tui::BackgroundTaskRowStatus::Completed {
                 task.percent = Some(100.0);
             }
@@ -269,7 +273,24 @@ impl App {
                 percent: (status == crate::tui::BackgroundTaskRowStatus::Completed)
                     .then_some(100.0),
                 status,
+                completed_at: (status == crate::tui::BackgroundTaskRowStatus::Completed)
+                    .then(std::time::Instant::now),
             });
+    }
+
+    /// Successful tasks are useful as short-lived confirmation, but should not
+    /// permanently consume the pinned todo band's limited space. Failures stay
+    /// until acted on, and running tasks always stay visible.
+    pub(super) fn prune_irrelevant_background_tasks(&mut self) -> bool {
+        const COMPLETED_TASK_VISIBILITY: std::time::Duration = std::time::Duration::from_secs(12);
+        let now = std::time::Instant::now();
+        let previous_len = self.background_task_rows.len();
+        self.background_task_rows.retain(|task| {
+            task.completed_at.is_none_or(|completed_at| {
+                now.saturating_duration_since(completed_at) < COMPLETED_TASK_VISIBILITY
+            })
+        });
+        self.background_task_rows.len() != previous_len
     }
 
     pub(super) fn upsert_overnight_display_card(
