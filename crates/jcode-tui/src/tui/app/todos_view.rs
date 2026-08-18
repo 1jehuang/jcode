@@ -580,15 +580,14 @@ fn format_goal_markdown(goals: &[crate::todo::TodoGoal], group: Option<&str>) ->
 /// Plan-level assessment lines, shown once for the whole todo list.
 fn format_plan_markdown(plan: &crate::todo::TodoPlan) -> String {
     let mut markdown = String::new();
-    if !crate::todo::intent_understanding_passes(plan.understands_user_intent) {
-        if let Some(intention) = plan
+    if !crate::todo::intent_understanding_passes(plan.understands_user_intent)
+        && let Some(intention) = plan
             .user_intention
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            markdown.push_str(&format!("- User intention: {}\n", intention));
-        }
+    {
+        markdown.push_str(&format!("- User intention: {}\n", intention));
     }
     if let Some(state) = plan.understands_user_intent {
         markdown.push_str(&format!(
