@@ -280,9 +280,9 @@ const LEGACY_TODO_OWNERSHIP_CONTINUATION_MESSAGE: &str = "[automated todo comple
 /// Model-facing continuation for private completion-confidence checks.
 pub const TODO_COMPLETION_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Do more validation on the work below. Keep the todo up to date; do not reply or wait for the user.";
 
-/// Model-facing continuation requesting evidence-backed verification without
-/// exposing why the private evaluator selected it.
-pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Verify the work below with concrete evidence from relevant checks, not an unsupported assessment. Keep the todo up to date; do not reply or wait for the user.";
+/// Model-facing continuation identifying the items whose confidence jumped and
+/// asking for one explicit double-check without exposing scores or thresholds.
+pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] You had a confidence jump in the items below. Double-check that these are correct. Keep the todo up to date; do not reply or wait for the user.";
 
 /// Final synthetic turn after every todo completion check has passed. Gate
 /// continuations tell the model not to reply, so without this handoff a cycle
@@ -715,12 +715,12 @@ pub fn build_todo_completion_continuation_message(todos: &[TodoItem]) -> String 
     message
 }
 
-/// Spike-gate continuation naming the completed todos that need evidence-backed
-/// verification, so the recheck targets those items.
+/// Spike-gate continuation naming the completed todos whose confidence jumped,
+/// so the double-check targets those items.
 pub fn build_todo_confidence_spike_continuation_message(todos: &[TodoItem]) -> String {
     let spiked = spike_completed_todos(todos);
     let mut message = String::from(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE);
-    append_named_todos(&mut message, "Verify with evidence:", &spiked);
+    append_named_todos(&mut message, "Confidence jumped:", &spiked);
     message
 }
 
@@ -770,7 +770,7 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_EVIDENCE_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
     {
-        return Some("🔍 Checking that completion is backed by evidence...");
+        return Some("🔍 Double-checking confidence jumps...");
     }
     if trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE) {
         return Some("✅ Preparing the final response...");
@@ -1382,7 +1382,7 @@ mod tests {
             (TODO_COMPLETION_CONTINUATION_MESSAGE, "more validation"),
             (
                 TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
-                "concrete evidence",
+                "confidence jump",
             ),
         ] {
             let lower = message.to_ascii_lowercase();
@@ -1419,7 +1419,6 @@ mod tests {
         for message in [
             TODO_OWNERSHIP_CONTINUATION_MESSAGE,
             TODO_COMPLETION_CONTINUATION_MESSAGE,
-            TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE,
         ] {
             let lower = message.to_ascii_lowercase();
             for evaluator_term in ["gate", "flagged", "failed", "threshold", "confidence"] {
@@ -1428,6 +1427,10 @@ mod tests {
                     "disclosed {evaluator_term}: {message}"
                 );
             }
+        }
+        let spike = TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_ascii_lowercase();
+        for evaluator_term in ["gate", "flagged", "failed", "threshold", "score"] {
+            assert!(!spike.contains(evaluator_term), "disclosed {evaluator_term}");
         }
     }
 
