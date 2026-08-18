@@ -1902,7 +1902,16 @@ struct CommunicateInput {
 
 impl CommunicateInput {
     fn spawn_initial_message(&self) -> Option<String> {
-        self.initial_message.clone().or_else(|| self.prompt.clone())
+        self.initial_message
+            .as_ref()
+            .filter(|message| !message.trim().is_empty())
+            .cloned()
+            .or_else(|| {
+                self.prompt
+                    .as_ref()
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .cloned()
+            })
     }
 
     fn required_spawn_label(&self) -> anyhow::Result<String> {

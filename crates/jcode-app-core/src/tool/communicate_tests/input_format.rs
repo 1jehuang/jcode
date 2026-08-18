@@ -20,6 +20,27 @@ fn spawn_initial_message_accepts_prompt_alias_and_prefers_explicit_initial_messa
         preferred.spawn_initial_message().as_deref(),
         Some("preferred")
     );
+
+    for blank_initial_message in ["", " \t\n"] {
+        let from_prompt: CommunicateInput = serde_json::from_value(serde_json::json!({
+            "action": "spawn",
+            "initial_message": blank_initial_message,
+            "prompt": "fallback"
+        }))
+        .expect("spawn payload should deserialize");
+        assert_eq!(
+            from_prompt.spawn_initial_message().as_deref(),
+            Some("fallback")
+        );
+    }
+
+    let blank_messages: CommunicateInput = serde_json::from_value(serde_json::json!({
+        "action": "spawn",
+        "initial_message": "",
+        "prompt": "  "
+    }))
+    .expect("spawn payload should deserialize");
+    assert_eq!(blank_messages.spawn_initial_message(), None);
 }
 
 #[test]
