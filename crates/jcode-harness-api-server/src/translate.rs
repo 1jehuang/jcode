@@ -7,7 +7,7 @@ use jcode_harness_api::{
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -440,14 +440,28 @@ impl BridgeState {
                 vec![Outbound::Legacy(json!({"type": "ping", "id": id}))]
             }
             "list_sessions" => {
+                let list_started = std::time::Instant::now();
                 // A fresh API connection has not received a daemon `state`
                 // snapshot. Start with every persisted record, then merge the
                 // live snapshot so unattached dashboards and global event
                 // subscribers discover complete session state.
-                let mut ids: BTreeSet<String> = Self::stored_session_ids().into_iter().collect();
+                let limit = request["limit"].as_u64().map(|limit| limit as usize);
+                let mut ids: BTreeSet<String> =
+                    Self::stored_session_ids(limit).into_iter().collect();
+                let ids_loaded = list_started.elapsed();
                 ids.extend(self.known_sessions.iter().cloned());
                 if let Some(attached) = self.session_id.clone() {
                     ids.insert(attached);
+                }
+                if let Some(limit) = limit
+                    && ids.len() > limit
+                {
+                    let mut recent: Vec<_> = ids.into_iter().collect();
+                    recent.sort_unstable_by_key(|id| {
+                        std::cmp::Reverse(Self::session_modified_ms(id))
+                    });
+                    recent.truncate(limit);
+                    ids = recent.into_iter().collect();
                 }
                 // Titles are deliberately not cached. A rename is persisted
                 // before `SessionRenamed` is broadcast, and every list call
@@ -459,6 +473,7 @@ impl BridgeState {
                         Self::resolve_session_metadata(id).map(|metadata| (id.clone(), metadata))
                     })
                     .collect();
+                let metadata_loaded = list_started.elapsed();
                 for id in &ids {
                     if !self.session_dirs.contains_key(id)
                         && let Some(dir) = metadata
@@ -488,7 +503,7 @@ impl BridgeState {
                     }
                 }
                 let include_archived = request["include_archived"].as_bool().unwrap_or(false);
-                let sessions = ids
+                let sessions: Vec<_> = ids
                     .into_iter()
                     .filter(|session_id| {
                         include_archived || !archive.sessions.contains_key(session_id)
@@ -509,6 +524,14 @@ impl BridgeState {
                         session_id,
                     })
                     .collect();
+                let completed = list_started.elapsed();
+                eprintln!(
+                    "harness API bridge: list_sessions ids={:.1}ms metadata={:.1}ms total={:.1}ms count={}",
+                    ids_loaded.as_secs_f64() * 1_000.0,
+                    metadata_loaded.as_secs_f64() * 1_000.0,
+                    completed.as_secs_f64() * 1_000.0,
+                    sessions.len()
+                );
                 vec![Outbound::Reply(ServerFrame::reply(
                     api_id,
                     ApiEvent::Sessions { sessions },
@@ -1268,14 +1291,47 @@ impl BridgeState {
     /// groups by directory, so the bridge resolves them from the same files
     /// the daemon persists. Best-effort by design: an unreadable or missing
     /// record simply leaves the session ungrouped rather than failing the
-    /// list, and results are cached because this is on a poll path.
+    /// list. Session records can be hundreds of megabytes, while the fields we
+    /// need are written in the small header and trailer. Reading bounded windows
+    /// avoids parsing every transcript message just to populate the sidebar.
     fn resolve_session_metadata(session_id: &str) -> Option<PersistedSessionMetadata> {
         let path = Self::session_record_path(session_id)?;
         // A missing or malformed record is expected (a session may predate the
         // fields, or be mid-write), and the only cost is missing metadata, so
         // this degrades rather than failing the whole session list or attach.
-        let reader = std::io::BufReader::new(std::fs::File::open(path).ok()?);
-        serde_json::from_reader(reader).ok()
+        const WINDOW: usize = 64 * 1024;
+        let mut file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let head_len = usize::try_from(len.min(WINDOW as u64)).ok()?;
+        let mut head = vec![0; head_len];
+        file.read_exact(&mut head).ok()?;
+        let tail = if len > WINDOW as u64 {
+            file.seek(SeekFrom::End(-(WINDOW as i64))).ok()?;
+            let mut tail = vec![0; WINDOW];
+            file.read_exact(&mut tail).ok()?;
+            tail
+        } else {
+            Vec::new()
+        };
+        Some(PersistedSessionMetadata {
+            title: Self::metadata_string(&head, "title", false),
+            custom_title: Self::metadata_string(&tail, "custom_title", true)
+                .or_else(|| Self::metadata_string(&head, "custom_title", true)),
+            working_dir: Self::metadata_string(&tail, "working_dir", true)
+                .or_else(|| Self::metadata_string(&head, "working_dir", true)),
+        })
+    }
+
+    fn metadata_string(bytes: &[u8], field: &str, last: bool) -> Option<String> {
+        let needle = format!("\"{field}\":");
+        let mut starts = bytes
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
+        let start = if last { starts.last()? } else { starts.next()? };
+        Option::<String>::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..]))
+            .ok()
+            .flatten()
     }
 
     fn resolve_working_dir(session_id: &str) -> Option<String> {
@@ -1320,14 +1376,14 @@ impl BridgeState {
             })
     }
 
-    fn stored_session_ids() -> Vec<String> {
+    fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
         let Some(home) = Self::jcode_home() else {
             return Vec::new();
         };
         let Ok(entries) = std::fs::read_dir(home.join("sessions")) else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = entries
+        let mut ids: Vec<(SystemTime, String)> = entries
             .flatten()
             .filter_map(|entry| {
                 let kind = entry.file_type().ok()?;
@@ -1336,13 +1392,20 @@ impl BridgeState {
                     return None;
                 }
                 let id = path.file_stem()?.to_str()?;
-                Self::session_record_path(id)
-                    .is_some()
-                    .then(|| id.to_string())
+                Self::session_record_path(id).is_some().then(|| {
+                    let modified = entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .unwrap_or(UNIX_EPOCH);
+                    (modified, id.to_string())
+                })
             })
             .collect();
-        ids.sort();
-        ids
+        ids.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        if let Some(limit) = limit {
+            ids.truncate(limit);
+        }
+        ids.into_iter().map(|(_, id)| id).collect()
     }
 
     fn archive_state_path() -> Option<std::path::PathBuf> {

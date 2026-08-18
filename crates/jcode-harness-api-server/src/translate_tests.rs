@@ -79,6 +79,35 @@ fn write_session_record_with_titles(
     path
 }
 
+#[test]
+fn persisted_metadata_reads_large_transcripts_from_bounded_windows() {
+    let home = ScopedJcodeHome::new("bounded-metadata");
+    let sessions = home.path.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions directory");
+    let path = sessions.join("session_large.json");
+    let mut file = std::fs::File::create(&path).expect("create large session");
+    write!(
+        file,
+        "{{\"id\":\"session_large\",\"title\":\"Generated title\",\"messages\":[\""
+    )
+    .unwrap();
+    for _ in 0..(2 * 1024) {
+        file.write_all(&[b'x'; 1024]).unwrap();
+    }
+    write!(
+        file,
+        "\"],\"working_dir\":\"/workspace/large\",\"custom_title\":\"Pinned title\"}}"
+    )
+    .unwrap();
+    drop(file);
+
+    let metadata = BridgeState::resolve_session_metadata("session_large").expect("metadata");
+    assert_eq!(metadata.working_dir.as_deref(), Some("/workspace/large"));
+    assert_eq!(metadata.title.as_deref(), Some("Generated title"));
+    assert_eq!(metadata.custom_title.as_deref(), Some("Pinned title"));
+    assert_eq!(metadata.display_title().as_deref(), Some("Pinned title"));
+}
+
 fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
     assert_eq!(outbound.len(), 1, "expected exactly one reply");
     match outbound.into_iter().next().expect("one outbound") {
@@ -696,6 +725,7 @@ fn attached_requests_still_reach_the_daemon() {
 /// `list_sessions`, so the attach guard must leave them alone.
 #[test]
 fn browsing_requests_work_without_attaching() {
+    let _home = ScopedJcodeHome::new("browsing-without-attach");
     let mut state = BridgeState::default();
     for req in ["list_sessions", "peek_session", "ping"] {
         let out = state.api_request_to_legacy(&json!({

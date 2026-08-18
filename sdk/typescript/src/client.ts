@@ -412,12 +412,16 @@ export class JcodeClient extends EventEmitter {
 
   // --- Curated surface -----------------------------------------------------
 
-  async listSessions(options: { includeArchived?: boolean } = {}): Promise<SessionInfo[]> {
+  async listSessions(options: { includeArchived?: boolean; limit?: number } = {}): Promise<SessionInfo[]> {
     const frame = await this.expectReply(
-      { req: "list_sessions", include_archived: options.includeArchived },
+      { req: "list_sessions", include_archived: options.includeArchived, limit: options.limit },
       "sessions",
     );
     return frame.sessions ?? [];
+  }
+
+  async listSessionsLimited(limit: number): Promise<SessionInfo[]> {
+    return this.listSessions({ limit });
   }
 
   /** Reversibly hide a session from the default list. No transcript is deleted. */
