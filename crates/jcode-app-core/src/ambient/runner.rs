@@ -933,7 +933,7 @@ impl AmbientRunnerHandle {
                 )
                 .await?
             {
-                VisibleCycleOutcome::Completed(result) => return Ok(result),
+                VisibleCycleOutcome::Completed(result) => return Ok(*result),
                 VisibleCycleOutcome::FallBackHeadless => {}
             }
         }
@@ -1072,25 +1072,29 @@ impl AmbientRunnerHandle {
                         crate::storage::read_json::<AmbientCycleResult>(&result_path)
                 {
                     let _ = std::fs::remove_file(&result_path);
-                    return Ok(VisibleCycleOutcome::Completed(AmbientCycleResult {
-                        started_at,
-                        ended_at: Utc::now(),
-                        ..result
-                    }));
+                    return Ok(VisibleCycleOutcome::Completed(Box::new(
+                        AmbientCycleResult {
+                            started_at,
+                            ended_at: Utc::now(),
+                            ..result
+                        },
+                    )));
                 }
 
                 // No result file — user closed the window without end_ambient_cycle
-                Ok(VisibleCycleOutcome::Completed(AmbientCycleResult {
-                    summary: "Visible cycle ended (user closed window)".to_string(),
-                    memories_modified: 0,
-                    compactions: 0,
-                    proactive_work: None,
-                    next_schedule: None,
-                    started_at,
-                    ended_at: Utc::now(),
-                    status: CycleStatus::Incomplete,
-                    conversation: None,
-                }))
+                Ok(VisibleCycleOutcome::Completed(Box::new(
+                    AmbientCycleResult {
+                        summary: "Visible cycle ended (user closed window)".to_string(),
+                        memories_modified: 0,
+                        compactions: 0,
+                        proactive_work: None,
+                        next_schedule: None,
+                        started_at,
+                        ended_at: Utc::now(),
+                        status: CycleStatus::Incomplete,
+                        conversation: None,
+                    },
+                )))
             }
             Err(e) => {
                 logging::warn(&format!(
@@ -1105,7 +1109,7 @@ impl AmbientRunnerHandle {
 }
 
 enum VisibleCycleOutcome {
-    Completed(AmbientCycleResult),
+    Completed(Box<AmbientCycleResult>),
     FallBackHeadless,
 }
 
