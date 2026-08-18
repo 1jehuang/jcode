@@ -27,6 +27,7 @@ import {
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
+  type RenderedImage,
   type ServerFrame,
   type SessionInfo,
   type TextMatch,
@@ -544,11 +545,18 @@ export class JcodeClient extends EventEmitter {
   }
 
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {
+    const { messages } = await this.getHistoryWithImages(sessionId);
+    return messages;
+  }
+
+  async getHistoryWithImages(
+    sessionId: string,
+  ): Promise<{ messages: HistoryMessage[]; images: RenderedImage[] }> {
     const frame = await this.expectReply(
       { req: "get_history", session_id: sessionId },
       "history",
     );
-    return frame.messages ?? [];
+    return { messages: frame.messages ?? [], images: frame.images ?? [] };
   }
 
   async peekSession(sessionId: string, limit?: number): Promise<HistoryMessage[]> {
