@@ -1839,6 +1839,13 @@ mod tests {
             parameters["properties"]["action"]["enum"],
             json!(["search", "select", "suggest"])
         );
+        assert_eq!(
+            parameters["properties"]["category"]["enum"],
+            json!(crate::sponsors::DISCOVERY_CATEGORIES)
+        );
+        assert!(parameters["properties"]["category"]["enum"]
+            .as_array()
+            .is_some_and(|categories| categories.contains(&json!("git"))));
         assert!(
             schema.len() < 4_500,
             "discovery schema should stay compact, got {} bytes",
