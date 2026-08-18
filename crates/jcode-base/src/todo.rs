@@ -6,7 +6,13 @@ use std::path::PathBuf;
 /// Generic mid-task reassessment prompt. The elapsed-time policy that triggers
 /// it is intentionally private so the model reassesses from evidence rather
 /// than targeting a timer or evaluator boundary.
-pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop relevance and coverage, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
+pub const TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the request. Update the todo plan and goal assessments from the evidence gathered so far. Correct anything stale or overstated, then continue the work. Do not reply or wait for the user.";
+const PRE_BUDGET_TODO_LONG_SESSION_REVIEW_MESSAGE: &str = "[automated todo assessment review - not a user message] Re-read the original request and reconsider the current todo plan and every goal assessment using the evidence gathered during the work so far. Correct anything stale or overstated, including intent understanding, feedback-loop relevance and coverage, autonomy, difficulty, delivery, confidence, iteration maturity, and stopping evidence. Do not reply conversationally or wait for the user. Continue the work after saving an honest updated assessment.";
+
+/// Static quality-gate instructions should stay short enough to be read as a
+/// nudge, not a replacement system prompt. Dynamic todo/goal details are added
+/// separately and have their own list-size limits.
+pub const TODO_QUALITY_GATE_MAX_APPROX_TOKENS: usize = 64;
 
 /// Private policy. Do not include this duration in model-facing schemas or
 /// continuation text.
@@ -176,7 +182,8 @@ const PRE_CONCISE_TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE: &str = "Your u
 
 /// Model-facing continuation for the private closed-feedback-loop check. Names
 /// the assessment category without disclosing the score or threshold.
-pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback loop is not closed. First, improve the goal's objective and name the observation that reports back on each requirement, so progress can be measured across iterations. Generic phrases such as run tests, verify, or review count only for requirements those named checks demonstrably enforce; add separate explicit checks for non-testable requirements. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
+pub const TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Improve the goal's feedback loop. Name a concrete check for each requirement and what result will show it passed. Update the goal, then continue the work.";
+const PRE_BUDGET_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE: &str = "Your feedback loop is not closed. First, improve the goal's objective and name the observation that reports back on each requirement, so progress can be measured across iterations. Generic phrases such as run tests, verify, or review count only for requirements those named checks demonstrably enforce; add separate explicit checks for non-testable requirements. Then call the todo tool again with the revised goal before continuing the task. The goal is to create a strong feedback loop you can iterate against.";
 
 /// Pre-rename ("hill-climbability") version of the closed-feedback-loop
 /// continuation. Kept only so persisted transcripts still classify it as a
@@ -291,7 +298,8 @@ pub const TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE: &str = "[automated follow-
 /// Final synthetic turn after every todo completion check has passed. Gate
 /// continuations tell the model not to reply, so without this handoff a cycle
 /// can end on a bare tool call or an internal-looking validation response.
-pub const TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] All work and quality checks are complete. Give the user the final response now. Default to fewer than 5 lines unless the user's request requires more detail. Summarize the outcome clearly; do not call the todo tool or perform more work.";
+pub const TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] Quality checks passed. Give the user a concise final response now. Do not call the todo tool or do more work.";
+const PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE: &str = "[automated follow-up - not a user message] All work and quality checks are complete. Give the user the final response now. Default to fewer than 5 lines unless the user's request requires more detail. Summarize the outcome clearly; do not call the todo tool or perform more work.";
 
 /// A completed todo is considered spike-finished when its final recorded
 /// confidence step jumps this many levels or more (e.g. speculative straight
@@ -743,6 +751,7 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         && trimmed.contains(" incomplete todo")
         && trimmed.ends_with("update the todo tool."))
         || trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE)
@@ -752,12 +761,14 @@ pub fn is_auto_poke_message(message: &str) -> bool {
         || trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_COMPLETION_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(PRE_EVIDENCE_TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_CONFIDENCE_SUMMARY_PREFIX)
         || trimmed.starts_with(TODO_GATE_DIGEST_PREFIX)
         || trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_LONG_SESSION_REVIEW_MESSAGE)
 }
 
 /// Short, user-facing stand-in for a synthetic auto-poke/gate continuation.
@@ -777,7 +788,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     {
         return Some("🔍 Double-checking confidence jumps...");
     }
-    if trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE) {
+    if trimmed.starts_with(TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE)
+    {
         return Some("✅ Preparing the final response...");
     }
     if trimmed.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
@@ -789,7 +802,9 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
     if trimmed.starts_with(TODO_GATE_DIGEST_PREFIX) {
         return Some("🔍 Reviewing the weak points of this turn for you...");
     }
-    if trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE) {
+    if trimmed.starts_with(TODO_LONG_SESSION_REVIEW_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_LONG_SESSION_REVIEW_MESSAGE)
+    {
         return Some("🔍 Rechecking the plan and assessments after extended work...");
     }
     if trimmed.starts_with(TODO_OWNERSHIP_CONTINUATION_MESSAGE)
@@ -803,6 +818,7 @@ pub fn auto_poke_display_summary(message: &str) -> Option<&'static str> {
         return Some("🔍 Re-checking the request was understood...");
     }
     if trimmed.starts_with(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
+        || trimmed.starts_with(PRE_BUDGET_TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_HILL_CLIMBABILITY_CONTINUATION_MESSAGE)
         || trimmed.starts_with(LEGACY_TODO_ALIGNMENT_CONTINUATION_MESSAGE)
     {
@@ -1379,7 +1395,7 @@ mod tests {
         for (message, category) in [
             (
                 TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
-                "feedback loop is not closed",
+                "concrete check for each requirement",
             ),
             (
                 TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE,
@@ -1409,14 +1425,7 @@ mod tests {
             }
         }
 
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("strong feedback loop"));
-        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("First, improve"));
-        assert!(
-            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("call the todo tool again")
-        );
-        assert!(
-            TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("before continuing the task")
-        );
+        assert!(TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE.contains("Update the goal"));
         assert!(TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE.contains("Try to avoid asking"));
         for message in [
             TODO_OWNERSHIP_CONTINUATION_MESSAGE,
@@ -1433,6 +1442,26 @@ mod tests {
         let spike = TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE.to_ascii_lowercase();
         for evaluator_term in ["gate", "flagged", "failed", "threshold", "score"] {
             assert!(!spike.contains(evaluator_term), "disclosed {evaluator_term}");
+        }
+    }
+
+    #[test]
+    fn static_quality_gate_messages_stay_within_token_budget() {
+        for (name, message) in [
+            ("long session review", TODO_LONG_SESSION_REVIEW_MESSAGE),
+            ("intent understanding", TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE),
+            ("closed feedback loop", TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE),
+            ("ownership", TODO_OWNERSHIP_CONTINUATION_MESSAGE),
+            ("completion", TODO_COMPLETION_CONTINUATION_MESSAGE),
+            ("confidence jump", TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE),
+            ("final response", TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE),
+            ("turn digest", TODO_GATE_DIGEST_PREFIX),
+        ] {
+            let tokens = jcode_core::util::estimate_tokens(message);
+            assert!(
+                tokens <= TODO_QUALITY_GATE_MAX_APPROX_TOKENS,
+                "{name} quality-gate message is about {tokens} tokens; budget is {TODO_QUALITY_GATE_MAX_APPROX_TOKENS}: {message}"
+            );
         }
     }
 
