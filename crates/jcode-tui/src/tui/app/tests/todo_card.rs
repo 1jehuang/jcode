@@ -434,10 +434,6 @@ fn background_task_rows_render_without_todos_or_transcript_cards() {
     let rendered = render_and_snap(&app, &mut terminal);
 
     assert!(
-        rendered.contains("◌ bg cargo test  ━━━╺── 42%"),
-        "missing running task row:\n{rendered}"
-    );
-    assert!(
         rendered.contains("✓ bg release build  ━━━━━━ 100%"),
         "missing completed task row:\n{rendered}"
     );
@@ -445,10 +441,35 @@ fn background_task_rows_render_without_todos_or_transcript_cards() {
         rendered.contains("× bg integration tests  ────── failed"),
         "missing failed task row:\n{rendered}"
     );
+    assert!(
+        !rendered.contains("◌ bg cargo test"),
+        "only the two most recent task rows should render:\n{rendered}"
+    );
     assert!(!rendered.contains("Background tasks"));
     assert!(!rendered.contains("Background task started"));
     assert!(!rendered.contains("Background task progress"));
     assert!(!rendered.contains("Background task completed"));
+}
+
+#[test]
+fn background_task_rows_retain_the_two_most_recently_active_tasks() {
+    let mut app = create_test_app();
+    app.upsert_running_background_task("first".to_string(), "first task".to_string(), None);
+    app.upsert_running_background_task("second".to_string(), "second task".to_string(), None);
+    app.upsert_running_background_task(
+        "first".to_string(),
+        "first task updated".to_string(),
+        Some(50.0),
+    );
+    app.upsert_running_background_task("third".to_string(), "third task".to_string(), None);
+
+    assert_eq!(
+        app.background_task_rows_ref()
+            .iter()
+            .map(|row| row.task_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "third"]
+    );
 }
 
 #[test]
