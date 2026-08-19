@@ -1,0 +1,16 @@
+{
+  "version": "0.78.1",
+  "date": "2026-08-19",
+  "highlights": [
+    "Git integrations can now be discovered through the tool catalog"
+  ],
+  "improvements": [
+    "Session discovery is faster and bounded for dashboard clients"
+  ],
+  "fixes": [
+    "Pinned background tasks now stay limited to the two most recently active tasks",
+    "Station sessions now use the correct model status routing",
+    "Anthropic catalog probes now send the required provider headers",
+    "Command safety checks no longer flag inert heredoc payloads"
+  ]
+}
