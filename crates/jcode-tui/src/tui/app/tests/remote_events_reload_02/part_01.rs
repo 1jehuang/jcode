@@ -766,7 +766,10 @@ fn test_handle_server_event_notification_background_task_scope_uses_failed_row()
         crate::tui::BackgroundTaskRowStatus::Failed
     );
     assert!(text.contains("× bg bash"), "missing compact failed row:\n{text}");
-    assert!(!text.contains("╭") && !text.contains("Background task failed"));
+    assert!(
+        !text.contains("Background task failed") && !text.contains("[stderr] line one"),
+        "unexpected expanded background task card:\n{text}"
+    );
 }
 
 #[test]

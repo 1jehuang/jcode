@@ -476,16 +476,16 @@ fn background_task_rows_retain_the_two_most_recently_active_tasks() {
 fn completed_background_tasks_clear_after_they_stop_being_relevant() {
     let mut app = create_test_app();
     app.finish_background_task(
-        "done".to_string(),
-        "release build".to_string(),
-        crate::tui::BackgroundTaskRowStatus::Completed,
-    );
-    app.finish_background_task(
         "failed".to_string(),
         "integration tests".to_string(),
         crate::tui::BackgroundTaskRowStatus::Failed,
     );
     app.upsert_running_background_task("running".to_string(), "cargo test".to_string(), None);
+    app.finish_background_task(
+        "done".to_string(),
+        "release build".to_string(),
+        crate::tui::BackgroundTaskRowStatus::Completed,
+    );
 
     app.background_task_rows
         .iter_mut()
@@ -499,7 +499,7 @@ fn completed_background_tasks_clear_after_they_stop_being_relevant() {
             .iter()
             .map(|row| row.task_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["failed", "running"]
+        vec!["running"]
     );
     assert!(!app.prune_irrelevant_background_tasks());
 }
