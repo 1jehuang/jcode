@@ -1,14 +1,212 @@
 //! MCP management tool - connect, disconnect, list, reload MCP servers
 
-use crate::mcp::{McpManager, McpServerConfig};
+use crate::mcp::{ContentBlock, McpManager, McpServerConfig, dispatch_name};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+#[derive(Debug, Deserialize)]
+struct McpSearchInput {
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct McpSearchResult {
+    name: String,
+    server: String,
+    tool: String,
+    description: String,
+    input_schema: Value,
+}
+
+/// Fixed MCP discovery surface used when individual server definitions are deferred.
+pub struct McpSearchTool {
+    manager: Arc<RwLock<McpManager>>,
+}
+
+impl McpSearchTool {
+    pub fn new(manager: Arc<RwLock<McpManager>>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for McpSearchTool {
+    fn name(&self) -> &str {
+        "mcp_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search available MCP tools by server, name, or description. Returns callable names and input schemas."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "Optional exact MCP server name."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional case-insensitive name or description search."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let params: McpSearchInput = serde_json::from_value(input)?;
+        let server_filter = params
+            .server
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let query = params
+            .query
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        let manager = self.manager.read().await;
+        let catalog = manager.searchable_tools().await;
+        drop(manager);
+
+        let matches: Vec<McpSearchResult> = catalog
+            .into_iter()
+            .filter_map(|(server, tool)| {
+                if server_filter.is_some_and(|wanted| wanted != server) {
+                    return None;
+                }
+                let name = dispatch_name(&server, &tool.name);
+                if !super::session_mcp_dispatch_is_allowed(&ctx.session_id, &name, "mcp_search") {
+                    return None;
+                }
+                if let Some(query) = &query {
+                    let description = tool.description.as_deref().unwrap_or_default();
+                    if !name.to_ascii_lowercase().contains(query)
+                        && !server.to_ascii_lowercase().contains(query)
+                        && !tool.name.to_ascii_lowercase().contains(query)
+                        && !description.to_ascii_lowercase().contains(query)
+                    {
+                        return None;
+                    }
+                }
+                Some(McpSearchResult {
+                    name,
+                    server,
+                    tool: tool.name,
+                    description: tool.description.unwrap_or_else(|| "MCP tool".to_string()),
+                    input_schema: tool.input_schema,
+                })
+            })
+            .collect();
+
+        Ok(ToolOutput::new(serde_json::to_string_pretty(&matches)?)
+            .with_title(format!("MCP tools ({})", matches.len())))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct McpCallInput {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+/// Fixed MCP execution surface used when individual server definitions are deferred.
+pub struct McpCallTool {
+    manager: Arc<RwLock<McpManager>>,
+}
+
+impl McpCallTool {
+    pub fn new(manager: Arc<RwLock<McpManager>>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl Tool for McpCallTool {
+    fn name(&self) -> &str {
+        "mcp_call"
+    }
+
+    fn description(&self) -> &str {
+        "Call an MCP server tool discovered with mcp_search."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "server": {"type": "string", "description": "MCP server name."},
+                "tool": {"type": "string", "description": "Raw MCP tool name."},
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments matching the input schema returned by mcp_search."
+                }
+            },
+            "required": ["server", "tool", "arguments"]
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let mut params: McpCallInput = serde_json::from_value(input)?;
+        let dispatched_name = dispatch_name(&params.server, &params.tool);
+        if !super::session_mcp_dispatch_is_allowed(&ctx.session_id, &dispatched_name, "mcp_call") {
+            anyhow::bail!("MCP tool '{}' is not allowed", dispatched_name);
+        }
+        if params.arguments.is_null() {
+            params.arguments = Value::Object(serde_json::Map::new());
+        }
+
+        let manager = self.manager.read().await;
+        let result = manager
+            .call_tool(&params.server, &params.tool, params.arguments)
+            .await?;
+        drop(manager);
+
+        let mut output_parts = Vec::new();
+        for block in result.content {
+            match block {
+                ContentBlock::Text { text } => output_parts.push(text),
+                ContentBlock::Image { data, mime_type } => {
+                    output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
+                }
+                ContentBlock::Resource { resource } => {
+                    if let Some(text) = resource.text {
+                        output_parts.push(text);
+                    } else if let Some(blob) = resource.blob {
+                        output_parts.push(format!(
+                            "[Resource: {} ({} bytes)]",
+                            resource.uri,
+                            blob.len()
+                        ));
+                    } else {
+                        output_parts.push(format!("[Resource: {}]", resource.uri));
+                    }
+                }
+            }
+        }
+        let output = output_parts.join("\n");
+        let title = format!("mcp:{}:{}", params.server, params.tool);
+        if result.is_error {
+            Ok(ToolOutput::new(format!("Error: {}", output)).with_title(title))
+        } else {
+            Ok(ToolOutput::new(output).with_title(title))
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct McpToolInput {

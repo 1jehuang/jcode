@@ -114,6 +114,14 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) disable_base_tools: bool,
 
+    /// MCP tool exposure mode: auto, eager, or deferred.
+    #[arg(long, global = true, value_parser = ["auto", "eager", "deferred"])]
+    pub(crate) mcp_tools: Option<String>,
+
+    /// Token estimate at which --mcp-tools=auto switches to deferred exposure.
+    #[arg(long, global = true, value_name = "TOKENS")]
+    pub(crate) mcp_tools_token_threshold: Option<usize>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
