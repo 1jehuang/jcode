@@ -393,10 +393,11 @@ pub(super) fn is_ci() -> bool {
     // classify themselves accurately even on an unknown provider, and lets a
     // controlled non-CI environment override an inherited generic CI marker.
     if let Ok(value) = std::env::var("JCODE_CI") {
-        return matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {} // Invalid values fall through to provider detection.
+        }
     }
     // Vendor-specific markers. `CI` alone misses several providers that only
     // set their own variable, which let CI runners land in the headline DAU
