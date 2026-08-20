@@ -933,6 +933,9 @@ impl Agent {
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
+                        if text.trim_start().starts_with("<system-reminder>") {
+                            continue;
+                        }
                         transcript.push_str(text);
                         transcript.push('\n');
                     }
