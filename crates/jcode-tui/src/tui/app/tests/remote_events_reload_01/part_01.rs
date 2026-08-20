@@ -50,6 +50,38 @@ fn test_remote_bus_dictation_completion_ignores_other_session() {
 }
 
 #[test]
+fn test_remote_bus_productivity_failure_clears_refresh_state() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut remote = rt.block_on(async { crate::tui::backend::RemoteConnection::dummy() });
+    app.productivity_refreshing = true;
+    let session_id = app.session.id.clone();
+
+    let handled = rt.block_on(crate::tui::app::remote::handle_bus_event(
+        &mut app,
+        &mut remote,
+        Ok(crate::bus::BusEvent::ProductivityReportReady(
+            crate::bus::ProductivityReportReady {
+                session_id,
+                result: Err("generation failed".to_string()),
+            },
+        )),
+    ));
+
+    assert!(handled);
+    assert!(!app.productivity_refreshing);
+    assert_eq!(
+        app.status_notice.as_ref().map(|(notice, _)| notice.as_str()),
+        Some("Productivity report failed")
+    );
+    assert!(
+        app.display_messages()
+            .last()
+            .is_some_and(|message| message.content.contains("generation failed"))
+    );
+}
+
+#[test]
 fn test_handle_server_event_transcript_send_prefixes_user_message() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
