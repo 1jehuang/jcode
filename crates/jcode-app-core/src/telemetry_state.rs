@@ -291,10 +291,11 @@ pub(super) fn is_git_checkout() -> bool {
 
 pub(super) fn is_ci() -> bool {
     if let Ok(value) = std::env::var("JCODE_CI") {
-        return matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {}
+        }
     }
     [
         "CI",

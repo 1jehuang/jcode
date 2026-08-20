@@ -272,6 +272,15 @@ fn test_is_ci_detects_ci_env() {
     jcode_core::env::remove_var("JCODE_CI");
     jcode_core::env::remove_var("CI");
 
+    jcode_core::env::set_var("CI", "true");
+    jcode_core::env::set_var("JCODE_CI", "invalid");
+    assert!(
+        is_ci(),
+        "invalid explicit values should fall back to provider detection"
+    );
+    jcode_core::env::remove_var("JCODE_CI");
+    jcode_core::env::remove_var("CI");
+
     // Vendor-specific markers count on their own: several providers never set
     // the generic `CI` variable, and those runners used to look like people.
     for key in [
