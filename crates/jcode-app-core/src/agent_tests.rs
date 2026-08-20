@@ -1233,6 +1233,200 @@ impl crate::tool::Tool for FakeMcpTool {
     }
 }
 
+struct VerboseFakeMcpTool {
+    name: String,
+    description: String,
+}
+
+#[async_trait]
+impl crate::tool::Tool for VerboseFakeMcpTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {"value": {"type": "string"}}
+        })
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: crate::tool::ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::new("ok"))
+    }
+}
+
+async fn register_fake_deferred_mcp_surface(registry: &Registry) {
+    for name in ["mcp_search", "mcp_call"] {
+        registry
+            .register(
+                name.to_string(),
+                Arc::new(FakeMcpTool {
+                    name: name.to_string(),
+                }) as Arc<dyn crate::tool::Tool>,
+            )
+            .await;
+    }
+}
+
+async fn agent_with_fake_mcp_surface(mode: crate::config::McpToolsMode, threshold: usize) -> Agent {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    registry
+        .register(
+            "mcp__test__verbose".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "verbose".to_string(),
+                description: "large MCP definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = mode;
+    agent.mcp_tools_token_threshold = threshold;
+    agent
+}
+
+#[tokio::test]
+async fn mcp_exposure_modes_select_eager_or_fixed_definitions() {
+    let _guard = crate::storage::lock_test_env();
+
+    let mut eager = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Eager, 0).await;
+    let eager_names: Vec<String> = eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(eager_names.iter().any(|name| name == "mcp__test__verbose"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_search"));
+    assert!(!eager_names.iter().any(|name| name == "mcp_call"));
+
+    let mut deferred =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Deferred, usize::MAX).await;
+    let deferred_names: Vec<String> = deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(!deferred_names.iter().any(|name| name.starts_with("mcp__")));
+    assert!(deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(deferred_names.iter().any(|name| name == "mcp_call"));
+
+    let mut auto_eager =
+        agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, usize::MAX).await;
+    let auto_eager_names: Vec<String> = auto_eager
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        auto_eager_names
+            .iter()
+            .any(|name| name == "mcp__test__verbose")
+    );
+
+    let mut auto_deferred = agent_with_fake_mcp_surface(crate::config::McpToolsMode::Auto, 1).await;
+    let auto_deferred_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        !auto_deferred_names
+            .iter()
+            .any(|name| name.starts_with("mcp__"))
+    );
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_search"));
+    assert!(auto_deferred_names.iter().any(|name| name == "mcp_call"));
+    let stable_auto_names: Vec<String> = auto_deferred
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert_eq!(auto_deferred_names, stable_auto_names);
+    assert!(auto_deferred.mcp_late_register_resolved);
+}
+
+#[tokio::test]
+async fn deferred_mcp_surface_ignores_late_per_tool_registration() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Deferred;
+
+    let before: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    agent
+        .registry
+        .register(
+            "mcp__late__tool".to_string(),
+            Arc::new(FakeMcpTool {
+                name: "late".to_string(),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+    let after: Vec<String> = agent
+        .tool_definitions()
+        .await
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+
+    assert_eq!(
+        before, after,
+        "fixed deferred surface must stay cache-stable"
+    );
+    assert!(agent.mcp_late_register_resolved);
+    assert!(!after.iter().any(|name| name.starts_with("mcp__")));
+}
+
+#[tokio::test]
+async fn auto_mode_rechecks_late_mcp_definitions_before_deferring() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    register_fake_deferred_mcp_surface(&registry).await;
+    let mut agent = Agent::new(provider, registry);
+    agent.mcp_tools_mode = crate::config::McpToolsMode::Auto;
+    agent.mcp_tools_token_threshold = 1;
+
+    let before = agent.tool_definitions().await;
+    assert!(!before.iter().any(|tool| tool.name == "mcp_search"));
+    agent
+        .registry
+        .register(
+            "mcp__late__large".to_string(),
+            Arc::new(VerboseFakeMcpTool {
+                name: "large".to_string(),
+                description: "late large definition ".repeat(32),
+            }) as Arc<dyn crate::tool::Tool>,
+        )
+        .await;
+
+    let after = agent.tool_definitions().await;
+    assert!(after.iter().any(|tool| tool.name == "mcp_search"));
+    assert!(after.iter().any(|tool| tool.name == "mcp_call"));
+    assert!(!after.iter().any(|tool| tool.name.starts_with("mcp__")));
+    assert!(agent.mcp_late_register_resolved);
+}
+
 /// Reproduction for #206: MCP tools that register on the registry *after* the
 /// first turn locks the tool snapshot never reach the provider, because
 /// `tool_definitions()` returns the frozen `locked_tools` snapshot and the only

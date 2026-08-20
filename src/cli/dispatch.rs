@@ -107,10 +107,18 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     if args.disable_base_tools {
         crate::env::set_var("JCODE_DISABLE_BASE_TOOLS", "1");
     }
+    if let Some(mcp_tools) = args.mcp_tools.as_deref() {
+        crate::env::set_var("JCODE_MCP_TOOLS", mcp_tools);
+    }
+    if let Some(threshold) = args.mcp_tools_token_threshold {
+        crate::env::set_var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD", threshold.to_string());
+    }
     if args.tool_profile.is_some()
         || args.tools.is_some()
         || args.disabled_tools.is_some()
         || args.disable_base_tools
+        || args.mcp_tools.is_some()
+        || args.mcp_tools_token_threshold.is_some()
     {
         crate::config::invalidate_config_cache();
     }

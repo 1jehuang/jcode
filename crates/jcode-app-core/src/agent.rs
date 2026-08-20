@@ -186,6 +186,10 @@ pub struct Agent {
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    /// MCP top-level definition exposure policy captured when the session starts.
+    mcp_tools_mode: crate::config::McpToolsMode,
+    /// Auto-mode token estimate above which MCP definitions are deferred.
+    mcp_tools_token_threshold: usize,
     /// Provider-specific session ID for conversation resume (e.g., Claude Code CLI session)
     provider_session_id: Option<String>,
     /// Last upstream provider (OpenRouter) observed for this session
@@ -285,6 +289,7 @@ impl Agent {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let skills = SkillRegistry::shared_snapshot();
+        let tool_config = &crate::config::config().tools;
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
@@ -296,6 +301,8 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             disabled_tools,
+            mcp_tools_mode: tool_config.mcp_tools,
+            mcp_tools_token_threshold: tool_config.mcp_tools_token_threshold,
             provider_session_id: None,
             last_upstream_provider: None,
             last_connection_type: None,
