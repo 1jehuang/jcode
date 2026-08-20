@@ -1,5 +1,8 @@
 name: Release
 
+env:
+  JCODE_CI: "1"
+
 on:
   push:
     tags:
@@ -155,6 +158,7 @@ jobs:
           fi
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
       - name: Build portable Linux x86_64 release binary
@@ -163,6 +167,7 @@ jobs:
         run: scripts/build_linux_compat.sh dist
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
           JCODE_COMPAT_ARTIFACT: ${{ matrix.artifact }}
 
@@ -264,6 +269,7 @@ jobs:
           & cargo @cargoArgs
         env:
           JCODE_RELEASE_BUILD: "1"
+          JCODE_CI_BUILD: "1"
           JCODE_BUILD_SEMVER: ${{ github.ref_name }}
 
       - name: Verify built Windows binary launches
@@ -473,6 +479,7 @@ jobs:
             # CARGO_BUILD_JOBS keeps memory in check; aws-lc-sys is memory hungry.
             export CARGO_BUILD_JOBS=3
             export JCODE_RELEASE_BUILD=1
+            export JCODE_CI_BUILD=1
             export JCODE_BUILD_SEMVER="${{ github.ref_name }}"
 
             echo "::group::cargo build (jcode binary)"

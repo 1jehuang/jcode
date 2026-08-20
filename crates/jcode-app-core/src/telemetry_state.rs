@@ -279,6 +279,9 @@ pub(super) fn build_channel() -> String {
     if crate::build::get_repo_dir().is_some() {
         return "git_checkout".to_string();
     }
+    if option_env!("JCODE_CI_BUILD").is_some() {
+        return "ci_release".to_string();
+    }
     "release".to_string()
 }
 
@@ -287,6 +290,12 @@ pub(super) fn is_git_checkout() -> bool {
 }
 
 pub(super) fn is_ci() -> bool {
+    if let Ok(value) = std::env::var("JCODE_CI") {
+        return matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+    }
     [
         "CI",
         "GITHUB_ACTIONS",
