@@ -422,8 +422,24 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
 
+    if app.toggle_keys.copy_selection.matches(code, modifiers) {
+        app.toggle_copy_selection_mode();
+        return Ok(());
+    }
+
     if app.toggle_keys.side_panel.matches(code, modifiers) {
         app.toggle_side_panel();
+        return Ok(());
+    }
+
+    if app.toggle_keys.info_widget.matches(code, modifiers) {
+        crate::tui::info_widget::toggle_enabled();
+        let status = if crate::tui::info_widget::is_enabled() {
+            "Info widget: ON"
+        } else {
+            "Info widget: OFF"
+        };
+        app.set_status_notice(status);
         return Ok(());
     }
 
