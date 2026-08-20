@@ -326,10 +326,17 @@ Most events also carry a few coarse quality / cleanup fields:
 | `event_id` | `"uuid"` | Deduplication |
 | `session_id` | `"uuid"` | Joins session-scoped events together |
 | `schema_version` | `3` | Forward-compatible parsing |
-| `build_channel` | `"release"` / `"selfdev"` / `"local_build"` | Filter out dev/test usage |
+| `build_channel` | `"release"` / `"ci_release"` / `"selfdev"` / `"local_build"` | Separate installed releases, CI/CD-built releases, and dev/test usage |
 | `is_git_checkout` | `true/false` | Distinguish source-tree usage from installed usage |
 | `is_ci` | `true/false` | Filter CI noise |
 | `ran_from_cargo` | `true/false` | Filter local dev launches |
+
+CI/CD jobs should set `JCODE_CI=1` when running jcode. `JCODE_CI=0` explicitly
+marks a run as non-CI and overrides inherited provider variables. When this
+setting is absent, jcode falls back to common provider markers such as `CI`,
+`GITHUB_ACTIONS`, `GITLAB_CI`, and `BUILDKITE`. Build provenance is independent:
+official release workflows set `JCODE_CI_BUILD=1` while compiling, producing the
+`ci_release` channel without classifying later end-user executions as CI.
 
 ## What We Do NOT Collect
 

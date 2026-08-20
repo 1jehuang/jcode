@@ -1,5 +1,8 @@
 name: Require Linked Issue
 
+env:
+  JCODE_CI: "1"
+
 # Ensure every pull request is linked to a REAL GitHub issue in this repo.
 # A PR passes when it links an issue via any of:
 #   * GitHub's "Development" sidebar (closing issue reference), or

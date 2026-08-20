@@ -1161,6 +1161,30 @@ test("lifecycle events stamp last_country on the DAU rollup", async () => {
   assert.equal(dau.values[dau.values.length - 1], "JP");
 });
 
+test("CI-built artifacts count as releases without becoming runtime CI", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "session_end",
+      event_id: "se-ci-built-release",
+      build_channel: "ci_release",
+      is_ci: false,
+      turns: 1,
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+
+  const dau = db.executed.find(({ sql }) => /INSERT INTO daily_active_users/.test(sql));
+  assert.ok(dau, "daily_active_users rollup should be written");
+  assert.equal(dau.values[3], 1, "CI-built binary remains release activity");
+  assert.equal(dau.values[4], 1, "meaningful CI-built work remains release activity");
+  assert.equal(dau.values[9], 0, "build provenance must not imply runtime CI");
+  assert.equal(dau.values[10], 0, "last runtime CI flag remains false");
+  assert.equal(dau.values[11], "ci_release");
+});
+
 test("client-supplied country is ignored and bogus codes are dropped", async () => {
   const db = makeDb();
   const geo = makeFirehose();

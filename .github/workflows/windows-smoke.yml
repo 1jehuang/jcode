@@ -1,5 +1,8 @@
 name: Windows Smoke
 
+env:
+  JCODE_CI: "1"
+
 on:
   workflow_dispatch:
     inputs:
