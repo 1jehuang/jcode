@@ -68,6 +68,7 @@ pub mod protocol;
 pub mod provider;
 pub mod provider_activity;
 pub mod provider_catalog;
+pub mod recent_session_index;
 pub mod registry;
 pub mod runtime_memory_log;
 pub mod safety;

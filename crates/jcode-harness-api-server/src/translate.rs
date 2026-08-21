@@ -5,6 +5,7 @@ use crate::background_progress::parse_background_notification;
 use jcode_harness_api::{
     ApiEvent, ErrorCode, HistoryMessage, ModelRouteInfo, ServerFrame, SessionInfo, TextMatch,
 };
+use rusqlite::{Connection, params};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -147,6 +148,8 @@ struct PersistedSessionMetadata {
     /// User-provided rename, which is what `Session::display_title` prefers.
     #[serde(default)]
     custom_title: Option<String>,
+    #[serde(default)]
+    todo_title: Option<String>,
 }
 
 impl PersistedSessionMetadata {
@@ -154,12 +157,35 @@ impl PersistedSessionMetadata {
         self.custom_title
             .as_deref()
             .and_then(Self::normalized_title)
+            .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
             .or_else(|| self.title.as_deref().and_then(Self::normalized_title))
     }
 
     fn normalized_title(title: &str) -> Option<String> {
         let title = title.trim();
         (!title.is_empty()).then(|| title.to_string())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RecentSessionIndexEntry {
+    session_id: String,
+    working_dir: Option<String>,
+    generated_title: Option<String>,
+    custom_title: Option<String>,
+    todo_title: Option<String>,
+    updated_at_ms: i64,
+    last_active_at_ms: Option<i64>,
+}
+
+impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
+    fn from(entry: &RecentSessionIndexEntry) -> Self {
+        Self {
+            working_dir: entry.working_dir.clone(),
+            title: entry.generated_title.clone(),
+            custom_title: entry.custom_title.clone(),
+            todo_title: entry.todo_title.clone(),
+        }
     }
 }
 
@@ -453,9 +479,7 @@ impl BridgeState {
                 if let Some(attached) = self.session_id.clone() {
                     ids.insert(attached);
                 }
-                if let Some(limit) = limit
-                    && ids.len() > limit
-                {
+                if let Some(limit) = limit {
                     let mut recent: Vec<_> = ids.into_iter().collect();
                     recent.sort_unstable_by_key(|id| {
                         std::cmp::Reverse(Self::session_modified_ms(id))
@@ -467,10 +491,18 @@ impl BridgeState {
                 // before `SessionRenamed` is broadcast, and every list call
                 // should reflect that newest canonical value even on another
                 // API connection.
+                let indexed_metadata: BTreeMap<_, _> = Self::recent_session_index_entries()
+                    .into_iter()
+                    .map(|entry| (entry.session_id.clone(), entry))
+                    .collect();
                 let metadata: BTreeMap<String, PersistedSessionMetadata> = ids
                     .iter()
                     .filter_map(|id| {
-                        Self::resolve_session_metadata(id).map(|metadata| (id.clone(), metadata))
+                        indexed_metadata
+                            .get(id)
+                            .map(PersistedSessionMetadata::from)
+                            .or_else(|| Self::resolve_session_metadata(id))
+                            .map(|metadata| (id.clone(), metadata))
                     })
                     .collect();
                 let metadata_loaded = list_started.elapsed();
@@ -1317,6 +1349,7 @@ impl BridgeState {
             title: Self::metadata_string(&head, "title", false),
             custom_title: Self::metadata_string(&tail, "custom_title", true)
                 .or_else(|| Self::metadata_string(&head, "custom_title", true)),
+            todo_title: None,
             working_dir: Self::metadata_string(&tail, "working_dir", true)
                 .or_else(|| Self::metadata_string(&head, "working_dir", true)),
         })
@@ -1376,7 +1409,105 @@ impl BridgeState {
             })
     }
 
+    fn recent_session_index_path() -> Option<std::path::PathBuf> {
+        Some(Self::jcode_home()?.join("session-metadata-v1.sqlite3"))
+    }
+
+    fn recent_session_index_entries() -> Vec<RecentSessionIndexEntry> {
+        let Some(path) = Self::recent_session_index_path() else {
+            return Vec::new();
+        };
+        let Ok(connection) = Connection::open(path) else {
+            return Vec::new();
+        };
+        if connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 CREATE TABLE IF NOT EXISTS recent_sessions (
+                     session_id TEXT PRIMARY KEY NOT NULL,
+                     working_dir TEXT,
+                     generated_title TEXT,
+                     custom_title TEXT,
+                     todo_title TEXT,
+                     updated_at_ms INTEGER NOT NULL,
+                     last_active_at_ms INTEGER
+                 );
+                 CREATE INDEX IF NOT EXISTS recent_sessions_activity
+                 ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
+            )
+            .is_err()
+        {
+            return Vec::new();
+        }
+        let Ok(mut statement) = connection.prepare(
+            "SELECT session_id, working_dir, generated_title, custom_title,
+                    todo_title, updated_at_ms, last_active_at_ms
+             FROM recent_sessions
+             ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
+             LIMIT 500",
+        ) else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| {
+                Ok(RecentSessionIndexEntry {
+                    session_id: row.get(0)?,
+                    working_dir: row.get(1)?,
+                    generated_title: row.get(2)?,
+                    custom_title: row.get(3)?,
+                    todo_title: row.get(4)?,
+                    updated_at_ms: row.get(5)?,
+                    last_active_at_ms: row.get(6)?,
+                })
+            })
+            .and_then(|rows| rows.collect())
+            .unwrap_or_default()
+    }
+
+    fn write_bootstrap_recent_session_index(ids: &[(SystemTime, String)]) {
+        let Some(path) = Self::recent_session_index_path() else {
+            return;
+        };
+        let Ok(mut connection) = Connection::open(path) else {
+            return;
+        };
+        let Ok(transaction) = connection.transaction() else {
+            return;
+        };
+        for (modified, session_id) in ids.iter().take(500) {
+            let metadata = Self::resolve_session_metadata(session_id).unwrap_or_default();
+            let updated_at_ms = modified
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or_default();
+            let _ = transaction.execute(
+                "INSERT INTO recent_sessions (
+                     session_id, working_dir, generated_title, custom_title,
+                     todo_title, updated_at_ms, last_active_at_ms
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
+                 ON CONFLICT(session_id) DO NOTHING",
+                params![
+                    session_id,
+                    metadata.working_dir,
+                    metadata.title,
+                    metadata.custom_title,
+                    updated_at_ms,
+                ],
+            );
+        }
+        let _ = transaction.commit();
+    }
+
     fn stored_session_ids(limit: Option<usize>) -> Vec<String> {
+        let indexed = Self::recent_session_index_entries();
+        if !indexed.is_empty() && limit.is_some_and(|limit| indexed.len() >= limit) {
+            return indexed
+                .into_iter()
+                .take(limit.unwrap_or(usize::MAX))
+                .map(|entry| entry.session_id)
+                .collect();
+        }
         let Some(home) = Self::jcode_home() else {
             return Vec::new();
         };
@@ -1425,6 +1556,7 @@ impl BridgeState {
                 .collect::<Vec<_>>()
         });
         ids.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        Self::write_bootstrap_recent_session_index(&ids);
         if let Some(limit) = limit {
             ids.truncate(limit);
         }

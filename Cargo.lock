@@ -3740,6 +3740,7 @@ dependencies = [
  "jcode-harness-api",
  "jcode-transport",
  "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
