@@ -1,4 +1,4 @@
-name: Update star history
+name: Update weekly stars chart
 
 on:
   schedule:
@@ -30,5 +30,5 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add docs/images/star-history.svg
-          git commit -m "docs: update star history chart"
+          git commit -m "docs: update weekly stars chart"
           git push
