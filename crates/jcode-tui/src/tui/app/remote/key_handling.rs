@@ -317,6 +317,22 @@ async fn handle_remote_key_internal(
     if let Some(ref picker) = app.inline_interactive_state
         && !picker.preview
     {
+        if code == KeyCode::Enter {
+            let subagent_model = picker
+                .filtered
+                .get(picker.selected)
+                .and_then(|index| picker.entries.get(*index))
+                .and_then(|entry| match entry.action {
+                    crate::tui::PickerAction::SubagentModelChoice { inherit: true } => Some(None),
+                    crate::tui::PickerAction::SubagentModelChoice { inherit: false } => Some(Some(
+                        super::super::inline_interactive::subagent_picker_model_spec(entry),
+                    )),
+                    _ => None,
+                });
+            if let Some(model) = subagent_model {
+                remote.set_subagent_model(model).await?;
+            }
+        }
         return app.handle_inline_interactive_key(code, modifiers);
     }
 
