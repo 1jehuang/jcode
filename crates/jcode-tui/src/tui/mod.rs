@@ -1233,6 +1233,9 @@ pub enum PickerAction {
         target: AgentModelTarget,
         clear_override: bool,
     },
+    SubagentModelChoice {
+        inherit: bool,
+    },
 }
 
 /// Unified inline picker with three columns.
@@ -1275,6 +1278,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
         PickerAction::Model
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
+        | PickerAction::SubagentModelChoice { .. }
         | PickerAction::LogoutAll => 0,
         PickerAction::Account(AccountPickerAction::Switch { provider_id, label }) => {
             provider_id.capacity() + label.capacity()
