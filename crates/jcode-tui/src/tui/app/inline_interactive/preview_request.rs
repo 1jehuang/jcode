@@ -5,6 +5,9 @@ pub(super) enum InlinePickerPreviewRequest {
     Model {
         filter: String,
     },
+    SubagentModel {
+        filter: String,
+    },
     Login {
         filter: String,
     },
@@ -17,7 +20,7 @@ pub(super) enum InlinePickerPreviewRequest {
 impl InlinePickerPreviewRequest {
     fn kind(&self) -> PickerKind {
         match self {
-            Self::Model { .. } => PickerKind::Model,
+            Self::Model { .. } | Self::SubagentModel { .. } => PickerKind::Model,
             Self::Login { .. } => PickerKind::Login,
             Self::Account { .. } => PickerKind::Account,
         }
@@ -25,9 +28,10 @@ impl InlinePickerPreviewRequest {
 
     pub(super) fn filter(&self) -> &str {
         match self {
-            Self::Model { filter } | Self::Login { filter } | Self::Account { filter, .. } => {
-                filter
-            }
+            Self::Model { filter }
+            | Self::SubagentModel { filter }
+            | Self::Login { filter }
+            | Self::Account { filter, .. } => filter,
         }
     }
 
@@ -43,7 +47,7 @@ impl InlinePickerPreviewRequest {
 
     pub(super) fn open(&self, app: &mut App) {
         match self {
-            Self::Model { .. } => app.open_model_picker(),
+            Self::Model { .. } | Self::SubagentModel { .. } => app.open_model_picker(),
             Self::Login { .. } => app.open_login_picker_inline(),
             Self::Account {
                 provider_filter, ..
@@ -89,6 +93,7 @@ pub(super) fn picker_account_provider_scope(picker: &InlineInteractiveState) -> 
         | PickerAction::LogoutAll
         | PickerAction::Usage { .. }
         | PickerAction::AgentTarget(_)
-        | PickerAction::AgentModelChoice { .. } => None,
+        | PickerAction::AgentModelChoice { .. }
+        | PickerAction::SubagentModelChoice { .. } => None,
     })
 }
