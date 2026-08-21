@@ -1206,6 +1206,19 @@ impl SessionPicker {
             return self.handle_search_key(code, modifiers);
         }
 
+        // The first-run choice is deliberately simpler than the full session
+        // picker: Enter submits, and every other key rotates between its two
+        // actions. This makes the page work without requiring users to discover
+        // a particular navigation key.
+        if self.onboarding_banner_active() && code != KeyCode::Enter {
+            if self.onboarding_review_recent_project_highlighted() {
+                self.onboarding_action = Some(OnboardingAction::StartNewSession);
+            } else {
+                self.onboarding_action = Some(OnboardingAction::ReviewRecentProject);
+            }
+            return Ok(OverlayAction::Continue);
+        }
+
         match code {
             KeyCode::Esc => {
                 if !self.search_query.is_empty() {

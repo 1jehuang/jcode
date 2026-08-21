@@ -1307,7 +1307,17 @@ fn onboarding_banner_offers_review_then_new_session() {
         OverlayAction::Selected(PickerResult::ReviewRecentProject)
     ));
 
-    // The actual arrow-key dispatch selects the current-directory action.
+    // Any non-submit key rotates between the two choices.
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
+    // Arrow keys use the same rotation behavior.
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
         .expect("down arrow");
