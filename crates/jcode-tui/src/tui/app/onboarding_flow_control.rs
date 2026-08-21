@@ -907,7 +907,7 @@ impl App {
             shown_at: Instant::now(),
         });
         self.onboarding_prefetch_recent_project();
-        self.set_status_notice("Choose an option (↑↓, Enter)");
+        self.set_status_notice("Press any key to switch, Enter to choose");
     }
 
     /// Formatted copy shown above the two first-run actions.

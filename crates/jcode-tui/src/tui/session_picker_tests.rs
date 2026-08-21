@@ -1317,6 +1317,16 @@ fn onboarding_banner_offers_review_then_new_session() {
         .expect("ordinary key");
     assert!(picker.onboarding_review_recent_project_highlighted());
 
+    // Keys that normally close the full picker rotate on this action-only page.
+    picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+        .expect("escape key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .expect("control-c");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
     // Arrow keys use the same rotation behavior.
     picker
         .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
