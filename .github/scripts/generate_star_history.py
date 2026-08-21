@@ -93,9 +93,11 @@ def render_svg(repository: str, dates: list[dt.date], today: dt.date | None = No
             )
 
     latest = values[-1]
-    previous = values[-2]
-    change = latest - previous
-    change_label = f"{change:+,} vs last week"
+    previous_week = weeks[-2]
+    previous_cutoff = previous_week + dt.timedelta(days=today.weekday())
+    previous_to_date = sum(previous_week <= day <= previous_cutoff for day in dates)
+    change = latest - previous_to_date
+    change_label = f"{change:+,} vs same point last week"
     period_total = sum(values)
 
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">
@@ -112,7 +114,7 @@ def render_svg(repository: str, dates: list[dt.date], today: dt.date | None = No
 <rect class="bg" width="100%" height="100%" rx="6"/>
 <text class="heading" x="{left}" y="27">Stars, week over week</text>
 <text x="{left}" y="51">New stars per week · last 26 weeks</text>
-<text class="metric" x="{width-right}" y="27" text-anchor="end">+{latest:,} this week</text>
+<text class="metric" x="{width-right}" y="27" text-anchor="end">+{latest:,} this week so far</text>
 <text x="{width-right}" y="51" text-anchor="end">{change_label} · {period_total:,} total</text>
 {''.join(y_ticks)}{''.join(x_ticks)}
 {''.join(bars)}
