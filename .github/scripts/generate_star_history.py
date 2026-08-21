@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate a self-hosted GitHub star-history chart for the README."""
+"""Generate a self-hosted week-over-week GitHub stars chart for the README."""
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import urllib.request
 from pathlib import Path
@@ -36,70 +37,87 @@ def fetch_stars(repository: str, token: str) -> list[dt.date]:
     return dates
 
 
-def render_svg(repository: str, dates: list[dt.date]) -> str:
+def week_start(day: dt.date) -> dt.date:
+    """Return the Monday containing ``day``."""
+    return day - dt.timedelta(days=day.weekday())
+
+
+def render_svg(repository: str, dates: list[dt.date], today: dt.date | None = None) -> str:
     if not dates:
         raise RuntimeError("GitHub returned no stargazers")
+    today = today or dt.date.today()
     dates.sort()
-    start, end = dates[0], max(dates[-1], dt.date.today())
-    span = max((end - start).days, 1)
+    current_week = week_start(today)
+    weeks = [current_week - dt.timedelta(weeks=week) for week in reversed(range(26))]
+    counts = {week: 0 for week in weeks}
+    for day in dates:
+        if (week := week_start(day)) in counts:
+            counts[week] += 1
+
     width, height = 800, 420
-    left, right, top, bottom = 72, 24, 38, 58
+    left, right, top, bottom = 64, 24, 72, 54
     plot_w, plot_h = width - left - right, height - top - bottom
 
-    points: list[tuple[dt.date, int]] = []
-    for index, day in enumerate(dates, 1):
-        if index == len(dates) or dates[index] != day:
-            points.append((day, index))
-    if points[-1][0] < end:
-        points.append((end, len(dates)))
-
-    def x(day: dt.date) -> float:
-        return left + (day - start).days / span * plot_w
-
-    max_stars = len(dates)
-    grid_max = ((max_stars + 4999) // 5000) * 5000 or 1
+    values = [counts[week] for week in weeks]
+    max_weekly = max(values)
+    magnitude = 10 ** max(0, len(str(max_weekly)) - 1)
+    step = max(magnitude, math.ceil(max_weekly / 4 / magnitude) * magnitude)
+    grid_max = max(step * 4, 4)
 
     def y(value: int) -> float:
         return top + (1 - value / grid_max) * plot_h
 
-    path = " ".join(
-        ("M" if index == 0 else "L") + f" {x(day):.1f} {y(count):.1f}"
-        for index, (day, count) in enumerate(points)
-    )
-    area = f"{path} L {x(end):.1f} {top + plot_h:.1f} L {x(start):.1f} {top + plot_h:.1f} Z"
-
     y_ticks = []
     for index in range(5):
-        value = round(grid_max * index / 4)
+        value = step * index
         yy = y(value)
         label = f"{value / 1000:g}k" if value >= 1000 else str(value)
         y_ticks.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{width-right}" y2="{yy:.1f}" class="grid"/><text x="{left-12}" y="{yy+5:.1f}" text-anchor="end">{label}</text>')
 
+    slot = plot_w / len(weeks)
+    bar_width = max(slot - 5, 4)
+    bars = []
     x_ticks = []
-    years = range(start.year, end.year + 1)
-    for year in years:
-        day = max(start, dt.date(year, 1, 1))
-        if day > end:
-            continue
-        xx = x(day)
-        x_ticks.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top+plot_h}" class="grid"/><text x="{xx:.1f}" y="{height-25}" text-anchor="middle">{day.year}</text>')
+    for index, (week, value) in enumerate(zip(weeks, values)):
+        xx = left + index * slot + (slot - bar_width) / 2
+        yy = y(value)
+        bar_height = top + plot_h - yy
+        current = " current" if week == current_week else ""
+        bars.append(
+            f'<rect class="bar{current}" x="{xx:.1f}" y="{yy:.1f}" width="{bar_width:.1f}" '
+            f'height="{bar_height:.1f}" rx="2"><title>{week:%b %-d}: +{value:,} stars</title></rect>'
+        )
+        if index % 4 == 0 or index == len(weeks) - 1:
+            x_ticks.append(
+                f'<text x="{xx + bar_width / 2:.1f}" y="{height-25}" text-anchor="middle">{week:%b %-d}</text>'
+            )
+
+    latest = values[-1]
+    previous_week = weeks[-2]
+    previous_cutoff = previous_week + dt.timedelta(days=today.weekday())
+    previous_to_date = sum(previous_week <= day <= previous_cutoff for day in dates)
+    change = latest - previous_to_date
+    change_label = f"{change:+,} vs same point last week"
+    period_total = sum(values)
 
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">
-<title id="title">{repository} star history</title>
-<desc id="desc">GitHub stars over time, currently {max_stars:,}</desc>
+<title id="title">{repository} weekly GitHub stars</title>
+<desc id="desc">New GitHub stars per week for the last 26 weeks. This week: {latest:,}, {change_label}.</desc>
 <style>
   :root {{ color-scheme: light dark; }}
   .bg {{ fill: #fff; }} text {{ fill: #57606a; font: 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }}
-  .grid {{ stroke: #d8dee4; stroke-width: 1; }} .area {{ fill: #0969da; opacity: .12; }} .line {{ fill: none; stroke: #0969da; stroke-width: 3; }}
+  .grid {{ stroke: #d8dee4; stroke-width: 1; }} .bar {{ fill: #2f81f7; }} .bar.current {{ fill: #bf8700; }}
   .heading {{ fill: #24292f; font-size: 17px; font-weight: 600; }}
-  @media (prefers-color-scheme: dark) {{ .bg {{ fill: #0d1117; }} text {{ fill: #8b949e; }} .grid {{ stroke: #30363d; }} .area {{ fill: #58a6ff; }} .line {{ stroke: #58a6ff; }} .heading {{ fill: #f0f6fc; }} }}
+  .metric {{ fill: #24292f; font-size: 15px; font-weight: 600; }}
+  @media (prefers-color-scheme: dark) {{ .bg {{ fill: #0d1117; }} text {{ fill: #8b949e; }} .grid {{ stroke: #30363d; }} .bar {{ fill: #58a6ff; }} .bar.current {{ fill: #d29922; }} .heading,.metric {{ fill: #f0f6fc; }} }}
 </style>
 <rect class="bg" width="100%" height="100%" rx="6"/>
-<text class="heading" x="{left}" y="25">GitHub stars over time</text>
+<text class="heading" x="{left}" y="27">Stars, week over week</text>
+<text x="{left}" y="51">New stars per week · last 26 weeks</text>
+<text class="metric" x="{width-right}" y="27" text-anchor="end">+{latest:,} this week so far</text>
+<text x="{width-right}" y="51" text-anchor="end">{change_label} · {period_total:,} total</text>
 {''.join(y_ticks)}{''.join(x_ticks)}
-<path class="area" d="{area}"/><path class="line" d="{path}"/>
-<circle cx="{x(points[-1][0]):.1f}" cy="{y(max_stars):.1f}" r="4" class="line"/>
-<text x="{width-right}" y="25" text-anchor="end">{max_stars:,} stars</text>
+{''.join(bars)}
 </svg>
 '''
 
