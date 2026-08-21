@@ -557,6 +557,12 @@ impl Session {
             fields.push(("error", crate::util::format_error_chain(error)));
             crate::logging::event_warn("SESSION_PERSISTENCE", fields);
         } else {
+            if let Err(error) = crate::recent_session_index::upsert_session(self) {
+                crate::logging::warn(&format!(
+                    "Failed to update recent-session metadata for {}: {error}",
+                    self.id
+                ));
+            }
             crate::logging::event_info("SESSION_PERSISTENCE", fields);
         }
         result

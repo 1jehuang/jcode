@@ -878,7 +878,13 @@ pub fn todos_exist(session_id: &str) -> Result<bool> {
 
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
-    storage::write_json_fast(&path, todos)
+    storage::write_json_fast(&path, todos)?;
+    if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
+        crate::logging::warn(&format!(
+            "Failed to refresh indexed todo title for {session_id}: {error}"
+        ));
+    }
+    Ok(())
 }
 
 fn todo_path(session_id: &str) -> Result<PathBuf> {
@@ -1024,7 +1030,13 @@ pub fn load_plan(session_id: &str) -> Result<TodoPlan> {
 
 pub fn save_plan(session_id: &str, plan: &TodoPlan) -> Result<()> {
     let path = plan_path(session_id)?;
-    storage::write_json_fast(&path, plan)
+    storage::write_json_fast(&path, plan)?;
+    if let Err(error) = crate::recent_session_index::refresh_todo_title(session_id) {
+        crate::logging::warn(&format!(
+            "Failed to refresh indexed todo title for {session_id}: {error}"
+        ));
+    }
+    Ok(())
 }
 
 fn plan_path(session_id: &str) -> Result<PathBuf> {
