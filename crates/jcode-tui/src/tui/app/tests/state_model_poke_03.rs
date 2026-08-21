@@ -465,7 +465,6 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
             .unwrap();
     }
     wait_for_model_picker_load(&mut app);
-    app.sync_model_picker_preview_from_input();
 
     let picker = app
         .inline_interactive_state

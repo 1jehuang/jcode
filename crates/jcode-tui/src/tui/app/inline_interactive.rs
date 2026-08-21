@@ -1913,6 +1913,9 @@ impl App {
                     picker.filter.clone(),
                     picker.selected,
                     picker.column,
+                    picker.entries.iter().any(|entry| {
+                        matches!(entry.action, PickerAction::SubagentModelChoice { .. })
+                    }),
                 ))
             } else {
                 None
@@ -1946,9 +1949,15 @@ impl App {
             preview: false,
         });
 
-        if let Some((preview, filter, selected, column)) = previous_picker
+        if let Some((preview, filter, selected, column, subagent_model)) = previous_picker
             && let Some(ref mut picker) = self.inline_interactive_state
         {
+            if subagent_model {
+                Self::configure_subagent_model_picker(
+                    picker,
+                    self.session.subagent_model.as_deref(),
+                );
+            }
             picker.preview = preview;
             picker.filter = filter;
             picker.selected = selected.min(picker.filtered.len().saturating_sub(1));
