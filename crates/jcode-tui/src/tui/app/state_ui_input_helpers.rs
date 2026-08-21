@@ -546,27 +546,19 @@ impl App {
         }
 
         if prefix.starts_with("/subagent-model ") {
-            let mut suggestions = vec![
-                (
-                    "/subagent-model inherit".into(),
-                    "Use the current active model",
-                ),
-                (
-                    "/subagent-model show".into(),
-                    "Show the current subagent model policy",
-                ),
-            ];
-            suggestions.extend(
-                self.model_suggestion_candidates()
-                    .into_iter()
-                    .map(|(cmd, _)| {
-                        (
-                            cmd.replacen("/model ", "/subagent-model ", 1),
-                            "Pin this subagent model",
-                        )
-                    }),
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/subagent-model inherit".into(),
+                        "Use the current active model",
+                    ),
+                    (
+                        "/subagent-model show".into(),
+                        "Show the current subagent model policy",
+                    ),
+                ],
             );
-            return self.rank_suggestions(input, suggestions);
         }
 
         if prefix.starts_with("/autoreview ") {

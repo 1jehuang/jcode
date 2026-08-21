@@ -566,6 +566,56 @@ fn model_picker_route_is_default(
 }
 
 impl App {
+    fn configure_subagent_model_picker(
+        picker: &mut InlineInteractiveState,
+        configured: Option<&str>,
+    ) {
+        picker.entries.retain(|entry| {
+            !matches!(
+                entry.action,
+                PickerAction::SubagentModelChoice { inherit: true }
+            )
+        });
+        for entry in &mut picker.entries {
+            let spec = model_entry_saved_spec(entry);
+            entry.action = PickerAction::SubagentModelChoice { inherit: false };
+            entry.is_current = configured
+                .is_some_and(|saved| saved == spec || saved == model_entry_base_name(entry));
+            entry.is_default = false;
+        }
+        picker.entries.insert(
+            0,
+            PickerEntry {
+                name: "inherit (current active model)".to_string(),
+                options: vec![PickerOption {
+                    provider: "session".to_string(),
+                    api_method: "subagent_model".to_string(),
+                    available: true,
+                    detail: "use the current active model".to_string(),
+                    estimated_reference_cost_micros: None,
+                }],
+                action: PickerAction::SubagentModelChoice { inherit: true },
+                selected_option: 0,
+                is_current: configured.is_none(),
+                is_default: false,
+                is_favorite: false,
+                recommended: false,
+                recommendation_rank: usize::MAX,
+                usage_score: 0,
+                old: false,
+                created_date: None,
+                effort: None,
+            },
+        );
+        picker.filtered = (0..picker.entries.len()).collect();
+        picker.selected = picker
+            .entries
+            .iter()
+            .position(|entry| entry.is_current)
+            .unwrap_or(0);
+        picker.column = 0;
+    }
+
     pub(super) fn remote_model_catalog_snapshot(
         &self,
     ) -> jcode_provider_core::ModelCatalogSnapshot {
@@ -3420,6 +3470,26 @@ impl App {
                                 self.set_status_notice("Agent model save failed");
                             }
                         }
+                    }
+                    PickerAction::SubagentModelChoice { inherit } => {
+                        self.inline_interactive_state = None;
+                        if inherit {
+                            self.session.subagent_model = None;
+                            self.set_status_notice("Subagent model: inherit");
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Subagent model reset to inherit the current model ({}).",
+                                self.provider.model()
+                            )));
+                        } else {
+                            let spec = model_entry_saved_spec(&entry);
+                            self.session.subagent_model = Some(spec.clone());
+                            self.set_status_notice(format!("Subagent model → {}", spec));
+                            self.push_display_message(DisplayMessage::system(format!(
+                                "Subagent model pinned to {} for this session.",
+                                spec
+                            )));
+                        }
+                        let _ = self.session.save();
                     }
                     PickerAction::Model => {
                         if !route.available {

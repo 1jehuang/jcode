@@ -9,6 +9,10 @@ impl App {
         slash_command_preview_filter(input, &["/model", "/models"])
     }
 
+    pub(crate) fn subagent_model_picker_preview_filter(input: &str) -> Option<String> {
+        slash_command_preview_filter(input, &["/subagent-model"])
+    }
+
     pub(crate) fn login_picker_preview_filter(input: &str) -> Option<String> {
         slash_command_preview_filter(input, &["/login"])
     }
@@ -102,6 +106,10 @@ impl App {
         Self::model_picker_preview_filter(input)
             .map(|filter| InlinePickerPreviewRequest::Model { filter })
             .or_else(|| {
+                Self::subagent_model_picker_preview_filter(input)
+                    .map(|filter| InlinePickerPreviewRequest::SubagentModel { filter })
+            })
+            .or_else(|| {
                 Self::login_picker_preview_filter(input)
                     .map(|filter| InlinePickerPreviewRequest::Login { filter })
             })
@@ -130,12 +138,15 @@ impl App {
         if should_open {
             let saved_input = self.input.clone();
             let saved_cursor = self.cursor_pos;
-            let append_model_filter_space =
-                matches!(
-                    request,
-                    InlinePickerPreviewRequest::Model { ref filter } if filter.is_empty()
-                ) && matches!(saved_input.trim_start(), "/model" | "/models")
-                    && saved_cursor == saved_input.len();
+            let append_model_filter_space = matches!(
+                request,
+                InlinePickerPreviewRequest::Model { ref filter }
+                | InlinePickerPreviewRequest::SubagentModel { ref filter }
+                    if filter.is_empty()
+            ) && matches!(
+                saved_input.trim_start(),
+                "/model" | "/models" | "/subagent-model"
+            ) && saved_cursor == saved_input.len();
             request.open(self);
             let mut preview_opened = false;
             if let Some(ref mut picker) = self.inline_interactive_state {
@@ -156,6 +167,12 @@ impl App {
         if let Some(ref mut picker) = self.inline_interactive_state
             && picker.preview
         {
+            if matches!(request, InlinePickerPreviewRequest::SubagentModel { .. }) {
+                Self::configure_subagent_model_picker(
+                    picker,
+                    self.session.subagent_model.as_deref(),
+                );
+            }
             picker.filter = request.filter().to_string();
             Self::apply_inline_interactive_filter(picker);
         }

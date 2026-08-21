@@ -423,7 +423,11 @@ impl Provider for CountingModelRoutesProvider {
         }
         (0..self.route_count)
             .map(|idx| crate::provider::ModelRoute {
-                model: format!("counting-{}", (b'a' + idx as u8) as char),
+                model: if idx < 26 {
+                    format!("counting-{}", (b'a' + idx as u8) as char)
+                } else {
+                    format!("counting-{idx}")
+                },
                 provider: "Counting".to_string(),
                 api_method: "test".to_string(),
                 available: true,
@@ -436,6 +440,65 @@ impl Provider for CountingModelRoutesProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(self.clone())
     }
+}
+
+#[test]
+fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
+    ensure_test_jcode_home_if_unset();
+    clear_persisted_test_ui_state();
+    crate::tui::ui::clear_test_render_state_for_tests();
+
+    let calls = StdArc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(CountingModelRoutesProvider {
+        calls: StdArc::clone(&calls),
+        route_count: 400,
+        delay: Duration::from_millis(25),
+    });
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let registry = rt.block_on(crate::tool::Registry::new(provider.clone()));
+    let mut app = App::new_for_test_harness(provider, registry);
+    app.queue_mode = false;
+    app.diff_mode = crate::config::DiffDisplayMode::Inline;
+
+    for c in "/subagent-model".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    wait_for_model_picker_load(&mut app);
+    app.sync_model_picker_preview_from_input();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("subagent model picker should be open");
+    assert!(picker.preview);
+    assert_eq!(picker.entries.len(), 401, "400 models plus inherit");
+    assert!(matches!(
+        picker.entries[0].action,
+        crate::tui::PickerAction::SubagentModelChoice { inherit: true }
+    ));
+    let calls_after_load = calls.load(Ordering::SeqCst);
+
+    for _ in 0..10 {
+        app.handle_key(KeyCode::Down, KeyModifiers::empty())
+            .unwrap();
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        calls_after_load,
+        "navigation must not rebuild or re-query the model catalog"
+    );
+
+    app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
+        .unwrap();
+    let picker = app.inline_interactive_state.as_ref().unwrap();
+    assert!(!picker.filtered.is_empty(), "typed input should filter models");
+    assert!(picker.filtered.len() < picker.entries.len());
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    assert!(app.session.subagent_model.is_some());
+    assert_eq!(app.provider.model(), "counting-a");
 }
 
 #[test]
