@@ -93,6 +93,7 @@ pub fn split_segments(command: &str) -> Vec<Vec<Token>> {
 /// rather than expanding it, and the path layer treats an unexpanded variable
 /// as unknown-and-therefore-risky.
 pub fn tokenize(command: &str) -> Vec<Token> {
+    let command = without_heredoc_bodies(command);
     let mut tokens: Vec<Token> = Vec::new();
     let mut current = String::new();
     let mut has_content = false;
@@ -197,6 +198,124 @@ pub fn tokenize(command: &str) -> Vec<Token> {
     flush!();
 
     tokens
+}
+
+/// Remove heredoc payloads before tokenizing shell source.
+///
+/// A heredoc body is input data for the command on the declaration line, not
+/// shell source in the surrounding command. Treating it as source makes prose
+/// containing `time`, or a script containing `rm`, trip the risk gate (#922).
+/// Newlines are retained so a command after the terminator remains a separate
+/// segment and cannot disappear from assessment.
+fn without_heredoc_bodies(command: &str) -> String {
+    let lines: Vec<&str> = command.split_inclusive('\n').collect();
+    let mut output = String::with_capacity(command.len());
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        output.push_str(line);
+        let delimiters = heredoc_delimiters(line.trim_end_matches('\n'));
+        index += 1;
+
+        for (delimiter, strip_tabs) in delimiters {
+            while index < lines.len() {
+                let candidate = lines[index].trim_end_matches(['\r', '\n']);
+                let candidate = if strip_tabs {
+                    candidate.trim_start_matches('\t')
+                } else {
+                    candidate
+                };
+                index += 1;
+                if candidate == delimiter {
+                    output.push('\n');
+                    break;
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn heredoc_delimiters(line: &str) -> Vec<(String, bool)> {
+    let bytes = line.as_bytes();
+    let mut found = Vec::new();
+    let mut index = 0;
+    let mut quote = None;
+
+    while index + 1 < bytes.len() {
+        let byte = bytes[index];
+        if let Some(end) = quote {
+            if byte == b'\\' && end == b'"' {
+                index += 2;
+                continue;
+            }
+            if byte == end {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' {
+            index += 2;
+            continue;
+        }
+        if byte != b'<' || bytes[index + 1] != b'<' {
+            index += 1;
+            continue;
+        }
+
+        index += 2;
+        // `<<<` is a here-string, not a multiline heredoc.
+        if bytes.get(index) == Some(&b'<') {
+            index += 1;
+            continue;
+        }
+        let strip_tabs = bytes.get(index) == Some(&b'-');
+        if strip_tabs {
+            index += 1;
+        }
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+
+        let mut delimiter = String::new();
+        let mut delimiter_quote = None;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if let Some(end) = delimiter_quote {
+                if byte == end {
+                    delimiter_quote = None;
+                } else if byte == b'\\' && end == b'"' && index + 1 < bytes.len() {
+                    index += 1;
+                    delimiter.push(bytes[index] as char);
+                } else {
+                    delimiter.push(byte as char);
+                }
+            } else if matches!(byte, b'\'' | b'"') {
+                delimiter_quote = Some(byte);
+            } else if byte == b'\\' && index + 1 < bytes.len() {
+                index += 1;
+                delimiter.push(bytes[index] as char);
+            } else if byte.is_ascii_whitespace() || matches!(byte, b';' | b'&' | b'|') {
+                break;
+            } else {
+                delimiter.push(byte as char);
+            }
+            index += 1;
+        }
+        if !delimiter.is_empty() {
+            found.push((delimiter, strip_tabs));
+        }
+    }
+
+    found
 }
 
 #[cfg(test)]

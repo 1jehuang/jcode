@@ -1310,7 +1310,10 @@ async function recordDailyActivity(env, body) {
 
   const activityDate = new Date().toISOString().slice(0, 10);
   const meaningful = isMeaningfulLifecycleEvent(body) ? 1 : 0;
-  const release = body.build_channel === "release" ? 1 : 0;
+  // ci_release means the artifact was built by CI/CD, not that this execution
+  // happened on a runner. Runtime automation is represented independently by
+  // is_ci and CI-built official binaries still count as release usage.
+  const release = ["release", "ci_release"].includes(body.build_channel) ? 1 : 0;
   const meaningfulRelease = meaningful && release ? 1 : 0;
   const isCi = boolToInt(body.is_ci);
   const sessionStartCount = body.event === "session_start" ? 1 : 0;

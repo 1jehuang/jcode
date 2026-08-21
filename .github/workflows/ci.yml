@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  JCODE_CI: "1"
+
 on:
   push:
     branches: [main, master]

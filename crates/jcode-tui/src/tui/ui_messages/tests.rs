@@ -732,10 +732,19 @@ fn render_todos_message_uses_readable_semantic_colors() {
 #[test]
 fn render_todos_message_color_codes_every_intent_state() {
     let cases = [
-        (crate::todo::IntentUnderstanding::Uncertain, todo_failure_color()),
-        (crate::todo::IntentUnderstanding::Partial, todo_warning_color()),
+        (
+            crate::todo::IntentUnderstanding::Uncertain,
+            todo_failure_color(),
+        ),
+        (
+            crate::todo::IntentUnderstanding::Partial,
+            todo_warning_color(),
+        ),
         (crate::todo::IntentUnderstanding::Clear, todo_score_color()),
-        (crate::todo::IntentUnderstanding::Complete, todo_score_color()),
+        (
+            crate::todo::IntentUnderstanding::Complete,
+            todo_score_color(),
+        ),
     ];
 
     for (state, expected_color) in cases {
@@ -2714,6 +2723,80 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     assert!(plain.contains("┌─ diff"), "plain={plain}");
     assert!(plain.contains("old line"), "plain={plain}");
     assert!(plain.contains("new line"), "plain={plain}");
+}
+
+#[test]
+fn render_tool_message_labels_single_file_apply_patch_diff() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "✓ src/example.rs: modified (1 hunks)".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("src/example.rs".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_apply_patch_single".to_string(),
+            name: "apply_patch".to_string(),
+            input: serde_json::json!({
+                "intent": "Update example behavior",
+                "patch_text": "*** Begin Patch\n*** Update File: src/example.rs\n@@\n-old_value\n+new_value\n*** End Patch\n"
+            }),
+            intent: Some("Update example behavior".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff · src/example.rs"), "plain={plain}");
+    assert!(plain.contains("old_value"), "plain={plain}");
+    assert!(plain.contains("new_value"), "plain={plain}");
+}
+
+#[test]
+fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("2 files".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call_apply_patch_multi".to_string(),
+            name: "apply_patch".to_string(),
+            input: serde_json::json!({
+                "intent": "Update both examples",
+                "patch_text": "*** Begin Patch\n*** Update File: a.txt\n@@\n-old a\n+new a\n*** Update File: b.txt\n@@\n-old b\n+new b\n*** End Patch\n"
+            }),
+            intent: Some("Update both examples".to_string()),
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let a_header = plain.find("┌─ diff · a.txt").expect("missing a.txt header");
+    let old_a = plain.find("old a").expect("missing a.txt deletion");
+    let new_a = plain.find("new a").expect("missing a.txt addition");
+    let b_header = plain
+        .find("├─ diff · b.txt")
+        .expect("missing b.txt boundary");
+    let old_b = plain.find("old b").expect("missing b.txt deletion");
+    let new_b = plain.find("new b").expect("missing b.txt addition");
+    assert!(
+        a_header < old_a && old_a < new_a && new_a < b_header,
+        "plain={plain}"
+    );
+    assert!(b_header < old_b && old_b < new_b, "plain={plain}");
 }
 
 #[test]

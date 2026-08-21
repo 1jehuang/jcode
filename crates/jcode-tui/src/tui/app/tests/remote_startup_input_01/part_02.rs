@@ -376,6 +376,7 @@ fn test_remote_catalog_activity_notification_upserts_compact_row() {
             label: "Model list refresh".to_string(),
             percent: Some(20.0),
             status: crate::tui::BackgroundTaskRowStatus::Running,
+            completed_at: None,
         }
     );
     let status = app.status_notice().expect("status notice");

@@ -22,6 +22,9 @@ pub struct BackgroundTaskRow {
     pub label: String,
     pub percent: Option<f32>,
     pub status: BackgroundTaskRowStatus,
+    /// When a successful task stopped being actionable. Running and failed
+    /// tasks remain visible until their state changes or the session closes.
+    pub completed_at: Option<std::time::Instant>,
 }
 
 pub mod backend;

@@ -3,6 +3,35 @@
 
 use super::*;
 
+#[test]
+fn heredoc_payload_is_data_not_shell_source() {
+    let command = "cat > /tmp/repro.sh <<'EOF'\n#!/bin/bash\nrm -rf \"$SOME_VAR\"\nEOF\necho wrote";
+    let segments = split_segments(command);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0][0].text, "cat");
+    assert_eq!(segments[1][0].text, "echo");
+    assert!(!segments.iter().flatten().any(|token| token.text == "rm"));
+}
+
+#[test]
+fn heredoc_terminator_does_not_hide_following_command() {
+    let command = "cat <<EOF\ninert\nEOF\nrm -rf ~";
+    let segments = split_segments(command);
+    assert!(segments.iter().any(|segment| segment[0].text == "rm"));
+}
+
+#[test]
+fn tab_stripping_and_escaped_delimiters_are_supported() {
+    for command in [
+        "cat <<-EOF\n\trm -rf ~\n\tEOF\necho safe",
+        "cat <<\\EOF\nrm -rf ~\nEOF\necho safe",
+    ] {
+        let segments = split_segments(command);
+        assert!(!segments.iter().flatten().any(|token| token.text == "rm"));
+        assert!(segments.iter().any(|segment| segment[0].text == "echo"));
+    }
+}
+
 fn texts(command: &str) -> Vec<String> {
     tokenize(command).into_iter().map(|t| t.text).collect()
 }

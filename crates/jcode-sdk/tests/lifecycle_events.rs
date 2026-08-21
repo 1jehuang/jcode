@@ -150,6 +150,7 @@ fn serve_connection(
             ),
             ApiRequest::ListSessions {
                 include_archived: requested,
+                ..
             } => {
                 include_archived.store(requested, Ordering::Release);
                 let listed = sessions

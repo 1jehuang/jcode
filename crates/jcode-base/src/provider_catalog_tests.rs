@@ -27,6 +27,59 @@ impl Drop for EnvGuard {
 }
 
 #[test]
+fn anthropic_catalog_auth_uses_api_key_and_version_headers() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://api.anthropic.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+    assert!(request.headers().get("authorization").is_none());
+}
+
+#[test]
+fn anthropic_catalog_auth_detects_host_case_insensitively() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://api.anthropic.com/v1/models"),
+        "https://API.ANTHROPIC.COM/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(request.headers().get("x-api-key").unwrap(), "test-key");
+    assert_eq!(
+        request.headers().get("anthropic-version").unwrap(),
+        ANTHROPIC_VERSION_HEADER_VALUE
+    );
+}
+
+#[test]
+fn generic_catalog_auth_uses_bearer_header() {
+    let request = apply_openai_compatible_catalog_auth(
+        reqwest::Client::new().get("https://example.com/v1/models"),
+        "https://example.com/v1",
+        "test-key",
+    )
+    .build()
+    .expect("request should build");
+
+    assert_eq!(
+        request.headers().get("authorization").unwrap(),
+        "Bearer test-key"
+    );
+    assert!(request.headers().get("x-api-key").is_none());
+    assert!(request.headers().get("anthropic-version").is_none());
+}
+
+#[test]
 fn matrix_profiles_have_unique_ids_and_safe_metadata() {
     let mut ids = HashSet::new();
     for profile in openai_compatible_profiles() {

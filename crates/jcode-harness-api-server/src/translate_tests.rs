@@ -79,6 +79,35 @@ fn write_session_record_with_titles(
     path
 }
 
+#[test]
+fn persisted_metadata_reads_large_transcripts_from_bounded_windows() {
+    let home = ScopedJcodeHome::new("bounded-metadata");
+    let sessions = home.path.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("create sessions directory");
+    let path = sessions.join("session_large.json");
+    let mut file = std::fs::File::create(&path).expect("create large session");
+    write!(
+        file,
+        "{{\"id\":\"session_large\",\"title\":\"Generated title\",\"messages\":[\""
+    )
+    .unwrap();
+    for _ in 0..(2 * 1024) {
+        file.write_all(&[b'x'; 1024]).unwrap();
+    }
+    write!(
+        file,
+        "\"],\"working_dir\":\"/workspace/large\",\"custom_title\":\"Pinned title\"}}"
+    )
+    .unwrap();
+    drop(file);
+
+    let metadata = BridgeState::resolve_session_metadata("session_large").expect("metadata");
+    assert_eq!(metadata.working_dir.as_deref(), Some("/workspace/large"));
+    assert_eq!(metadata.title.as_deref(), Some("Generated title"));
+    assert_eq!(metadata.custom_title.as_deref(), Some("Pinned title"));
+    assert_eq!(metadata.display_title().as_deref(), Some("Pinned title"));
+}
+
 fn only_reply_event(outbound: Vec<Outbound>) -> ApiEvent {
     assert_eq!(outbound.len(), 1, "expected exactly one reply");
     match outbound.into_iter().next().expect("one outbound") {
@@ -696,6 +725,7 @@ fn attached_requests_still_reach_the_daemon() {
 /// `list_sessions`, so the attach guard must leave them alone.
 #[test]
 fn browsing_requests_work_without_attaching() {
+    let _home = ScopedJcodeHome::new("browsing-without-attach");
     let mut state = BridgeState::default();
     for req in ["list_sessions", "peek_session", "ping"] {
         let out = state.api_request_to_legacy(&json!({
@@ -1139,6 +1169,44 @@ fn unattached_list_sessions_discovers_all_persisted_records() {
     assert_eq!(sessions[1].working_dir.as_deref(), second_root.to_str());
     assert_eq!(sessions[0].title.as_deref(), Some("Generated first title"));
     assert_eq!(sessions[1].title.as_deref(), Some("Custom second title"));
+}
+
+#[test]
+fn limited_session_list_reads_compact_index_without_transcript_records() {
+    let home = ScopedJcodeHome::new("metadata-index");
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let mut connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    let transaction = connection.transaction().unwrap();
+    for index in 0..100 {
+        transaction
+            .execute(
+                "INSERT INTO recent_sessions (
+                     session_id, working_dir, todo_title, updated_at_ms, last_active_at_ms
+                 ) VALUES (?1, '/indexed/project', ?2, ?3, ?3)",
+                params![
+                    format!("indexed_{index:03}"),
+                    format!("Indexed goal {index}"),
+                    index,
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+
+    let event = only_reply_event(
+        BridgeState::default()
+            .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 100})),
+    );
+    let ApiEvent::Sessions { sessions } = event else {
+        panic!("expected sessions reply, got {event:?}");
+    };
+    assert_eq!(sessions.len(), 100);
+    assert!(sessions.iter().all(|session| {
+        session
+            .title
+            .as_deref()
+            .is_some_and(|title| title.starts_with("Indexed goal "))
+    }));
 }
 
 #[test]

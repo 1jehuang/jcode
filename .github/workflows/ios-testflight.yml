@@ -1,5 +1,8 @@
 name: iOS TestFlight
 
+env:
+  JCODE_CI: "1"
+
 on:
   workflow_dispatch:
   push:

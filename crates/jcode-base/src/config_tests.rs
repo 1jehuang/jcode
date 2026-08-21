@@ -1,7 +1,7 @@
 use super::{
     AmbientConfig, Config, DiffDisplayMode, DisplayConfig, HookCommands, LatexRenderingMode,
-    ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig, config_env_fingerprint,
-    populate_context_limits_from_config_ref,
+    McpToolsMode, ProviderConfig, SessionPickerResumeAction, SwarmSpawnMode, ToolConfig,
+    config_env_fingerprint, populate_context_limits_from_config_ref,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -412,9 +412,42 @@ fn test_env_override_memory_sidecar() {
 
 #[test]
 fn tool_config_defaults_to_full_toolset() {
-    let selection = ToolConfig::default().selection();
+    let config = ToolConfig::default();
+    let selection = config.selection();
     assert!(selection.allowed_tools.is_none());
     assert!(selection.disabled_tools.is_empty());
+    assert_eq!(config.mcp_tools, McpToolsMode::Auto);
+    assert_eq!(config.mcp_tools_token_threshold, 8_000);
+}
+
+#[test]
+fn tool_config_deserializes_all_mcp_exposure_modes() {
+    for (raw, expected) in [
+        ("auto", McpToolsMode::Auto),
+        ("eager", McpToolsMode::Eager),
+        ("deferred", McpToolsMode::Deferred),
+    ] {
+        let config: Config = toml::from_str(&format!("[tools]\nmcp_tools = \"{raw}\"\n"))
+            .expect("valid MCP exposure mode");
+        assert_eq!(config.tools.mcp_tools, expected);
+    }
+}
+
+#[test]
+fn tool_config_mcp_exposure_env_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let previous_mode = std::env::var_os("JCODE_MCP_TOOLS");
+    let previous_threshold = std::env::var_os("JCODE_MCP_TOOLS_TOKEN_THRESHOLD");
+    crate::env::set_var("JCODE_MCP_TOOLS", "deferred");
+    crate::env::set_var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD", "4321");
+
+    let mut config = Config::default();
+    config.apply_env_overrides();
+
+    assert_eq!(config.tools.mcp_tools, McpToolsMode::Deferred);
+    assert_eq!(config.tools.mcp_tools_token_threshold, 4_321);
+    restore_env_var("JCODE_MCP_TOOLS", previous_mode);
+    restore_env_var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD", previous_threshold);
 }
 
 #[test]

@@ -120,6 +120,16 @@ impl Config {
         {
             self.tools.disable_base_tools = parsed;
         }
+        if let Ok(v) = std::env::var("JCODE_MCP_TOOLS")
+            && let Some(mode) = crate::config::McpToolsMode::parse(&v)
+        {
+            self.tools.mcp_tools = mode;
+        }
+        if let Ok(v) = std::env::var("JCODE_MCP_TOOLS_TOKEN_THRESHOLD")
+            && let Ok(parsed) = v.trim().parse::<usize>()
+        {
+            self.tools.mcp_tools_token_threshold = parsed;
+        }
 
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {

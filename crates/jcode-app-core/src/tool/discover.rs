@@ -1839,6 +1839,15 @@ mod tests {
             parameters["properties"]["action"]["enum"],
             json!(["search", "select", "suggest"])
         );
+        assert_eq!(
+            parameters["properties"]["category"]["enum"],
+            json!(crate::sponsors::DISCOVERY_CATEGORIES)
+        );
+        assert!(
+            parameters["properties"]["category"]["enum"]
+                .as_array()
+                .is_some_and(|categories| categories.contains(&json!("git")))
+        );
         assert!(
             schema.len() < 4_500,
             "discovery schema should stay compact, got {} bytes",
@@ -2347,14 +2356,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_end_to_end_with_enabled_config_and_local_server() {
+    async fn git_category_executes_end_to_end_with_enabled_config_and_local_server() {
         let _guard = crate::storage::lock_test_env();
         let prev_home = std::env::var_os("JCODE_HOME");
         let temp = tempfile::tempdir().unwrap();
         crate::env::set_var("JCODE_HOME", temp.path());
 
-        let body = json!({"tools": [{"name": "agentcard", "blurb": "single-use virtual visa cards", "url": "https://agentcard.example", "setup": "MCP server: npx agentcard-mcp"}]}).to_string();
-        let (endpoint, _server) = one_shot_server("HTTP/1.1 200 OK", body).await;
+        let body = json!({"tools": [{"name": "github", "blurb": "repository hosting and collaboration", "url": "https://github.com", "setup": "MCP server: npx github-mcp"}]}).to_string();
+        let (endpoint, server) = one_shot_server("HTTP/1.1 200 OK", body).await;
         std::fs::write(
             temp.path().join("config.toml"),
             format!("[sponsors]\nenabled = true\nendpoint = \"{endpoint}\"\n"),
@@ -2366,16 +2375,16 @@ mod tests {
         let output = tool
             .execute(
                 json!({
-                    "category": "payments",
-                    "query": "virtual card for checkout",
-                    "reason": "task requires a safe online card payment capability not present in the current tools"
+                    "category": "git",
+                    "query": "host and collaborate on git repositories",
+                    "reason": "task requires remote repository collaboration capabilities not present in the current tools"
                 }),
                 test_ctx(),
             )
             .await
             .unwrap();
 
-        assert!(output.output.contains("agentcard"));
+        assert!(output.output.contains("github"));
         assert!(output.output.contains("Jcode integration directory"));
         assert!(
             output
@@ -2385,15 +2394,18 @@ mod tests {
         // End to end, not just in render_listing: a browse must never hand the
         // agent runnable setup, or it has no reason to call select.
         assert!(
-            !output.output.contains("npx agentcard-mcp"),
+            !output.output.contains("npx github-mcp"),
             "browse leaked setup instructions: {}",
             output.output
         );
         assert!(output.output.contains("action `select`"));
         let title = output.title.unwrap();
-        assert_eq!(title, "payments", "{title}");
+        assert_eq!(title, "git", "{title}");
         let meta = output.metadata.unwrap();
         assert_eq!(meta["sponsored_discovery"], true);
+
+        let request = server.await.unwrap();
+        assert!(request.contains("category=git"), "{request}");
 
         // Opted-out config: execute refuses without any network call.
         std::fs::write(

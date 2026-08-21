@@ -1,5 +1,8 @@
 name: Announce release on Discord
 
+env:
+  JCODE_CI: "1"
+
 on:
   # Covers releases published outside the tag-driven release workflow. Events
   # created by GITHUB_TOKEN are suppressed, so release.yml also dispatches this

@@ -51,12 +51,29 @@ export interface HistoryMessage {
   content: string;
 }
 
+export type RenderedImageSource =
+  | { kind: "user_input" }
+  | { kind: "tool_result"; tool_name: string }
+  | { kind: "other"; role: string };
+
+export type RenderedImageAnchor =
+  | { kind: "tool_call"; id: string }
+  | { kind: "user_prompt"; ordinal: number };
+
+export interface RenderedImage {
+  media_type: string;
+  data: string;
+  label?: string;
+  source: RenderedImageSource;
+  anchor?: RenderedImageAnchor;
+}
+
 /** Base64 image attachment: [mediaType, base64Data]. */
 export type ImageAttachment = [string, string];
 
 export type ApiRequest =
   | { req: "hello"; min_version: number; max_version: number; client: string }
-  | { req: "list_sessions"; include_archived?: boolean }
+  | { req: "list_sessions"; include_archived?: boolean; limit?: number }
   | { req: "archive_session"; session_id: string }
   | { req: "restore_session"; session_id: string }
   | { req: "set_retention_policy"; archive_after_days?: number }
@@ -109,7 +126,7 @@ export type ApiEvent =
   | { ev: "error"; code: ErrorCode; message: string }
   | { ev: "sessions"; sessions: SessionInfo[] }
   | { ev: "attached"; session: SessionInfo }
-  | { ev: "history"; session_id: string; messages: HistoryMessage[] }
+  | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
   | { ev: "pong" }
   | { ev: "text_delta"; session_id: string; text: string }
   | { ev: "reasoning_delta"; session_id: string; text: string }
@@ -125,6 +142,7 @@ export type ApiEvent =
       output: string;
       error?: string;
     }
+  | { ev: "side_pane_images"; session_id: string; images: RenderedImage[] }
   | {
       ev: "token_usage";
       session_id: string;
@@ -234,6 +252,7 @@ export const KNOWN_EVENT_KINDS = [
   "sessions",
   "attached",
   "history",
+  "side_pane_images",
   "pong",
   "text_delta",
   "reasoning_delta",

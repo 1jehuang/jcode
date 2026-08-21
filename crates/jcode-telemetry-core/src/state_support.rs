@@ -375,6 +375,12 @@ pub(super) fn build_channel() -> String {
     if telemetry_jcode_repo_dir().is_some() {
         return "git_checkout".to_string();
     }
+    // Build provenance is separate from runtime automation. Official release
+    // artifacts are produced by CI/CD but are normally run by real users, so
+    // they must remain in release usage while still being identifiable.
+    if option_env!("JCODE_CI_BUILD").is_some() {
+        return "ci_release".to_string();
+    }
     "release".to_string()
 }
 
@@ -383,6 +389,16 @@ pub(super) fn is_git_checkout() -> bool {
 }
 
 pub(super) fn is_ci() -> bool {
+    // Explicit runtime provenance wins over heuristics. This lets CI/CD jobs
+    // classify themselves accurately even on an unknown provider, and lets a
+    // controlled non-CI environment override an inherited generic CI marker.
+    if let Ok(value) = std::env::var("JCODE_CI") {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => return true,
+            "0" | "false" | "no" | "off" => return false,
+            _ => {} // Invalid values fall through to provider detection.
+        }
+    }
     // Vendor-specific markers. `CI` alone misses several providers that only
     // set their own variable, which let CI runners land in the headline DAU
     // as if they were people.
