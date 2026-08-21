@@ -23,6 +23,10 @@ use helpers::{
     save_agent_model_override,
 };
 
+pub(super) fn subagent_picker_model_spec(entry: &PickerEntry) -> String {
+    model_entry_saved_spec(entry)
+}
+
 const REMOTE_MODEL_CATALOG_CACHE_FILE: &str = "remote_model_catalog_cache.json";
 const REMOTE_MODEL_CATALOG_CACHE_VERSION: u8 = 3;
 const REMOTE_MODEL_CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
