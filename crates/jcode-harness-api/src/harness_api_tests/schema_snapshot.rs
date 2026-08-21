@@ -96,6 +96,7 @@ fn request_roundtrip() {
         },
         ApiRequest::ListSessions {
             include_archived: false,
+            limit: None,
         },
         ApiRequest::ArchiveSession {
             session_id: "s1".into(),

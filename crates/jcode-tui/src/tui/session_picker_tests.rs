@@ -1307,8 +1307,30 @@ fn onboarding_banner_offers_review_then_new_session() {
         OverlayAction::Selected(PickerResult::ReviewRecentProject)
     ));
 
-    // Down selects the blank-session action.
-    picker.next();
+    // Any non-submit key rotates between the two choices.
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .expect("ordinary key");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
+    // Keys that normally close the full picker rotate on this action-only page.
+    picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+        .expect("escape key");
+    assert!(picker.onboarding_start_new_highlighted());
+    picker
+        .handle_overlay_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        .expect("control-c");
+    assert!(picker.onboarding_review_recent_project_highlighted());
+
+    // Arrow keys use the same rotation behavior.
+    picker
+        .handle_overlay_key(KeyCode::Down, KeyModifiers::empty())
+        .expect("down arrow");
     assert!(picker.onboarding_start_new_highlighted());
     let action = picker
         .handle_overlay_key(KeyCode::Enter, KeyModifiers::empty())
@@ -1321,7 +1343,9 @@ fn onboarding_banner_offers_review_then_new_session() {
     // There is no session list below the two actions.
     picker.next();
     assert!(picker.onboarding_start_new_highlighted());
-    picker.previous();
+    picker
+        .handle_overlay_key(KeyCode::Up, KeyModifiers::empty())
+        .expect("up arrow");
     assert!(picker.onboarding_review_recent_project_highlighted());
 }
 
@@ -1354,11 +1378,11 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         "onboarding prompt should render in the banner: {text:?}"
     );
     assert!(
-        text.contains("Start a new session"),
+        text.contains("Start in the current directory"),
         "start-new row should render in the banner: {text:?}"
     );
     assert!(
-        text.contains("Find bugs in what I've been working on"),
+        text.contains("Find bugs in my most active repo"),
         "suggested-review row should render in the banner: {text:?}"
     );
     assert!(
@@ -1376,17 +1400,17 @@ fn onboarding_banner_renders_prompt_and_both_action_rows() {
         .expect("welcome row");
     let review_y = lines
         .iter()
-        .position(|line| line.contains("Find bugs in what I've been working on"))
+        .position(|line| line.contains("Find bugs in my most active repo"))
         .expect("review row");
     let start_y = lines
         .iter()
-        .position(|line| line.contains("Start a new session"))
+        .position(|line| line.contains("Start in the current directory"))
         .expect("start-new row");
     let review_x = lines[review_y]
-        .find("Find bugs in what I've been working on")
+        .find("Find bugs in my most active repo")
         .expect("review column");
     let start_x = lines[start_y]
-        .find("Start a new session")
+        .find("Start in the current directory")
         .expect("start-new column");
 
     assert!(

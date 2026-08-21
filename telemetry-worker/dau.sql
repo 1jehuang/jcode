@@ -44,7 +44,7 @@ WITH today AS (
              AND created_at <= datetime('now', '-7 days') THEN telemetry_id END) AS users_sofar_7d
     FROM events
     WHERE created_at >= datetime('now', '-7 days', 'start of day')
-      AND build_channel = 'release'
+      AND build_channel IN ('release', 'ci_release')
       AND is_ci = 0
 ), recent AS (
     SELECT
@@ -74,10 +74,10 @@ WITH today AS (
     SELECT
         COUNT(DISTINCT telemetry_id) AS raw_24h,
         COUNT(DISTINCT CASE WHEN meaningful = 1 THEN telemetry_id END) AS meaningful_24h,
-        COUNT(DISTINCT CASE WHEN build_channel = 'release' THEN telemetry_id END) AS raw_release_24h,
-        COUNT(DISTINCT CASE WHEN build_channel = 'release' AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h,
+        COUNT(DISTINCT CASE WHEN build_channel IN ('release', 'ci_release') THEN telemetry_id END) AS raw_release_24h,
+        COUNT(DISTINCT CASE WHEN build_channel IN ('release', 'ci_release') AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h,
         -- Same headline metric over a rolling 24h window, excluding CI traffic.
-        COUNT(DISTINCT CASE WHEN build_channel = 'release' AND is_ci = 0 AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h_noci,
+        COUNT(DISTINCT CASE WHEN build_channel IN ('release', 'ci_release') AND is_ci = 0 AND meaningful = 1 THEN telemetry_id END) AS meaningful_release_24h_noci,
         COUNT(DISTINCT CASE WHEN is_ci = 1 THEN telemetry_id END) AS ci_24h,
         -- Dev-build traffic: `debug`/`git_checkout` ids are overwhelmingly
         -- throwaway (a session_start and an onboarding_step, no session_end),

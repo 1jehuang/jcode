@@ -162,6 +162,8 @@ const CONFIG_ENV_KEYS: &[&str] = &[
     "JCODE_SPAWN_HOOK",
     "JCODE_STREAM_IDLE_TIMEOUT_SECS",
     "JCODE_MAX_RETRIES",
+    "JCODE_MCP_TOOLS",
+    "JCODE_MCP_TOOLS_TOKEN_THRESHOLD",
     "JCODE_RETRY_BACKOFF_CAP_SECS",
     "JCODE_SWARM_ENABLED",
     "JCODE_SWARM_MODEL",
@@ -562,8 +564,41 @@ impl Default for AcpConfig {
     }
 }
 
+/// Controls how MCP server tools are exposed to the model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpToolsMode {
+    /// Expose individual tools until their serialized definitions exceed the
+    /// configured threshold, then use the fixed search/call surface.
+    #[default]
+    Auto,
+    /// Always expose every MCP server tool as a top-level tool definition.
+    Eager,
+    /// Expose only the fixed `mcp_search` and `mcp_call` tools.
+    Deferred,
+}
+
+impl McpToolsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Eager => "eager",
+            Self::Deferred => "deferred",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "eager" => Some(Self::Eager),
+            "deferred" => Some(Self::Deferred),
+            _ => None,
+        }
+    }
+}
+
 /// Controls which tools are sent to the model.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolConfig {
     /// Tool profile: "full" (default), "acp", "minimal"/"lite", or "none".
@@ -575,6 +610,28 @@ pub struct ToolConfig {
     pub disabled: Vec<String>,
     /// Disable all built-in tools unless `enabled` is provided.
     pub disable_base_tools: bool,
+    /// MCP tool exposure mode: auto (default), eager, or deferred.
+    pub mcp_tools: McpToolsMode,
+    /// In auto mode, defer MCP tools when their definitions exceed this token estimate.
+    #[serde(
+        alias = "mcp_tools_threshold",
+        alias = "mcp_tools_auto_threshold",
+        alias = "mcp_tools_auto_threshold_tokens"
+    )]
+    pub mcp_tools_token_threshold: usize,
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            profile: String::new(),
+            enabled: Vec::new(),
+            disabled: Vec::new(),
+            disable_base_tools: false,
+            mcp_tools: McpToolsMode::Auto,
+            mcp_tools_token_threshold: 8_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

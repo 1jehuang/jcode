@@ -225,6 +225,7 @@ fn test_is_ci_detects_ci_env() {
     let _guard = lock_test_env();
     // Clear any inherited CI markers so the baseline is deterministic.
     for key in [
+        "JCODE_CI",
         "CI",
         "CONTINUOUS_INTEGRATION",
         "BUILD_NUMBER",
@@ -257,6 +258,28 @@ fn test_is_ci_detects_ci_env() {
     );
     jcode_core::env::remove_var("CI");
     assert!(!is_ci());
+
+    jcode_core::env::set_var("JCODE_CI", "1");
+    assert!(is_ci(), "explicit JCODE_CI=1 should mark any runtime as CI");
+    jcode_core::env::remove_var("JCODE_CI");
+
+    jcode_core::env::set_var("CI", "true");
+    jcode_core::env::set_var("JCODE_CI", "0");
+    assert!(
+        !is_ci(),
+        "explicit JCODE_CI=0 should override inherited provider markers"
+    );
+    jcode_core::env::remove_var("JCODE_CI");
+    jcode_core::env::remove_var("CI");
+
+    jcode_core::env::set_var("CI", "true");
+    jcode_core::env::set_var("JCODE_CI", "invalid");
+    assert!(
+        is_ci(),
+        "invalid explicit values should fall back to provider detection"
+    );
+    jcode_core::env::remove_var("JCODE_CI");
+    jcode_core::env::remove_var("CI");
 
     // Vendor-specific markers count on their own: several providers never set
     // the generic `CI` variable, and those runners used to look like people.

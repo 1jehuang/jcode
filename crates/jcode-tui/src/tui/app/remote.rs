@@ -130,6 +130,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.refresh_todos_view_if_needed();
     needs_redraw |= app.refresh_todo_card_if_needed();
     needs_redraw |= app.refresh_pinned_todos_if_needed();
+    needs_redraw |= app.prune_irrelevant_background_tasks();
     needs_redraw |= app.refresh_side_panel_linked_content_if_due();
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
@@ -594,6 +595,10 @@ pub(super) async fn handle_bus_event(
         Ok(BusEvent::UiActivity(activity)) => super::local::handle_ui_activity(app, activity),
         Ok(BusEvent::GitStatusCompleted(result)) => {
             super::commands::handle_git_status_completed(app, result);
+            true
+        }
+        Ok(BusEvent::ProductivityReportReady(event)) => {
+            app.handle_productivity_report_ready(event);
             true
         }
         Ok(BusEvent::MermaidRenderCompleted) => true,
@@ -1888,6 +1893,10 @@ fn handle_disconnected_key_internal(
     let mut code = code;
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+    if input::handle_scroll_overlay_key(app, code)? {
+        return Ok(());
+    }
 
     if handle_ctrl_kill_to_end(app, code, modifiers) {
         return Ok(());

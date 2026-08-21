@@ -233,10 +233,13 @@ pub fn dispatch_observer(event: HookEvent) {
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null());
                 match crate::platform::spawn_detached(&mut cmd) {
-                    Ok(_) => crate::logging::debug(&format!(
-                        "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
-                        event.session_id
-                    )),
+                    Ok(child) => {
+                        crate::platform::reap_detached(child);
+                        crate::logging::debug(&format!(
+                            "Hook '{event_name}' dispatched to '{command_line}' (session={:?})",
+                            event.session_id
+                        ));
+                    }
                     Err(error) => crate::logging::warn(&format!(
                         "Hook '{event_name}' command '{command_line}' failed to start: {error}"
                     )),
@@ -617,6 +620,51 @@ mod tests {
             None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
         }
         assert_eq!(recorded, "turn_end|ses_obs|ok|1");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn observer_dispatch_reaps_completed_hook() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let record = temp.path().join("pid.txt");
+        let script = write_executable_script(
+            temp.path(),
+            "record-pid.sh",
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\n",
+                crate::terminal_launch::sh_escape(&record.to_string_lossy())
+            ),
+        );
+
+        let previous = std::env::var_os("JCODE_HOOK_TURN_END");
+        crate::env::set_var("JCODE_HOOK_TURN_END", script.to_string_lossy().to_string());
+        dispatch_observer(HookEvent::new("turn_end").session_id("ses_reap"));
+
+        let mut pid: Option<u32> = None;
+        for _ in 0..100 {
+            pid = std::fs::read_to_string(&record)
+                .ok()
+                .and_then(|value| value.strip_suffix('\n').and_then(|pid| pid.parse().ok()));
+            if pid.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        match previous {
+            Some(value) => crate::env::set_var("JCODE_HOOK_TURN_END", value),
+            None => crate::env::remove_var("JCODE_HOOK_TURN_END"),
+        }
+
+        let pid = pid.expect("hook should record its pid");
+        let process = std::path::PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            if !process.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("completed hook process {pid} was not reaped");
     }
 
     #[cfg(unix)]

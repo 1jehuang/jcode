@@ -1,5 +1,8 @@
 name: FreeBSD Smoke
 
+env:
+  JCODE_CI: "1"
+
 # Builds and smoke-tests jcode inside a real FreeBSD VM.
 #
 # GitHub does not offer native FreeBSD runners, so we boot a FreeBSD guest

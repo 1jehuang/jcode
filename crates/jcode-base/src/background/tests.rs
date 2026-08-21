@@ -185,7 +185,9 @@ async fn update_progress_keeps_the_determinate_high_water_mark() -> Result<()> {
         source: BackgroundTaskProgressSource::Reported,
     };
 
-    manager.update_progress(&info.task_id, progress(60.0)).await?;
+    manager
+        .update_progress(&info.task_id, progress(60.0))
+        .await?;
     let status = manager
         .update_progress(&info.task_id, progress(25.0))
         .await?
@@ -224,7 +226,9 @@ async fn update_progress_preserves_high_water_mark_through_reported_checkpoint()
         updated_at: Utc::now().to_rfc3339(),
         source: BackgroundTaskProgressSource::Reported,
     };
-    manager.update_progress(&info.task_id, progress.clone()).await?;
+    manager
+        .update_progress(&info.task_id, progress.clone())
+        .await?;
 
     progress.kind = BackgroundTaskProgressKind::Indeterminate;
     progress.percent = None;
@@ -248,7 +252,9 @@ async fn update_progress_preserves_high_water_mark_through_reported_checkpoint()
 #[tokio::test]
 async fn concurrent_progress_updates_cannot_overwrite_the_high_water_mark() -> Result<()> {
     let tmp = tempdir()?;
-    let manager = Arc::new(BackgroundTaskManager::with_output_dir(tmp.path().to_path_buf()));
+    let manager = Arc::new(BackgroundTaskManager::with_output_dir(
+        tmp.path().to_path_buf(),
+    ));
     let info = manager
         .spawn_with_notify(
             "bash",

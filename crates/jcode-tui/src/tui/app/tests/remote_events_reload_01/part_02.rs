@@ -184,7 +184,7 @@ fn test_remote_auto_poke_challenges_abrupt_confidence_increase() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| { msg.content.contains("Double-checking a confidence jump") })
+                .any(|msg| { msg.content.contains("Double-checking confidence jumps") })
         );
     });
 }

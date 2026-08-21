@@ -11,6 +11,7 @@ use super::onboarding_flow::{
 use super::{App, DisplayMessage, SessionPickerMode};
 use crate::import::repo_ranking::{self, SessionLocation};
 use crate::tui::session_picker::{SessionPicker, load_sessions};
+use chrono::Utc;
 use crossterm::event::KeyCode;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -906,7 +907,7 @@ impl App {
             shown_at: Instant::now(),
         });
         self.onboarding_prefetch_recent_project();
-        self.set_status_notice("Choose a suggested review or start a new session (↑↓, Enter)");
+        self.set_status_notice("Press any key to switch, Enter to choose");
     }
 
     /// Formatted copy shown above the two first-run actions.
@@ -926,13 +927,13 @@ impl App {
         ]
     }
 
-    /// Warm the recent-project lookup while the user is still reading the start
+    /// Warm the most-active-project lookup while the user is still reading the start
     /// choice screen.
     ///
-    /// Resolving the newest known Git repository requires a full session-list
+    /// Resolving the most active Git repository requires a full session-list
     /// scan, which is a cold multi-hundred-millisecond disk walk on machines
     /// with a large `~/.jcode/sessions` directory. Doing it inline on Enter made
-    /// the "Find bugs in what I've been working on" action feel laggy, so run it
+    /// the suggested repository review action feel laggy, so run it
     /// off-thread as soon as the choice is displayed and have the key handler
     /// consume the cached answer.
     fn onboarding_prefetch_recent_project(&mut self) {
@@ -952,30 +953,23 @@ impl App {
         });
     }
 
-    /// Resolve the project to review before the agent turn starts. The active
-    /// session directory wins when it is already inside a Git repository;
-    /// otherwise recent native and external session metadata supplies the newest
-    /// known repository. This keeps repository discovery out of the model prompt.
+    /// Resolve the user's most active project before the agent turn starts.
+    /// Native and external session metadata are ranked by frequency and recency,
+    /// keeping repository discovery out of the model prompt.
     pub(super) fn onboarding_recent_project_path(&self) -> Option<PathBuf> {
         let home = dirs::home_dir();
         let excluded: Vec<PathBuf> = home.iter().cloned().collect();
 
-        if let Some(working_dir) = self.session.working_dir.as_deref() {
+        if self.is_remote
+            && let Some(working_dir) = self.session.working_dir.as_deref()
+        {
             let working_dir = Path::new(working_dir);
-            if self.is_remote {
-                // The path belongs to the remote runtime and cannot generally be
-                // statted by the attached client. Trust the server-provided
-                // session directory, but never turn a home-directory launch into
-                // a broad home review.
-                if !working_dir.as_os_str().is_empty()
-                    && home.as_deref().is_none_or(|home| home != working_dir)
-                {
-                    return Some(working_dir.to_path_buf());
-                }
-            } else if let Some(root) = repo_ranking::resolve_git_root(working_dir)
-                && !excluded.iter().any(|excluded| excluded == &root)
+            // Remote session history is not available on the client. Trust the
+            // server-provided directory, but never review the bare home directory.
+            if !working_dir.as_os_str().is_empty()
+                && home.as_deref().is_none_or(|home| home != working_dir)
             {
-                return Some(root);
+                return Some(working_dir.to_path_buf());
             }
         }
 
@@ -984,18 +978,29 @@ impl App {
         }
 
         // Prefer the prefetched answer so the action responds immediately.
-        if let Some(prefetched) = self
+        if let Some(repository) = self
             .onboarding_recent_project_prefetch
             .as_ref()
             .and_then(|slot| slot.lock().ok().and_then(|slot| slot.clone()))
+            .flatten()
         {
-            return prefetched;
+            return Some(repository);
         }
 
-        Self::recent_project_path_from_sessions(&self.session.id)
+        if let Some(repository) = Self::recent_project_path_from_sessions(&self.session.id) {
+            return Some(repository);
+        }
+
+        // A brand-new user has no history to rank yet. In that case only, use
+        // the repository they launched jcode from rather than disabling review.
+        self.session
+            .working_dir
+            .as_deref()
+            .and_then(|working_dir| repo_ranking::resolve_git_root(Path::new(working_dir)))
+            .filter(|root| !excluded.iter().any(|excluded| excluded == root))
     }
 
-    /// Newest known Git repository across recorded sessions, excluding the
+    /// Most active Git repository across recorded sessions, excluding the
     /// current session and the bare home directory. Blocking: this walks the
     /// session list on disk.
     fn recent_project_path_from_sessions(current_session_id: &str) -> Option<PathBuf> {
@@ -1014,7 +1019,14 @@ impl App {
                 ))
             })
             .collect();
-        repo_ranking::most_recent_repository(&locations, &excluded)
+        let options = repo_ranking::RankOptions {
+            excluded_paths: excluded,
+            ..repo_ranking::RankOptions::default()
+        };
+        repo_ranking::rank_repositories(&locations, Utc::now(), &options)
+            .into_iter()
+            .next()
+            .map(|repo| PathBuf::from(repo.path))
     }
 
     /// First-turn prompt launched by the onboarding recent-project review action.
@@ -1031,7 +1043,7 @@ impl App {
         let Some(repository) = self.onboarding_recent_project_path() else {
             self.onboarding_show_suggestions();
             self.set_status_notice(
-                "No recent Git repository found. Start jcode inside a project to review it.",
+                "No active Git repository found. Start jcode inside a project to review it.",
             );
             return false;
         };

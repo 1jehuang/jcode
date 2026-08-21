@@ -19,6 +19,9 @@ pub enum ApiRequest {
         /// Include sessions the user archived through this API.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         include_archived: bool,
+        /// Return at most this many most-recently modified persisted sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
     },
 
     /// Reversibly hide a session from the default list. Its transcript remains

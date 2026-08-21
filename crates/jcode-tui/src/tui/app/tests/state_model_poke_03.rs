@@ -2674,20 +2674,40 @@ fn test_finish_turn_challenges_confidence_spike_once() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|msg| { msg.content.contains("Double-checking a confidence jump") })
+                .any(|msg| { msg.content.contains("Double-checking confidence jumps") })
         );
 
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         app.is_processing = true;
-        // Pin the default so the clean second cycle disarms; this test is
-        // about challenging the spike exactly once.
-        app.auto_poke_default_on = false;
         super::local::finish_turn(&mut app);
 
-        assert!(!app.auto_poke_incomplete_todos);
-        assert!(!app.todo_confidence_spike_challenged);
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.todo_confidence_spike_challenged);
+        assert!(app.pending_queued_dispatch);
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+
+        // Finishing the synthetic final-response turn must not challenge the
+        // same unchanged confidence history again.
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        app.is_processing = true;
+        super::local::finish_turn(&mut app);
+
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(app.todo_confidence_spike_challenged);
         assert!(!app.pending_queued_dispatch);
+        assert!(app.queued_messages.is_empty());
+        assert_eq!(
+            app.display_messages()
+                .iter()
+                .filter(|message| message.content.contains("All todos done"))
+                .count(),
+            1
+        );
     });
 }
 

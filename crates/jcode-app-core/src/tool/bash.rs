@@ -20,7 +20,9 @@ use std::sync::LazyLock;
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 const MAX_OUTPUT_LEN: usize = 30000;
@@ -435,33 +437,10 @@ async fn handle_background_output_line(
     raw_line: &str,
     stderr: bool,
 ) {
-    if let Some(progress) = parse_checkpoint_marker(raw_line) {
-        if let Some(task_id) = task_id_from_output_path(output_path) {
-            let _ = crate::background::global()
-                .update_checkpoint(task_id, progress)
-                .await;
-        }
-        return;
-    }
-
-    if let Some((progress, is_checkpoint)) = parse_progress_marker_with_checkpoint(raw_line) {
-        if let Some(task_id) = task_id_from_output_path(output_path) {
-            let manager = crate::background::global();
-            let _ = if is_checkpoint {
-                manager.update_checkpoint(task_id, progress).await
-            } else {
-                manager.update_progress(task_id, progress).await
-            };
-        }
-        return;
-    }
-
-    match parse_heuristic_progress(raw_line) {
-        Ok(Some(progress)) => {
+    match parse_progress_line(raw_line) {
+        Ok(Some(update)) => {
             if let Some(task_id) = task_id_from_output_path(output_path) {
-                let _ = crate::background::global()
-                    .update_progress(task_id, progress)
-                    .await;
+                apply_progress_update(task_id, update).await;
             }
             return;
         }
@@ -480,6 +459,157 @@ async fn handle_background_output_line(
     };
     file.write_all(rendered.as_bytes()).await.ok();
     file.flush().await.ok();
+}
+
+/// A progress or checkpoint update parsed from one line of command output.
+#[derive(Debug)]
+pub(super) enum ProgressLineUpdate {
+    Progress(BackgroundTaskProgress),
+    Checkpoint(BackgroundTaskProgress),
+}
+
+/// Parse one output line for any supported progress signal: explicit
+/// `JCODE_CHECKPOINT`/`JCODE_PROGRESS` markers first, then heuristic patterns
+/// (ratios, percentages, byte ratios, phase prefixes).
+pub(super) fn parse_progress_line(line: &str) -> Result<Option<ProgressLineUpdate>> {
+    if let Some(progress) = parse_checkpoint_marker(line) {
+        return Ok(Some(ProgressLineUpdate::Checkpoint(progress)));
+    }
+
+    if let Some((progress, is_checkpoint)) = parse_progress_marker_with_checkpoint(line) {
+        return Ok(Some(if is_checkpoint {
+            ProgressLineUpdate::Checkpoint(progress)
+        } else {
+            ProgressLineUpdate::Progress(progress)
+        }));
+    }
+
+    Ok(parse_heuristic_progress(line)?.map(ProgressLineUpdate::Progress))
+}
+
+async fn apply_progress_update(task_id: &str, update: ProgressLineUpdate) {
+    let manager = crate::background::global();
+    let _ = match update {
+        ProgressLineUpdate::Progress(progress) => manager.update_progress(task_id, progress).await,
+        ProgressLineUpdate::Checkpoint(progress) => {
+            manager.update_checkpoint(task_id, progress).await
+        }
+    };
+}
+
+/// Progress state for a foreground command that may be promoted to a
+/// background task if it exceeds the foreground timeout.
+///
+/// Before promotion there is no task to attach progress to, so only the most
+/// recent update is kept. When the command is promoted, `attach_task` flushes
+/// that pending update so the task row starts at the real percentage instead
+/// of 0%, and later updates stream directly to the background manager.
+#[derive(Default)]
+struct PromotedCommandProgress {
+    task_id: std::sync::OnceLock<String>,
+    pending: std::sync::Mutex<Option<ProgressLineUpdate>>,
+}
+
+impl PromotedCommandProgress {
+    async fn record(&self, update: ProgressLineUpdate) {
+        let direct = {
+            let mut pending = self.pending.lock().expect("progress mutex poisoned");
+            if self.task_id.get().is_none() {
+                *pending = Some(update);
+                None
+            } else {
+                Some(update)
+            }
+        };
+        if let Some(update) = direct
+            && let Some(task_id) = self.task_id.get()
+        {
+            apply_progress_update(task_id, update).await;
+        }
+    }
+
+    async fn attach_task(&self, task_id: &str) {
+        let _ = self.task_id.set(task_id.to_string());
+        let pending = self
+            .pending
+            .lock()
+            .expect("progress mutex poisoned")
+            .take();
+        if let Some(update) = pending {
+            apply_progress_update(task_id, update).await;
+        }
+    }
+}
+
+/// Collect a command's output stream line by line, reporting any parsed
+/// progress so a later background promotion has live progress instead of
+/// sitting at 0% until completion.
+async fn collect_output_reporting_progress<R>(
+    reader: Option<R>,
+    progress: std::sync::Arc<PromotedCommandProgress>,
+) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = String::new();
+    let Some(reader) = reader else {
+        return buf;
+    };
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(Some(update)) = parse_progress_line(&line) {
+            progress.record(update).await;
+        }
+        buf.push_str(&line);
+        buf.push('\n');
+    }
+    buf
+}
+
+/// Tail a detached background task's output file and translate progress lines
+/// into background-manager progress updates.
+///
+/// Detached commands write directly to their output file, so nothing in-process
+/// sees their output as it streams. This follower polls the file while the task
+/// is `Running`, parsing complete lines from where it left off. It performs one
+/// final drain after the task leaves `Running` and then exits.
+#[cfg(unix)]
+fn spawn_detached_progress_follower(task_id: String, output_file: std::path::PathBuf) {
+    tokio::spawn(async move {
+        let manager = crate::background::global();
+        let mut pos: u64 = 0;
+        let mut partial: Vec<u8> = Vec::new();
+        loop {
+            let running = manager
+                .status(&task_id)
+                .await
+                .map(|status| status.status == crate::bus::BackgroundTaskStatus::Running)
+                .unwrap_or(false);
+
+            if let Ok(mut file) = tokio::fs::File::open(&output_file).await {
+                use tokio::io::AsyncSeekExt;
+                if file.seek(std::io::SeekFrom::Start(pos)).await.is_ok() {
+                    let mut chunk = Vec::new();
+                    if file.read_to_end(&mut chunk).await.is_ok() && !chunk.is_empty() {
+                        pos += chunk.len() as u64;
+                        partial.extend_from_slice(&chunk);
+                        while let Some(newline) = partial.iter().position(|byte| *byte == b'\n') {
+                            let line: Vec<u8> = partial.drain(..=newline).collect();
+                            let line = String::from_utf8_lossy(&line);
+                            if let Ok(Some(update)) = parse_progress_line(line.trim_end()) {
+                                apply_progress_update(&task_id, update).await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
 }
 
 #[cfg(not(windows))]
@@ -823,27 +953,26 @@ impl BashTool {
         let stdin_tx = ctx.stdin_request_tx.clone();
         let tool_call_id = ctx.tool_call_id.clone();
         let title_for_work = title.clone();
+        // Track progress parsed from output so a timeout promotion starts the
+        // background task at the real percentage instead of 0%.
+        let promoted_progress = std::sync::Arc::new(PromotedCommandProgress::default());
+        let stdout_progress = std::sync::Arc::clone(&promoted_progress);
+        let stderr_progress = std::sync::Arc::clone(&promoted_progress);
 
         // Run the command (read stdout/stderr, service stdin, wait for exit) in a
         // dedicated task so that, if it exceeds the foreground timeout, we can hand
         // the still-running task off to the background manager instead of killing it.
         let mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>> =
             tokio::spawn(async move {
-                let stdout_task = tokio::spawn(async move {
-                    let mut buf = String::new();
-                    if let Some(mut out) = stdout_handle {
-                        let _ = out.read_to_string(&mut buf).await;
-                    }
-                    buf
-                });
+                let stdout_task = tokio::spawn(collect_output_reporting_progress(
+                    stdout_handle,
+                    stdout_progress,
+                ));
 
-                let stderr_task = tokio::spawn(async move {
-                    let mut buf = String::new();
-                    if let Some(mut err) = stderr_handle {
-                        let _ = err.read_to_string(&mut buf).await;
-                    }
-                    buf
-                });
+                let stderr_task = tokio::spawn(collect_output_reporting_progress(
+                    stderr_handle,
+                    stderr_progress,
+                ));
 
                 let stdin_task = if has_stdin_channel {
                     Some(tokio::spawn(async move {
@@ -953,6 +1082,10 @@ impl BashTool {
                         work_handle,
                     )
                     .await;
+                // Route progress parsed from the still-running command's output
+                // to the new background task, including any update seen before
+                // promotion, so the task row shows real progress from the start.
+                promoted_progress.attach_task(&info.task_id).await;
 
                 let output = format!(
                     "Command exceeded the foreground timeout after {:.1}s and is continuing in background (not killed).\n\n\
@@ -1057,6 +1190,13 @@ impl BashTool {
                         params.wake,
                     )
                     .await;
+                // Detached commands write straight to the output file, so no
+                // in-process reader sees their output. Follow the file to keep
+                // the task's progress bar live.
+                spawn_detached_progress_follower(
+                    info.task_id.clone(),
+                    info.output_file.clone(),
+                );
 
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let output = format!(
@@ -1114,6 +1254,10 @@ impl BashTool {
                         params.wake,
                     )
                     .await;
+                spawn_detached_progress_follower(
+                    info.task_id.clone(),
+                    info.output_file.clone(),
+                );
                 let output = format!(
                     "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\nUse `bg` with action=\"wait\" and task_id=\"{}\" after reload to wait for completion or the next progress checkpoint.",
                     info.task_id,

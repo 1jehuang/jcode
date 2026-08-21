@@ -127,6 +127,9 @@ pub fn build_transcript_for_extraction(messages: &[crate::message::Message]) -> 
         for block in &msg.content {
             match block {
                 crate::message::ContentBlock::Text { text, .. } => {
+                    if text.trim_start().starts_with("<system-reminder>") {
+                        continue;
+                    }
                     transcript.push_str(text);
                     transcript.push('\n');
                 }

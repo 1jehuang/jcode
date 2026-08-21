@@ -135,9 +135,7 @@ fn active_anthropic_profile_models() -> Option<Vec<String>> {
     let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") else {
         return None;
     };
-    let Some(profile) = jcode_base::config::config().providers.get(&profile_name) else {
-        return None;
-    };
+    let profile = jcode_base::config::config().providers.get(&profile_name)?;
     if !matches!(
         profile.provider_type,
         jcode_base::config::NamedProviderType::AnthropicCompatible
@@ -1969,6 +1967,10 @@ async fn force_refresh_oauth_token(
 }
 
 /// Stream the response from Anthropic API
+#[expect(
+    clippy::too_many_arguments,
+    reason = "streaming requires transport, authentication, request, event, and session context"
+)]
 async fn stream_response(
     client: Client,
     token: String,

@@ -887,17 +887,55 @@ impl AmbientRunnerHandle {
 
     /// Run a single ambient cycle. Returns the cycle result.
     async fn run_cycle(&self, provider: &Arc<dyn Provider>) -> anyhow::Result<AmbientCycleResult> {
+        self.run_cycle_with_visible_launcher(provider, config().ambient.visible, || {
+            let jcode_bin =
+                std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
+
+            std::process::Command::new("kitty")
+                .args([
+                    "--title",
+                    "🤖 jcode ambient cycle",
+                    "-e",
+                    &jcode_bin.to_string_lossy(),
+                    "ambient",
+                    "run-visible",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        })
+        .await
+    }
+
+    async fn run_cycle_with_visible_launcher<F>(
+        &self,
+        provider: &Arc<dyn Provider>,
+        visible: bool,
+        launch_visible: F,
+    ) -> anyhow::Result<AmbientCycleResult>
+    where
+        F: FnOnce() -> std::io::Result<std::process::Child> + Send,
+    {
         let started_at = Utc::now();
-        let visible = config().ambient.visible;
 
         self.set_running_detail("gathering context").await;
         let (system_prompt, initial_message) = self.build_cycle_context(provider).await?;
 
         // Visible mode: spawn a full TUI instead of running headlessly
         if visible {
-            return self
-                .run_cycle_visible(started_at, system_prompt, initial_message)
-                .await;
+            match self
+                .run_cycle_visible(
+                    started_at,
+                    system_prompt.clone(),
+                    initial_message.clone(),
+                    launch_visible,
+                )
+                .await?
+            {
+                VisibleCycleOutcome::Completed(result) => return Ok(*result),
+                VisibleCycleOutcome::FallBackHeadless => {}
+            }
         }
 
         // Headless mode: run agent directly
@@ -986,12 +1024,16 @@ impl AmbientRunnerHandle {
     }
 
     /// Run a visible ambient cycle by spawning a full TUI in a kitty window.
-    async fn run_cycle_visible(
+    async fn run_cycle_visible<F>(
         &self,
         started_at: chrono::DateTime<Utc>,
         system_prompt: String,
         initial_message: String,
-    ) -> anyhow::Result<AmbientCycleResult> {
+        launch_visible: F,
+    ) -> anyhow::Result<VisibleCycleOutcome>
+    where
+        F: FnOnce() -> std::io::Result<std::process::Child> + Send,
+    {
         use crate::ambient::VisibleCycleContext;
 
         self.set_running_detail("launching visible TUI").await;
@@ -1008,25 +1050,9 @@ impl AmbientRunnerHandle {
             let _ = std::fs::remove_file(&result_path);
         }
 
-        // Find the jcode binary
-        let jcode_bin =
-            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
-
         // Spawn kitty with `jcode ambient run-visible`
         logging::info("Ambient visible: spawning kitty with jcode TUI");
-        let child = std::process::Command::new("kitty")
-            .args([
-                "--title",
-                "🤖 jcode ambient cycle",
-                "-e",
-                &jcode_bin.to_string_lossy(),
-                "ambient",
-                "run-visible",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        let child = launch_visible();
 
         match child {
             Ok(mut child) => {
@@ -1046,25 +1072,29 @@ impl AmbientRunnerHandle {
                         crate::storage::read_json::<AmbientCycleResult>(&result_path)
                 {
                     let _ = std::fs::remove_file(&result_path);
-                    return Ok(AmbientCycleResult {
-                        started_at,
-                        ended_at: Utc::now(),
-                        ..result
-                    });
+                    return Ok(VisibleCycleOutcome::Completed(Box::new(
+                        AmbientCycleResult {
+                            started_at,
+                            ended_at: Utc::now(),
+                            ..result
+                        },
+                    )));
                 }
 
                 // No result file — user closed the window without end_ambient_cycle
-                Ok(AmbientCycleResult {
-                    summary: "Visible cycle ended (user closed window)".to_string(),
-                    memories_modified: 0,
-                    compactions: 0,
-                    proactive_work: None,
-                    next_schedule: None,
-                    started_at,
-                    ended_at: Utc::now(),
-                    status: CycleStatus::Incomplete,
-                    conversation: None,
-                })
+                Ok(VisibleCycleOutcome::Completed(Box::new(
+                    AmbientCycleResult {
+                        summary: "Visible cycle ended (user closed window)".to_string(),
+                        memories_modified: 0,
+                        compactions: 0,
+                        proactive_work: None,
+                        next_schedule: None,
+                        started_at,
+                        ended_at: Utc::now(),
+                        status: CycleStatus::Incomplete,
+                        conversation: None,
+                    },
+                )))
             }
             Err(e) => {
                 logging::warn(&format!(
@@ -1072,10 +1102,15 @@ impl AmbientRunnerHandle {
                     e
                 ));
                 // Fall back to headless mode
-                Err(anyhow::anyhow!("Failed to spawn visible TUI: {}", e))
+                Ok(VisibleCycleOutcome::FallBackHeadless)
             }
         }
     }
+}
+
+enum VisibleCycleOutcome {
+    Completed(Box<AmbientCycleResult>),
+    FallBackHeadless,
 }
 
 // ---------------------------------------------------------------------------

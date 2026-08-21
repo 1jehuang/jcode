@@ -27,6 +27,7 @@ import {
   type ImageAttachment,
   type ModelRouteInfo,
   type PermissionDecision,
+  type RenderedImage,
   type ServerFrame,
   type SessionInfo,
   type TextMatch,
@@ -411,12 +412,16 @@ export class JcodeClient extends EventEmitter {
 
   // --- Curated surface -----------------------------------------------------
 
-  async listSessions(options: { includeArchived?: boolean } = {}): Promise<SessionInfo[]> {
+  async listSessions(options: { includeArchived?: boolean; limit?: number } = {}): Promise<SessionInfo[]> {
     const frame = await this.expectReply(
-      { req: "list_sessions", include_archived: options.includeArchived },
+      { req: "list_sessions", include_archived: options.includeArchived, limit: options.limit },
       "sessions",
     );
     return frame.sessions ?? [];
+  }
+
+  async listSessionsLimited(limit: number): Promise<SessionInfo[]> {
+    return this.listSessions({ limit });
   }
 
   /** Reversibly hide a session from the default list. No transcript is deleted. */
@@ -544,11 +549,18 @@ export class JcodeClient extends EventEmitter {
   }
 
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {
+    const { messages } = await this.getHistoryWithImages(sessionId);
+    return messages;
+  }
+
+  async getHistoryWithImages(
+    sessionId: string,
+  ): Promise<{ messages: HistoryMessage[]; images: RenderedImage[] }> {
     const frame = await this.expectReply(
       { req: "get_history", session_id: sessionId },
       "history",
     );
-    return frame.messages ?? [];
+    return { messages: frame.messages ?? [], images: frame.images ?? [] };
   }
 
   async peekSession(sessionId: string, limit?: number): Promise<HistoryMessage[]> {

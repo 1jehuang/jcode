@@ -20,6 +20,7 @@ pub(super) struct ParsedDiffLine {
     pub kind: DiffLineKind,
     pub prefix: String,
     pub content: String,
+    pub file_path: Option<String>,
 }
 
 pub(super) fn diff_change_counts(content: &str) -> (usize, usize) {
@@ -235,6 +236,7 @@ fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine>
                     kind: DiffLineKind::Del,
                     prefix: format!("{}- ", change.old_index().unwrap_or(0) + 1),
                     content: content.to_string(),
+                    file_path: None,
                 });
             }
             ChangeTag::Insert => {
@@ -242,6 +244,7 @@ fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine>
                     kind: DiffLineKind::Add,
                     prefix: format!("{}+ ", change.new_index().unwrap_or(0) + 1),
                     content: content.to_string(),
+                    file_path: None,
                 });
             }
             ChangeTag::Equal => {}
@@ -252,7 +255,66 @@ fn generate_diff_lines_from_strings(old: &str, new: &str) -> Vec<ParsedDiffLine>
 }
 
 pub(super) fn collect_diff_lines(content: &str) -> Vec<ParsedDiffLine> {
-    content.lines().filter_map(parse_diff_line).collect()
+    let mut file_path = None;
+    let mut lines = Vec::new();
+
+    for raw_line in content.lines() {
+        if let Some(path) = diff_file_path(raw_line) {
+            file_path = Some(path);
+            continue;
+        }
+        if let Some(mut line) = parse_diff_line(raw_line) {
+            line.file_path = file_path.clone();
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
+fn diff_file_path(raw_line: &str) -> Option<String> {
+    let trimmed = raw_line.trim();
+    if let Some(path) = trimmed
+        .strip_prefix("*** Add File: ")
+        .or_else(|| trimmed.strip_prefix("*** Update File: "))
+        .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+    {
+        return non_empty_diff_path(path);
+    }
+
+    if let Some(path) = trimmed.strip_prefix("+++ ") {
+        return unified_diff_path(path);
+    }
+    if let Some(path) = trimmed.strip_prefix("--- ") {
+        return unified_diff_path(path);
+    }
+
+    let status = trimmed
+        .strip_prefix('✓')
+        .or_else(|| trimmed.strip_prefix('✗'))?
+        .trim_start();
+    let (path, _) = status.split_once(": ")?;
+    non_empty_diff_path(path)
+}
+
+fn unified_diff_path(raw_path: &str) -> Option<String> {
+    let path = raw_path
+        .split('\t')
+        .next()
+        .unwrap_or(raw_path)
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let path = path
+        .strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path);
+    non_empty_diff_path(path)
+}
+
+fn non_empty_diff_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    (!path.is_empty() && path != "/dev/null").then(|| path.to_string())
 }
 
 fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
@@ -277,6 +339,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
                 kind: DiffLineKind::Del,
                 prefix: prefix.to_string(),
                 content: trim_diff_content(content),
+                file_path: None,
             });
         }
     }
@@ -287,6 +350,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
                 kind: DiffLineKind::Add,
                 prefix: prefix.to_string(),
                 content: trim_diff_content(content),
+                file_path: None,
             });
         }
     }
@@ -296,6 +360,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
             kind: DiffLineKind::Add,
             prefix: "+".to_string(),
             content: trim_diff_content(rest),
+            file_path: None,
         });
     }
     if let Some(rest) = raw_line.strip_prefix('-') {
@@ -303,6 +368,7 @@ fn parse_diff_line(raw_line: &str) -> Option<ParsedDiffLine> {
             kind: DiffLineKind::Del,
             prefix: "-".to_string(),
             content: trim_diff_content(rest),
+            file_path: None,
         });
     }
 
@@ -338,8 +404,8 @@ pub(super) fn tint_span_with_diff_color(span: Span<'static>, diff_color: Color) 
 #[cfg(test)]
 mod tests {
     use super::{
-        DiffLineKind, diff_change_counts_for_tool, diff_counts_from_apply_patch_input,
-        generate_diff_lines_from_strings,
+        DiffLineKind, collect_diff_lines, diff_change_counts_for_tool,
+        diff_counts_from_apply_patch_input, generate_diff_lines_from_strings,
     };
     use crate::message::ToolCall;
     use serde_json::json;
@@ -351,6 +417,25 @@ mod tests {
         });
 
         assert_eq!(diff_counts_from_apply_patch_input(&input), Some((1, 1)));
+    }
+
+    #[test]
+    fn collected_apply_patch_lines_retain_file_boundaries() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old a\n+new a\n*** Update File: b.txt\n@@\n-old b\n+new b\n*** End Patch\n";
+
+        let lines = collect_diff_lines(patch);
+
+        assert_eq!(lines.len(), 4);
+        assert!(
+            lines[..2]
+                .iter()
+                .all(|line| line.file_path.as_deref() == Some("a.txt"))
+        );
+        assert!(
+            lines[2..]
+                .iter()
+                .all(|line| line.file_path.as_deref() == Some("b.txt"))
+        );
     }
 
     #[test]

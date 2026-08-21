@@ -402,6 +402,22 @@ impl Agent {
         // prompt-cache miss (the turn MCP tools first appear). The
         // `mcp_late_register_resolved` flag makes this a one-shot check so we do
         // not rescan the registry on every subsequent turn.
+        let locked_uses_fixed_mcp_surface = self.locked_tools.as_ref().is_some_and(|locked| {
+            locked
+                .iter()
+                .any(|tool| matches!(tool.name.as_str(), "mcp_search" | "mcp_call"))
+                && !locked.iter().any(|tool| tool.name.starts_with("mcp__"))
+        });
+        if (self.mcp_tools_mode == crate::config::McpToolsMode::Deferred
+            || locked_uses_fixed_mcp_surface)
+            && let Some(locked) = self.locked_tools.clone()
+        {
+            // Per-server tools may continue registering in the background, but
+            // deferred mode's fixed surface cannot change as a result. Avoid an
+            // unnecessary provider cache reset and registry scan.
+            self.mcp_late_register_resolved = true;
+            return locked;
+        }
         if let Some(ref locked) = self.locked_tools {
             if self.mcp_late_register_resolved {
                 return locked.clone();
@@ -450,7 +466,31 @@ impl Agent {
             });
         }
         Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        self.apply_mcp_tool_exposure(&mut tools);
         tools
+    }
+
+    /// Replace per-server MCP definitions with the fixed search/call surface
+    /// according to the configured mode. Auto mode estimates the actual
+    /// serialized, already-filtered definitions the provider would receive.
+    fn apply_mcp_tool_exposure(&self, tools: &mut Vec<ToolDefinition>) {
+        let mcp_definitions: Vec<ToolDefinition> = tools
+            .iter()
+            .filter(|tool| tool.name.starts_with("mcp__"))
+            .cloned()
+            .collect();
+        let estimated_tokens = ToolDefinition::aggregate_prompt_token_estimate(&mcp_definitions);
+        let deferred = match self.mcp_tools_mode {
+            crate::config::McpToolsMode::Auto => estimated_tokens > self.mcp_tools_token_threshold,
+            crate::config::McpToolsMode::Eager => false,
+            crate::config::McpToolsMode::Deferred => true,
+        };
+
+        if deferred {
+            tools.retain(|tool| !tool.name.starts_with("mcp__"));
+        } else {
+            tools.retain(|tool| !matches!(tool.name.as_str(), "mcp_search" | "mcp_call"));
+        }
     }
 
     /// Expose the `selfdev` tool only while running in self-development mode.
@@ -501,14 +541,7 @@ impl Agent {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
         }
-        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
-        if !self.disabled_tools.is_empty() {
-            tools.retain(|tool| {
-                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
-            });
-        }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
-        tools
+        self.build_filtered_tool_definitions().await
     }
 
     pub async fn execute_tool(
@@ -900,6 +933,9 @@ impl Agent {
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
+                        if text.trim_start().starts_with("<system-reminder>") {
+                            continue;
+                        }
                         transcript.push_str(text);
                         transcript.push('\n');
                     }

@@ -39,22 +39,18 @@ fn smoke_timeout(default_secs: u64) -> std::time::Duration {
 /// Most providers use `Authorization: Bearer <key>`. Anthropic's
 /// OpenAI-compatible endpoints authenticate with `x-api-key` plus a required
 /// `anthropic-version` header and reject Bearer auth (401), so key off the
-/// resolved host.
+/// resolved host. Keep this delegated to the shared helper used by the other
+/// OpenAI-compatible probes so their authentication cannot drift apart.
 fn apply_provider_auth(
     request: reqwest::RequestBuilder,
     resolved: &ResolvedOpenAiCompatibleProfile,
     api_key: &str,
 ) -> reqwest::RequestBuilder {
-    if resolved
-        .api_base
-        .to_ascii_lowercase()
-        .contains("api.anthropic.com")
-    {
-        return request
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01");
-    }
-    request.bearer_auth(api_key)
+    jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+        request,
+        &resolved.api_base,
+        api_key,
+    )
 }
 
 /// Set an output-token cap on a chat-completions body using the parameter name

@@ -928,6 +928,36 @@ fn test_remote_alt_m_toggles_side_panel_visibility() {
 }
 
 #[test]
+fn test_remote_alt_y_toggles_copy_selection_instead_of_typing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('y'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+
+    assert!(app.copy_selection_mode);
+    assert!(app.input.is_empty(), "Alt+Y must not insert text");
+}
+
+#[test]
+fn test_remote_alt_i_toggles_info_widget_instead_of_typing() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let initially_enabled = crate::tui::info_widget::is_enabled();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('i'), KeyModifiers::ALT, &mut remote))
+        .unwrap();
+
+    assert_ne!(crate::tui::info_widget::is_enabled(), initially_enabled);
+    assert!(app.input.is_empty(), "Alt+I must not insert text");
+    crate::tui::info_widget::toggle_enabled();
+}
+
+#[test]
 fn test_remote_typing_scroll_lock_preserves_scroll_position() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();

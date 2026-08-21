@@ -18,15 +18,12 @@ fn test_handle_background_task_completed_retains_row_without_transcript_card() {
     super::local::handle_bus_event(&mut app, Ok(event));
 
     assert!(app.display_messages().is_empty());
-    assert_eq!(
-        app.background_task_rows_ref(),
-        &[crate::tui::BackgroundTaskRow {
-            task_id: "bg123".to_string(),
-            label: "bash".to_string(),
-            percent: Some(100.0),
-            status: crate::tui::BackgroundTaskRowStatus::Completed,
-        }]
-    );
+    let row = &app.background_task_rows_ref()[0];
+    assert_eq!(row.task_id, "bg123");
+    assert_eq!(row.label, "bash");
+    assert_eq!(row.percent, Some(100.0));
+    assert_eq!(row.status, crate::tui::BackgroundTaskRowStatus::Completed);
+    assert!(row.completed_at.is_some());
     assert_eq!(
         app.status_notice(),
         Some("Background task completed · bash".to_string())
@@ -95,6 +92,7 @@ fn test_handle_background_task_progress_updates_status_notice() {
             label: "bash".to_string(),
             percent: Some(42.0),
             status: crate::tui::BackgroundTaskRowStatus::Running,
+            completed_at: None,
         }]
     );
 }
@@ -118,6 +116,7 @@ fn test_background_task_started_activity_creates_running_row_without_card() {
             label: "cargo test".to_string(),
             percent: None,
             status: crate::tui::BackgroundTaskRowStatus::Running,
+            completed_at: None,
         }]
     );
 }
