@@ -2083,7 +2083,7 @@ impl SessionPicker {
     }
 
     /// Render the suggested first-run prompt as the primary centered action,
-    /// with the blank-session escape hatch kept secondary in the bottom-right.
+    /// with the current-directory session kept secondary in the bottom-right.
     fn render_onboarding_band(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -2151,7 +2151,7 @@ impl SessionPicker {
         let review_selected = self.onboarding_review_recent_project_highlighted();
         frame.render_widget(
             Paragraph::new(action_line(
-                "Find bugs in what I've been working on",
+                "Find bugs in my most active repo",
                 review_selected,
             ))
             .alignment(Alignment::Center),
@@ -2165,8 +2165,11 @@ impl SessionPicker {
 
         let start_selected = self.onboarding_start_new_highlighted();
         frame.render_widget(
-            Paragraph::new(action_line("Start a new session", start_selected))
-                .alignment(Alignment::Right),
+            Paragraph::new(action_line(
+                "Start in the current directory",
+                start_selected,
+            ))
+            .alignment(Alignment::Right),
             Rect {
                 x: inner.x,
                 y: inner.y + inner.height.saturating_sub(1),
