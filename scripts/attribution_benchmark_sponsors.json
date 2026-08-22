@@ -5,8 +5,9 @@
     {
       "tool": "agentcard",
       "category": "payments",
-      "mechanism": "referral-link",
-      "marker": "via=jcode-discovery",
+      "mechanism": "cli-flag",
+      "marker": "--via jcode-discovery",
+      "listing_marker": "via=jcode-discovery",
       "signup_survives_navigation": true
     },
     {
