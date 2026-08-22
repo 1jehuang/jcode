@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -79,7 +83,12 @@ class MockSponsorEndToEndTests(unittest.TestCase):
             "signup", "--service", self.url, "--email", "tamper@example.test", "--via", "jcode-discovery"
         )
         link = result.stdout.strip()
-        tampered = link[:-1] + ("A" if link[-1] != "A" else "B")
+        parsed = urllib.parse.urlsplit(link)
+        token = urllib.parse.parse_qs(parsed.query)["token"][0]
+        body, signature = token.split(".", 1)
+        tampered_body = ("A" if body[0] != "A" else "B") + body[1:]
+        tampered_query = urllib.parse.urlencode({"token": f"{tampered_body}.{signature}"})
+        tampered = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, tampered_query, ""))
         failed = self.cli("confirm", tampered, check=False)
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("invalid signup token", failed.stderr)
@@ -130,6 +139,25 @@ class MockSponsorEndToEndTests(unittest.TestCase):
         self.assertIn("1/1 sponsors credit agent-driven CLI signups to jcode", result.stdout)
         self.assertEqual(report["sponsors"][0]["score"], 100)
         self.assertEqual(report["sponsors"][0]["cli_attribution"], "attributed")
+
+    def test_exact_discovery_served_command_creates_attributed_account(self):
+        query = urllib.parse.urlencode({
+            "category": "payments",
+            "q": "virtual payment capability for an automated test account",
+            "reason": "Acceptance test selects the reference sponsor to validate its public setup contract.",
+            "tool": "mock-sponsor",
+        })
+        with urllib.request.urlopen(f"{self.url}/v1/discovery?{query}") as response:
+            selected = json.loads(response.read())["tool"]
+        match = re.search(r"`([^`]+)`", selected["setup"])
+        self.assertIsNotNone(match, "select setup must contain one executable command")
+        email = "served-command@example.test"
+        command = shlex.split(match.group(1).replace("<email>", email))
+        signup = subprocess.run(command, check=True, text=True, capture_output=True)
+        magic_link = signup.stdout.strip()
+        confirmed = json.loads(self.cli("confirm", magic_link).stdout)
+        self.assertTrue(confirmed["confirmed"])
+        self.assertEqual(self.account(email)["acquisition_source"], "jcode-discovery")
 
 
 if __name__ == "__main__":
