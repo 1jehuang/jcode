@@ -53,9 +53,16 @@ CLI-attribution verdict is not `attributed`.
 attribution `mechanism` and `marker`. Supported mechanisms:
 
 - `referral-link`: cookie-based affiliate link (weakest for CLI flows);
+- `cli-flag`: a partner/referrer flag the agent supplies to a CLI signup;
 - `signup-code`: a code the agent supplies during signup;
 - `utm-forwarding`: the sponsor ingests query params server-side at signup;
 - `api-partner-id`: a partner identifier embedded in the API/MCP setup.
+
+For non-cookie mechanisms, `marker` is the exact text that must occur in the
+select-phase setup, such as `--via jcode-discovery`. Use `listing_marker` when
+the browser URL uses a different representation, such as
+`via=jcode-discovery`. Declaring a mechanism without serving its marker fails
+the primary CLI-attribution check.
 
 A unit test enforces that every tool with a positive case in
 `scripts/discovery_benchmark_cases.json` has an attribution expectation, so a

@@ -101,13 +101,27 @@ class CheckSponsorTests(unittest.TestCase):
         report = self.run_checks(entry)
         self.assertEqual(self.status(report, "cli_flow_attributable"), "fail")
 
-    def test_cli_flow_with_non_cookie_mechanism_passes(self):
+    def test_cli_flow_with_non_cookie_mechanism_passes_when_setup_contains_marker(self):
         entry = {
             "url": f"https://example.com/?{MARKER}",
-            "setup": "Run `npx -y example-mcp@1.0.0` and paste your API key.",
+            "setup": "Run `example signup --via jcode-discovery`, then install the CLI.",
         }
-        report = self.run_checks(entry, sponsor(mechanism="api-partner-id"))
+        report = self.run_checks(
+            entry,
+            sponsor(mechanism="cli-flag", marker="--via jcode-discovery", listing_marker=MARKER),
+        )
         self.assertEqual(self.status(report, "cli_flow_attributable"), "pass")
+
+    def test_non_cookie_declaration_without_marker_fails(self):
+        entry = {
+            "url": f"https://example.com/?{MARKER}",
+            "setup": "Run `example signup`, then install the CLI.",
+        }
+        report = self.run_checks(
+            entry,
+            sponsor(mechanism="cli-flag", marker="--via jcode-discovery", listing_marker=MARKER),
+        )
+        self.assertEqual(self.status(report, "cli_flow_attributable"), "fail")
 
     def test_non_cli_setup_skips_cli_check(self):
         entry = {

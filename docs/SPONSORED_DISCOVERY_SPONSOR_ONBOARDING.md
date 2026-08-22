@@ -4,6 +4,9 @@ This runbook is the source of truth for adding a tool sponsor to jcode's
 `discover_tools` catalog. It covers product approval, catalog data, service
 behavior, client validation, rollout, and rollback.
 
+Sponsor-facing implementation contracts and prompts live in
+[`SPONSOR_IMPLEMENTATION.md`](SPONSOR_IMPLEMENTATION.md).
+
 Sponsors pay for placement in a discovery category, not for recommendations.
 The agent must still choose the best tool for the user's task and may choose a
 non-sponsored alternative. Do not onboard a sponsor whose agreement requires
