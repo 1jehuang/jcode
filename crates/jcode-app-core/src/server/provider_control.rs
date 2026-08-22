@@ -1175,8 +1175,9 @@ pub(super) async fn handle_notify_auth_changed(
                     .await;
                 }
             } else if let Some(model_to_select) =
-                crate::auth::lifecycle::provider_model_to_select_after_auth(
+                crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
                     &activation,
+                    crate::config::config().provider.default_model.as_deref(),
                     latest_snapshot.provider_model.as_deref(),
                     &latest_snapshot.model_routes,
                 )
