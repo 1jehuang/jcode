@@ -89,3 +89,8 @@ Then perform one clean acceptance signup with the latest release binary:
 
 The HTTP benchmark proves Jcode serves the contract. The clean signup proves
 AgentCard receives and persists it. Both are required.
+
+Before implementing this in AgentCard, the same contract can be exercised
+locally with `python scripts/test_mock_sponsor_service.py`; see
+[`SPONSOR_IMPLEMENTATION.md`](../SPONSOR_IMPLEMENTATION.md) for the modeled
+service boundary and covered failure cases.
