@@ -655,8 +655,16 @@ fn build_raw_mime(
     in_reply_to: Option<&str>,
     attachments: &[std::path::PathBuf],
 ) -> Result<String> {
+    let subject = encode_header_value(subject);
     let mut reply_headers = String::new();
     if let Some(reply_to) = in_reply_to {
+        // The In-Reply-To/References headers require an RFC 5322 Message-ID in
+        // angle brackets. Callers should already have resolved Gmail API IDs.
+        let reply_to = if reply_to.starts_with('<') {
+            reply_to.to_string()
+        } else {
+            format!("<{}>", reply_to)
+        };
         reply_headers.push_str(&format!(
             "In-Reply-To: {}\r\nReferences: {}\r\n",
             reply_to, reply_to
@@ -665,7 +673,7 @@ fn build_raw_mime(
 
     if attachments.is_empty() {
         return Ok(format!(
-            "To: {}\r\nSubject: {}\r\n{}Content-Type: text/plain; charset=utf-8\r\n\r\n{}",
+            "To: {}\r\nSubject: {}\r\n{}MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{}",
             to, subject, reply_headers, body
         ));
     }
@@ -681,7 +689,9 @@ fn build_raw_mime(
 
     // Body part.
     raw.push_str(&format!("--{}\r\n", boundary));
-    raw.push_str("Content-Type: text/plain; charset=utf-8\r\n\r\n");
+    raw.push_str(
+        "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n",
+    );
     raw.push_str(body);
     raw.push_str("\r\n");
 
@@ -715,6 +725,43 @@ fn build_raw_mime(
 
     raw.push_str(&format!("--{}--\r\n", boundary));
     Ok(raw)
+}
+
+/// RFC 2047 encode a header value when it contains non-ASCII text.
+///
+/// Gmail stores the `raw` payload verbatim, so a bare UTF-8 subject line gets
+/// reinterpreted as Latin-1 by receiving clients (mojibake like "Ã¢Â€Â”") and
+/// defeats Gmail's subject-based fallback threading. Encoded words are chunked
+/// so each stays within the RFC 2047 limit of 75 characters.
+fn encode_header_value(value: &str) -> String {
+    if value.is_ascii() {
+        return value.to_string();
+    }
+    // 45 input bytes -> 60 base64 chars -> 72 chars with the =?UTF-8?B?...?=
+    // wrapper, under the 75-char encoded-word limit.
+    const MAX_CHUNK_BYTES: usize = 45;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in value.chars() {
+        if current.len() + ch.len_utf8() > MAX_CHUNK_BYTES && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+        .iter()
+        .map(|chunk| {
+            format!(
+                "=?UTF-8?B?{}?=",
+                base64::engine::general_purpose::STANDARD.encode(chunk.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>()
+        // Folding whitespace between encoded words is not rendered.
+        .join("\r\n ")
 }
 
 /// Best-effort MIME type from a file extension for email attachments.
@@ -1209,5 +1256,76 @@ mod tests {
         assert_eq!(c.effective_user_id(), "default");
         c.user_id = Some("alice".to_string());
         assert_eq!(c.effective_user_id(), "alice");
+    }
+}
+
+#[cfg(test)]
+mod mime_tests {
+    use super::*;
+
+    #[test]
+    fn ascii_subject_is_unchanged() {
+        assert_eq!(encode_header_value("plain subject"), "plain subject");
+    }
+
+    #[test]
+    fn non_ascii_subject_is_rfc2047_encoded() {
+        let encoded = encode_header_value("Re: pricing \u{2014} inquiry");
+        assert!(encoded.starts_with("=?UTF-8?B?"), "got: {encoded}");
+        assert!(encoded.ends_with("?="));
+        // Round-trip: decoding the base64 payload restores the original.
+        let payload = encoded
+            .trim_start_matches("=?UTF-8?B?")
+            .trim_end_matches("?=");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "Re: pricing \u{2014} inquiry"
+        );
+    }
+
+    #[test]
+    fn long_non_ascii_subject_folds_into_multiple_encoded_words() {
+        let long = "\u{2014}".repeat(60);
+        let encoded = encode_header_value(&long);
+        for word in encoded.split("\r\n ") {
+            assert!(word.len() <= 75, "encoded word too long: {}", word.len());
+            assert!(word.starts_with("=?UTF-8?B?") && word.ends_with("?="));
+        }
+        assert!(encoded.split("\r\n ").count() > 1);
+    }
+
+    #[test]
+    fn reply_headers_use_angle_bracketed_message_id() {
+        let raw = build_raw_mime(
+            "a@b.c",
+            "Re: hi",
+            "body",
+            Some("CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com"),
+            &[],
+        )
+        .unwrap();
+        assert!(raw.contains("In-Reply-To: <CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com>"));
+        assert!(raw.contains("References: <CAOU+8LMfxVaPMmigYAtdJK0z0Y@mail.gmail.com>"));
+        // Already-bracketed IDs are not double wrapped.
+        let raw2 = build_raw_mime("a@b.c", "Re: hi", "body", Some("<x@y.z>"), &[]).unwrap();
+        assert!(raw2.contains("In-Reply-To: <x@y.z>"));
+        assert!(!raw2.contains("<<"));
+    }
+
+    #[test]
+    fn utf8_subject_in_raw_mime_is_ascii_only() {
+        let raw = build_raw_mime(
+            "a@b.c",
+            "caf\u{e9} \u{2014} r\u{e9}sum\u{e9}",
+            "body",
+            None,
+            &[],
+        )
+        .unwrap();
+        let subject_line = raw.lines().find(|l| l.starts_with("Subject:")).unwrap();
+        assert!(subject_line.is_ascii(), "subject header leaked raw UTF-8");
     }
 }

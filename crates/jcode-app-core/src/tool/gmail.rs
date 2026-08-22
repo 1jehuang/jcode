@@ -16,6 +16,49 @@ impl GmailTool {
             client: GmailClient::new(),
         }
     }
+
+    /// Resolve reply parameters into a usable (In-Reply-To header, threadId).
+    ///
+    /// Models pass Gmail API message IDs (hex, from search/read output) as
+    /// `in_reply_to`, but MIME threading needs the RFC 5322 Message-ID header
+    /// and the Gmail API needs the containing threadId. Silently sending
+    /// without either starts a new conversation, so look the message up and
+    /// fail loudly when it cannot be resolved.
+    async fn resolve_reply(
+        &self,
+        in_reply_to: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let Some(reply_ref) = in_reply_to else {
+            return Ok((None, thread_id.map(str::to_string)));
+        };
+        // Already an RFC 5322 Message-ID (contains '@', usually in <...>).
+        if reply_ref.contains('@') {
+            return Ok((Some(reply_ref.to_string()), thread_id.map(str::to_string)));
+        }
+        let msg = self
+            .client
+            .get_message(reply_ref, MessageFormat::Metadata)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "in_reply_to '{}' is not an RFC 5322 Message-ID and could not be \
+                     resolved as a Gmail message ID: {}. The reply was NOT sent.",
+                    reply_ref,
+                    e
+                )
+            })?;
+        let header_id = msg.header("Message-ID").map(str::to_string);
+        let resolved_thread = thread_id.map(str::to_string).or(msg.thread_id.clone());
+        if header_id.is_none() && resolved_thread.is_none() {
+            anyhow::bail!(
+                "Message '{}' has no Message-ID header or threadId; cannot thread the reply. \
+                 The reply was NOT sent.",
+                reply_ref
+            );
+        }
+        Ok((header_id, resolved_thread))
+    }
 }
 
 #[derive(Deserialize)]
@@ -340,14 +383,17 @@ impl Tool for GmailTool {
                     }
                 }
 
+                let (reply_header, reply_thread) = self
+                    .resolve_reply(params.in_reply_to.as_deref(), params.thread_id.as_deref())
+                    .await?;
                 let draft = self
                     .client
                     .create_draft_with_attachments(
                         to,
                         subject,
                         body,
-                        params.in_reply_to.as_deref(),
-                        params.thread_id.as_deref(),
+                        reply_header.as_deref(),
+                        reply_thread.as_deref(),
                         &attachments,
                     )
                     .await?;
@@ -427,21 +473,25 @@ impl Tool for GmailTool {
                     )));
                 }
 
+                let (reply_header, reply_thread) = self
+                    .resolve_reply(params.in_reply_to.as_deref(), params.thread_id.as_deref())
+                    .await?;
                 let msg = self
                     .client
                     .send_message_with_attachments(
                         to,
                         subject,
                         body,
-                        params.in_reply_to.as_deref(),
-                        params.thread_id.as_deref(),
+                        reply_header.as_deref(),
+                        reply_thread.as_deref(),
                         &attachments,
                     )
                     .await?;
 
                 Ok(ToolOutput::new(format!(
-                    "Email sent successfully.\nMessage ID: {}\nTo: {}\nSubject: {}\nAttachments: {}",
+                    "Email sent successfully.\nMessage ID: {}\nThread ID: {}\nTo: {}\nSubject: {}\nAttachments: {}",
                     msg.id,
+                    msg.thread_id.as_deref().unwrap_or("(new thread)"),
                     to,
                     subject,
                     attachments.len()
