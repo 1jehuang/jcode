@@ -57,3 +57,9 @@ It also exposes a discovery-compatible browse/select endpoint and runs the real
 `benchmark_attribution.py` entry point against it, including marked public-web
 URL resolution. The integrated reference must score 100 with CLI attribution
 reported as `attributed`.
+The end-to-end suite also fetches the select response, extracts the exact setup
+command Jcode would hand to an agent, executes that command through the public
+CLI, confirms its magic link, and observes `acquisition_source =
+jcode-discovery` through the public account API. This prevents the catalog and
+sponsor-flow tests from passing independently while disagreeing at their shared
+command boundary.
