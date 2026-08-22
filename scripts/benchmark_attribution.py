@@ -81,7 +81,7 @@ CLI_VERDICTS = {
 
 URL_RE = re.compile(r"https?://[^\s`'\")\]>]+")
 CLI_SETUP_RE = re.compile(
-    r"(npx |npm |pipx? |uvx? |cargo |brew |curl |mcp|api[ _-]?key|cli)",
+    r"(npx |npm |pipx? |python(?:3)? |uvx? |cargo |brew |curl |mcp|api[ _-]?key|cli)",
     re.IGNORECASE,
 )
 SIGNUPISH_PATH_RE = re.compile(r"(signup|sign-up|register|get[-_]?started|join)", re.IGNORECASE)

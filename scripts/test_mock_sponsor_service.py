@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mock_sponsor_service as mock  # noqa: E402
 
 SCRIPT = Path(__file__).with_name("mock_sponsor_service.py")
+BENCHMARK = Path(__file__).with_name("benchmark_attribution.py")
 SECRET = b"test-secret"
 
 
@@ -93,6 +94,42 @@ class MockSponsorEndToEndTests(unittest.TestCase):
         token = mock.encode_token({"email": "old@example.test", "via": "jcode-discovery", "exp": 1}, SECRET)
         with self.assertRaisesRegex(ValueError, "expired"):
             mock.decode_token(token, SECRET, now=2)
+
+    def test_real_attribution_benchmark_accepts_discovery_to_cli_contract(self):
+        sponsor_file = Path(self.temp.name) / "mock-sponsors.json"
+        sponsor_file.write_text(json.dumps({
+            "version": 1,
+            "default_marker": "via=jcode-discovery",
+            "sponsors": [{
+                "tool": "mock-sponsor",
+                "category": "payments",
+                "mechanism": "cli-flag",
+                "marker": "--via jcode-discovery",
+                "listing_marker": "via=jcode-discovery",
+            }],
+        }))
+        report_file = Path(self.temp.name) / "benchmark-report.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(BENCHMARK),
+                "--live",
+                "--live-web",
+                "--endpoint",
+                f"{self.url}/v1/discovery",
+                "--sponsors",
+                str(sponsor_file),
+                "--output",
+                str(report_file),
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        report = json.loads(report_file.read_text())
+        self.assertIn("1/1 sponsors credit agent-driven CLI signups to jcode", result.stdout)
+        self.assertEqual(report["sponsors"][0]["score"], 100)
+        self.assertEqual(report["sponsors"][0]["cli_attribution"], "attributed")
 
 
 if __name__ == "__main__":
