@@ -237,7 +237,7 @@ pub fn build_responses_input_with_logger(
                             id,
                             summary,
                             encrypted_content,
-                            status,
+                            ..
                         } => {
                             let mut item = serde_json::json!({
                                 "type": "reasoning",
@@ -252,9 +252,6 @@ pub fn build_responses_input_with_logger(
                             });
                             if let Some(encrypted_content) = encrypted_content {
                                 item["encrypted_content"] = serde_json::json!(encrypted_content);
-                            }
-                            if let Some(status) = status {
-                                item["status"] = serde_json::json!(status);
                             }
                             items.push(item);
                         }
@@ -631,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn build_responses_input_replays_openai_reasoning_item() {
+    fn build_responses_input_replays_openai_reasoning_without_output_only_status() {
         let messages = vec![ChatMessage {
             role: Role::Assistant,
             content: vec![ContentBlock::OpenAIReasoning {
@@ -650,7 +647,7 @@ mod tests {
         assert_eq!(items[0]["type"], json!("reasoning"));
         assert_eq!(items[0]["id"], json!("rs_123"));
         assert_eq!(items[0]["encrypted_content"], json!("enc_reasoning"));
-        assert_eq!(items[0]["status"], json!("completed"));
+        assert!(items[0].get("status").is_none());
         assert_eq!(
             items[0]["summary"],
             json!([{ "type": "summary_text", "text": "Checked constraints." }])
