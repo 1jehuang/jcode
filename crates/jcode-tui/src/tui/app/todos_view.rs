@@ -397,23 +397,13 @@ fn todo_card_payload_json(
 }
 
 fn build_todos_view_markdown(
-    session_id: Option<&str>,
+    _session_id: Option<&str>,
     todos: &[TodoItem],
-    plan: &crate::todo::TodoPlan,
-    goals: &[crate::todo::TodoGoal],
+    _plan: &crate::todo::TodoPlan,
+    _goals: &[crate::todo::TodoGoal],
 ) -> String {
-    let session_label = session_id
-        .and_then(crate::id::extract_session_name)
-        .map(|name| format!("`{}`", name))
-        .unwrap_or_else(|| "this session".to_string());
-    let session_id_line = session_id.map(|id| format!("- Session ID: `{}`\n", id));
-
     if todos.is_empty() {
-        return format!(
-            "# Todos\n\nDedicated todo view for {}.\n\n{}\nNo todos saved yet for this session. The model can populate them with the `todo` tool.\n",
-            session_label,
-            session_id_line.unwrap_or_default()
-        );
+        return "# Todos\n\nNo todos saved yet for this session.\n".to_string();
     }
 
     let total = todos.len();
@@ -435,34 +425,20 @@ fn build_todos_view_markdown(
         .filter(|todo| todo.status != "completed" && !todo.blocked_by.is_empty())
         .count();
     let percent = ((completed as f64 / total as f64) * 100.0).round() as u64;
-    let weighted_confidence = weighted_todo_confidence(todos);
-    let lowest_completed_confidence = todos
-        .iter()
-        .filter(|todo| todo.status == "completed")
-        .filter_map(|todo| todo.completion_confidence)
-        .min();
-    let missing_completion_confidence = todos
-        .iter()
-        .filter(|todo| todo.status == "completed" && todo.completion_confidence.is_none())
-        .count();
-
     let mut markdown = format!(
-        "# Todos\n\nDedicated todo view for {}.\n\n{}- Progress: **{}/{} completed** ({}%)\n- In progress: {}\n- Pending: {}\n- Blocked: {}\n- Cancelled: {}\n- Weighted confidence: **{}**\n- Lowest completed confidence: **{}**\n- Missing completion confidence: {}\n",
-        session_label,
-        session_id_line.unwrap_or_default(),
+        "# Todos\n\n**{}/{} completed** ({}%) · {} doing · {} pending · {} blocked{}\n",
         completed,
         total,
         percent,
         in_progress,
         pending,
         blocked,
-        cancelled,
-        format_confidence_value(weighted_confidence),
-        format_confidence_value(lowest_completed_confidence),
-        missing_completion_confidence,
+        if cancelled > 0 {
+            format!(" · {cancelled} cancelled")
+        } else {
+            String::new()
+        },
     );
-
-    markdown.push_str(&format_plan_markdown(plan));
 
     let sections = [
         ("in_progress", "In progress"),
@@ -470,32 +446,8 @@ fn build_todos_view_markdown(
         ("completed", "Completed"),
         ("cancelled", "Cancelled"),
     ];
-
-    if let Some(groups) = grouped_todos_view(todos) {
-        for (group, items) in groups {
-            let group_name = group.as_deref().unwrap_or("Other");
-            let group_total = items.len();
-            let group_done = items.iter().filter(|t| t.status == "completed").count();
-            markdown.push_str(&format!(
-                "\n## {} ({}/{})\n",
-                group_name, group_done, group_total
-            ));
-            markdown.push_str(&format_goal_markdown(goals, group.as_deref()));
-            for (status, heading) in sections {
-                let status_items = sorted_group_items_for_status(&items, status);
-                if status_items.is_empty() {
-                    continue;
-                }
-                markdown.push_str(&format!("\n### {}\n\n", heading));
-                for todo in status_items {
-                    markdown.push_str(&format_todo_markdown(todo));
-                }
-            }
-        }
-        return markdown;
-    }
-
-    markdown.push_str(&format_goal_markdown(goals, None));
+    const MAX_VISIBLE_TODOS: usize = 8;
+    let mut visible = 0;
     for (status, heading) in sections {
         let items = sorted_todos_for_status(todos, status);
         if items.is_empty() {
@@ -503,11 +455,40 @@ fn build_todos_view_markdown(
         }
         markdown.push_str(&format!("\n## {}\n\n", heading));
         for todo in items {
-            markdown.push_str(&format_todo_markdown(todo));
+            if visible == MAX_VISIBLE_TODOS {
+                break;
+            }
+            markdown.push_str(&format_todo_compact_markdown(todo));
+            visible += 1;
+        }
+        if visible == MAX_VISIBLE_TODOS {
+            break;
         }
     }
 
+    let hidden = total.saturating_sub(visible);
+    if hidden > 0 {
+        markdown.push_str(&format!("\n_… and {hidden} more._\n"));
+    }
+    markdown.push_str("\nUse `/todos` for full details.\n");
+
     markdown
+}
+
+fn format_todo_compact_markdown(todo: &TodoItem) -> String {
+    let group = todo
+        .group
+        .as_deref()
+        .map(str::trim)
+        .filter(|group| !group.is_empty())
+        .map(|group| format!(" _({group})_"))
+        .unwrap_or_default();
+    format!(
+        "- {} {}{}\n",
+        status_badge(&todo.status, !todo.blocked_by.is_empty()),
+        todo.content,
+        group
+    )
 }
 
 /// Group key for the side-panel view, treating empty/whitespace as ungrouped.
@@ -827,7 +808,7 @@ mod tests {
     }
 
     #[test]
-    fn todos_view_markdown_includes_confidence_summary_and_item_fields() {
+    fn todos_view_markdown_keeps_status_but_omits_internal_metadata() {
         let todos = vec![
             todo(
                 "todo-1",
@@ -849,12 +830,13 @@ mod tests {
 
         let markdown = build_todos_view_markdown(Some("session_test"), &todos, &plan(), &[]);
 
-        assert!(markdown.contains("- Weighted confidence: **plausible**"));
-        assert!(markdown.contains("- Lowest completed confidence: **plausible**"));
-        assert!(markdown.contains("- Missing completion confidence: 0"));
-        assert!(markdown.contains("  - confidence: `plausible`"));
-        assert!(markdown.contains("  - confidence: `plausible`"));
-        assert!(markdown.contains("  - completion confidence: `plausible`"));
+        assert!(markdown.contains("**1/2 completed** (50%) · 1 doing · 0 pending"));
+        assert!(markdown.contains("- [doing] Validate confidence side panel"));
+        assert!(markdown.contains("- [done] Finish completed item"));
+        assert!(!markdown.contains("  - confidence:"));
+        assert!(!markdown.contains("completion confidence:"));
+        assert!(!markdown.contains("Session ID"));
+        assert!(markdown.contains("Use `/todos` for full details."));
     }
 
     #[test]
@@ -875,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn todos_view_markdown_groups_items_under_group_headers() {
+    fn todos_view_markdown_is_bounded_and_keeps_group_context() {
         let mut grouped_a = todo(
             "g1",
             "Cut frame allocs",
@@ -898,9 +880,20 @@ mod tests {
         other.group = Some("scrollback".to_string());
         let ungrouped = todo("u1", "Misc cleanup", "pending", "low", Some(60), None);
 
+        let mut todos = vec![grouped_a, grouped_b, other, ungrouped];
+        for index in 0..8 {
+            todos.push(todo(
+                &format!("extra-{index}"),
+                &format!("Extra item {index}"),
+                "pending",
+                "low",
+                Some(60),
+                None,
+            ));
+        }
         let markdown = build_todos_view_markdown(
             Some("session_test"),
-            &[grouped_a, grouped_b, other, ungrouped],
+            &todos,
             &plan(),
             &[crate::todo::TodoGoal {
                 group: Some("optimize rendering".to_string()),
@@ -915,49 +908,10 @@ mod tests {
             }],
         );
 
-        assert!(
-            markdown.contains("## optimize rendering (1/2)"),
-            "{markdown}"
-        );
-        // A clear intent keeps the intention narrative out of the todo display.
-        assert!(
-            !markdown.contains("make navigation feel immediate"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Understands user intent: **clear**"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Closed feedback loop: **strong**"),
-            "{markdown}"
-        );
-        assert!(
-            markdown
-                .contains("- Feedback loop: run the frame benchmark and compare p95 frame time"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Feedback-loop relevance: **representative**"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Feedback-loop coverage: **main_paths**"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("- Delivery state: **workflow_validated**"),
-            "{markdown}"
-        );
-        assert!(markdown.contains("## scrollback (0/1)"), "{markdown}");
-        assert!(markdown.contains("## Other (0/1)"), "{markdown}");
-        // Status sub-headings nest under groups.
-        assert!(markdown.contains("### In progress"), "{markdown}");
-        // First-seen group order, ungrouped bucket last.
-        let opt = markdown.find("## optimize rendering").unwrap();
-        let scroll = markdown.find("## scrollback").unwrap();
-        let other_idx = markdown.find("## Other").unwrap();
-        assert!(opt < scroll && scroll < other_idx, "{markdown}");
+        assert!(markdown.contains("_(optimize rendering)_"), "{markdown}");
+        assert!(!markdown.contains("Feedback loop:"), "{markdown}");
+        assert!(markdown.contains("_… and 4 more._"), "{markdown}");
+        assert_eq!(markdown.matches("- [").count(), 8, "{markdown}");
     }
 
     #[test]
