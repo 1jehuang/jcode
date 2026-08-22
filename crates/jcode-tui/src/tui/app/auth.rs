@@ -2821,8 +2821,9 @@ impl App {
                             ))
                         } else {
                             let current_model = provider.model();
-                            crate::auth::lifecycle::provider_model_to_select_after_auth(
+                            crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
                                 &activation,
+                                crate::config::config().provider.default_model.as_deref(),
                                 Some(&current_model),
                                 &routes,
                             )
@@ -2894,8 +2895,9 @@ impl App {
                     }
                 } else {
                     let current_model = provider.model();
-                    if let Some(model) = crate::auth::lifecycle::provider_model_to_select_after_auth(
+                    if let Some(model) = crate::auth::lifecycle::provider_model_to_select_after_auth_with_configured_default(
                         &activation,
+                        crate::config::config().provider.default_model.as_deref(),
                         Some(&current_model),
                         &routes,
                     ) {

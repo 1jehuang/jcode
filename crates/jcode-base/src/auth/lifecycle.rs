@@ -217,6 +217,32 @@ pub fn provider_model_to_select_after_auth(
     matching_routes.first().map(|route| route.model.clone())
 }
 
+/// Reconcile a provider after auth while preserving an explicit configured
+/// default when that model is available for the activated provider.
+pub fn provider_model_to_select_after_auth_with_configured_default(
+    activation: &AuthActivationResult,
+    configured_model: Option<&str>,
+    selected_model: Option<&str>,
+    routes: &[ModelRoute],
+) -> Option<String> {
+    let configured_model = configured_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if let Some(configured) = configured_model
+        && routes.iter().any(|route| {
+            route.available
+                && route.model == configured
+                && route_matches_activation(route, activation)
+        })
+    {
+        if selected_model.map(str::trim) != Some(configured) {
+            return Some(configured.to_string());
+        }
+    }
+
+    provider_model_to_select_after_auth(activation, selected_model, routes)
+}
+
 /// Pick the strongest available route across every authenticated provider.
 ///
 /// This is intentionally separate from [`provider_model_to_select_after_auth`],
@@ -1821,6 +1847,37 @@ mod tests {
             provider_model_to_select_after_auth(&activation, None, &routes).as_deref(),
             Some("claude-opus-5"),
             "API-key login should auto-select the Anthropic flagship, not the first catalog route"
+        );
+    }
+
+    #[test]
+    fn post_auth_model_selection_preserves_configured_claude_model() {
+        let activation = AuthActivationResult {
+            provider_id: Some("claude-api".to_string()),
+            provider_label: Some("Anthropic".to_string()),
+            activated_model: None,
+            expected_runtime: None,
+            expected_catalog_namespace: None,
+        };
+        let routes = vec![
+            route(
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+                "Anthropic",
+                "claude-api",
+                true,
+            ),
+            route("claude-opus-4-6", "Anthropic", "claude-api", true),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth_with_configured_default(
+                &activation,
+                Some("claude-opus-4-6"),
+                Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL),
+                &routes,
+            )
+            .as_deref(),
+            Some("claude-opus-4-6")
         );
     }
 

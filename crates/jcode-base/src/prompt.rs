@@ -710,10 +710,7 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
     let mut lines = vec!["# Session Context".to_string()];
 
-    let now_utc = chrono::Utc::now();
-    lines.push(format!("Date: {}", now_utc.format("%Y-%m-%d")));
-    lines.push(format!("Time: {} UTC", now_utc.format("%H:%M:%S")));
-    lines.push("Timezone: UTC".to_string());
+    lines.extend(session_datetime_lines());
     lines.push(format!("OS: {}", std::env::consts::OS));
     lines.push(format!("Architecture: {}", std::env::consts::ARCH));
     lines.push(format!(
@@ -735,6 +732,23 @@ pub fn build_session_context(working_dir: Option<&Path>) -> String {
     }
 
     lines.join("\n")
+}
+
+fn session_datetime_lines() -> [String; 3] {
+    std::panic::catch_unwind(|| format_session_datetime(chrono::Local::now()))
+        .unwrap_or_else(|_| format_session_datetime(chrono::Utc::now()))
+}
+
+fn format_session_datetime<Tz>(now: chrono::DateTime<Tz>) -> [String; 3]
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    [
+        format!("Date: {}", now.format("%Y-%m-%d")),
+        format!("Time: {}", now.format("%H:%M:%S")),
+        format!("Timezone: {}", now.format("%Z")),
+    ]
 }
 
 /// Get git branch and status summary
