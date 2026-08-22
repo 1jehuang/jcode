@@ -53,3 +53,7 @@ source is immutable, an omitted flag stays unattributed, tampered and expired
 state is rejected, and a magic link cannot be reused. This reference proves the
 proposed contract is implementable. Sponsor production acceptance still
 requires the live catalog benchmark and a test account in the sponsor's system.
+It also exposes a discovery-compatible browse/select endpoint and runs the real
+`benchmark_attribution.py` entry point against it, including marked public-web
+URL resolution. The integrated reference must score 100 with CLI attribution
+reported as `attributed`.
