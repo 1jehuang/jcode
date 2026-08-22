@@ -32,3 +32,24 @@ Before a campaign is considered attributable:
 
 The internal catalog and rollout runbook remains
 [Sponsored discovery sponsor onboarding](SPONSORED_DISCOVERY_SPONSOR_ONBOARDING.md).
+
+## Exercise the reference implementation
+
+`scripts/mock_sponsor_service.py` is a runnable reference sponsor boundary. It
+exposes a real local HTTP signup API and account API plus CLI commands for
+signup, magic-link confirmation, and account inspection. Attribution is carried
+inside signed, expiring, one-use state and persisted in SQLite on first account
+creation.
+
+Run the end-to-end acceptance suite:
+
+```bash
+python scripts/test_mock_sponsor_service.py
+```
+
+The suite invokes the public CLI in subprocesses and crosses the HTTP boundary.
+It verifies that `--via jcode-discovery` survives confirmation, the acquisition
+source is immutable, an omitted flag stays unattributed, tampered and expired
+state is rejected, and a magic link cannot be reused. This reference proves the
+proposed contract is implementable. Sponsor production acceptance still
+requires the live catalog benchmark and a test account in the sponsor's system.
