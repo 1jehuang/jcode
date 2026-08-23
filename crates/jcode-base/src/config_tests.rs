@@ -588,7 +588,7 @@ fn tool_config_disabled_only_keeps_full_profile_with_deny_list() {
 }
 
 #[test]
-fn test_generated_default_config_uses_low_openai_reasoning_effort() {
+fn test_generated_default_config_has_expected_user_defaults() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -643,6 +643,15 @@ fn test_generated_default_config_uses_low_openai_reasoning_effort() {
     let parsed: Config =
         toml::from_str(&content).expect("generated default config should parse as Config");
     assert_eq!(parsed.agents.swarm_spawn_mode, SwarmSpawnMode::Inline);
+    assert!(
+        parsed.display.show_thinking,
+        "freshly created user config should request model reasoning"
+    );
+    assert_eq!(
+        parsed.display.reasoning_display(),
+        jcode_config_types::ReasoningDisplayMode::Full,
+        "freshly created user config should show the full reasoning trace"
+    );
 
     if let Some(prev) = prev_home {
         crate::env::set_var("JCODE_HOME", prev);

@@ -28,7 +28,7 @@ pub struct DisplayConfig {
     pub emoji: bool,
     /// Center all content (default: false)
     pub centered: bool,
-    /// Show thinking/reasoning content by default (default: false)
+    /// Show thinking/reasoning content by default (default: true)
     pub show_thinking: bool,
     /// How to display reasoning/thinking content (off/full/current).
     /// When unset, falls back to `show_thinking` (true => full, false => off).
@@ -140,8 +140,8 @@ impl Default for DisplayConfig {
             debug_socket: false,
             emoji: true,
             centered: false,
-            show_thinking: false,
-            reasoning_display: Some(ReasoningDisplayMode::Off),
+            show_thinking: true,
+            reasoning_display: Some(ReasoningDisplayMode::Full),
             diagram_mode: DiagramDisplayMode::default(),
             markdown_spacing: MarkdownSpacingMode::default(),
             latex_rendering: LatexRenderingMode::default(),
@@ -219,6 +219,18 @@ impl DisplayConfig {
 #[cfg(test)]
 mod tests {
     use super::DisplayConfig;
+    use crate::ReasoningDisplayMode;
+
+    #[test]
+    fn thinking_is_shown_in_full_by_default() {
+        let default = DisplayConfig::default();
+        assert!(default.show_thinking);
+        assert_eq!(default.reasoning_display(), ReasoningDisplayMode::Full);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(missing.show_thinking);
+        assert_eq!(missing.reasoning_display(), ReasoningDisplayMode::Full);
+    }
 
     #[test]
     fn todos_are_pinned_by_default_but_can_be_disabled() {
