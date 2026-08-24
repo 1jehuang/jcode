@@ -154,6 +154,17 @@ fn should_run_rerank_cadence_and_overrides() {
     assert!(should_run_rerank(4, Some(3), 0, false));
 }
 
+#[test]
+fn hybrid_retrieval_uses_focused_query_with_empty_fallback() {
+    let context = "old session context and tool output";
+
+    assert_eq!(
+        retrieval_query(context, "current user question"),
+        "current user question"
+    );
+    assert_eq!(retrieval_query(context, "  \n"), context);
+}
+
 fn mem(content: &str) -> MemoryEntry {
     MemoryEntry::new(MemoryCategory::Fact, content)
 }

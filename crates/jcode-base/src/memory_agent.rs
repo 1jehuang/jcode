@@ -329,6 +329,14 @@ fn should_run_rerank(
     }
 }
 
+fn retrieval_query<'a>(context: &'a str, focused_query: &'a str) -> &'a str {
+    if focused_query.trim().is_empty() {
+        context
+    } else {
+        focused_query
+    }
+}
+
 fn bump_turn_stat() {
     if let Ok(mut stats) = MEMORY_AGENT_STATS.lock() {
         stats.turns_processed = stats.turns_processed.saturating_add(1);
@@ -658,7 +666,7 @@ impl MemoryAgent {
         // 0.5 cosine floor surfaced essentially nothing on real session windows;
         // hybrid recovers recall and lets the sidecar/rerank do the filtering.
         let candidates = memory_manager.find_similar_hybrid(
-            &context,
+            retrieval_query(&context, &focused_query),
             &context_embedding,
             memory::EMBEDDING_MAX_HITS,
         )?;
