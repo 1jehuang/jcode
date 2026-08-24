@@ -1,0 +1,20 @@
+{
+  "version": "0.80.0",
+  "date": "2026-08-24",
+  "highlights": [
+    "Integration discovery can now investigate a candidate's capabilities, compatibility, setup, pricing, and limitations before selecting it",
+    "Subagent models can now be chosen from the full model picker and stay synchronized across remote sessions",
+    "Model thinking is now shown by default"
+  ],
+  "improvements": [
+    "Onboarding offers clearer project choices and supports rotating choices from any key",
+    "Gmail replies now preserve thread context from message IDs and correctly encode non-ASCII subjects",
+    "Session context now reports the local date, time, and timezone",
+    "The todo side panel is more compact"
+  ],
+  "fixes": [
+    "Subagent model selection is preserved when the model catalog refreshes",
+    "Configured default models are preserved after authentication",
+    "OpenAI reasoning replay no longer sends output-only status fields"
+  ]
+}
