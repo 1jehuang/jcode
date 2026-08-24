@@ -530,11 +530,7 @@ impl PromotedCommandProgress {
 
     async fn attach_task(&self, task_id: &str) {
         let _ = self.task_id.set(task_id.to_string());
-        let pending = self
-            .pending
-            .lock()
-            .expect("progress mutex poisoned")
-            .take();
+        let pending = self.pending.lock().expect("progress mutex poisoned").take();
         if let Some(update) = pending {
             apply_progress_update(task_id, update).await;
         }
@@ -1193,10 +1189,7 @@ impl BashTool {
                 // Detached commands write straight to the output file, so no
                 // in-process reader sees their output. Follow the file to keep
                 // the task's progress bar live.
-                spawn_detached_progress_follower(
-                    info.task_id.clone(),
-                    info.output_file.clone(),
-                );
+                spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
 
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
                 let output = format!(
@@ -1254,10 +1247,7 @@ impl BashTool {
                         params.wake,
                     )
                     .await;
-                spawn_detached_progress_follower(
-                    info.task_id.clone(),
-                    info.output_file.clone(),
-                );
+                spawn_detached_progress_follower(info.task_id.clone(), info.output_file.clone());
                 let output = format!(
                     "Command continued in background due to reload.\n\nTask ID: {}\nOutput file: {}\nStatus file: {}\n\nUse `bg` with action=\"wait\" and task_id=\"{}\" after reload to wait for completion or the next progress checkpoint.",
                     info.task_id,
