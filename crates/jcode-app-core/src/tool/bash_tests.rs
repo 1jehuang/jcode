@@ -1,7 +1,9 @@
 use super::*;
 use crate::bus::{BackgroundTaskProgressSource, BackgroundTaskStatus};
 use crate::tool::StdinInputRequest;
-use crate::tool::bash::{BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line};
+use crate::tool::bash::{
+    BashTool, ProgressLineUpdate, parse_heuristic_progress, parse_progress_line,
+};
 use serde_json::json;
 use tokio::sync::mpsc;
 
