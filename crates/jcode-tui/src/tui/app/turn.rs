@@ -327,10 +327,7 @@ impl App {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
                                             for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
+                                                content_blocks.push(tc.to_tool_use_block());
                                             }
                                             if !content_blocks.is_empty() {
                                                 let content_clone = content_blocks.clone();
@@ -395,10 +392,7 @@ impl App {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
                                             for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
+                                                content_blocks.push(tc.to_tool_use_block());
                                             }
                                             // Add partial assistant response to messages
                                             if !content_blocks.is_empty() {
@@ -1080,12 +1074,7 @@ impl App {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: None,
-                });
+                content_blocks.push(tc.to_tool_use_block());
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
