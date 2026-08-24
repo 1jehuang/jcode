@@ -2600,6 +2600,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_details_posts_decision_context_and_returns_agent_brief() {
+        let response = json!({
+            "tool": "Stripe",
+            "fit": "strong",
+            "summary": "The requested metered billing workflow is supported.",
+            "capabilities": ["Usage meters", "Webhook invoice updates"],
+            "freshness": { "status": "current", "checked_at": "2026-08-24T00:00:00Z" },
+            "sources": [{
+                "title": "Metered billing",
+                "provider_url": "https://docs.stripe.com/billing/subscriptions/usage-based",
+                "cached_url": "https://jcode.sh/docs/stripe/usage-based"
+            }],
+            "next_action": "select"
+        });
+        let (endpoint, server) = one_shot_server("HTTP/1.1 200 OK", response.to_string()).await;
+        let client = reqwest::Client::new();
+        let context = test_discovery_request(
+            &client,
+            &endpoint,
+            "11111111-2222-4333-8444-555555555555",
+            false,
+        );
+        let details = ValidatedDetails {
+            work_relevance: "core_requirement".to_string(),
+            investigation_goal: "capability_fit".to_string(),
+            requirements: vec!["Webhook status updates".to_string()],
+            topics: vec!["capabilities".to_string(), "limitations".to_string()],
+            prior_request_id: Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string()),
+        };
+
+        let fetched = fetch_details(&context, "stripe", &details).await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /details HTTP/1.1"));
+        for expected in [
+            "\"tool\":\"stripe\"",
+            "\"work_relevance\":\"core_requirement\"",
+            "\"investigation_goal\":\"capability_fit\"",
+            "\"requirements\":[\"Webhook status updates\"]",
+            "\"topics\":[\"capabilities\",\"limitations\"]",
+            "\"prior_request_id\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\"",
+        ] {
+            assert!(
+                request.contains(expected),
+                "missing request field: {expected}"
+            );
+        }
+        let rendered = render_details("payments", "stripe", &fetched.listing).unwrap();
+        assert!(rendered.contains("Fit: strong"));
+        assert!(rendered.contains("Usage meters"));
+        assert!(rendered.contains("https://docs.stripe.com/billing/subscriptions/usage-based"));
+        assert!(rendered.contains("Jcode snapshot: https://jcode.sh/docs/stripe/usage-based"));
+        assert!(rendered.contains("Suggested next action: `select`"));
+    }
+
+    #[tokio::test]
     async fn fetch_listing_hard_fails_on_http_error() {
         let (endpoint, _server) =
             one_shot_server("HTTP/1.1 500 Internal Server Error", "{}".to_string()).await;
