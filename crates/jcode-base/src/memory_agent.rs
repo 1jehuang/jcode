@@ -527,6 +527,7 @@ impl MemoryAgent {
         // for listwise LLM reranking. Benchmarking showed the cross-encoder/LLM
         // reranker only works with this focused query, not the full noisy window.
         let focused_query = memory::format_focused_query_for_relevance(&messages);
+        let retrieval_text = retrieval_query(&context, &focused_query).to_string();
 
         let context_signature = relevance_context_signature(&context);
         {
@@ -641,6 +642,42 @@ impl MemoryAgent {
             ss.last_context_string = Some(context.clone());
         }
 
+        // Hybrid retrieval must use the same representation for both halves of
+        // the fusion. Keep the broad context embedding above for topic-change
+        // tracking, but embed the focused lexical query for dense retrieval.
+        let retrieval_embedding = if retrieval_text == context {
+            context_embedding.clone()
+        } else {
+            let text = retrieval_text.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::embedding_backend::embed_query_active(&text)
+            })
+            .await
+            {
+                Ok(Ok((embedding, _model))) => embedding,
+                Ok(Err(e)) => {
+                    crate::logging::event_rate_limited(
+                        crate::logging::LogLevel::Info,
+                        "memory_agent_retrieval_embedding_failed",
+                        std::time::Duration::from_secs(60),
+                        "MEMORY_RETRIEVAL_EMBEDDING_FAILED",
+                        vec![
+                            ("session_id", session_id.to_string()),
+                            ("error", e.to_string()),
+                            ("fallback", "skip_memory_relevance".to_string()),
+                        ],
+                    );
+                    memory::set_state(MemoryState::Idle);
+                    return Ok(());
+                }
+                Err(e) => {
+                    crate::logging::info(&format!("Retrieval embedding task failed: {}", e));
+                    memory::set_state(MemoryState::Idle);
+                    return Ok(());
+                }
+            }
+        };
+
         // Periodic extraction: even without topic change, extract every N turns
         {
             let ss = self.session_state(session_id);
@@ -666,8 +703,8 @@ impl MemoryAgent {
         // 0.5 cosine floor surfaced essentially nothing on real session windows;
         // hybrid recovers recall and lets the sidecar/rerank do the filtering.
         let candidates = memory_manager.find_similar_hybrid(
-            retrieval_query(&context, &focused_query),
-            &context_embedding,
+            &retrieval_text,
+            &retrieval_embedding,
             memory::EMBEDDING_MAX_HITS,
         )?;
 
