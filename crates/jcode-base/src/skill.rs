@@ -27,7 +27,14 @@ struct SkillFrontmatter {
     name: String,
     description: String,
     #[serde(rename = "allowed-tools")]
-    allowed_tools: Option<String>,
+    allowed_tools: Option<AllowedTools>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AllowedTools {
+    CommaDelimited(String),
+    Sequence(Vec<String>),
 }
 
 /// Registry of available skills
@@ -499,8 +506,13 @@ impl SkillRegistry {
             allowed_tools,
         } = frontmatter;
 
-        let allowed_tools =
-            allowed_tools.map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
+        let allowed_tools = allowed_tools.map(|tools| match tools {
+            AllowedTools::CommaDelimited(tools) => tools
+                .split(',')
+                .map(|tool| tool.trim().to_string())
+                .collect(),
+            AllowedTools::Sequence(tools) => tools,
+        });
         let search_text = build_skill_search_text(&name, &description, &body);
 
         Ok(Skill {
@@ -979,6 +991,52 @@ mod tests {
         let path = dir.join("SKILL.md");
         std::fs::write(&path, content).expect("write skill");
         path
+    }
+
+    #[test]
+    fn allowed_tools_accepts_legacy_string_sequence_and_absence() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cases = [
+            (
+                "allowed-tools: bash, read, write\n",
+                Some(vec!["bash", "read", "write"]),
+            ),
+            (
+                "allowed-tools:\n  - bash\n  - read\n  - write\n",
+                Some(vec!["bash", "read", "write"]),
+            ),
+            ("", None),
+        ];
+
+        for (index, (allowed_tools, expected)) in cases.into_iter().enumerate() {
+            let path = temp.path().join(format!("skill-{index}.md"));
+            std::fs::write(
+                &path,
+                format!("---\nname: test\ndescription: Test skill\n{allowed_tools}---\n\nBody\n"),
+            )
+            .expect("write skill");
+            let skill = SkillRegistry::parse_skill_inner(&path).expect("parse skill");
+            let expected = expected.map(|tools| {
+                tools
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<String>>()
+            });
+            assert_eq!(skill.allowed_tools, expected);
+        }
+    }
+
+    #[test]
+    fn allowed_tools_rejects_non_string_sequence_values() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("SKILL.md");
+        std::fs::write(
+            &path,
+            "---\nname: test\ndescription: Test skill\nallowed-tools: [bash, 1]\n---\n\nBody\n",
+        )
+        .expect("write skill");
+
+        assert!(SkillRegistry::parse_skill_inner(&path).is_err());
     }
 
     #[test]
