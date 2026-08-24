@@ -59,6 +59,7 @@ struct ToolCallAccumulator {
     id: String,
     name: String,
     arguments: String,
+    thought_signature: Option<String>,
 }
 
 impl OpenRouterStream {
@@ -169,6 +170,10 @@ impl OpenRouterStream {
         self.pending
             .push_back(StreamEvent::ToolInputDelta(tc.arguments));
         self.pending.push_back(StreamEvent::ToolUseEnd);
+        if let Some(signature) = tc.thought_signature.filter(|value| !value.is_empty()) {
+            self.pending
+                .push_back(StreamEvent::ToolUseSignature(signature));
+        }
     }
 
     fn flush_tool_call_accumulators(&mut self) {
@@ -184,6 +189,7 @@ impl OpenRouterStream {
         id: Option<&str>,
         name: Option<&str>,
         arguments: Option<&str>,
+        thought_signature: Option<&str>,
     ) {
         let incoming_id = id
             .map(str::trim)
@@ -219,6 +225,10 @@ impl OpenRouterStream {
 
         if let Some(args) = arguments {
             tc.arguments.push_str(args);
+        }
+
+        if let Some(signature) = thought_signature.filter(|value| !value.is_empty()) {
+            tc.thought_signature = Some(signature.to_string());
         }
     }
 
@@ -386,6 +396,10 @@ impl OpenRouterStream {
                                     function
                                         .and_then(|f| f.get("arguments"))
                                         .and_then(|a| a.as_str()),
+                                    tc.get("extra_content")
+                                        .and_then(|value| value.get("google"))
+                                        .and_then(|value| value.get("thought_signature"))
+                                        .and_then(|value| value.as_str()),
                                 );
                             }
                         }
@@ -844,6 +858,51 @@ mod tests {
     }
 
     #[test]
+    fn vertex_sse_preserves_tool_call_thought_signature() {
+        let mut stream = test_stream();
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_vertex",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{\"path\":\"README.md\"}"},
+                        "extra_content": {
+                            "google": {"thought_signature": "AY89a1...verbatim"}
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        stream.buffer = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+
+        let mut events = Vec::new();
+        while let Some(event) = stream.parse_next_event() {
+            events.push(event);
+        }
+
+        assert!(
+            matches!(
+                &events[..],
+                [
+                    StreamEvent::ToolUseStart { id, name },
+                    StreamEvent::ToolInputDelta(arguments),
+                    StreamEvent::ToolUseEnd,
+                    StreamEvent::ToolUseSignature(signature),
+                    StreamEvent::MessageEnd { stop_reason: Some(reason) },
+                ] if id == "call_vertex"
+                    && name == "read"
+                    && arguments == "{\"path\":\"README.md\"}"
+                    && signature == "AY89a1...verbatim"
+                    && reason == "tool_calls"
+            ),
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
     fn positional_fallback_tool_call_ids_are_unique_across_responses() {
         fn parse_id() -> String {
             let mut stream = test_stream();
@@ -852,6 +911,7 @@ mod tests {
                 Some("bash:0"),
                 Some("bash"),
                 Some(r#"{"command":"echo ok"}"#),
+                None,
             );
             stream.flush_tool_call_accumulators();
 
