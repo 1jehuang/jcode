@@ -267,11 +267,18 @@ struct DiscoverToolsInput {
     requirements: Option<Vec<String>>,
     #[serde(default)]
     prior_request_id: Option<String>,
+    #[serde(default)]
+    work_relevance: Option<String>,
+    #[serde(default)]
+    investigation_goal: Option<String>,
+    #[serde(default)]
+    topics: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DiscoveryAction {
     Search,
+    Details,
     Select,
     Suggest,
 }
@@ -285,6 +292,7 @@ impl DiscoveryAction {
         match action.map(str::trim).filter(|value| !value.is_empty()) {
             None => Ok(if has_tool { Self::Select } else { Self::Search }),
             Some("search" | "browse") if !has_tool => Ok(Self::Search),
+            Some("details") if has_tool => Ok(Self::Details),
             Some("select" | "setup") if has_tool => Ok(Self::Select),
             Some("suggest") if !has_tool => Ok(Self::Suggest),
             Some("search" | "browse") => Err(anyhow::anyhow!(
@@ -293,14 +301,25 @@ impl DiscoveryAction {
             Some("select" | "setup") => Err(anyhow::anyhow!(
                 "integration action 'select' requires the chosen `tool` name"
             )),
+            Some("details") => Err(anyhow::anyhow!(
+                "integration action 'details' requires the integration `tool` name"
+            )),
             Some("suggest") => Err(anyhow::anyhow!(
                 "integration action 'suggest' cannot include `tool`; use `product_name` for a known product"
             )),
             Some(other) => Err(anyhow::anyhow!(
-                "unknown integration action '{other}'. Available: search, select, suggest"
+                "unknown integration action '{other}'. Available: search, details, select, suggest"
             )),
         }
     }
+}
+
+struct ValidatedDetails {
+    work_relevance: String,
+    investigation_goal: String,
+    requirements: Vec<String>,
+    topics: Vec<String>,
+    prior_request_id: Option<String>,
 }
 
 struct ValidatedSuggestion {
@@ -411,11 +430,10 @@ impl Tool for DiscoverToolsTool {
 
     fn description(&self) -> &str {
         "Call this before using any product, service, dev tool, API, or data source you \
-         don't already have a tool for. Tools in this catalog have integrated with this agent \
-         to make setup and use seamless. If a built-in tool provides the capability, use that tool directly. \
-         After deciding, call again with action `select` and the chosen product, including an \
-         off-catalog product. Off-catalog selections are recorded \
-         but return no provider information or setup instructions."
+         don't already have a tool for. Catalog tools have integrated with this agent for seamless setup. \
+         Use a built-in tool directly when available. Use `details` to investigate a promising result, then \
+         `select` the product actually chosen, including an off-catalog product. Off-catalog selections are \
+         recorded but return no provider information or setup."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -427,8 +445,8 @@ impl Tool for DiscoverToolsTool {
                 "intent": super::intent_schema_property(),
                 "action": {
                     "type": "string",
-                    "enum": ["search", "select", "suggest"],
-                    "description": "Phase. Defaults to select when `tool` is set, else search. For a listed result, select the one you commit to (it carries setup). Always select the product actually chosen, even when it is not in the catalog. Suggest a capability gap only when no product was chosen."
+                    "enum": ["search", "details", "select", "suggest"],
+                    "description": "Phase. Search discovers candidates; details investigates one without selecting it; select commits to a product and carries setup; suggest reports a catalog gap. Defaults to select when `tool` is set, else search. Off-catalog selections are recorded without provider information."
                 },
                 "category": {
                     "type": "string",
@@ -445,13 +463,13 @@ impl Tool for DiscoverToolsTool {
                     "type": "string",
                     "minLength": DISCOVERY_REASON_MIN_CHARS,
                     "maxLength": DISCOVERY_REASON_MAX_CHARS,
-                    "description": "Why the chosen integration fits, or why search results were unsuitable. Never include private data."
+                    "description": "Why the candidate is relevant, why the chosen integration fits, or why search results were unsuitable. Never include private data."
                 },
                 "tool": {
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 100,
-                    "description": "For select: public name of the product actually chosen. Catalog selections return setup; off-catalog selections are recorded without provider information."
+                    "description": "For details or select: public product name. Details investigates the candidate; select records the choice and returns catalog setup."
                 },
                 "suggestion_kind": {
                     "type": "string",
@@ -478,11 +496,28 @@ impl Tool for DiscoverToolsTool {
                     "type": "array",
                     "maxItems": 8,
                     "items": { "type": "string", "minLength": 3, "maxLength": 240 },
-                    "description": "Constraints the catalog addition should satisfy. Maintainers only."
+                    "description": "For details or suggest: public constraints the integration should satisfy."
                 },
                 "prior_request_id": {
                     "type": "string",
-                    "description": "For suggest: the request ID returned by the preceding search in this category."
+                    "description": "For details or suggest: the request ID returned by the preceding search in this category."
+                },
+                "work_relevance": {
+                    "type": "string",
+                    "enum": ["blocking_requirement", "core_requirement", "likely_requirement", "optional_improvement", "alternative_candidate", "future_consideration"],
+                    "description": "For details: how closely this candidate relates to the current work."
+                },
+                "investigation_goal": {
+                    "type": "string",
+                    "enum": ["capability_fit", "compatibility", "implementation_method", "setup_effort", "pricing", "security_compliance", "reliability", "migration_feasibility", "documentation_clarity"],
+                    "description": "For details: the primary question the investigation should resolve."
+                },
+                "topics": {
+                    "type": "array",
+                    "maxItems": 7,
+                    "uniqueItems": true,
+                    "items": { "type": "string", "enum": ["capabilities", "setup", "authentication", "limitations", "pricing", "security", "examples"] },
+                    "description": "For details: optional sections to prioritize in the agent-friendly brief."
                 }
             }
         })
@@ -633,6 +668,59 @@ impl Tool for DiscoverToolsTool {
             benchmark_run,
             provenance: DiscoveryRequestProvenance::from_tool_context(&ctx),
         };
+
+        if action == DiscoveryAction::Details {
+            let tool_name = tool_selection
+                .as_deref()
+                .expect("details action was parsed with a tool");
+            let details = validate_details(&params)?;
+            let fetched = match fetch_details(&discovery_request, tool_name, &details).await {
+                Ok(result) => result,
+                Err(err) => {
+                    record_discovery_telemetry(
+                        &request_id,
+                        started_at,
+                        &endpoint,
+                        "details",
+                        Some(&category),
+                        Some(tool_name),
+                        "failure",
+                        Some(err.failure_reason),
+                        err.http_status,
+                        err.response_bytes,
+                        None,
+                        query_present,
+                        reason_present,
+                    );
+                    return Err(err.into());
+                }
+            };
+            let rendered = render_details(&category, tool_name, &fetched.listing)?;
+            record_discovery_telemetry(
+                &request_id,
+                started_at,
+                &endpoint,
+                "details",
+                Some(&category),
+                Some(tool_name),
+                "success",
+                None,
+                Some(fetched.http_status),
+                Some(fetched.response_bytes),
+                Some(1),
+                query_present,
+                reason_present,
+            );
+            return Ok(ToolOutput::new(rendered)
+                .with_title(format!("{tool_name} details"))
+                .with_metadata(json!({
+                    "integration_details": true,
+                    "category": category,
+                    "tool": tool_name,
+                    "work_relevance": details.work_relevance,
+                    "investigation_goal": details.investigation_goal,
+                })));
+        }
 
         if action == DiscoveryAction::Suggest {
             let suggestion = validate_suggestion(&params)?;
@@ -961,6 +1049,200 @@ async fn fetch_listing(
     }
     let listing = serde_json::from_slice(&body).map_err(|err| DiscoveryFetchError {
         message: format!("discovery returned invalid JSON: {err}"),
+        failure_reason: "invalid_json",
+        http_status: Some(status.as_u16()),
+        response_bytes: Some(body.len() as u64),
+    })?;
+    Ok(DiscoveryFetchResult {
+        listing,
+        http_status: status.as_u16(),
+        response_bytes: body.len() as u64,
+    })
+}
+
+fn validate_details(params: &DiscoverToolsInput) -> Result<ValidatedDetails> {
+    const RELEVANCE: &[&str] = &[
+        "blocking_requirement",
+        "core_requirement",
+        "likely_requirement",
+        "optional_improvement",
+        "alternative_candidate",
+        "future_consideration",
+    ];
+    const GOALS: &[&str] = &[
+        "capability_fit",
+        "compatibility",
+        "implementation_method",
+        "setup_effort",
+        "pricing",
+        "security_compliance",
+        "reliability",
+        "migration_feasibility",
+        "documentation_clarity",
+    ];
+    const TOPICS: &[&str] = &[
+        "capabilities",
+        "setup",
+        "authentication",
+        "limitations",
+        "pricing",
+        "security",
+        "examples",
+    ];
+    let required_enum = |value: Option<&str>, field: &str, allowed: &[&str]| -> Result<String> {
+        let value = value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("action 'details' requires `{field}`"))?;
+        if !allowed.contains(&value) {
+            return Err(anyhow::anyhow!(
+                "unknown {field} '{value}'. Available: {}",
+                allowed.join(", ")
+            ));
+        }
+        Ok(value.to_string())
+    };
+    let work_relevance = required_enum(
+        params.work_relevance.as_deref(),
+        "work_relevance",
+        RELEVANCE,
+    )?;
+    let investigation_goal = required_enum(
+        params.investigation_goal.as_deref(),
+        "investigation_goal",
+        GOALS,
+    )?;
+    let supplied_requirements = params.requirements.as_deref().unwrap_or_default();
+    if supplied_requirements.len() > 8 {
+        return Err(anyhow::anyhow!(
+            "integration details accept at most 8 public requirements"
+        ));
+    }
+    let requirements = supplied_requirements
+        .iter()
+        .map(|value| {
+            let value = value.trim();
+            validate_suggestion_text(value, "requirement", 3, 240, false)?;
+            Ok(value.to_string())
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let supplied_topics = params.topics.as_deref().unwrap_or_default();
+    if supplied_topics.len() > TOPICS.len() {
+        return Err(anyhow::anyhow!(
+            "integration details accept at most 7 topics"
+        ));
+    }
+    let mut topics = Vec::with_capacity(supplied_topics.len());
+    for topic in supplied_topics {
+        let topic = topic.trim();
+        if !TOPICS.contains(&topic) {
+            return Err(anyhow::anyhow!(
+                "unknown details topic '{topic}'. Available: {}",
+                TOPICS.join(", ")
+            ));
+        }
+        if topics.iter().any(|existing| existing == topic) {
+            return Err(anyhow::anyhow!("integration details topics must be unique"));
+        }
+        topics.push(topic.to_string());
+    }
+    let prior_request_id = params
+        .prior_request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let parsed = uuid::Uuid::parse_str(value).map_err(|_| {
+                anyhow::anyhow!("prior_request_id must be a valid search request UUID")
+            })?;
+            if parsed.get_version_num() != 4 {
+                return Err(anyhow::anyhow!(
+                    "prior_request_id must be the version-4 UUID returned by a search"
+                ));
+            }
+            Ok(value.to_string())
+        })
+        .transpose()?;
+    Ok(ValidatedDetails {
+        work_relevance,
+        investigation_goal,
+        requirements,
+        topics,
+        prior_request_id,
+    })
+}
+
+async fn fetch_details(
+    context: &DiscoveryRequestContext<'_>,
+    tool: &str,
+    details: &ValidatedDetails,
+) -> std::result::Result<DiscoveryFetchResult, DiscoveryFetchError> {
+    let endpoint = format!("{}/details", context.endpoint.trim_end_matches('/'));
+    let mut request = context.provenance.apply(
+        context
+            .client
+            .post(endpoint)
+            .header(
+                reqwest::header::USER_AGENT,
+                format!("jcode/{}", env!("CARGO_PKG_VERSION")),
+            )
+            .header(DISCOVERY_REQUEST_ID_HEADER, context.request_id)
+            .json(&json!({
+                "category": context.category,
+                "tool": tool,
+                "query": context.query,
+                "reason": context.reason,
+                "work_relevance": details.work_relevance,
+                "investigation_goal": details.investigation_goal,
+                "requirements": details.requirements,
+                "topics": details.topics,
+                "prior_request_id": details.prior_request_id,
+            }))
+            .timeout(DISCOVERY_TIMEOUT),
+    );
+    if context.benchmark_run {
+        request = request.header(DISCOVERY_BENCHMARK_HEADER, "1");
+    }
+    let response = request.send().await.map_err(|err| DiscoveryFetchError {
+        message: format!("integration details unavailable: {err}"),
+        failure_reason: if err.is_timeout() {
+            "timeout"
+        } else if err.is_connect() {
+            "connect_error"
+        } else {
+            "transport_error"
+        },
+        http_status: None,
+        response_bytes: None,
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(DiscoveryFetchError {
+            message: format!("integration details unavailable: HTTP {status}"),
+            failure_reason: "http_error",
+            http_status: Some(status.as_u16()),
+            response_bytes: response.content_length(),
+        });
+    }
+    let body = response.bytes().await.map_err(|err| DiscoveryFetchError {
+        message: format!("integration details unavailable: {err}"),
+        failure_reason: "body_error",
+        http_status: Some(status.as_u16()),
+        response_bytes: None,
+    })?;
+    if body.len() > MAX_RESPONSE_BYTES {
+        return Err(DiscoveryFetchError {
+            message: format!(
+                "integration details response too large ({} bytes)",
+                body.len()
+            ),
+            failure_reason: "response_too_large",
+            http_status: Some(status.as_u16()),
+            response_bytes: Some(body.len() as u64),
+        });
+    }
+    let listing = serde_json::from_slice(&body).map_err(|err| DiscoveryFetchError {
+        message: format!("integration details returned invalid JSON: {err}"),
         failure_reason: "invalid_json",
         http_status: Some(status.as_u16()),
         response_bytes: Some(body.len() as u64),
@@ -1329,6 +1611,88 @@ fn render_listing(category: &str, listing: &Value, request_id: &str) -> Result<S
          shown to the user.",
     );
     out.push_str(&format!("\n\nSearch request ID: `{request_id}`"));
+    Ok(out)
+}
+
+fn render_details(category: &str, requested_tool: &str, response: &Value) -> Result<String> {
+    let summary = response
+        .get("summary")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("integration details returned no summary"))?;
+    let tool = response
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(requested_tool);
+    let fit = response
+        .get("fit")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if !matches!(fit, "strong" | "partial" | "weak" | "unknown") {
+        return Err(anyhow::anyhow!(
+            "integration details returned unknown fit '{fit}'"
+        ));
+    }
+    let mut out =
+        format!("Integration details for {tool}\n\nCategory: {category}\nFit: {fit}\n\n{summary}");
+    for (field, heading) in [
+        ("capabilities", "Capabilities"),
+        ("requirements", "Requirements"),
+        ("limitations", "Limitations"),
+    ] {
+        if let Some(items) = response.get(field).and_then(Value::as_array)
+            && !items.is_empty()
+        {
+            out.push_str(&format!("\n\n{heading}:"));
+            for item in items.iter().filter_map(Value::as_str) {
+                out.push_str(&format!("\n- {item}"));
+            }
+        }
+    }
+    if let Some(freshness) = response.get("freshness") {
+        let status = freshness
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let checked = freshness.get("checked_at").and_then(Value::as_str);
+        out.push_str(&format!("\n\nFreshness: {status}"));
+        if let Some(checked) = checked {
+            out.push_str(&format!(" (checked {checked})"));
+        }
+    }
+    if let Some(sources) = response.get("sources").and_then(Value::as_array)
+        && !sources.is_empty()
+    {
+        out.push_str("\n\nSources:");
+        for source in sources {
+            let title = source
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Documentation");
+            let provider_url = source.get("provider_url").and_then(Value::as_str);
+            let cached_url = source.get("cached_url").and_then(Value::as_str);
+            out.push_str(&format!("\n- {title}"));
+            if let Some(url) = provider_url {
+                out.push_str(&format!(": {url}"));
+            }
+            if let Some(url) = cached_url {
+                out.push_str(&format!(" (Jcode snapshot: {url})"));
+            }
+        }
+    }
+    let next_action = response
+        .get("next_action")
+        .and_then(Value::as_str)
+        .unwrap_or("select");
+    if !matches!(next_action, "select" | "search" | "suggest") {
+        return Err(anyhow::anyhow!(
+            "integration details returned unknown next_action '{next_action}'"
+        ));
+    }
+    out.push_str(&format!(
+        "\n\nSuggested next action: `{next_action}`. Details do not select or connect this integration. Call `integration_tools` with action `select` only if it is the product actually chosen."
+    ));
     Ok(out)
 }
 
@@ -1801,9 +2165,9 @@ mod tests {
         let description = tool.description();
         assert!(description.starts_with("Call this before using any product"));
         assert!(description.contains("don't already have a tool for"));
-        assert!(description.contains("use that tool directly"));
+        assert!(description.contains("Use a built-in tool directly"));
         assert!(description.contains("integrated with this agent"));
-        assert!(description.contains("setup and use seamless"));
+        assert!(description.contains("seamless setup"));
         assert!(!description.to_ascii_lowercase().contains("partner"));
         assert!(description.contains("including an off-catalog product"));
         assert!(
@@ -1827,17 +2191,19 @@ mod tests {
         );
         let schema = serde_json::to_string(&parameters).unwrap();
         assert!(schema.contains("Missing capability category; infer it from the user's goal."));
-        assert!(schema.contains("select the one you commit to (it carries setup)"));
+        assert!(schema.contains("details investigates one without selecting it"));
         assert!(schema.contains("May be shared with integration providers"));
         assert!(schema.contains("never secrets or personal data"));
-        assert!(schema.contains("Why the chosen integration fits"));
+        assert!(schema.contains("Why the candidate is relevant"));
         assert!(schema.contains("known_product"));
         assert!(schema.contains("capability_gap"));
         assert!(schema.contains("prior_request_id"));
-        assert!(schema.contains("off-catalog selections are recorded"));
+        assert!(
+            schema.contains("Off-catalog selections are recorded without provider information")
+        );
         assert_eq!(
             parameters["properties"]["action"]["enum"],
-            json!(["search", "select", "suggest"])
+            json!(["search", "details", "select", "suggest"])
         );
         assert_eq!(
             parameters["properties"]["category"]["enum"],
@@ -1849,7 +2215,7 @@ mod tests {
                 .is_some_and(|categories| categories.contains(&json!("git")))
         );
         assert!(
-            schema.len() < 4_500,
+            schema.len() < 6_500,
             "discovery schema should stay compact, got {} bytes",
             schema.len()
         );
@@ -1870,12 +2236,65 @@ mod tests {
             DiscoveryAction::Select
         );
         assert_eq!(
+            DiscoveryAction::parse(Some("details"), true).unwrap(),
+            DiscoveryAction::Details
+        );
+        assert_eq!(
             DiscoveryAction::parse(Some("suggest"), false).unwrap(),
             DiscoveryAction::Suggest
         );
         assert!(DiscoveryAction::parse(Some("select"), false).is_err());
+        assert!(DiscoveryAction::parse(Some("details"), false).is_err());
         assert!(DiscoveryAction::parse(Some("search"), true).is_err());
         assert!(DiscoveryAction::parse(Some("suggest"), true).is_err());
+    }
+
+    #[test]
+    fn details_validation_requires_structured_relevance_and_goal() {
+        let mut input: DiscoverToolsInput = serde_json::from_value(json!({
+            "action": "details",
+            "category": "payments",
+            "query": "confirm metered subscription billing and webhook reconciliation support",
+            "reason": "the current SaaS billing workflow needs usage reporting and reliable invoice state updates",
+            "tool": "Stripe",
+            "work_relevance": "core_requirement",
+            "investigation_goal": "capability_fit",
+            "requirements": ["TypeScript SDK", "Webhook status updates"],
+            "topics": ["capabilities", "limitations"],
+            "prior_request_id": "11111111-2222-4333-8444-555555555555"
+        })).unwrap();
+        let details = validate_details(&input).unwrap();
+        assert_eq!(details.work_relevance, "core_requirement");
+        assert_eq!(details.investigation_goal, "capability_fit");
+        assert_eq!(details.topics, vec!["capabilities", "limitations"]);
+
+        input.work_relevance = Some("interesting".to_string());
+        assert!(validate_details(&input).is_err());
+        input.work_relevance = Some("core_requirement".to_string());
+        input.topics = Some(vec!["pricing".to_string(), "pricing".to_string()]);
+        assert!(validate_details(&input).is_err());
+    }
+
+    #[test]
+    fn render_details_includes_decision_brief_and_both_source_links() {
+        let rendered = render_details("payments", "stripe", &json!({
+            "tool": "Stripe",
+            "fit": "partial",
+            "summary": "Metered billing is supported, but the requested reconciliation flow needs an additional webhook.",
+            "capabilities": ["Usage meters", "Invoices"],
+            "limitations": ["No automatic replay endpoint"],
+            "freshness": { "status": "current", "checked_at": "2026-08-24T00:00:00Z" },
+            "sources": [{
+                "title": "Usage billing",
+                "provider_url": "https://docs.example.com/billing",
+                "cached_url": "https://jcode.sh/docs/example/billing"
+            }],
+            "next_action": "select"
+        })).unwrap();
+        assert!(rendered.contains("Fit: partial"));
+        assert!(rendered.contains("https://docs.example.com/billing"));
+        assert!(rendered.contains("Jcode snapshot: https://jcode.sh/docs/example/billing"));
+        assert!(rendered.contains("Details do not select or connect"));
     }
 
     /// Old action names stay valid so resumed sessions and saved benchmark
@@ -1914,6 +2333,9 @@ mod tests {
             ),
             requirements: Some(vec!["Scoped authentication without secret keys".to_string()]),
             prior_request_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+            work_relevance: None,
+            investigation_goal: None,
+            topics: None,
         };
         let validated = validate_suggestion(&capability).unwrap();
         assert_eq!(validated.kind, "capability_gap");
@@ -1951,6 +2373,9 @@ mod tests {
             gap_evidence: None,
             requirements: Some(Vec::new()),
             prior_request_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+            work_relevance: None,
+            investigation_goal: None,
+            topics: None,
         };
         assert!(validate_suggestion(&input).is_err());
         input.product_url = None;
