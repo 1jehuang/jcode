@@ -473,6 +473,28 @@ fn background_task_rows_retain_the_two_most_recently_active_tasks() {
 }
 
 #[test]
+fn indeterminate_background_update_preserves_last_known_percent() {
+    let mut app = create_test_app();
+    app.upsert_running_background_task(
+        "build".to_string(),
+        "cargo build".to_string(),
+        Some(42.0),
+    );
+
+    // A later phase-only parser update carries no percentage. It should update
+    // activity/label state without resetting the visible bar to zero.
+    app.upsert_running_background_task("build".to_string(), "Compiling jcode".to_string(), None);
+
+    let row = app
+        .background_task_rows_ref()
+        .iter()
+        .find(|row| row.task_id == "build")
+        .expect("background row should remain present");
+    assert_eq!(row.percent, Some(42.0));
+    assert_eq!(row.label, "Compiling jcode");
+}
+
+#[test]
 fn completed_background_tasks_clear_after_they_stop_being_relevant() {
     let mut app = create_test_app();
     app.finish_background_task(
