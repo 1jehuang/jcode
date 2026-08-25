@@ -259,24 +259,40 @@ impl Tool for AgentGrepTool {
         // the first cold-cache search feel like it "takes forever" with no
         // spinner and an unresponsive interrupt. This mirrors how the sibling
         // grep/glob/ls tools offload their work.
-        let mut work_handle =
+        let work_handle =
             tokio::task::spawn_blocking(move || run_agentgrep_blocking(&params, &ctx));
-        match tokio::time::timeout(AGENTGREP_FOREGROUND_BUDGET, &mut work_handle).await {
-            Ok(joined) => {
-                joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
-            }
-            Err(_) => {
-                let info = crate::background::global()
-                    .adopt_with_options(
-                        "agentgrep",
-                        Some(display_name.clone()),
-                        &session_id,
-                        true,
-                        false,
-                        work_handle,
-                    )
-                    .await;
-                Ok(ToolOutput::new(format!(
+        await_or_background_search(
+            work_handle,
+            AGENTGREP_FOREGROUND_BUDGET,
+            display_name,
+            session_id,
+        )
+        .await
+    }
+}
+
+async fn await_or_background_search(
+    mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>>,
+    foreground_budget: Duration,
+    display_name: String,
+    session_id: String,
+) -> Result<ToolOutput> {
+    match tokio::time::timeout(foreground_budget, &mut work_handle).await {
+        Ok(joined) => {
+            joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
+        }
+        Err(_) => {
+            let info = crate::background::global()
+                .adopt_with_options(
+                    "agentgrep",
+                    Some(display_name.clone()),
+                    &session_id,
+                    true,
+                    false,
+                    work_handle,
+                )
+                .await;
+            Ok(ToolOutput::new(format!(
                     "Search is still running after 5s and is continuing in background.\n\n\
                      Task ID: {}\n\
                      Name: {}\n\n\
@@ -291,9 +307,8 @@ impl Tool for AgentGrepTool {
                     "output_file": info.output_file.to_string_lossy(),
                     "status_file": info.status_file.to_string_lossy(),
                     "timeout_promoted": true,
-                    "foreground_timeout_ms": AGENTGREP_FOREGROUND_BUDGET.as_millis(),
+                    "foreground_timeout_ms": foreground_budget.as_millis(),
                 })))
-            }
         }
     }
 }
