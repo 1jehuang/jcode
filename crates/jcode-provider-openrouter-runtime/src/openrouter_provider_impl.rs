@@ -428,6 +428,17 @@ impl Provider for OpenRouterProvider {
             self.clear_pin_if_model_changed(&model_id, true);
         }
 
+        if self
+            .model_reasoning_config()
+            .and_then(|config| config.1.as_ref())
+            .is_some()
+        {
+            let configured = self.configured_effort_for_model();
+            if let Ok(mut effort) = self.reasoning_effort.try_write() {
+                *effort = configured;
+            }
+        }
+
         let stored_effort = self
             .reasoning_effort
             .try_read()
@@ -781,6 +792,8 @@ impl Provider for OpenRouterProvider {
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
             reasoning_effort_support: self.reasoning_effort_support,
+            disable_reasoning_heuristics: self.disable_reasoning_heuristics,
+            static_reasoning_config: self.static_reasoning_config.clone(),
             max_tokens: self.max_tokens,
             extra_body: self.extra_body.clone(),
             static_models: self.static_models.clone(),

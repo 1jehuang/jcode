@@ -178,11 +178,14 @@ pub(crate) fn configure_provider_profile(
         allow_provider_pinning: options.provider_routing,
         models: vec![NamedProviderModelConfig {
             id: model.clone(),
+            reasoning: None,
+            reasoning_effort: None,
             context_window: options.context_window,
             input: Vec::new(),
         }],
         extra_body: None,
         supports_reasoning_effort: None,
+        disable_reasoning_heuristics: false,
     };
 
     let config_path = Config::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
