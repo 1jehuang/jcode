@@ -46,6 +46,9 @@ pub enum ApiRequest {
     /// Attach to an existing session and subscribe to its event stream.
     AttachSession { session_id: String },
 
+    /// Clone an attached session's transcript into a new, idle session.
+    ForkSession { session_id: String },
+
     /// Detach from the currently attached session.
     DetachSession { session_id: String },
 

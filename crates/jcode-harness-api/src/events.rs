@@ -28,6 +28,9 @@ pub enum ApiEvent {
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
 
+    /// Reply to `ForkSession`.
+    SessionForked { session: SessionInfo },
+
     /// Reply to `GetHistory`.
     History {
         session_id: String,

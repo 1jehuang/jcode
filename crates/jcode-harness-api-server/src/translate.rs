@@ -36,6 +36,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "compact",
     "rename_session",
     "get_runtime_info",
+    "fork_session",
     "read_file",
     "find_files",
     "search_text",
@@ -97,6 +98,8 @@ pub struct BridgeState {
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64)>,
+    /// Legacy and API ids for an in-flight session fork.
+    pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -410,6 +413,11 @@ impl BridgeState {
                     message["images"] = json!(images);
                 }
                 vec![Outbound::Legacy(message)]
+            }
+            "fork_session" => {
+                let id = self.legacy_id();
+                self.pending_fork_id = Some((id, api_id));
+                vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
             }
             "cancel" => {
                 let id = self.legacy_id();
@@ -980,6 +988,50 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "split_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some((_, api_id)) = self
+                    .pending_fork_id
+                    .take()
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                else {
+                    return vec![];
+                };
+                let session_id = event["new_session_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let metadata = Self::resolve_session_metadata(&session_id);
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionForked {
+                        session: SessionInfo {
+                            transcript_bytes: Self::transcript_bytes(&session_id),
+                            saved: metadata.as_ref().is_some_and(|value| value.saved),
+                            updated_at_ms: Self::session_modified_ms(&session_id)
+                                .map(|value| value as i64),
+                            last_active_at_ms: metadata
+                                .as_ref()
+                                .and_then(|value| value.last_active_at_ms),
+                            session_id,
+                            working_dir: metadata
+                                .as_ref()
+                                .and_then(|value| value.working_dir.clone()),
+                            title: event["new_session_name"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    metadata
+                                        .as_ref()
+                                        .and_then(PersistedSessionMetadata::display_title)
+                                }),
+                            status: "idle".into(),
+                            archived: false,
+                            archived_at_ms: None,
+                        },
+                    },
+                )]
+            }
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
                 .map(|api_id| vec![ServerFrame::reply(api_id, ApiEvent::Pong)])
@@ -1227,8 +1279,15 @@ impl BridgeState {
                 if no_reply_api_id.is_some() {
                     self.pending_no_reply_message_id = None;
                 }
+                let fork_api_id = self
+                    .pending_fork_id
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                    .map(|(_, api_id)| api_id);
+                if fork_api_id.is_some() {
+                    self.pending_fork_id = None;
+                }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or_else(|| {
+                let reply_to = no_reply_api_id.or(fork_api_id).or_else(|| {
                     self.pending_simple
                         .iter()
                         .position(|(legacy_id, _, _)| *legacy_id == id)
@@ -1409,7 +1468,11 @@ impl BridgeState {
             .windows(needle.len())
             .enumerate()
             .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
-        let start = if last { starts.next_back()? } else { starts.next()? };
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
         bool::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..])).ok()
     }
 
