@@ -1874,7 +1874,7 @@ function normalizeSubscriptionEvent(body) {
 }
 
 function normalizeDiscoveryEvent(body) {
-  const phases = new Set(["browse", "select", "suggest", "unknown"]);
+  const phases = new Set(["browse", "details", "select", "suggest", "unknown"]);
   const outcomes = new Set(["success", "failure"]);
   const failures = new Set([
     "disabled", "invalid_input", "invalid_category", "timeout",

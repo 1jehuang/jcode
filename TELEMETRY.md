@@ -118,9 +118,9 @@ without exposing prompts or a persistent telemetry identifier to that service.
 |-------|---------|----------|
 | `event` | `"discovery"` | Event type |
 | `request_id` | `"9a23..."` | Random correlation ID scoped to one request |
-| `phase` | `"browse"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `suggest` records a missing catalog capability proposal |
+| `phase` | `"browse"` / `"details"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `details` records investigation without selection and `suggest` records a missing catalog capability proposal |
 | `category` | `"payments"` | Fixed discovery category, when valid |
-| `selected_tool` | `"agentcard"` | Public catalog tool name in the select phase |
+| `selected_tool` | `"agentcard"` | Public catalog tool name in the details or select phase |
 | `outcome` | `"success"` / `"failure"` | Attempt result |
 | `failure_reason` | `"timeout"` | Allowlisted coarse failure class only |
 | `http_status` | `200` | Discovery service response status, if received |

@@ -485,6 +485,27 @@ test("discovery telemetry accepts the catalog suggest phase", async () => {
   assert.equal(detailInsert.values[columns.indexOf("phase")], "suggest");
 });
 
+test("discovery telemetry accepts and persists the catalog details phase", async () => {
+  const db = makeDb();
+  const discoveryFirehose = makeFirehose();
+  const response = await worker.fetch(
+    postRequest(makeDiscoveryBody({
+      phase: "details",
+      selected_tool: "agentcard",
+      result_count: 1,
+    })),
+    { DB: db, FIREHOSE_DISCOVERY: discoveryFirehose },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(discoveryFirehose.points[0].blobs[8], "details");
+  assert.equal(discoveryFirehose.points[0].blobs[10], "agentcard");
+  const detailInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO discovery_details/.test(sql));
+  const columns = detailInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(detailInsert.values[columns.indexOf("phase")], "details");
+  assert.equal(detailInsert.values[columns.indexOf("selected_tool")], "agentcard");
+});
+
 test("discovery event rejects unknown failure classifications", async () => {
   const response = await worker.fetch(
     postRequest(makeDiscoveryBody({ outcome: "failure", failure_reason: "raw secret error" })),
