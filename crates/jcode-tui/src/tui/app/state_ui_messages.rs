@@ -216,7 +216,14 @@ impl App {
         {
             let mut task = self.background_task_rows.remove(index);
             task.label = label;
-            task.percent = percent;
+            // Output parsers can alternate between determinate updates (for
+            // example `42%`) and phase-only updates (`Compiling foo`).  A
+            // phase-only update must not erase the last useful percentage,
+            // otherwise the pinned progress bar jumps back to zero until the
+            // task completes at 100%.
+            if percent.is_some() || task.percent.is_none() {
+                task.percent = percent;
+            }
             task.status = crate::tui::BackgroundTaskRowStatus::Running;
             task.completed_at = None;
             self.background_task_rows.push(task);
