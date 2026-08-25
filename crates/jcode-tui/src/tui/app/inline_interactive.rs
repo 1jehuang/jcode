@@ -1138,7 +1138,18 @@ impl App {
             self.invalidate_model_picker_cache();
         }
 
-        if self.is_remote && self.remote_model_options.is_empty() {
+        // During remote startup the authoritative session catalog has not
+        // arrived yet. Do not make an old persisted catalog look current just
+        // because the user opened `/model` quickly after spawning the client.
+        let awaiting_initial_remote_catalog = self.is_remote
+            && self.remote_startup_phase.is_some()
+            && self.remote_model_options.is_empty()
+            && self.remote_available_entries.is_empty();
+
+        if self.is_remote
+            && !awaiting_initial_remote_catalog
+            && self.remote_model_options.is_empty()
+        {
             self.hydrate_remote_model_catalog_cache();
         }
 
@@ -1149,6 +1160,11 @@ impl App {
         } else {
             self.provider.model().to_string()
         };
+
+        if awaiting_initial_remote_catalog {
+            self.open_loading_model_picker(&current_model);
+            return;
+        }
 
         // Never present the old catalog as authoritative immediately after a
         // login/import. Local mode clears this when the provider's synchronous

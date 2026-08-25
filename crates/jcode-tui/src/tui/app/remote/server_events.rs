@@ -1720,6 +1720,10 @@ pub(in crate::tui::app) fn handle_server_event(
             if catalog_outcome.catalog_changed {
                 app.persist_remote_model_catalog_cache();
             }
+            // `/model` may have been opened while the initial session catalog
+            // was still loading. Replace that loading row as soon as history
+            // supplies the authoritative snapshot.
+            app.refresh_open_model_picker_after_catalog_update();
             app.remote_skills = skills;
             app.invalidate_command_candidates_cache();
             app.remote_sessions = all_sessions;

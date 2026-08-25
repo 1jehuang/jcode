@@ -58,6 +58,26 @@ fn test_open_model_picker_without_routes_shows_actionable_guidance() {
     assert!(last.content.contains("/model"));
 }
 
+#[test]
+fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.set_remote_startup_phase(crate::tui::app::RemoteStartupPhase::LoadingSession);
+    app.remote_provider_model = Some("gpt-5.6-sol".to_string());
+    app.remote_available_entries.clear();
+    app.remote_model_options.clear();
+
+    app.open_model_picker();
+
+    let picker = app
+        .inline_interactive_state
+        .as_ref()
+        .expect("loading model picker should be open");
+    assert_eq!(picker.entries.len(), 1);
+    assert_eq!(picker.entries[0].name, "gpt-5.6-sol");
+    assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
+}
+
 #[derive(Clone)]
 struct CountingModelRoutesProvider {
     calls: StdArc<AtomicUsize>,
