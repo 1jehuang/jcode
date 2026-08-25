@@ -511,7 +511,15 @@ pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
         let stage = trimmed.strip_prefix("/update-sim").unwrap_or("").trim();
         let simulated_version = "v99.0.0-simulated";
         let status = match stage {
-            "" | "available" => crate::bus::UpdateStatus::Available {
+            "" => {
+                app.restart_update_simulator();
+                app.push_display_message(DisplayMessage::system(
+                    "Update simulator started. It will automatically play the complete receive → download → install → restart experience. Press Alt+_ anytime to replay. Nothing real will be changed."
+                        .to_string(),
+                ));
+                return true;
+            }
+            "available" => crate::bus::UpdateStatus::Available {
                 current: jcode_build_meta::version().to_string(),
                 latest: simulated_version.to_string(),
             },

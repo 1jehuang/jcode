@@ -94,6 +94,7 @@ mod shortcut_hints;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
+mod update_sim;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -1075,6 +1076,8 @@ pub struct App {
     /// simulator seeds synthetic phases so a developer can step through every
     /// first-run screen via Alt+5 reset or Cmd+5 toggle without touching real auth state.
     onboarding_sim: Option<usize>,
+    /// Active time-based, non-destructive update experience preview.
+    update_sim: Option<update_sim::UpdateSimulator>,
     /// Active guided first-run onboarding flow (model select -> continue ->
     /// transcript pick -> suggestions). `None` when not onboarding.
     onboarding_flow: Option<onboarding_flow::OnboardingFlow>,
