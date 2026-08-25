@@ -413,9 +413,12 @@ pub enum NamedProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NamedProviderAuth {
+    #[serde(alias = "Bearer", alias = "BEARER")]
     #[default]
     Bearer,
+    #[serde(alias = "Header", alias = "HEADER")]
     Header,
+    #[serde(alias = "None", alias = "NONE")]
     None,
 }
 

@@ -730,11 +730,17 @@ fn save_openai_effort_setting_local(app: &mut App, value: Option<&str>) {
         ));
         return;
     }
+    if let Some(value) = value
+        && let Err(err) = app.provider.set_reasoning_effort(value)
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Failed to set OpenAI effort: {}",
+            err
+        )));
+        return;
+    }
     match crate::config::Config::set_openai_reasoning_effort(value) {
         Ok(()) => {
-            if let Some(value) = value {
-                let _ = app.provider.set_reasoning_effort(value);
-            }
             let label = value.unwrap_or("(provider default)");
             app.set_status_notice(format!("Effort: {}", label));
             app.push_display_message(DisplayMessage::system(format!(
