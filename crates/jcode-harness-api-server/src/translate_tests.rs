@@ -508,14 +508,14 @@ fn an_available_models_push_updates_the_model() {
 
 #[test]
 fn create_session_in_a_jcode_checkout_requests_selfdev() {
-    // Regression: desktop2 opens its own crate, and without the `selfdev`
+    // Regression: external client opens its own crate, and without the `selfdev`
     // flag the daemon hands back an agent with no self-dev tools or prompt.
     let mut state = BridgeState::default();
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("workspace root")
-        .join("crates/jcode-desktop2");
+        .join("crates/jcode-tui");
     let out = state.api_request_to_legacy(&json!({
         "req": "create_session",
         "id": 1,
