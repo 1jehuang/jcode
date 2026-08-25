@@ -1,6 +1,32 @@
 use super::*;
 
 impl App {
+    /// Open the harmless update preview from anywhere in the TUI. Terminals may
+    /// report Alt+_ as either Alt+_ or Alt+Shift+_, so accept both forms.
+    pub(super) fn handle_update_sim_shortcut(
+        &mut self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if code != KeyCode::Char('_')
+            || (modifiers != KeyModifiers::ALT
+                && modifiers != KeyModifiers::ALT | KeyModifiers::SHIFT)
+        {
+            return false;
+        }
+        self.handle_update_status(crate::bus::UpdateStatus::Available {
+            current: jcode_build_meta::version().to_string(),
+            latest: "v99.0.0-simulated".to_string(),
+        });
+        self.push_display_message(DisplayMessage::system(
+            "Update simulator opened with Alt+_. Try `/update-sim download`, then `install`, `done`, or `error`. Nothing real will be changed."
+                .to_string(),
+        ));
+        true
+    }
+
     fn client_maintenance_busy_message(
         current: crate::bus::ClientMaintenanceAction,
         requested: crate::bus::ClientMaintenanceAction,
