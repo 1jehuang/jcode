@@ -103,6 +103,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= app.maybe_refresh_overnight_display_card();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);
@@ -394,6 +395,7 @@ fn apply_terminal_event(
 ) -> Result<bool> {
     match event {
         Some(Ok(Event::FocusGained)) => {
+            crate::tui::reapply_configured_terminal_modes();
             let redraw = app.set_client_focused(true);
             app.note_client_focus(true);
             Ok(redraw)

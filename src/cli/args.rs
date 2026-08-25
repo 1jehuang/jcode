@@ -81,6 +81,11 @@ pub(crate) struct Args {
     #[arg(long = "onboarding-sim")]
     pub(crate) onboarding_sim: bool,
 
+    /// Launch the normal TUI, skip onboarding, then autoplay a safe simulation
+    /// of receiving, downloading, installing, and restarting after an update.
+    #[arg(long = "update-sim")]
+    pub(crate) update_sim: bool,
+
     /// Custom socket path for server/client communication
     #[arg(long, global = true)]
     pub(crate) socket: Option<String>,

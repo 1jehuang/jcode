@@ -136,6 +136,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
 
     let _ = check_debug_command(app, remote).await;
@@ -391,6 +392,7 @@ async fn apply_terminal_event(
     };
     match event {
         Some(Ok(Event::FocusGained)) => {
+            crate::tui::reapply_configured_terminal_modes();
             input_attribution.event = Some("focus_gained".to_string());
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
@@ -767,6 +769,7 @@ fn handle_terminal_event_while_disconnected(
 
     match event {
         Some(Ok(Event::FocusGained)) => {
+            crate::tui::reapply_configured_terminal_modes();
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
         }

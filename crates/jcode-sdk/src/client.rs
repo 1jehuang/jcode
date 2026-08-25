@@ -646,6 +646,19 @@ impl JcodeClient {
         }
     }
 
+    /// Clone a session's complete persisted context into a new idle session.
+    pub fn fork_session(&self, session_id: &str) -> Result<SessionInfo> {
+        match self
+            .request_ok(ApiRequest::ForkSession {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::SessionForked { session } => Ok(session),
+            other => Err(unexpected("session_forked", &other)),
+        }
+    }
+
     pub fn detach_session(&self, session_id: &str) -> Result<()> {
         self.request_ok(ApiRequest::DetachSession {
             session_id: session_id.to_string(),

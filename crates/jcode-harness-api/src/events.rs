@@ -28,6 +28,9 @@ pub enum ApiEvent {
     /// Reply to `CreateSession` / `AttachSession`.
     Attached { session: SessionInfo },
 
+    /// Reply to `ForkSession`.
+    SessionForked { session: SessionInfo },
+
     /// Reply to `GetHistory`.
     History {
         session_id: String,
@@ -284,6 +287,16 @@ pub struct SessionInfo {
     /// could not determine it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript_bytes: Option<u64>,
+    /// Whether the user pinned/saved this session. Saved sessions sort before
+    /// ordinary sessions in every first-party session picker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub saved: bool,
+    /// Persisted transcript update time, used for newest-first ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<i64>,
+    /// Most recent active-process timestamp when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at_ms: Option<i64>,
     /// Archived sessions are hidden from the default list but never deleted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub archived: bool,

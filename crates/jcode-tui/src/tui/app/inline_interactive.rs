@@ -3678,9 +3678,14 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Some(ref mut picker) = self.inline_interactive_state
-                    && !c.is_whitespace()
+                    // Spaces separate independently matched search terms. The
+                    // token matcher already permits those terms to appear in
+                    // any order, so dropping whitespace here made that
+                    // capability impossible to use from the picker.
+                    && (!c.is_whitespace()
+                        || (!picker.filter.is_empty() && !picker.filter.ends_with(' ')))
                 {
-                    picker.filter.push(c);
+                    picker.filter.push(if c.is_whitespace() { ' ' } else { c });
                     Self::apply_inline_interactive_filter(picker);
                 }
             }
