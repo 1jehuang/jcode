@@ -103,6 +103,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
     needs_redraw |= app.onboarding_tick();
+    needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.poll_compaction_completion();
     needs_redraw |= app.maybe_refresh_overnight_display_card();
     needs_redraw |= super::commands::poll_local_transfer_prepare(app);

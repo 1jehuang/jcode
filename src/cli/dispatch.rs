@@ -1012,6 +1012,7 @@ async fn run_default_command(args: Args) -> Result<()> {
         args.fresh_spawn,
         args.remote_working_dir,
         args.onboarding_sim,
+        args.update_sim,
     )
     .await?;
 

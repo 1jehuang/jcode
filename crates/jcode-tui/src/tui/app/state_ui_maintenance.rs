@@ -16,14 +16,7 @@ impl App {
         {
             return false;
         }
-        self.handle_update_status(crate::bus::UpdateStatus::Available {
-            current: jcode_build_meta::version().to_string(),
-            latest: "v99.0.0-simulated".to_string(),
-        });
-        self.push_display_message(DisplayMessage::system(
-            "Update simulator opened with Alt+_. Try `/update-sim download`, then `install`, `done`, or `error`. Nothing real will be changed."
-                .to_string(),
-        ));
+        self.restart_update_simulator();
         true
     }
 
