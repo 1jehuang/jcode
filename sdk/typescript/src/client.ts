@@ -454,6 +454,15 @@ export class JcodeClient extends EventEmitter {
     return frame.session;
   }
 
+  /** Clone a session's complete persisted context into a new idle session. */
+  async forkSession(sessionId: string): Promise<SessionInfo> {
+    const frame = await this.expectReply(
+      { req: "fork_session", session_id: sessionId },
+      "session_forked",
+    );
+    return frame.session;
+  }
+
   async detachSession(sessionId: string): Promise<void> {
     await this.requestOk({ req: "detach_session", session_id: sessionId });
   }
