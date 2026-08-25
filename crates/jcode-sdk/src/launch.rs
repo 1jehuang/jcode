@@ -5,6 +5,7 @@
 //! home which the returned owner tears down on drop.
 
 use crate::errors::{Error, ErrorKind, Result};
+#[cfg(unix)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
