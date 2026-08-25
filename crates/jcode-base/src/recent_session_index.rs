@@ -18,6 +18,7 @@ pub struct RecentSessionMetadata {
     pub generated_title: Option<String>,
     pub custom_title: Option<String>,
     pub todo_title: Option<String>,
+    pub saved: bool,
     pub updated_at_ms: i64,
     pub last_active_at_ms: Option<i64>,
 }
@@ -56,6 +57,12 @@ fn open() -> Result<Connection> {
          CREATE INDEX IF NOT EXISTS recent_sessions_activity
          ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
     )?;
+    // Additive migration for databases created before saved-session ordering
+    // became part of the shared session-list contract.
+    let _ = connection.execute(
+        "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(connection)
 }
 
@@ -63,7 +70,7 @@ pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
     let connection = open()?;
     let mut statement = connection.prepare(
         "SELECT session_id, working_dir, generated_title, custom_title,
-                todo_title, updated_at_ms, last_active_at_ms
+                todo_title, saved, updated_at_ms, last_active_at_ms
          FROM recent_sessions
          ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
          LIMIT ?1",
@@ -76,8 +83,9 @@ pub fn recent(limit: usize) -> Result<Vec<RecentSessionMetadata>> {
                 generated_title: row.get(2)?,
                 custom_title: row.get(3)?,
                 todo_title: row.get(4)?,
-                updated_at_ms: row.get(5)?,
-                last_active_at_ms: row.get(6)?,
+                saved: row.get(5)?,
+                updated_at_ms: row.get(6)?,
+                last_active_at_ms: row.get(7)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -92,6 +100,7 @@ pub fn upsert_session(session: &Session) -> Result<()> {
         generated_title: session.title.clone(),
         custom_title: session.custom_title.clone(),
         todo_title: crate::todo::load_session_title(&session.id),
+        saved: session.saved,
         updated_at_ms: session.updated_at.timestamp_millis(),
         last_active_at_ms: session.last_active_at.map(|time| time.timestamp_millis()),
     })
@@ -101,13 +110,14 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
     open()?.execute(
         "INSERT INTO recent_sessions (
              session_id, working_dir, generated_title, custom_title, todo_title,
-             updated_at_ms, last_active_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             saved, updated_at_ms, last_active_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(session_id) DO UPDATE SET
              working_dir = excluded.working_dir,
              generated_title = excluded.generated_title,
              custom_title = excluded.custom_title,
              todo_title = excluded.todo_title,
+             saved = excluded.saved,
              updated_at_ms = excluded.updated_at_ms,
              last_active_at_ms = excluded.last_active_at_ms",
         params![
@@ -116,6 +126,7 @@ pub fn upsert(entry: &RecentSessionMetadata) -> Result<()> {
             entry.generated_title,
             entry.custom_title,
             entry.todo_title,
+            entry.saved,
             entry.updated_at_ms,
             entry.last_active_at_ms,
         ],
@@ -155,6 +166,7 @@ mod tests {
             generated_title: Some("Generated".into()),
             custom_title: None,
             todo_title: Some("Todo goal".into()),
+            saved: false,
             updated_at_ms: 1,
             last_active_at_ms: None,
         };
