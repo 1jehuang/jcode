@@ -474,7 +474,11 @@ fn background_task_rows_retain_the_two_most_recently_active_tasks() {
 
 #[test]
 fn indeterminate_background_update_preserves_last_known_percent() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _render_lock = crate::tui::ui::render_state_test_lock();
     let mut app = create_test_app();
+    app.session.short_name = Some("test".to_string());
+    app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
     app.upsert_running_background_task(
         "build".to_string(),
         "cargo build".to_string(),
@@ -492,6 +496,14 @@ fn indeterminate_background_update_preserves_last_known_percent() {
         .expect("background row should remain present");
     assert_eq!(row.percent, Some(42.0));
     assert_eq!(row.label, "Compiling jcode");
+
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    let rendered = render_and_snap(&app, &mut terminal);
+    assert!(
+        rendered.contains("Compiling jcode") && rendered.contains("42%"),
+        "phase-only update reset or hid the visible percentage:\n{rendered}"
+    );
 }
 
 #[test]
