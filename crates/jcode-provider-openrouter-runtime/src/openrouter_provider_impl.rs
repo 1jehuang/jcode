@@ -155,7 +155,14 @@ impl Provider for OpenRouterProvider {
                 // GPT-family models on direct compat gateways (e.g. OpenCode
                 // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
                 // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
+                let effort = if strict_openai_schema
+                    && (jcode_base::prompt::is_swarm_effort(effort) || effort == "max")
+                {
+                    // Strict OpenAI-schema endpoints such as Mistral document
+                    // xhigh as their strongest accepted value and reject the
+                    // jcode/OpenAI UX alias `max`.
+                    "xhigh"
+                } else if jcode_base::prompt::is_swarm_effort(effort) {
                     "max"
                 } else {
                     effort
