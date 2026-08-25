@@ -634,6 +634,20 @@ pub fn fuzzy_match_positions(needle: &str, haystack: &str) -> Vec<usize> {
         .unwrap_or_default()
 }
 
+/// Return the union of positions matched by whitespace-separated query words.
+///
+/// Words are matched independently, just like [`fuzzy_score_tokens`], so the
+/// returned highlights remain useful when query terms are typed out of order.
+pub fn fuzzy_match_token_positions(needle: &str, haystack: &str) -> Vec<usize> {
+    let mut positions: Vec<usize> = needle
+        .split_whitespace()
+        .flat_map(|word| fuzzy_match_positions(word, haystack))
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
 /// Match a slash command. A leading slash is ignored for scoring, and the first
 /// true character match remains anchored to the command's first letter to keep
 /// short slash suggestions precise.
@@ -706,6 +720,21 @@ mod tests {
         assert!(fuzzy_score_tokens("gpt anthropic", "gpt-5-codex openai responses").is_none());
         // Words may hit different fields in any order.
         assert!(fuzzy_score_tokens("openai gpt", "gpt-5-codex openai responses").is_some());
+    }
+
+    #[test]
+    fn multi_word_queries_combine_out_of_order_terms_and_typos() {
+        assert!(fuzzy_score_tokens("opneai codxe", "gpt-5-codex openai responses").is_some());
+        assert!(fuzzy_score_tokens("sonet clade", "claude-sonnet-4.5 anthropic api").is_some());
+    }
+
+    #[test]
+    fn token_positions_highlight_out_of_order_terms() {
+        let positions = fuzzy_match_token_positions("sonet clade", "claude-sonnet-4.5");
+        assert!(!positions.is_empty());
+        assert!(positions.contains(&0));
+        assert!(positions.iter().any(|&position| position >= 7));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]
