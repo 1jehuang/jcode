@@ -2904,6 +2904,9 @@ impl App {
         if self.handle_onboarding_sim_reset_shortcut(code, modifiers) {
             return Ok(());
         }
+        if self.handle_update_sim_shortcut(code, modifiers) {
+            return Ok(());
+        }
 
         // The onboarding simulator owns all key handling while active so the
         // real onboarding handlers and simulated modal overlays never fire (no
