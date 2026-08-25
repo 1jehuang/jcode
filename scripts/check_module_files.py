@@ -2,7 +2,7 @@
 """Fail when a `mod` declaration has no corresponding file.
 
 `221159294` broke `master` exactly this way: it declared `mod frame_meter;` and
-`mod scroll_profile;` in `jcode-desktop2/src/main.rs` without committing either
+`mod scroll_profile;` in `jcode-tui/src/main.rs` without committing either
 file, leaving a tree that could not be formatted or built.
 
 The underlying cause recurs. `c9ccb4f01` and `96a4a91ed` came from the same

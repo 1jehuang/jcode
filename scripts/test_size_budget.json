@@ -13,8 +13,6 @@
     "crates/jcode-base/src/live_tests.rs": 3087,
     "crates/jcode-base/src/provider/tests/model_resolution.rs": 2435,
     "crates/jcode-base/src/session_tests/cases.rs": 2465,
-    "crates/jcode-desktop2/src/tests/actions.rs": 1549,
-    "crates/jcode-desktop2/src/tests/visual.rs": 1245,
     "crates/jcode-harness-api-server/src/translate_tests.rs": 1390,
     "crates/jcode-plan/src/dag/tests.rs": 1392,
     "crates/jcode-provider-anthropic-runtime/src/anthropic_tests.rs": 2017,

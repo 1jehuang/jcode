@@ -1,7 +1,7 @@
 //! Parity between the Rust and TypeScript SDKs.
 //!
 //! Second-order dogfooding only works if the two SDKs stay the same shape. If
-//! the Rust one drifts into "whatever desktop2 happened to need", desktop2
+//! the Rust one drifts into "whatever external client happened to need", external client
 //! stops telling us anything about the TypeScript one and we are back to
 //! validating the TS SDK with examples written to make it look good.
 //!
@@ -107,7 +107,7 @@ fn the_typescript_sdk_implements_every_shared_capability() {
         missing.is_empty(),
         "the shared SDK surface names capabilities the TypeScript SDK does not \
          have: {missing:?}. A capability that exists only in Rust means \
-         desktop2 is exercising a design the shipped SDK does not have, which \
+         external client is exercising a design the shipped SDK does not have, which \
          is the drift this test exists to prevent."
     );
 }
@@ -115,7 +115,7 @@ fn the_typescript_sdk_implements_every_shared_capability() {
 /// Neither SDK has a public capability that is missing from the shared list.
 ///
 /// The direction that actually rots: someone adds a method to the Rust SDK for
-/// desktop2, never touches the TS SDK, and the lists silently diverge. Failing
+/// external client, never touches the TS SDK, and the lists silently diverge. Failing
 /// here forces the decision to be made rather than deferred.
 #[test]
 fn neither_sdk_has_an_untriaged_public_capability() {

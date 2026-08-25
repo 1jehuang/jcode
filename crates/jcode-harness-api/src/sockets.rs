@@ -1,7 +1,7 @@
 //! Socket path resolution shared by every harness API client and the bridge.
 //!
 //! This lives in the API crate on purpose. It used to be duplicated in the
-//! bridge and in `jcode-desktop2`, and the two copies disagreed: the bridge
+//! bridge and external clients, where separate copies could disagree: the bridge
 //! resolved `$XDG_RUNTIME_DIR` while the desktop always looked in
 //! `~/.jcode`. The result was a desktop app that could never connect even
 //! with a healthy bridge running. One definition, used by both sides, makes

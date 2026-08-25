@@ -1,9 +1,0 @@
-[package]
-name = "jcode-math"
-version = "0.1.0"
-edition = "2024"
-publish = false
-description = "TeX-style math typesetting: LaTeX to a renderer-neutral box/glyph layout using OpenType MATH metrics"
-
-[dependencies]
-ttf-parser = "0.25"

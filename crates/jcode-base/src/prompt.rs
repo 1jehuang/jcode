@@ -193,7 +193,6 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
 pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
-const SELFDEV_FOCUS_DESKTOP2_PROMPT: &str = include_str!("prompt/selfdev_focus_desktop2.txt");
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
 #[derive(Debug, Clone, Default)]
@@ -665,27 +664,17 @@ fn build_selfdev_prompt() -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelfDevProductContext {
     Tui,
-    Desktop2,
 }
 
 impl SelfDevProductContext {
     fn from_working_dir(working_dir: Option<&Path>) -> Self {
-        let Some(working_dir) = working_dir else {
-            return Self::Tui;
-        };
-
-        let path = working_dir.to_string_lossy().replace('\\', "/");
-        if path.contains("/crates/jcode-desktop") || path.ends_with("crates/jcode-desktop2") {
-            Self::Desktop2
-        } else {
-            Self::Tui
-        }
+        let _ = working_dir;
+        Self::Tui
     }
 
     fn prompt_block(self) -> &'static str {
         match self {
             Self::Tui => SELFDEV_FOCUS_TUI_PROMPT,
-            Self::Desktop2 => SELFDEV_FOCUS_DESKTOP2_PROMPT,
         }
     }
 }

@@ -1,5 +1,0 @@
-## Product Focus
-
-This self-dev session was launched from the jcode-desktop2 (greenfield desktop) context. By default, assume the user is asking about desktop2 unless they explicitly mention the TUI/CLI. Prefer desktop2 targets and commands (`selfdev build target=desktop2`, package `jcode-desktop2`, binary `jcode-desktop2`, launcher `~/.local/bin/jcode-desktop2`) for builds, reloads, tests, and UI debugging.
-
-Desktop2 is a greenfield rewrite: it talks to the jcode runtime through the harness API bridge (`jcode-harness-api`, `jcode-harness-api-bridge`) instead of the legacy desktop socket path.
