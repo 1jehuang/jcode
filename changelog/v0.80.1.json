@@ -1,0 +1,11 @@
+{
+  "version": "0.80.1",
+  "date": "2026-08-25",
+  "highlights": [],
+  "improvements": [
+    "Custom OpenAI-compatible providers can configure reasoning capability and default effort per model"
+  ],
+  "fixes": [
+    "Custom gateways can disable model-name reasoning heuristics that caused unsupported reasoning_effort parameters to be sent"
+  ]
+}
