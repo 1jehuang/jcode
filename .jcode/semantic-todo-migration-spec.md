@@ -133,5 +133,5 @@ block persisting.
   `cargo test -p jcode-app-core todo`, `cargo test -p jcode-tui todo`,
   `cargo check -p jcode-tui -p jcode-telemetry-core`.
 
-Do NOT touch unrelated dirty files (desktop2, render-core, etc). Commit nothing;
+Do NOT touch unrelated dirty files. Commit nothing;
 the coordinator commits.

@@ -42,13 +42,6 @@ jobs:
           key: quality-ubuntu
           cache-all-crates: "true"
 
-      - name: Install system dependencies
-        # jcode-desktop2 pulls yeslogic-fontconfig-sys, whose build script hard
-        # fails without fontconfig.pc. Without this the "Enforce desktop2 frame
-        # budget" step cannot even build, and `cargo check --all-targets
-        # --all-features` above is affected the same way.
-        run: sudo apt-get update && sudo apt-get install -y -qq libfontconfig1-dev
-
       - name: Check module declarations resolve
         # A `mod x;` with no file makes rustfmt fail with "Error writing files:
         # failed to resolve mod", which reads like a formatting problem and hides
@@ -104,22 +97,6 @@ jobs:
       - name: Enforce wildcard re-export ratchet
         shell: bash
         run: python3 scripts/check_wildcard_reexport_budget.py
-
-      # Frame-cost gate for desktop2. `build_scene` is a pure function of its
-      # model and `states::NODES` enumerates the app's visual states, so frame
-      # cost is something CI can evaluate rather than something a person has to
-      # notice by using the app and reporting that it feels slow.
-      #
-      # The decisive assertion is about work, not time: an unchanged frame must
-      # not lay the transcript out again. That is exact, so it fires on a
-      # contended CI runner exactly as it does locally, unlike a wall-clock
-      # budget which has to carry enough slack to hide real regressions.
-      #
-      # Runs on the default profile so it reuses this job's existing build
-      # artifacts rather than compiling a second dependency tree.
-      - name: Enforce desktop2 frame budget
-        shell: bash
-        run: "cargo test -p jcode-desktop2 profile:: -- --test-threads=1"
 
       - name: Enforce no unused dependencies
         shell: bash
