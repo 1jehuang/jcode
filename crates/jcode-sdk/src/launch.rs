@@ -395,7 +395,21 @@ fn link_credential_file(source: &Path, root: &Path, relative: &Path) -> Result<(
     let parent = ensure_instance_directory(root, parent_relative)?;
     let destination = parent.join(relative.file_name().unwrap_or_default());
     let _ = fs::remove_file(&destination);
+    link_file(source, &destination)
+}
+
+#[cfg(unix)]
+fn link_file(source: &Path, destination: &Path) -> Result<()> {
     std::os::unix::fs::symlink(source, destination).map_err(launch_io)
+}
+
+#[cfg(windows)]
+fn link_file(source: &Path, destination: &Path) -> Result<()> {
+    // Preserve rotating credentials rather than silently creating a stale copy.
+    // Windows may require Developer Mode or symlink privileges; report that OS
+    // error to the caller when links are unavailable.
+    std::os::windows::fs::symlink_file(source, destination)
+        .map_err(launch_io)
 }
 
 fn ensure_instance_directory(root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -442,7 +456,7 @@ pub type Progress<'a> = dyn Fn(&str) + 'a;
 
 /// Whether anything is listening on a socket path.
 pub fn socket_accepts(path: &Path) -> bool {
-    std::os::unix::net::UnixStream::connect(path).is_ok()
+    jcode_transport::is_socket_path(path)
 }
 
 /// Locate a sibling executable next to our own, falling back to `$PATH`.
@@ -530,6 +544,7 @@ pub fn wait_for_socket(path: &Path, what: &str, timeout: Duration) -> Result<()>
     ))
 }
 
+#[cfg(unix)]
 fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     let raw = fs::read(home.join("servers.json")).ok()?;
     let registry: Value = serde_json::from_slice(&raw).ok()?;
@@ -544,6 +559,7 @@ fn read_daemon_pid(home: &Path, runtime_dir: &Path) -> Option<i32> {
     })
 }
 
+#[cfg(unix)]
 fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     let Some(pid) = read_daemon_pid(home, runtime_dir) else {
         return;
@@ -563,6 +579,10 @@ fn stop_instance_daemon(home: &Path, runtime_dir: &Path) {
     }
 }
 
+#[cfg(not(unix))]
+fn stop_instance_daemon(_home: &Path, _runtime_dir: &Path) {}
+
+#[cfg(unix)]
 fn signal_process_group(pid: i32, signal: i32) {
     // SAFETY: `kill` does not retain pointers; both calls use validated pids.
     unsafe {
@@ -572,11 +592,13 @@ fn signal_process_group(pid: i32, signal: i32) {
     }
 }
 
+#[cfg(unix)]
 fn process_exists(pid: i32) -> bool {
     // SAFETY: signal 0 only probes whether the numeric pid exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+#[cfg(unix)]
 fn terminate_child(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
@@ -592,6 +614,17 @@ fn terminate_child(child: &mut Child) {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    // std's Windows Child::kill uses TerminateProcess. There is no portable
+    // graceful signal equivalent, so terminate immediately and reap it.
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -662,6 +695,18 @@ fn set_owner_only_dir(path: &Path) -> Result<()> {
 fn set_owner_only_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(launch_io)
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_dir(_path: &Path) -> Result<()> {
+    // Windows access is controlled by inherited ACLs. std does not expose an
+    // owner-only ACL operation, and marking a path read-only is not equivalent.
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_owner_only_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn launch_io(error: std::io::Error) -> Error {

@@ -307,6 +307,12 @@ impl SyncStream {
         Ok(Self { handle: file })
     }
 
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self {
+            handle: self.handle.try_clone()?,
+        })
+    }
+
     pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
         let _ = timeout;
         // std::fs::File-backed named pipes do not expose socket-style read timeouts.
