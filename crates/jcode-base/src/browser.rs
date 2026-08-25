@@ -244,6 +244,24 @@ pub async fn ensure_browser_setup() -> Result<String> {
         return Ok(log);
     }
 
+    // A silent bridge with installed binaries usually just means Firefox is
+    // closed. That is not an install problem, so launch Firefox and re-check
+    // before running any repair or reopening the extension installer.
+    let initial_status = match try_launch_firefox_for_bridge(&initial_status).await? {
+        Some(refreshed) if refreshed.ready => {
+            log.push_str(
+                "Firefox was not running, so it was launched and the browser bridge reconnected.\n",
+            );
+            log.push_str("No setup action was needed.\n");
+            return Ok(log);
+        }
+        Some(refreshed) => {
+            log.push_str("Firefox was not running; launched it, but the bridge did not reconnect yet. Continuing with setup checks...\n");
+            refreshed
+        }
+        None => initial_status,
+    };
+
     if initial_status.responding && !initial_status.compatible {
         log.push_str("Browser bridge is connected, but the live Firefox extension is out of date for this jcode build. Attempting repair steps...\n");
         if !initial_status.missing_actions.is_empty() {
@@ -868,6 +886,159 @@ fn should_prompt_extension_install(status: &BrowserStatus) -> bool {
         return true;
     }
     status.binary_installed && !status.responding
+}
+
+/// Whether a Firefox process appears to be running on this machine.
+///
+/// A bridge that once completed setup but stopped responding usually means
+/// Firefox is simply closed, not that the install broke. Callers use this to
+/// launch Firefox instead of re-running one-time setup.
+pub fn is_firefox_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        const FIREFOX_PROCESS_NAMES: &[&str] = &["firefox", "firefox-bin", "firefox-esr"];
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+                continue;
+            }
+            if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm"))
+                && FIREFOX_PROCESS_NAMES.contains(&comm.trim())
+            {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("pgrep")
+            .args(["-ix", "firefox"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", "IMAGENAME eq firefox.exe", "/NH"])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .to_ascii_lowercase()
+                    .contains("firefox.exe")
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+/// Launch Firefox detached, without any install prompt. Returns whether a
+/// launch was started (not whether Firefox finished starting).
+fn launch_firefox_detached() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let candidates: &[&[&str]] = &[
+            &["firefox"],
+            &["firefox-esr"],
+            &["flatpak", "run", "org.mozilla.firefox"],
+        ];
+        for candidate in candidates {
+            let mut cmd = std::process::Command::new(candidate[0]);
+            cmd.args(&candidate[1..])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(child) = crate::platform::spawn_detached(&mut cmd) {
+                crate::platform::reap_detached(child);
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for args in [
+            ["-a", "Firefox"].as_slice(),
+            ["-b", "org.mozilla.firefox"].as_slice(),
+        ] {
+            let launched = std::process::Command::new("open")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if launched {
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", "firefox"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Ok(child) = crate::platform::spawn_detached(&mut cmd) {
+            crate::platform::reap_detached(child);
+            return true;
+        }
+        false
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+/// Whether a silent bridge should be revived by launching Firefox rather than
+/// by re-running setup: the binaries are installed, the bridge is not
+/// responding, and no Firefox process is running.
+pub fn should_attempt_firefox_launch(status: &BrowserStatus, firefox_running: bool) -> bool {
+    !status.ready && status.binary_installed && !status.responding && !firefox_running
+}
+
+/// Whether automatic Firefox launching is disabled via environment.
+///
+/// Set `JCODE_BROWSER_AUTOLAUNCH=0` to keep jcode from starting Firefox on its
+/// own. Tests also use this to stay hermetic.
+pub fn firefox_autolaunch_disabled() -> bool {
+    matches!(
+        std::env::var("JCODE_BROWSER_AUTOLAUNCH").as_deref(),
+        Ok("0") | Ok("false") | Ok("off") | Ok("no")
+    )
+}
+
+/// If the bridge is installed but silent because Firefox is not running,
+/// launch Firefox, wait briefly for the bridge to reconnect, and return the
+/// refreshed status. Returns `Ok(None)` when no launch was attempted (bridge
+/// healthy, binaries missing, Firefox already running, or launch failed).
+pub async fn try_launch_firefox_for_bridge(status: &BrowserStatus) -> Result<Option<BrowserStatus>> {
+    if firefox_autolaunch_disabled() {
+        return Ok(None);
+    }
+    if !should_attempt_firefox_launch(status, is_firefox_running()) {
+        return Ok(None);
+    }
+    if !launch_firefox_detached() {
+        return Ok(None);
+    }
+    let _ = wait_for_ping(30).await;
+    Ok(Some(ensure_browser_ready_noninteractive().await?))
 }
 
 async fn install_extension() -> Result<String> {

@@ -88,6 +88,51 @@ fn test_should_prompt_extension_install_only_before_setup_complete() {
 }
 
 #[test]
+fn test_should_attempt_firefox_launch_only_when_firefox_closed_and_bridge_silent() {
+    let installed_but_silent = BrowserStatus {
+        backend: "firefox_agent_bridge",
+        browser: "firefox",
+        setup_complete: true,
+        binary_installed: true,
+        responding: false,
+        compatible: false,
+        missing_actions: vec![],
+        ready: false,
+    };
+
+    // Bridge installed and silent, Firefox closed: launch Firefox rather than
+    // pushing the agent toward one-time setup/repair.
+    assert!(should_attempt_firefox_launch(&installed_but_silent, false));
+
+    // Firefox already running: launching another instance will not help.
+    assert!(!should_attempt_firefox_launch(&installed_but_silent, true));
+
+    // Binaries missing: this genuinely needs setup, not a Firefox launch.
+    let not_installed = BrowserStatus {
+        binary_installed: false,
+        setup_complete: false,
+        ..installed_but_silent.clone()
+    };
+    assert!(!should_attempt_firefox_launch(&not_installed, false));
+
+    // Bridge responding (even if incompatible): Firefox is clearly up.
+    let responding = BrowserStatus {
+        responding: true,
+        ..installed_but_silent.clone()
+    };
+    assert!(!should_attempt_firefox_launch(&responding, false));
+
+    // Already ready: nothing to do.
+    let ready = BrowserStatus {
+        responding: true,
+        compatible: true,
+        ready: true,
+        ..installed_but_silent
+    };
+    assert!(!should_attempt_firefox_launch(&ready, false));
+}
+
+#[test]
 fn setup_complete_requires_native_host_binary() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");

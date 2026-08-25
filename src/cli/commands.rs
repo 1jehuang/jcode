@@ -1974,6 +1974,14 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 println!(
                     "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
                 );
+            } else if status.binary_installed && !browser::is_firefox_running() {
+                println!(
+                    "\nFirefox is not running, so the bridge cannot respond. Start Firefox (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run."
+                );
+            } else if status.binary_installed {
+                println!(
+                    "\nFirefox is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled in the running profile. Run `jcode browser setup` only to repair the install."
+                );
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
             }
