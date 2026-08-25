@@ -18,6 +18,9 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
+
+const AGENTGREP_FOREGROUND_BUDGET: Duration = Duration::from_secs(5);
 
 mod args;
 mod context;
@@ -245,6 +248,8 @@ impl Tool for AgentGrepTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: AgentGrepInput = serde_json::from_value(input)?;
+        let display_name = summarize_background_search(&params);
+        let session_id = ctx.session_id.clone();
         // The search shells out to ripgrep and walks/reads files (and for
         // trace/outline modes also loads the session and reads more files),
         // all of which is blocking work with no async yield points. Offload it
@@ -254,10 +259,77 @@ impl Tool for AgentGrepTool {
         // the first cold-cache search feel like it "takes forever" with no
         // spinner and an unresponsive interrupt. This mirrors how the sibling
         // grep/glob/ls tools offload their work.
-        tokio::task::spawn_blocking(move || run_agentgrep_blocking(&params, &ctx))
-            .await
-            .map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
+        let work_handle =
+            tokio::task::spawn_blocking(move || run_agentgrep_blocking(&params, &ctx));
+        await_or_background_search(
+            work_handle,
+            AGENTGREP_FOREGROUND_BUDGET,
+            display_name,
+            session_id,
+        )
+        .await
     }
+}
+
+async fn await_or_background_search(
+    mut work_handle: tokio::task::JoinHandle<Result<ToolOutput>>,
+    foreground_budget: Duration,
+    display_name: String,
+    session_id: String,
+) -> Result<ToolOutput> {
+    match tokio::time::timeout(foreground_budget, &mut work_handle).await {
+        Ok(joined) => {
+            joined.map_err(|err| anyhow::anyhow!("agentgrep task failed to join: {err}"))?
+        }
+        Err(_) => {
+            let info = crate::background::global()
+                .adopt_with_options(
+                    "agentgrep",
+                    Some(display_name.clone()),
+                    &session_id,
+                    true,
+                    false,
+                    work_handle,
+                )
+                .await;
+            Ok(ToolOutput::new(format!(
+                    "Search is still running after 5s and is continuing in background.\n\n\
+                     Task ID: {}\n\
+                     Name: {}\n\n\
+                     Use `bg` with action=\"wait\" and task_id=\"{}\" to wait for completion, or action=\"output\" to inspect its output.",
+                    info.task_id, display_name, info.task_id,
+                ))
+                .with_title(display_name.clone())
+                .with_metadata(json!({
+                    "background": true,
+                    "task_id": info.task_id,
+                    "display_name": display_name,
+                    "output_file": info.output_file.to_string_lossy(),
+                    "status_file": info.status_file.to_string_lossy(),
+                    "timeout_promoted": true,
+                    "foreground_timeout_ms": foreground_budget.as_millis(),
+                })))
+        }
+    }
+}
+
+fn summarize_background_search(params: &AgentGrepInput) -> String {
+    let subject = params
+        .query
+        .as_deref()
+        .or(params.file.as_deref())
+        .or_else(|| {
+            params
+                .terms
+                .as_ref()
+                .and_then(|terms| terms.first().map(String::as_str))
+        })
+        .unwrap_or("workspace");
+    format!(
+        "agentgrep {}: {}",
+        params.mode,
+        util::truncate_str(subject, 80)
+    )
 }
 
 fn run_agentgrep_blocking(params: &AgentGrepInput, ctx: &ToolContext) -> Result<ToolOutput> {

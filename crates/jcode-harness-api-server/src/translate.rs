@@ -36,6 +36,7 @@ const REQUIRES_ATTACH: &[&str] = &[
     "compact",
     "rename_session",
     "get_runtime_info",
+    "fork_session",
     "read_file",
     "find_files",
     "search_text",
@@ -97,6 +98,8 @@ pub struct BridgeState {
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64)>,
+    /// Legacy and API ids for an in-flight session fork.
+    pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
     /// reply becomes a `model_info` event rather than a request reply, so it is
     /// tracked apart from `pending_simple`.
@@ -150,6 +153,12 @@ struct PersistedSessionMetadata {
     custom_title: Option<String>,
     #[serde(default)]
     todo_title: Option<String>,
+    #[serde(default)]
+    saved: bool,
+    #[serde(skip)]
+    updated_at_ms: Option<i64>,
+    #[serde(skip)]
+    last_active_at_ms: Option<i64>,
 }
 
 impl PersistedSessionMetadata {
@@ -174,6 +183,7 @@ struct RecentSessionIndexEntry {
     generated_title: Option<String>,
     custom_title: Option<String>,
     todo_title: Option<String>,
+    saved: bool,
     updated_at_ms: i64,
     last_active_at_ms: Option<i64>,
 }
@@ -185,6 +195,9 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
             title: entry.generated_title.clone(),
             custom_title: entry.custom_title.clone(),
             todo_title: entry.todo_title.clone(),
+            saved: entry.saved,
+            updated_at_ms: Some(entry.updated_at_ms),
+            last_active_at_ms: entry.last_active_at_ms,
         }
     }
 }
@@ -401,6 +414,11 @@ impl BridgeState {
                 }
                 vec![Outbound::Legacy(message)]
             }
+            "fork_session" => {
+                let id = self.legacy_id();
+                self.pending_fork_id = Some((id, api_id));
+                vec![Outbound::Legacy(json!({"type": "split", "id": id}))]
+            }
             "cancel" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
@@ -551,6 +569,16 @@ impl BridgeState {
                             "idle".into()
                         },
                         transcript_bytes: Self::transcript_bytes(&session_id),
+                        saved: metadata.get(&session_id).is_some_and(|value| value.saved),
+                        updated_at_ms: metadata
+                            .get(&session_id)
+                            .and_then(|value| value.updated_at_ms)
+                            .or_else(|| {
+                                Self::session_modified_ms(&session_id).map(|value| value as i64)
+                            }),
+                        last_active_at_ms: metadata
+                            .get(&session_id)
+                            .and_then(|value| value.last_active_at_ms),
                         archived: archive.sessions.contains_key(&session_id),
                         archived_at_ms: archive.sessions.get(&session_id).copied(),
                         session_id,
@@ -853,6 +881,17 @@ impl BridgeState {
                         ApiEvent::Attached {
                             session: SessionInfo {
                                 transcript_bytes: Self::transcript_bytes(&session_id),
+                                saved: metadata.as_ref().is_some_and(|value| value.saved),
+                                updated_at_ms: metadata
+                                    .as_ref()
+                                    .and_then(|value| value.updated_at_ms)
+                                    .or_else(|| {
+                                        Self::session_modified_ms(&session_id)
+                                            .map(|value| value as i64)
+                                    }),
+                                last_active_at_ms: metadata
+                                    .as_ref()
+                                    .and_then(|value| value.last_active_at_ms),
                                 session_id,
                                 working_dir: metadata
                                     .as_ref()
@@ -948,6 +987,50 @@ impl BridgeState {
                 } else {
                     vec![]
                 }
+            }
+            "split_response" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some((_, api_id)) = self
+                    .pending_fork_id
+                    .take()
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                else {
+                    return vec![];
+                };
+                let session_id = event["new_session_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let metadata = Self::resolve_session_metadata(&session_id);
+                vec![ServerFrame::reply(
+                    api_id,
+                    ApiEvent::SessionForked {
+                        session: SessionInfo {
+                            transcript_bytes: Self::transcript_bytes(&session_id),
+                            saved: metadata.as_ref().is_some_and(|value| value.saved),
+                            updated_at_ms: Self::session_modified_ms(&session_id)
+                                .map(|value| value as i64),
+                            last_active_at_ms: metadata
+                                .as_ref()
+                                .and_then(|value| value.last_active_at_ms),
+                            session_id,
+                            working_dir: metadata
+                                .as_ref()
+                                .and_then(|value| value.working_dir.clone()),
+                            title: event["new_session_name"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    metadata
+                                        .as_ref()
+                                        .and_then(PersistedSessionMetadata::display_title)
+                                }),
+                            status: "idle".into(),
+                            archived: false,
+                            archived_at_ms: None,
+                        },
+                    },
+                )]
             }
             "pong" => self
                 .take_simple(event["id"].as_u64().unwrap_or(0), SimpleKind::Ping)
@@ -1196,8 +1279,15 @@ impl BridgeState {
                 if no_reply_api_id.is_some() {
                     self.pending_no_reply_message_id = None;
                 }
+                let fork_api_id = self
+                    .pending_fork_id
+                    .filter(|(legacy_id, _)| *legacy_id == id)
+                    .map(|(_, api_id)| api_id);
+                if fork_api_id.is_some() {
+                    self.pending_fork_id = None;
+                }
                 // Route to a pending request when possible, else stream it.
-                let reply_to = no_reply_api_id.or_else(|| {
+                let reply_to = no_reply_api_id.or(fork_api_id).or_else(|| {
                     self.pending_simple
                         .iter()
                         .position(|(legacy_id, _, _)| *legacy_id == id)
@@ -1350,6 +1440,11 @@ impl BridgeState {
             custom_title: Self::metadata_string(&tail, "custom_title", true)
                 .or_else(|| Self::metadata_string(&head, "custom_title", true)),
             todo_title: None,
+            saved: Self::metadata_bool(&tail, "saved", true)
+                .or_else(|| Self::metadata_bool(&head, "saved", false))
+                .unwrap_or(false),
+            updated_at_ms: None,
+            last_active_at_ms: None,
             working_dir: Self::metadata_string(&tail, "working_dir", true)
                 .or_else(|| Self::metadata_string(&head, "working_dir", true)),
         })
@@ -1365,6 +1460,20 @@ impl BridgeState {
         Option::<String>::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..]))
             .ok()
             .flatten()
+    }
+
+    fn metadata_bool(bytes: &[u8], field: &str, last: bool) -> Option<bool> {
+        let needle = format!("\"{field}\":");
+        let mut starts = bytes
+            .windows(needle.len())
+            .enumerate()
+            .filter_map(|(at, window)| (window == needle.as_bytes()).then_some(at + needle.len()));
+        let start = if last {
+            starts.next_back()?
+        } else {
+            starts.next()?
+        };
+        bool::deserialize(&mut serde_json::Deserializer::from_slice(&bytes[start..])).ok()
     }
 
     fn resolve_working_dir(session_id: &str) -> Option<String> {
@@ -1431,7 +1540,8 @@ impl BridgeState {
                      custom_title TEXT,
                      todo_title TEXT,
                      updated_at_ms INTEGER NOT NULL,
-                     last_active_at_ms INTEGER
+                     last_active_at_ms INTEGER,
+                     saved INTEGER NOT NULL DEFAULT 0
                  );
                  CREATE INDEX IF NOT EXISTS recent_sessions_activity
                  ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
@@ -1440,9 +1550,13 @@ impl BridgeState {
         {
             return Vec::new();
         }
+        let _ = connection.execute(
+            "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, updated_at_ms, last_active_at_ms
+                    todo_title, saved, updated_at_ms, last_active_at_ms
              FROM recent_sessions
              ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
              LIMIT 500",
@@ -1457,8 +1571,9 @@ impl BridgeState {
                     generated_title: row.get(2)?,
                     custom_title: row.get(3)?,
                     todo_title: row.get(4)?,
-                    updated_at_ms: row.get(5)?,
-                    last_active_at_ms: row.get(6)?,
+                    saved: row.get(5)?,
+                    updated_at_ms: row.get(6)?,
+                    last_active_at_ms: row.get(7)?,
                 })
             })
             .and_then(|rows| rows.collect())

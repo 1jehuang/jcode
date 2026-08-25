@@ -36,6 +36,9 @@ fn session(id: &str) -> SessionInfo {
         title: None,
         status: "idle".to_string(),
         transcript_bytes: None,
+        saved: false,
+        updated_at_ms: None,
+        last_active_at_ms: None,
         archived: false,
         archived_at_ms: None,
     }

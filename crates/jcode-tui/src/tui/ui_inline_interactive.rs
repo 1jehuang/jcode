@@ -350,7 +350,7 @@ pub(super) fn format_elapsed(secs: f32) -> String {
 }
 
 fn fuzzy_match_positions(pattern: &str, text: &str) -> Vec<usize> {
-    jcode_fuzzy::fuzzy_match_positions(pattern, text)
+    jcode_fuzzy::fuzzy_match_token_positions(pattern, text)
 }
 
 pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, area: Rect) {

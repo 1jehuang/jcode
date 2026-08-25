@@ -507,6 +507,53 @@ impl App {
 }
 
 pub(super) fn handle_dev_command(app: &mut App, trimmed: &str) -> bool {
+    if trimmed == "/update-sim" || trimmed.starts_with("/update-sim ") {
+        let stage = trimmed.strip_prefix("/update-sim").unwrap_or("").trim();
+        let simulated_version = "v99.0.0-simulated";
+        let status = match stage {
+            "" => {
+                app.restart_update_simulator();
+                app.push_display_message(DisplayMessage::system(
+                    "Update simulator started. It will automatically play the complete receive → download → install → restart experience. Press Alt+_ anytime to replay. Nothing real will be changed."
+                        .to_string(),
+                ));
+                return true;
+            }
+            "available" => crate::bus::UpdateStatus::Available {
+                current: jcode_build_meta::version().to_string(),
+                latest: simulated_version.to_string(),
+            },
+            "download" | "downloading" => crate::bus::UpdateStatus::Downloading {
+                version: simulated_version.to_string(),
+                downloaded: 37 * 1_048_576,
+                total: Some(100 * 1_048_576),
+            },
+            "install" | "installing" => crate::bus::UpdateStatus::Installing {
+                version: simulated_version.to_string(),
+            },
+            "done" | "installed" => crate::bus::UpdateStatus::Installed {
+                version: simulated_version.to_string(),
+            },
+            "error" => crate::bus::UpdateStatus::Error(
+                "Simulated network interruption (no real update was attempted)".to_string(),
+            ),
+            "reset" | "off" => crate::bus::UpdateStatus::UpToDate,
+            _ => {
+                app.push_display_message(DisplayMessage::system(
+                    "Usage: `/update-sim [available|download|install|done|error|reset]`. This preview never downloads, installs, or restarts anything."
+                        .to_string(),
+                ));
+                return true;
+            }
+        };
+        app.handle_update_status(status);
+        app.push_display_message(DisplayMessage::system(format!(
+            "Update simulator: **{}**. Try `/update-sim download`, then `install`, `done`, or `error`. Use `reset` to clear it. Nothing real was changed.",
+            if stage.is_empty() { "available" } else { stage }
+        )));
+        return true;
+    }
+
     if trimmed == "/onboarding-sim"
         || trimmed == "/onboarding-sim on"
         || trimmed == "/onboarding-sim off"
