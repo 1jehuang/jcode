@@ -393,11 +393,16 @@ async fn firefox_status(
     }
 
     if status.binary_installed {
-        return Ok(ToolOutput::new(
-            "Browser bridge binaries are installed, but the live bridge is not responding. Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task.",
-        )
-        .with_title("browser status")
-        .with_metadata(metadata));
+        let firefox_running = crate::browser::is_firefox_running();
+        metadata["firefox_running"] = json!(firefox_running);
+        let body = if firefox_running {
+            "Browser bridge binaries are installed and Firefox is running, but the live bridge is not responding. Check that the Browser Agent Bridge extension is enabled in the running Firefox profile. Use action='setup' only if you want to repair the existing install. You do not need to run setup before every browser task."
+        } else {
+            "Browser bridge binaries are installed, but Firefox is not running, so the bridge cannot respond. This is not a setup problem: setup is one-time. Run any normal browser action (for example action='open') and Firefox will be launched automatically, or start Firefox yourself and re-check status."
+        };
+        return Ok(ToolOutput::new(body)
+            .with_title("browser status")
+            .with_metadata(metadata));
     }
 
     metadata["backend"] = json!("unconfigured");
@@ -432,9 +437,24 @@ async fn ensure_firefox_ready() -> Result<Option<String>> {
     // A setup marker only proves that installation once completed. Always
     // verify the live bridge before launching an action because Firefox or the
     // extension may have stopped or become incompatible since then.
-    let status = crate::browser::ensure_browser_ready_noninteractive().await?;
+    let mut status = crate::browser::ensure_browser_ready_noninteractive().await?;
     if status.ready {
         return Ok(None);
+    }
+
+    // The most common "not responding" cause after a completed setup is that
+    // Firefox simply is not running. That is not a setup problem, so launch
+    // Firefox and re-check instead of steering toward one-time setup/repair.
+    let mut launched_firefox = false;
+    if let Some(refreshed) = crate::browser::try_launch_firefox_for_bridge(&status).await? {
+        launched_firefox = true;
+        if refreshed.ready {
+            return Ok(Some(
+                "Firefox was not running, so it was launched automatically and the browser bridge reconnected."
+                    .to_string(),
+            ));
+        }
+        status = refreshed;
     }
 
     let mut message = String::from(
@@ -451,8 +471,12 @@ async fn ensure_firefox_ready() -> Result<Option<String>> {
             ));
         }
         message.push('\n');
+    } else if launched_firefox {
+        message.push_str("Firefox was not running, so it was launched automatically, but the browser bridge is still not responding. The Browser Agent Bridge extension may be disabled or missing in this Firefox profile. This is not fixed by re-running setup unless the extension is actually missing.\n");
+    } else if crate::browser::is_firefox_running() {
+        message.push_str("Firefox is running, but the browser bridge extension is not responding. Check that the Browser Agent Bridge extension is installed and enabled in the running Firefox profile. Do not re-run setup just because the bridge is silent.\n");
     } else {
-        message.push_str("Browser bridge binaries are installed, but the live Firefox bridge is not responding.\n");
+        message.push_str("Firefox is not running, so the browser bridge is not responding. Start Firefox, then retry the browser action. Setup is one-time and is not needed again.\n");
     }
     message.push_str(
         "Normal browser tool calls will not reopen the installer automatically anymore. Do not retry browser actions until status reports ready. Continue with another available capability; if the goal requires an external capability unavailable in this session, use capability discovery.",
