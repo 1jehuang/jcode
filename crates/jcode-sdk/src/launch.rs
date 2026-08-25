@@ -464,9 +464,13 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         return Ok(());
     }
     let legacy = jcode_harness_api::legacy_socket_path();
+    let jcode = options
+        .binary
+        .clone()
+        .unwrap_or_else(|| sibling_exe("jcode"));
     if !socket_accepts(&legacy) {
         progress("starting jcode runtime...");
-        spawn_detached(&sibling_exe("jcode"), &["serve"]).map_err(|error| {
+        spawn_detached(&jcode, &["serve"]).map_err(|error| {
             Error::new(
                 ErrorKind::LaunchFailed,
                 format!("could not start the jcode runtime: {error}"),
@@ -475,10 +479,19 @@ pub fn ensure_runtime(options: &LaunchOptions, progress: &Progress<'_>) -> Resul
         wait_for_socket(&legacy, "jcode runtime", options.start_timeout)?;
     }
     progress("starting harness API bridge...");
-    spawn_detached(&sibling_exe("jcode-harness-api-bridge"), &[]).map_err(|error| {
+    let standalone_bridge = sibling_exe("jcode-harness-api-bridge");
+    let (bridge, bridge_args): (&Path, &[&str]) = if standalone_bridge.is_file() {
+        (&standalone_bridge, &[])
+    } else {
+        // Current Jcode distributions host the bridge as a CLI subcommand so a
+        // desktop bundle only needs to ship one companion executable. Keep the
+        // standalone lookup above for compatibility with older installations.
+        (&jcode, &["api-bridge"])
+    };
+    spawn_detached(bridge, bridge_args).map_err(|error| {
         Error::new(
             ErrorKind::LaunchFailed,
-            format!("could not start jcode-harness-api-bridge: {error}"),
+            format!("could not start the harness API bridge: {error}"),
         )
     })?;
     wait_for_socket(&api, "harness API bridge", options.start_timeout)
