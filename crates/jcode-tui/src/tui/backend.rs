@@ -1293,6 +1293,11 @@ impl RemoteConnection {
         self._dummy_peer.take()
     }
 
+    #[cfg(test)]
+    pub(crate) fn next_request_id_for_test(&self) -> u64 {
+        self.next_request_id
+    }
+
     /// Set session ID
     pub fn set_session_id(&mut self, id: String) {
         self.session_id = Some(id);

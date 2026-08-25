@@ -78,6 +78,32 @@ fn test_remote_model_picker_during_startup_waits_for_session_catalog() {
     assert_eq!(picker.entries[0].options[0].detail, "updating model list…");
 }
 
+#[test]
+fn test_remote_model_command_opens_picker_without_catalog_request() {
+    let mut app = create_test_app();
+    configure_test_remote_models(&mut app);
+    app.input = "/model".to_string();
+    app.cursor_pos = app.input.len();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    let request_id_before = remote.next_request_id_for_test();
+
+    rt.block_on(app.handle_remote_key(
+        KeyCode::Enter,
+        KeyModifiers::empty(),
+        &mut remote,
+    ))
+    .unwrap();
+
+    assert!(app.inline_interactive_state.is_some());
+    assert_eq!(
+        remote.next_request_id_for_test(),
+        request_id_before,
+        "opening /model must not refresh or request a remote catalog"
+    );
+}
+
 #[derive(Clone)]
 struct CountingModelRoutesProvider {
     calls: StdArc<AtomicUsize>,
