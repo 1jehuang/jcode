@@ -1181,12 +1181,13 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
         transaction
             .execute(
                 "INSERT INTO recent_sessions (
-                     session_id, working_dir, todo_title, updated_at_ms, last_active_at_ms
-                 ) VALUES (?1, '/indexed/project', ?2, ?3, ?3)",
+                     session_id, working_dir, todo_title, saved, updated_at_ms, last_active_at_ms
+                 ) VALUES (?1, '/indexed/project', ?2, ?4, ?3, ?3)",
                 params![
                     format!("indexed_{index:03}"),
                     format!("Indexed goal {index}"),
                     index,
+                    index == 99,
                 ],
             )
             .unwrap();
@@ -1201,6 +1202,13 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
         panic!("expected sessions reply, got {event:?}");
     };
     assert_eq!(sessions.len(), 100);
+    let newest = sessions
+        .iter()
+        .find(|session| session.session_id == "indexed_099")
+        .expect("indexed newest session");
+    assert!(newest.saved);
+    assert_eq!(newest.updated_at_ms, Some(99));
+    assert_eq!(newest.last_active_at_ms, Some(99));
     assert!(sessions.iter().all(|session| {
         session
             .title
