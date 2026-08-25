@@ -795,6 +795,12 @@ mod tests {
                 "target name `{name}` parsed wrong"
             );
         }
+        for removed in ["desktop", "desktop2", "jcode-desktop2"] {
+            assert!(
+                SelfDevBuildTarget::parse(Some(removed)).is_err(),
+                "removed target `{removed}` must not remain available"
+            );
+        }
         assert!(SelfDevBuildTarget::parse(Some("nonsense")).is_err());
     }
 
