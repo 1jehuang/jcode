@@ -467,6 +467,9 @@ pub fn on_config_reloaded(listener: fn()) {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Config {
+    /// Daemon behavior for autonomous wake requests.
+    pub server: ServerConfig,
+
     /// Keybinding configuration
     pub keybindings: KeybindingsConfig,
 
@@ -544,6 +547,34 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+}
+
+/// Controls who owns autonomous wake execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WakeMode {
+    /// The daemon starts idle turns and interrupts running turns itself.
+    #[default]
+    Internal,
+    /// The daemon emits a wake request and leaves turn scheduling to its operator.
+    External,
+}
+
+impl WakeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "internal" => Some(Self::Internal),
+            "external" => Some(Self::External),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Ownership model for autonomous wake requests.
+    pub wake_mode: WakeMode,
 }
 
 /// Agent Client Protocol adapter configuration.

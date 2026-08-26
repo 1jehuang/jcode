@@ -336,6 +336,22 @@ pub(super) async fn handle_comm_message(
                         .await;
                     }
                     CommDeliveryMode::Wake => {
+                        if crate::config::config().server.wake_mode
+                            == crate::config::WakeMode::External
+                        {
+                            let _ = fanout_session_event(
+                                swarm_members,
+                                session_id,
+                                ServerEvent::WakeRequested {
+                                    session_id: session_id.to_string(),
+                                    reason: "communication_delivery".to_string(),
+                                    notification: notification_msg.clone(),
+                                },
+                            )
+                            .await;
+                            delivered_targets += 1;
+                            continue;
+                        }
                         let woke_immediately = run_live_turn_if_idle(
                             session_id,
                             &notification_msg,

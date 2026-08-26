@@ -7,6 +7,13 @@ impl Config {
         reason = "Environment override parsing is intentionally explicit and grouped by config area"
     )]
     pub(crate) fn apply_env_overrides(&mut self) {
+        // Server/operator behavior
+        if let Ok(v) = std::env::var("JCODE_WAKE_MODE")
+            && let Some(parsed) = WakeMode::parse(&v)
+        {
+            self.server.wake_mode = parsed;
+        }
+
         // Keybindings
         if let Ok(v) = std::env::var("JCODE_SCROLL_UP_KEY") {
             self.keybindings.scroll_up = v;

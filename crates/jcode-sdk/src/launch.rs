@@ -50,6 +50,23 @@ const EXTERNAL_CREDENTIAL_FILES: &[&str] = &[
     ".local/share/opencode/auth.json",
 ];
 
+/// Operator ownership mode for autonomous wake requests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WakeMode {
+    #[default]
+    Internal,
+    External,
+}
+
+impl WakeMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::External => "external",
+        }
+    }
+}
+
 /// Options for starting a private jcode instance.
 pub struct LaunchOptions {
     /// State directory for the instance. A temporary, drop-cleaned directory is
@@ -67,6 +84,9 @@ pub struct LaunchOptions {
     /// coordinator's model and auth route. This is applied as the operator-level
     /// `JCODE_SWARM_MODEL` override and takes precedence over `env`.
     pub swarm_model: Option<String>,
+    /// Who executes autonomous wake requests. Applied as the operator-level
+    /// `JCODE_WAKE_MODE` override and takes precedence over `env`.
+    pub wake_mode: Option<WakeMode>,
     /// How long to wait for the API socket to accept connections.
     pub startup_timeout: Duration,
     /// Forward the bridge's stderr instead of capturing it for startup errors.
@@ -97,6 +117,7 @@ impl Default for LaunchOptions {
             binary: None,
             env: HashMap::new(),
             swarm_model: None,
+            wake_mode: None,
             startup_timeout: Duration::from_secs(30),
             inherit_stderr: false,
             cleanup_timeout: Duration::from_secs(30),
@@ -213,6 +234,9 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         });
     if let Some(swarm_model) = options.swarm_model.as_deref() {
         command.env("JCODE_SWARM_MODEL", swarm_model);
+    }
+    if let Some(wake_mode) = options.wake_mode {
+        command.env("JCODE_WAKE_MODE", wake_mode.as_str());
     }
 
     let mut child = match command.spawn() {
@@ -766,6 +790,38 @@ mod tests {
             fs::read_to_string(captured).expect("captured model"),
             "inherit"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wake_mode_reaches_runtime_and_overrides_generic_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("wake-mode.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"$JCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            wake_mode: Some(WakeMode::External),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options
+            .env
+            .insert("CAPTURE_PATH".into(), captured.as_os_str().to_owned());
+        options
+            .env
+            .insert("JCODE_WAKE_MODE".into(), "internal".into());
+        assert!(launch_instance(&options).is_err());
+        assert_eq!(fs::read_to_string(captured).unwrap(), "external");
     }
 
     #[test]
