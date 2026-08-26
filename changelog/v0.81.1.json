@@ -1,0 +1,7 @@
+{
+  "version": "0.81.1",
+  "date": "2026-08-25",
+  "fixes": [
+    "Desktop-owned sessions are marked as crashed when their client disappears unexpectedly, while deliberate detaches remain clean"
+  ]
+}
