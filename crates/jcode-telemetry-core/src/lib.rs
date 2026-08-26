@@ -508,6 +508,12 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
             }
         }
     } else {
+        // Record the explicit in-app choice once, while telemetry is still
+        // enabled. Failure never prevents or delays the opt-out itself, and
+        // environment-forced opt-outs remain completely silent.
+        if !path.exists() && !opt_out_forced_by_env() {
+            emit_telemetry_opt_out();
+        }
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -522,6 +528,31 @@ pub fn set_usage_telemetry_enabled(enabled: bool) -> bool {
             }
         }
     }
+}
+
+fn emit_telemetry_opt_out() {
+    let Some(id) = get_or_create_id() else {
+        return;
+    };
+    let (schema_version, build_channel, git_checkout, ci, from_cargo) = telemetry_envelope();
+    let payload = serde_json::json!({
+        "event_id": new_event_id(),
+        "id": id,
+        "event": "telemetry_opt_out",
+        "version": version(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "step": "telemetry_settings",
+        "schema_version": schema_version,
+        "build_channel": build_channel,
+        "is_git_checkout": git_checkout,
+        "is_ci": ci,
+        "ran_from_cargo": from_cargo,
+    });
+    let _ = send_payload(
+        payload,
+        DeliveryMode::Blocking(BLOCKING_FIRST_PROMPT_TIMEOUT),
+    );
 }
 
 /// Marker file recording that the user opted in to sharing prompt and
@@ -1404,9 +1435,14 @@ fn send_transcript_payload(payload: Value) -> bool {
 
 fn send_payload(payload: serde_json::Value, mode: DeliveryMode) -> bool {
     #[cfg(test)]
-    if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
-        emitted.push(payload.clone());
+    {
+        let _ = mode;
+        if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
+            emitted.push(payload);
+        }
+        return true;
     }
+    #[cfg(not(test))]
     match mode {
         DeliveryMode::Background => {
             if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {

@@ -391,6 +391,26 @@ test("prompt_submitted is accepted and marks meaningful daily activity", async (
   assert.equal(rollup.values[4], 1, "release prompt activity should be meaningful release activity");
 });
 
+test("telemetry_opt_out is accepted and persists only coarse metadata", async () => {
+  const db = makeDb();
+  const response = await worker.fetch(
+    postRequest(makeBody({
+      event: "telemetry_opt_out",
+      event_id: "opt-out-1",
+      step: "telemetry_settings",
+    })),
+    { DB: db },
+    makeCtx(),
+  );
+
+  assert.equal(response.status, 200);
+  const insert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO events/.test(sql));
+  assert.ok(insert, "opt-out event should be persisted");
+  assert.ok(columnIndex(insert.sql, "step") >= 0);
+  assert.equal(insert.values[columnIndex(insert.sql, "step")], "telemetry_settings");
+  assert.equal(columnIndex(insert.sql, "session_id"), -1);
+});
+
 test("session_end persists todo telemetry into session_details", async () => {
   const db = makeDb();
   const response = await worker.fetch(

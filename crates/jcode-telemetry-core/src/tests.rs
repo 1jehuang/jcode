@@ -179,6 +179,24 @@ fn false_opt_out_values_keep_telemetry_enabled() {
 }
 
 #[test]
+fn in_app_opt_out_emits_once_then_stops_telemetry() {
+    let _guard = lock_test_env();
+    TEST_EMITTED_PAYLOADS.lock().unwrap().clear();
+
+    assert!(set_usage_telemetry_enabled(false));
+    assert!(!is_enabled());
+    assert!(set_usage_telemetry_enabled(false));
+
+    let payloads = TEST_EMITTED_PAYLOADS.lock().unwrap();
+    let opt_outs = payloads
+        .iter()
+        .filter(|payload| payload["event"] == "telemetry_opt_out")
+        .collect::<Vec<_>>();
+    assert_eq!(opt_outs.len(), 1);
+    assert_eq!(opt_outs[0]["step"], "telemetry_settings");
+}
+
+#[test]
 fn record_turn_emits_prompt_submitted_immediately() {
     let _guard = lock_telemetry_test_state();
     TEST_EMITTED_PAYLOADS.lock().unwrap().clear();

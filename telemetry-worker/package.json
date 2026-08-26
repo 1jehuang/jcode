@@ -24,6 +24,7 @@
     "dau": "node scripts/run-dashboard.mjs dau.sql",
     "users": "node scripts/run-dashboard.mjs users.sql",
     "prompt-users": "node scripts/run-dashboard.mjs prompt-users.sql",
+    "opt-outs": "node scripts/run-dashboard.mjs opt-outs.sql",
     "repair:daily-active": "npx wrangler d1 execute jcode-telemetry --remote --file=repair-daily-active.sql",
     "token-value": "node scripts/run-dashboard.mjs token-value.sql",
     "token-value:fresh": "npm run sync:model-prices && npm run token-value",
