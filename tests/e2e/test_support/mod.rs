@@ -361,6 +361,7 @@ impl WsTestClient {
         self.next_id += 1;
         let working_dir = std::env::current_dir()?.to_string_lossy().into_owned();
         self.send_request(Request::Subscribe {
+            crash_on_disconnect: false,
             id,
             working_dir: Some(working_dir),
             selfdev: None,
