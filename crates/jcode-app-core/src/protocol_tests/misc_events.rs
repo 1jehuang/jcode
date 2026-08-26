@@ -205,6 +205,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         client_instance_id: Some("client-123".to_string()),
         client_has_local_history: true,
         allow_session_takeover: true,
+        crash_on_disconnect: false,
         terminal_env: vec![("ZELLIJ_SESSION_NAME".to_string(), "sessionB".to_string())],
     };
     let json = serde_json::to_string(&req)?;
@@ -218,6 +219,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        crash_on_disconnect: _,
         terminal_env,
     } = decoded
     else {
@@ -249,6 +251,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         client_instance_id,
         client_has_local_history,
         allow_session_takeover,
+        crash_on_disconnect: _,
         terminal_env,
     } = decoded
     else {
@@ -261,6 +264,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     assert_eq!(client_instance_id, None);
     assert!(!client_has_local_history);
     assert!(!allow_session_takeover);
+    crash_on_disconnect: _,
     assert!(terminal_env.is_empty());
     Ok(())
 }

@@ -88,6 +88,7 @@ impl Client {
             client_instance_id: None,
             client_has_local_history,
             allow_session_takeover,
+            crash_on_disconnect: _,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
         };
         let json = serde_json::to_string(&request)? + "\n";
