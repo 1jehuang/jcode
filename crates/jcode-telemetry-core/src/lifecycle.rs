@@ -21,7 +21,16 @@ pub(super) fn emit_lifecycle_event(
         };
         let now = Instant::now();
         if let Some(active) = guard.as_mut() {
-            finalize_current_turn(&id, active, now, reason.as_str(), DeliveryMode::Background);
+            // Shutdown is the last chance to persist a single-prompt turn. Use the
+            // bounded blocking path rather than abandoning it in the background
+            // queue when the process exits.
+            finalize_current_turn(
+                &id,
+                active,
+                now,
+                reason.as_str(),
+                DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT),
+            );
             observe_session_concurrency(active);
         }
         let state = match guard.as_ref() {

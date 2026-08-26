@@ -30,6 +30,7 @@ const CLI_EVENTS = [
   "onboarding_step",
   "feedback",
   "session_start",
+  "prompt_submitted",
   "turn_end",
   "session_end",
   "session_crash",
@@ -553,6 +554,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
+        await repairDailyActivityYesterday(env);
         await pruneOldEvents(env);
         // If the normal prune did not free enough headroom, escalate with the
         // emergency (halved) retention windows instead of waiting for inserts
@@ -570,6 +572,46 @@ export default {
     );
   },
 };
+
+async function repairDailyActivityYesterday(env) {
+  try {
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO daily_active_users (
+        activity_date, telemetry_id, raw_active, meaningful_active,
+        release_active, meaningful_release_active, session_start_count,
+        turn_end_count, session_end_count, session_crash_count, ci_active,
+        last_is_ci, last_build_channel
+      )
+      SELECT date(created_at), telemetry_id, 1,
+        MAX(CASE
+          WHEN event IN ('prompt_submitted', 'turn_end') THEN 1
+          WHEN event IN ('session_end', 'session_crash') AND (
+            had_user_prompt > 0 OR had_assistant_response > 0 OR turns > 0
+            OR assistant_responses > 0 OR tool_calls > 0 OR executed_tool_calls > 0
+          ) THEN 1 ELSE 0 END),
+        MAX(CASE WHEN build_channel IN ('release', 'ci_release') THEN 1 ELSE 0 END),
+        MAX(CASE WHEN build_channel IN ('release', 'ci_release') AND (
+          event IN ('prompt_submitted', 'turn_end')
+          OR (event IN ('session_end', 'session_crash') AND (
+            had_user_prompt > 0 OR had_assistant_response > 0 OR turns > 0
+            OR assistant_responses > 0 OR tool_calls > 0 OR executed_tool_calls > 0
+          ))
+        ) THEN 1 ELSE 0 END),
+        SUM(CASE WHEN event = 'session_start' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN event = 'turn_end' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN event = 'session_end' THEN 1 ELSE 0 END),
+        SUM(CASE WHEN event = 'session_crash' THEN 1 ELSE 0 END),
+        MAX(is_ci), MAX(is_ci), MAX(build_channel)
+      FROM events
+      WHERE event IN ('session_start', 'prompt_submitted', 'turn_end', 'session_end', 'session_crash')
+        AND created_at >= datetime('now', '-1 day', 'start of day')
+        AND created_at < datetime('now', 'start of day')
+      GROUP BY date(created_at), telemetry_id
+    `).run();
+  } catch (err) {
+    console.warn("daily activity repair failed", err?.message || err);
+  }
+}
 
 async function ingestTranscript(request, env, cors) {
   if (!env.TRANSCRIPTS || typeof env.TRANSCRIPTS.put !== "function") {
@@ -791,6 +833,7 @@ const RETENTION_DAYS = {
   subscription_router_error: 90,
   subscription_budget_exhausted: 365,
   todo_session: 365,
+  prompt_submitted: 30,
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
@@ -1080,6 +1123,18 @@ async function insertEvent(env, body) {
     return insertEventRow(env, body, values.filter(([name]) => columns.has(name)));
   }
 
+  if (body.event === "prompt_submitted") {
+    return insertEventRow(env, body, [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["turn_index", body.turn_index ?? null],
+      ...common,
+    ].filter(([name]) => columns.has(name)));
+  }
+
   if (body.event === "turn_end") {
     const values = [
       ["telemetry_id", body.id],
@@ -1304,7 +1359,7 @@ async function recordDailyActivity(env, body) {
   // Country rollup covers every event family, including the ones that never
   // reach the DAU table (install, upgrade, web_pageview, ...).
   await recordCountryDaily(env, body);
-  if (!["session_start", "turn_end", "session_end", "session_crash"].includes(body.event)) {
+  if (!["session_start", "prompt_submitted", "turn_end", "session_end", "session_crash"].includes(body.event)) {
     return;
   }
 
@@ -1399,6 +1454,9 @@ async function recordCountryDaily(env, body) {
 
 function isMeaningfulLifecycleEvent(body) {
   const errors = body.errors || {};
+  if (body.event === "prompt_submitted") {
+    return true;
+  }
   if (["session_end", "session_crash"].includes(body.event)) {
     return (
       (body.turns || 0) > 0
