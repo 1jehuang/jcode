@@ -360,6 +360,101 @@ where
     Ok(())
 }
 
+#[cfg(all(test, unix))]
+mod public_acceptance_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::{UnixListener, UnixStream};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
+        let root = std::env::temp_dir().join(format!(
+            "jcode-api-attachment-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let api_path = root.join("api.sock");
+        let legacy_path = root.join("legacy.sock");
+        let legacy_listener = UnixListener::bind(&legacy_path).unwrap();
+
+        let fake_daemon = tokio::spawn(async move {
+            let (stream, _) = legacy_listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let mut attached_state_id = None;
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                match request["type"].as_str() {
+                    Some("state") if attached_state_id.is_none() => {
+                        let id = request["id"].as_u64().unwrap();
+                        attached_state_id = Some(id);
+                        write_json_line(
+                            &mut write,
+                            &json!({"type":"state", "id":id, "session_id":"session_alpha"}),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    Some("message") => {
+                        assert_eq!(request["content"], "public boundary prompt");
+                        return;
+                    }
+                    _ => {}
+                }
+                if attached_state_id.is_some() {
+                    write_json_line(
+                        &mut write,
+                        &json!({"type":"state", "id":999_999, "session_id":"session_beta"}),
+                    )
+                    .await
+                    .unwrap();
+                    attached_state_id = None;
+                }
+            }
+            panic!("API connection closed before the message reached the attached session");
+        });
+
+        let bridge = tokio::spawn(run_bridge(api_path.clone(), legacy_path));
+        let stream = loop {
+            match UnixStream::connect(&api_path).await {
+                Ok(stream) => break stream,
+                Err(_) => tokio::task::yield_now().await,
+            }
+        };
+        let (read, mut write) = stream.into_split();
+        let mut replies = BufReader::new(read).lines();
+        for request in [
+            json!({"id":1, "req":"hello", "min_version":1, "max_version":1, "client":"acceptance-test"}),
+            json!({"id":2, "req":"attach_session", "session_id":"session_alpha"}),
+        ] {
+            write_json_line(&mut write, &request).await.unwrap();
+            replies
+                .next_line()
+                .await
+                .unwrap()
+                .expect("public API reply");
+        }
+        write_json_line(
+            &mut write,
+            &json!({"id":3, "req":"send_message", "session_id":"session_alpha", "content":"public boundary prompt"}),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), fake_daemon)
+            .await
+            .expect("message should cross the API/legacy boundary")
+            .unwrap();
+        bridge.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 #[cfg(test)]
 #[path = "framing_tests.rs"]
 mod framing_tests;
