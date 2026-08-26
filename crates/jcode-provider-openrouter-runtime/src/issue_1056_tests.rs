@@ -77,10 +77,7 @@ fn mistral_max_effort_is_sent_as_official_xhigh_value() {
 
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let mut stream = provider
-            .complete(&messages, &[], "", None)
-            .await
-            .unwrap();
+        let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
         while let Some(event) = stream.next().await {
             event.unwrap();
         }

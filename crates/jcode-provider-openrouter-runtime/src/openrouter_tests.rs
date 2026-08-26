@@ -3103,8 +3103,7 @@ fn named_profile_can_disable_reasoning_model_name_heuristics() {
         ..Default::default()
     };
 
-    let provider =
-        OpenRouterProvider::new_named_openai_compatible("enterprise", &config).unwrap();
+    let provider = OpenRouterProvider::new_named_openai_compatible("enterprise", &config).unwrap();
     assert!(provider.available_efforts().is_empty());
     assert!(provider.set_reasoning_effort("high").is_err());
 }
