@@ -216,3 +216,33 @@ test("a missing jcode binary is catchable, and leaks nothing", async () => {
     .filter((name) => name.startsWith("jcode-sdk-instance-")).length;
   assert.equal(after, before, "a failed launch must not leave an instance home behind");
 });
+
+test(
+  "swarmModel reaches the launched runtime and overrides the generic environment",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { launchInstance } = await import("../dist/launch.js");
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-swarm-model-test-"));
+    const binary = path.join(sandbox, "capture-env");
+    const captured = path.join(sandbox, "swarm-model.txt");
+    fs.writeFileSync(
+      binary,
+      "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+      { mode: 0o700 },
+    );
+
+    await assert.rejects(() =>
+      launchInstance({
+        binary,
+        jcodeHome: path.join(sandbox, "instance"),
+        inheritLogins: false,
+        startupTimeoutMs: 2000,
+        env: { CAPTURE_PATH: captured, JCODE_SWARM_MODEL: "unwanted-model" },
+        swarmModel: "inherit",
+      }),
+    );
+
+    assert.equal(fs.readFileSync(captured, "utf8"), "inherit");
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  },
+);
