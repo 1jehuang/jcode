@@ -972,20 +972,13 @@ fn schema_still_requires_action() {
 }
 
 #[test]
-fn schema_advertises_model_and_effort_spawn_overrides() {
+fn schema_omits_model_override_and_advertises_effort() {
     let schema = CommunicateTool::new().parameters_schema();
     let props = schema["properties"]
         .as_object()
         .expect("swarm schema should have properties");
 
-    assert!(props.contains_key("model"));
-    assert!(
-        props["model"]["description"]
-            .as_str()
-            .expect("model description")
-            .contains("list_models"),
-        "model param should point at the list_models action"
-    );
+    assert!(!props.contains_key("model"));
     assert!(props.contains_key("effort"));
     assert_eq!(
         props["effort"]["enum"],
@@ -1169,7 +1162,7 @@ fn format_swarm_model_list_renders_routes_and_pin() {
     ];
     let output =
         format_swarm_model_list(Some("claude-fable-5"), Some("openai-api:gpt-5.5"), &routes);
-    assert!(output.contains("Current model (spawn default when no override): claude-fable-5"));
+    assert!(output.contains("Current coordinator model: claude-fable-5"));
     assert!(output.contains("Configured agents.swarm_model pin: openai-api:gpt-5.5"));
     assert!(output.contains("gpt-5.5 via OpenAI [openai-api-key] (API key)"));
     assert!(output.contains("claude-fable-5 via Anthropic [anthropic-api-key] [unavailable]"));
@@ -1179,7 +1172,7 @@ fn format_swarm_model_list_renders_routes_and_pin() {
 #[test]
 fn format_swarm_model_list_handles_empty_catalog() {
     let output = format_swarm_model_list(None, None, &[]);
-    assert!(output.contains("Current model (spawn default when no override): unknown"));
+    assert!(output.contains("Current coordinator model: unknown"));
     assert!(output.contains("No agents.swarm_model pin configured"));
     assert!(output.contains("No model routes reported"));
 }

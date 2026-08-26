@@ -531,12 +531,6 @@ pub enum Request {
         request_nonce: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spawn_mode: Option<String>,
-        /// Optional per-spawn model override. Takes precedence over
-        /// `agents.swarm_model` config. Supports explicit auth-route prefixes
-        /// (e.g. `openai-api:gpt-5.5`) and the `inherit`/`coordinator`
-        /// sentinels to force coordinator inheritance past a config pin.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
         /// Optional reasoning effort for the spawned agent (e.g. `none`,
         /// `low`, `medium`, `high`, `xhigh`, `max`). Unset = provider default.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -655,10 +649,6 @@ pub enum Request {
         spawn_if_needed: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-        /// Optional model override for workers spawned by this assignment
-        /// (same semantics as CommSpawn::model).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
         /// Optional reasoning effort for workers spawned by this assignment
         /// (same semantics as CommSpawn::effort).
         #[serde(default, skip_serializing_if = "Option::is_none")]
