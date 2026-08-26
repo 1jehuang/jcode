@@ -725,6 +725,49 @@ fn launch_io(error: std::io::Error) -> Error {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn swarm_model_reaches_runtime_and_overrides_generic_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let binary = sandbox.path().join("capture-env");
+        let captured = sandbox.path().join("swarm-model.txt");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nprintf '%s' \"$JCODE_SWARM_MODEL\" > \"$CAPTURE_PATH\"\nexit 1\n",
+        )
+        .expect("write fake runtime");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .expect("make fake runtime executable");
+
+        let mut options = LaunchOptions {
+            jcode_home: Some(sandbox.path().join("instance")),
+            inherit_logins: false,
+            binary: Some(binary),
+            swarm_model: Some("inherit".to_string()),
+            startup_timeout: Duration::from_secs(2),
+            ..LaunchOptions::default()
+        };
+        options.env.insert(
+            OsString::from("CAPTURE_PATH"),
+            captured.as_os_str().to_owned(),
+        );
+        options.env.insert(
+            OsString::from("JCODE_SWARM_MODEL"),
+            OsString::from("unwanted-model"),
+        );
+
+        assert!(
+            launch_instance(&options).is_err(),
+            "fake runtime should fail startup"
+        );
+        assert_eq!(
+            fs::read_to_string(captured).expect("captured model"),
+            "inherit"
+        );
+    }
+
     #[test]
     fn dropping_an_ephemeral_instance_stops_its_bridge_and_removes_its_home() {
         let home = tempfile::Builder::new()
