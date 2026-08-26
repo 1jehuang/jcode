@@ -17,6 +17,24 @@ use std::time::{Duration, Instant};
 /// Requires a working TeX toolchain; skipped when one is not installed.
 #[test]
 fn a_deferred_formula_resolves_into_an_image_once_the_worker_finishes() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    assert_formula_resolves(format!("$$q_{{{nonce}}} = 1$$\n"));
+}
+
+#[test]
+fn a_gaussian_integral_nested_in_a_list_resolves_into_an_image() {
+    assert_formula_resolves(concat!(
+        "- Gaussian integral:\n\n",
+        "  \\[\n",
+        "  \\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx=\\sqrt{\\pi}\n",
+        "  \\]\n",
+    ));
+}
+
+fn assert_formula_resolves(text: impl Into<String>) {
     if which("latex").is_none() || which("dvipng").is_none() {
         eprintln!("skipping: no latex/dvipng toolchain available");
         return;
@@ -30,11 +48,7 @@ fn a_deferred_formula_resolves_into_an_image_once_the_worker_finishes() {
         std::env::remove_var("JCODE_PDFTOCAIRO_COMMAND");
     }
 
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let text = format!("$$q_{{{nonce}}} = 1$$\n");
+    let text = text.into();
 
     let render = || {
         jcode_tui_mermaid::with_image_protocol_override(Some(true), || {
