@@ -1027,7 +1027,9 @@ pub fn firefox_autolaunch_disabled() -> bool {
 /// launch Firefox, wait briefly for the bridge to reconnect, and return the
 /// refreshed status. Returns `Ok(None)` when no launch was attempted (bridge
 /// healthy, binaries missing, Firefox already running, or launch failed).
-pub async fn try_launch_firefox_for_bridge(status: &BrowserStatus) -> Result<Option<BrowserStatus>> {
+pub async fn try_launch_firefox_for_bridge(
+    status: &BrowserStatus,
+) -> Result<Option<BrowserStatus>> {
     if firefox_autolaunch_disabled() {
         return Ok(None);
     }
