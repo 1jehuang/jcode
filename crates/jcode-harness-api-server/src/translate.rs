@@ -879,7 +879,13 @@ impl BridgeState {
         match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
-                self.session_id = Some(session_id.clone());
+                // `session` is a broadcast lifecycle notification. The daemon
+                // sends it for other live sessions too, so it cannot identify
+                // which session this connection is attached to. Attachment
+                // identity comes from the correlated `state` reply below.
+                // Treating this broadcast as connection state made a panel for
+                // session A start rejecting its own commands after session B
+                // announced itself.
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id,
                     status: "attached".into(),
