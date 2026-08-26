@@ -63,6 +63,10 @@ pub struct LaunchOptions {
     pub binary: Option<PathBuf>,
     /// Extra environment variables for the private instance.
     pub env: HashMap<OsString, OsString>,
+    /// Model used by every spawned swarm worker. `inherit` keeps workers on the
+    /// coordinator's model and auth route. This is applied as the operator-level
+    /// `JCODE_SWARM_MODEL` override and takes precedence over `env`.
+    pub swarm_model: Option<String>,
     /// How long to wait for the API socket to accept connections.
     pub startup_timeout: Duration,
     /// Forward the bridge's stderr instead of capturing it for startup errors.
@@ -92,6 +96,7 @@ impl Default for LaunchOptions {
             inherit_logins: true,
             binary: None,
             env: HashMap::new(),
+            swarm_model: None,
             startup_timeout: Duration::from_secs(30),
             inherit_stderr: false,
             cleanup_timeout: Duration::from_secs(30),
@@ -206,6 +211,9 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
         } else {
             Stdio::piped()
         });
+    if let Some(swarm_model) = options.swarm_model.as_deref() {
+        command.env("JCODE_SWARM_MODEL", swarm_model);
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -409,8 +417,7 @@ fn link_file(source: &Path, destination: &Path) -> Result<()> {
     // Preserve rotating credentials rather than silently creating a stale copy.
     // Windows may require Developer Mode or symlink privileges; report that OS
     // error to the caller when links are unavailable.
-    std::os::windows::fs::symlink_file(source, destination)
-        .map_err(launch_io)
+    std::os::windows::fs::symlink_file(source, destination).map_err(launch_io)
 }
 
 fn ensure_instance_directory(root: &Path, relative: &Path) -> Result<PathBuf> {

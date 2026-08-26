@@ -9,7 +9,7 @@ Model routing guidance for spawned swarm agents. Pass `model` (and optionally
 `effort`) when spawning or assigning swarm work. Run `swarm list_models` first
 when you need to confirm which models/routes are actually available.
 
-- Default worker model: Fable 5 via the Anthropic API route (`claude-api:claude-fable-5`).
+- Worker models are selected by the operator through `agents.swarm_model`; do not attempt to override them per spawn.
 - Implementation tasks: `gpt-5.5` with `effort: "low"`.
 - Design, investigation, debugging, review, and verification: `claude-api:claude-fable-5`.
 - Context fetching / bulk reading / summarization: `gpt-5.5` with `effort: "none"`.

@@ -384,7 +384,6 @@ fn test_comm_assign_next_roundtrip() -> Result<()> {
         prefer_spawn: Some(true),
         spawn_if_needed: Some(true),
         message: Some("Take the next runnable task.".to_string()),
-        model: Some("gpt-5.5".to_string()),
         effort: Some("low".to_string()),
     };
     let json = serde_json::to_string(&req)?;
@@ -398,7 +397,6 @@ fn test_comm_assign_next_roundtrip() -> Result<()> {
         prefer_spawn,
         spawn_if_needed,
         message,
-        model,
         effort,
         ..
     } = decoded
@@ -411,7 +409,6 @@ fn test_comm_assign_next_roundtrip() -> Result<()> {
     assert_eq!(prefer_spawn, Some(true));
     assert_eq!(spawn_if_needed, Some(true));
     assert_eq!(message.as_deref(), Some("Take the next runnable task."));
-    assert_eq!(model.as_deref(), Some("gpt-5.5"));
     assert_eq!(effort.as_deref(), Some("low"));
     Ok(())
 }
@@ -453,7 +450,6 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         initial_message: Some("Start here".to_string()),
         request_nonce: Some("planner-fresh-123".to_string()),
         spawn_mode: Some("headless".to_string()),
-        model: Some("openai-api:gpt-5.5".to_string()),
         effort: Some("low".to_string()),
         label: Some("review auth flow".to_string()),
     };
@@ -461,7 +457,6 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert!(json.contains("\"type\":\"comm_spawn\""));
     assert!(json.contains("\"request_nonce\":\"planner-fresh-123\""));
     assert!(json.contains("\"spawn_mode\":\"headless\""));
-    assert!(json.contains("\"model\":\"openai-api:gpt-5.5\""));
     assert!(json.contains("\"effort\":\"low\""));
     assert!(json.contains("\"label\":\"review auth flow\""));
     let decoded = parse_request_json(&json)?;
@@ -472,7 +467,6 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
         initial_message,
         request_nonce,
         spawn_mode,
-        model,
         effort,
         label,
         ..
@@ -485,21 +479,20 @@ fn test_comm_spawn_roundtrip_with_optional_nonce() -> Result<()> {
     assert_eq!(initial_message.as_deref(), Some("Start here"));
     assert_eq!(request_nonce.as_deref(), Some("planner-fresh-123"));
     assert_eq!(spawn_mode.as_deref(), Some("headless"));
-    assert_eq!(model.as_deref(), Some("openai-api:gpt-5.5"));
     assert_eq!(effort.as_deref(), Some("low"));
     assert_eq!(label.as_deref(), Some("review auth flow"));
     Ok(())
 }
 
 #[test]
-fn test_comm_spawn_decodes_without_model_or_effort() -> Result<()> {
-    // Older clients omit the model/effort fields entirely.
-    let json = r#"{"type":"comm_spawn","id":60,"session_id":"sess_coord"}"#;
+fn test_comm_spawn_ignores_legacy_model_and_decodes_without_effort() -> Result<()> {
+    // A legacy SDK may still send `model`; the server ignores unknown fields so
+    // operator configuration remains authoritative.
+    let json = r#"{"type":"comm_spawn","id":60,"session_id":"sess_coord","model":"gpt-5.5"}"#;
     let decoded = parse_request_json(json)?;
-    let Request::CommSpawn { model, effort, label, .. } = decoded else {
+    let Request::CommSpawn { effort, label, .. } = decoded else {
         return Err(anyhow!("expected CommSpawn"));
     };
-    assert_eq!(model, None);
     assert_eq!(effort, None);
     assert_eq!(label, None);
     Ok(())

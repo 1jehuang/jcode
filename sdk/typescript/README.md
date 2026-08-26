@@ -316,6 +316,7 @@ up for you:
 | `inheritLogins` | Inherit the user's provider logins. Defaults to `true`. |
 | `binary` | Path to the jcode binary. Defaults to `jcode` on `PATH`. |
 | `env` | Extra environment variables for the instance. |
+| `swarmModel` | Operator-enforced model for all swarm workers. Use `inherit` to keep the coordinator model and auth route. Takes precedence over `env.JCODE_SWARM_MODEL`. |
 | `startupTimeoutMs` | How long to wait for the instance to come up. Defaults to 30000. |
 | `cleanupTimeoutMs` | How long `close()` spends removing an ephemeral home. Defaults to 30000. |
 | `inheritStderr` | Forward the instance's stderr to your process. Defaults to `false`. |

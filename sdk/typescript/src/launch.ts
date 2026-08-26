@@ -172,6 +172,12 @@ export interface LaunchOptions {
   binary?: string;
   /** Extra environment variables for the instance. */
   env?: Record<string, string>;
+  /**
+   * Model used by every spawned swarm worker. Use `inherit` to keep workers on
+   * the coordinator's model and auth route. This operator-level setting takes
+   * precedence over `env.JCODE_SWARM_MODEL`.
+   */
+  swarmModel?: string;
   /** Milliseconds to wait for the socket to appear. Defaults to 30000. */
   startupTimeoutMs?: number;
   /** Forward the instance's stderr to this process. Defaults to false. */
@@ -551,6 +557,9 @@ export async function launchInstance(options: LaunchOptions = {}): Promise<Launc
         JCODE_API_SOCKET: socketPath,
         JCODE_SOCKET: path.join(runtimeDir, "jcode.sock"),
         ...options.env,
+        ...(options.swarmModel === undefined
+          ? {}
+          : { JCODE_SWARM_MODEL: options.swarmModel }),
       },
       stdio: ["ignore", "ignore", options.inheritStderr ? "inherit" : "pipe"],
       detached: false,

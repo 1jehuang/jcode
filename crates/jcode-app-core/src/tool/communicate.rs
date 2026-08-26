@@ -1383,7 +1383,6 @@ async fn run_swarm_plan_loop(
                     spawn_if_needed
                 },
                 message: params.message.clone(),
-                model: params.model.clone(),
                 effort: params.effort.clone(),
             };
             match send_request(request).await {
@@ -1534,7 +1533,6 @@ async fn spawn_assignment_session(ctx: &ToolContext, params: &CommunicateInput) 
         initial_message: None,
         request_nonce: Some(fresh_spawn_request_nonce(ctx)),
         spawn_mode: params.spawn_mode.clone(),
-        model: params.model.clone(),
         effort: params.effort.clone(),
         label: None,
     };
@@ -1738,22 +1736,22 @@ fn format_swarm_model_list(
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "Current model (spawn default when no override): {}\n",
+        "Current coordinator model: {}\n",
         current_model.unwrap_or("unknown")
     ));
     match configured_swarm_model {
         Some(pin) if !pin.trim().is_empty() => {
             out.push_str(&format!("Configured agents.swarm_model pin: {pin}\n"));
         }
-        _ => out.push_str("No agents.swarm_model pin configured (workers inherit the coordinator's model unless a per-spawn model is passed).\n"),
+        _ => out.push_str(
+            "No agents.swarm_model pin configured (workers inherit the coordinator's model).\n",
+        ),
     }
     if model_routes.is_empty() {
-        out.push_str(
-            "\nNo model routes reported. Spawn with a bare model name or omit model to inherit.",
-        );
+        out.push_str("\nNo model routes reported. Configure agents.swarm_model or use inherit.");
         return out;
     }
-    out.push_str("\nAvailable model routes (pass as spawn model, e.g. 'gpt-5.5' or route-pinned 'openai-api:gpt-5.5'):\n");
+    out.push_str("\nAvailable model routes (configure agents.swarm_model with a bare model or route-pinned value):\n");
     for route in model_routes {
         let availability = if route.available {
             ""
@@ -1887,10 +1885,6 @@ struct CommunicateInput {
     /// threshold.
     #[serde(default)]
     tldr: Option<String>,
-    /// Per-spawn model override for spawn/assign_task/assign_next/run_plan
-    /// spawns. Takes precedence over agents.swarm_model config.
-    #[serde(default)]
-    model: Option<String>,
     /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
     #[serde(default)]
     effort: Option<String>,
@@ -2057,10 +2051,6 @@ impl Tool for CommunicateTool {
                     "type": "string",
                     "enum": ["visible", "headless", "inline", "auto"],
                     "description": "Spawn UI mode: visible terminal, headless, inline gallery, or auto. Defaults to inline."
-                },
-                "model": {
-                    "type": "string",
-                    "description": "Model for spawned agents, e.g. 'gpt-5.5' or 'claude-api:opus'. Omit to inherit; see list_models."
                 },
                 "effort": {
                     "type": "string",
@@ -2739,7 +2729,6 @@ impl Tool for CommunicateTool {
                     initial_message: params.spawn_initial_message(),
                     request_nonce: None,
                     spawn_mode: params.spawn_mode.clone(),
-                    model: params.model.clone(),
                     effort: params.effort.clone(),
                     label: Some(label),
                 };
@@ -3044,7 +3033,6 @@ impl Tool for CommunicateTool {
                     prefer_spawn: params.prefer_spawn,
                     spawn_if_needed: params.spawn_if_needed,
                     message: params.message.clone(),
-                    model: params.model.clone(),
                     effort: params.effort.clone(),
                 };
 
@@ -3096,7 +3084,6 @@ impl Tool for CommunicateTool {
                         prefer_spawn: params.prefer_spawn,
                         spawn_if_needed: params.spawn_if_needed,
                         message: params.message.clone(),
-                        model: params.model.clone(),
                         effort: params.effort.clone(),
                     };
 
