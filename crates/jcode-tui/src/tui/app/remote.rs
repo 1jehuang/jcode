@@ -1211,8 +1211,8 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
     // client to receive and render History: requests and events share one
     // ordered socket, so the server finishes writing the Subscribe History
     // response before it reads this Message request. Do not echo the user turn
-    // locally here because the still-in-flight History payload would clear it;
-    // the server's ordered Transcript event will add it immediately afterwards.
+    // locally here because the still-in-flight History payload would clear it.
+    // Preserve the echo and apply it immediately after History instead.
     //
     // This removes the visible, intermittent pause between the fork window
     // opening and its prompt starting, which was proportional to history payload
@@ -1227,6 +1227,7 @@ pub(super) async fn process_remote_followups(app: &mut App, remote: &mut RemoteC
         app.submit_input_on_startup = false;
         app.startup_submit_deferred_reason = None;
         let prepared = input::take_prepared_input(app);
+        app.pending_startup_prompt_echo = Some(prepared.raw_input.clone());
         app.last_submitted_input = Some(prepared.raw_input);
         crate::logging::info(&format!(
             "Startup auto-submit sent behind ordered Subscribe: input_chars={} pending_images={}",

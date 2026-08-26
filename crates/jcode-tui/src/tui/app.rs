@@ -1425,6 +1425,9 @@ pub struct App {
     // let `process_remote_followups` dispatch it, exactly like a staged startup
     // prompt.
     pending_prompt_before_history: Option<input::PreparedInput>,
+    /// User echo for a headed fork prompt sent before bootstrap History arrives.
+    /// History replaces the transcript, so the echo must be applied afterwards.
+    pending_startup_prompt_echo: Option<String>,
     // Pending account switch from inline picker (for remote mode async processing)
     pending_account_picker_action: Option<crate::tui::AccountPickerAction>,
     // Keybindings for model switching

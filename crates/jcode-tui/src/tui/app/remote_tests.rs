@@ -589,11 +589,17 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
         "the ordered startup request should start immediately"
     );
     assert!(
-        !app.display_messages()
-            .iter()
-            .any(|message| message.role == "user"),
-        "the local user echo must wait for the server Transcript behind History"
+        app.pending_startup_prompt_echo.as_deref() == Some("Start the fork immediately"),
+        "the user echo must be retained until bootstrap History is applied"
     );
+
+    // Bootstrap History replaces the visible transcript. The retained echo is
+    // restored afterwards so the fork prompt does not visually disappear.
+    crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo(&mut app);
+    assert!(app.display_messages().iter().any(|message| {
+        message.role == "user" && message.content == "Start the fork immediately"
+    }));
+    assert!(app.pending_startup_prompt_echo.is_none());
 }
 
 #[test]
