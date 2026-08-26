@@ -420,6 +420,83 @@ async fn background_task_wake_runs_live_session_immediately_when_idle() {
 }
 
 #[tokio::test]
+async fn external_background_task_wake_emits_request_without_starting_turn() {
+    let _env_lock = crate::storage::lock_test_env();
+    let _wake_mode = ScopedEnvVar::set("JCODE_WAKE_MODE", "external");
+    let provider = Arc::new(StreamingMockProvider::default());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("must not run".to_string()),
+        StreamEvent::MessageEnd { stop_reason: None },
+    ]);
+    let provider_dyn: Arc<dyn Provider> = provider;
+    let agent = test_agent(provider_dyn).await;
+    let session_id = agent.lock().await.session_id().to_string();
+    let initial_message_count = agent.lock().await.messages().len();
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        agent.clone(),
+    )])));
+    let soft_interrupt_queues: SessionInterruptQueues = Arc::new(RwLock::new(HashMap::new()));
+    let (member_event_tx, mut member_event_rx) = mpsc::unbounded_channel();
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([(
+        session_id.clone(),
+        attached_swarm_member(&session_id, member_event_tx),
+    )])));
+    let task = BackgroundTaskCompleted {
+        task_id: "external-wake".to_string(),
+        tool_name: "bash".to_string(),
+        display_name: None,
+        session_id: session_id.clone(),
+        status: BackgroundTaskStatus::Completed,
+        exit_code: Some(0),
+        output_preview: "done\n".to_string(),
+        output_file: std::env::temp_dir().join("external-wake.output"),
+        duration_secs: 0.1,
+        notify: false,
+        wake: true,
+    };
+    let (swarms_by_id, event_history, event_counter, swarm_event_tx) = empty_swarm_status_state();
+
+    dispatch_background_task_completion(
+        &task,
+        &sessions,
+        &soft_interrupt_queues,
+        &swarm_members,
+        &swarms_by_id,
+        &event_history,
+        &event_counter,
+        &swarm_event_tx,
+    )
+    .await;
+
+    let event = timeout(Duration::from_secs(2), member_event_rx.recv())
+        .await
+        .expect("external wake request should arrive promptly")
+        .expect("member event stream should remain open");
+    match event {
+        ServerEvent::WakeRequested {
+            session_id: event_session_id,
+            reason,
+            notification,
+        } => {
+            assert_eq!(event_session_id, session_id);
+            assert_eq!(reason, "background_task_completed");
+            assert!(notification.contains("**Background task** `external-wake`"));
+        }
+        other => panic!("unexpected external wake event: {other:?}"),
+    }
+
+    assert!(
+        timeout(Duration::from_millis(100), member_event_rx.recv())
+            .await
+            .is_err(),
+        "external mode must not stream an autonomous model turn"
+    );
+    assert_eq!(agent.lock().await.messages().len(), initial_message_count);
+    assert!(soft_interrupt_queues.read().await.is_empty());
+}
+
+#[tokio::test]
 async fn wake_turn_tracks_member_status_and_emits_terminal_done() {
     let provider = Arc::new(StreamingMockProvider::default());
     provider.queue_response(vec![
