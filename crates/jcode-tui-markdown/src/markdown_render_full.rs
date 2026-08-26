@@ -587,11 +587,15 @@ pub fn render_markdown_with_width(text: &str, max_width: Option<usize>) -> Vec<L
                         LatexRenderingMode::Unicode => math_display_lines(&math),
                         LatexRenderingMode::Image
                             if blockquote_depth == 0
-                                && list_stack.is_empty()
                                 && !in_definition_list
                                 && !in_footnote_definition =>
                         {
-                            latex_image_lines(&math, true, max_width)
+                            // pulldown-cmark preserves the indentation used to
+                            // nest display math inside a list item. That
+                            // whitespace is Markdown structure, not TeX source,
+                            // and can make native/image renderers reject an
+                            // otherwise valid expression.
+                            latex_image_lines(math.trim(), true, max_width)
                                 .unwrap_or_else(|| math_display_lines(&math))
                         }
                         LatexRenderingMode::Image => math_display_lines(&math),

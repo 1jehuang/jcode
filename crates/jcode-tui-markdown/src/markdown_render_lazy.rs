@@ -560,11 +560,12 @@ pub fn render_markdown_lazy(
                         LatexRenderingMode::Unicode => math_display_lines(&math),
                         LatexRenderingMode::Image
                             if blockquote_depth == 0
-                                && list_stack.is_empty()
                                 && !in_definition_list
                                 && !in_footnote_definition =>
                         {
-                            latex_image_lines(&math, true, max_width)
+                            // Strip Markdown container indentation before the
+                            // graphical renderer sees the TeX source.
+                            latex_image_lines(math.trim(), true, max_width)
                                 .unwrap_or_else(|| math_display_lines(&math))
                         }
                         LatexRenderingMode::Image => math_display_lines(&math),
