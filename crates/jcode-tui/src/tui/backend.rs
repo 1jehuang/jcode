@@ -353,7 +353,7 @@ impl RemoteConnection {
             client_instance_id: conn.client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,
-            crash_on_disconnect: _,
+            crash_on_disconnect: false,
             terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
         })
         .await?;
