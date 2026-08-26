@@ -85,6 +85,14 @@ pub(super) async fn cleanup_client_connection(
             .unwrap_or(false);
     let disposition = disconnect_disposition(disconnected_while_processing, crash_on_disconnect);
 
+    // A live processing task owns the agent mutex. Abort it before trying to
+    // persist the disconnect disposition; otherwise cleanup waits two seconds,
+    // times out, and leaves the durable session `Active` precisely when an
+    // interrupted desktop turn must become `Crashed`.
+    if let Some(handle) = processing_task.take() {
+        handle.abort();
+    }
+
     {
         let mut debug_state = client_debug_state.write().await;
         debug_state.unregister(client_debug_id);
@@ -254,10 +262,6 @@ pub(super) async fn cleanup_client_connection(
     }
     remove_background_tool_signal(client_session_id);
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
-
-    if let Some(handle) = processing_task.take() {
-        handle.abort();
-    }
 
     event_handle.abort();
     Ok(())
