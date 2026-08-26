@@ -1119,6 +1119,42 @@ fn capability_requests_need_an_attached_session() {
     }
 }
 
+#[test]
+fn another_sessions_broadcast_does_not_replace_the_attachment() {
+    let mut state = BridgeState::default();
+    let attach = state.api_request_to_legacy(&json!({
+        "id": 7,
+        "req": "attach_session",
+        "session_id": "session_retriever_1_a",
+    }));
+    let state_id = match &attach[1] {
+        Outbound::Legacy(value) => value["id"].as_u64().expect("state request id"),
+        other => panic!("unexpected attach output: {other:?}"),
+    };
+    state.legacy_event_to_api(&json!({
+        "type": "state",
+        "id": state_id,
+        "session_id": "session_retriever_1_a",
+    }));
+
+    state.legacy_event_to_api(&json!({
+        "type": "session",
+        "session_id": "session_pawprint_2_b",
+    }));
+
+    assert!(matches!(
+        state
+            .api_request_to_legacy(&json!({
+                "id": 8,
+                "req": "send_message",
+                "session_id": "session_retriever_1_a",
+                "content": "still routed to the attached session",
+            }))
+            .as_slice(),
+        [Outbound::Legacy(_)]
+    ));
+}
+
 /// A session id becomes a filesystem path, so it must be treated as untrusted.
 ///
 /// The id arrives straight off the wire and is interpolated into
