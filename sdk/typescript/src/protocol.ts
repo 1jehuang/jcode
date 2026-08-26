@@ -154,6 +154,12 @@ export type ApiEvent =
     }
   | { ev: "turn_done"; session_id: string }
   | {
+      ev: "wake_requested";
+      session_id: string;
+      reason: string;
+      notification: string;
+    }
+  | {
       ev: "background_progress";
       session_id: string;
       task_id: string;
@@ -266,6 +272,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_done",
   "token_usage",
   "turn_done",
+  "wake_requested",
   "background_progress",
   "message_accepted",
   "permission_request",

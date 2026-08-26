@@ -317,6 +317,7 @@ up for you:
 | `binary` | Path to the jcode binary. Defaults to `jcode` on `PATH`. |
 | `env` | Extra environment variables for the instance. |
 | `swarmModel` | Operator-enforced model for all swarm workers. Use `inherit` to keep the coordinator model and auth route. Takes precedence over `env.JCODE_SWARM_MODEL`. |
+| `wakeMode` | `internal` (daemon-owned wakes) or `external` (emit `wake_requested` for the operator). Takes precedence over `env.JCODE_WAKE_MODE`. |
 | `startupTimeoutMs` | How long to wait for the instance to come up. Defaults to 30000. |
 | `cleanupTimeoutMs` | How long `close()` spends removing an ephemeral home. Defaults to 30000. |
 | `inheritStderr` | Forward the instance's stderr to your process. Defaults to `false`. |
@@ -330,6 +331,7 @@ rebuild its complete session index without keeping a separate id registry.
 | Env var | Effect |
 | --- | --- |
 | `JCODE_API_SOCKET` | Override the API socket path |
+| `JCODE_WAKE_MODE` | Autonomous wake ownership: `internal` (default) or `external` |
 | `JCODE_RUNTIME_DIR` | Override the runtime directory |
 | `XDG_RUNTIME_DIR` | Default runtime directory on Linux |
 

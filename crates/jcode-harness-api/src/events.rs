@@ -101,6 +101,14 @@ pub enum ApiEvent {
     /// The turn finished; the agent is idle.
     TurnDone { session_id: String },
 
+    /// The daemon requests that its external operator decide when to run the
+    /// session. Emitted only when external wake ownership is configured.
+    WakeRequested {
+        session_id: String,
+        reason: String,
+        notification: String,
+    },
+
     /// A background task the agent is waiting on reported progress, or
     /// finished.
     ///

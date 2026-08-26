@@ -143,6 +143,26 @@ fn connection_phase_is_forwarded_to_api_clients() {
 }
 
 #[test]
+fn wake_request_is_forwarded_with_explicit_session_and_payload() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "wake_requested",
+        "session_id": "target",
+        "reason": "background_task_completed",
+        "notification": "finished",
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(
+        frames[0].event,
+        ApiEvent::WakeRequested {
+            session_id: "target".into(),
+            reason: "background_task_completed".into(),
+            notification: "finished".into(),
+        }
+    );
+}
+
+#[test]
 fn create_session_maps_to_subscribe() {
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));

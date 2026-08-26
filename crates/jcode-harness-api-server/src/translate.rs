@@ -976,6 +976,14 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
+                session_id: event["session_id"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| session(self)),
+                reason: event["reason"].as_str().unwrap_or("").to_string(),
+                notification: event["notification"].as_str().unwrap_or("").to_string(),
+            })],
             "context_message_added" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 if self

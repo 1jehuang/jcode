@@ -246,3 +246,25 @@ test(
     fs.rmSync(sandbox, { recursive: true, force: true });
   },
 );
+
+test(
+  "wakeMode reaches the launched runtime and overrides the generic environment",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { launchInstance } = await import("../dist/launch.js");
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "jcode-sdk-wake-mode-test-"));
+    const binary = path.join(sandbox, "capture-env");
+    const captured = path.join(sandbox, "wake-mode.txt");
+    fs.writeFileSync(binary, "#!/bin/sh\nprintf '%s' \"$JCODE_WAKE_MODE\" > \"$CAPTURE_PATH\"\nexit 1\n", { mode: 0o700 });
+    await assert.rejects(() => launchInstance({
+      binary,
+      jcodeHome: path.join(sandbox, "instance"),
+      inheritLogins: false,
+      startupTimeoutMs: 2000,
+      env: { CAPTURE_PATH: captured, JCODE_WAKE_MODE: "internal" },
+      wakeMode: "external",
+    }));
+    assert.equal(fs.readFileSync(captured, "utf8"), "external");
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  },
+);

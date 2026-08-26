@@ -14,6 +14,28 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::{RwLock, broadcast};
 
+async fn emit_external_wake(
+    session_id: &str,
+    reason: &str,
+    notification: &str,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> bool {
+    if crate::config::config().server.wake_mode != crate::config::WakeMode::External {
+        return false;
+    }
+    let _ = fanout_session_event(
+        swarm_members,
+        session_id,
+        ServerEvent::WakeRequested {
+            session_id: session_id.to_string(),
+            reason: reason.to_string(),
+            notification: notification.to_string(),
+        },
+    )
+    .await;
+    true
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "background task completion needs session, interrupt, and swarm status state"
@@ -55,6 +77,13 @@ pub(super) async fn dispatch_background_task_completion(
     }
 
     if task.wake
+        && !emit_external_wake(
+            &task.session_id,
+            "background_task_completed",
+            &notification,
+            swarm_members,
+        )
+        .await
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
@@ -135,6 +164,13 @@ pub(super) async fn dispatch_background_task_stalled(
     }
 
     if task.wake
+        && !emit_external_wake(
+            &task.session_id,
+            "background_task_stalled",
+            &notification,
+            swarm_members,
+        )
+        .await
         && !run_live_turn_if_idle(
             &task.session_id,
             &notification,
@@ -212,6 +248,17 @@ pub(super) async fn dispatch_swarm_await_completion(
     }
 
     if !event.wake {
+        return;
+    }
+
+    if emit_external_wake(
+        &event.session_id,
+        "swarm_await_completed",
+        &event.notification,
+        swarm_members,
+    )
+    .await
+    {
         return;
     }
 

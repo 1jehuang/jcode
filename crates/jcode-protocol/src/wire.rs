@@ -722,6 +722,15 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    /// An autonomous wake was requested. In external wake mode this event is
+    /// emitted instead of starting or injecting into a turn.
+    #[serde(rename = "wake_requested")]
+    WakeRequested {
+        session_id: String,
+        reason: String,
+        notification: String,
+    },
+
     /// Acknowledgment of request
     #[serde(rename = "ack")]
     Ack { id: u64 },

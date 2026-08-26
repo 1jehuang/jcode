@@ -227,6 +227,24 @@ fn test_env_override_swarm_model() {
 }
 
 #[test]
+fn wake_mode_defaults_parses_and_env_overrides() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_WAKE_MODE");
+    assert_eq!(
+        Config::default().server.wake_mode,
+        crate::config::WakeMode::Internal
+    );
+    let parsed: Config = toml::from_str("[server]\nwake_mode = \"external\"\n").unwrap();
+    assert_eq!(parsed.server.wake_mode, crate::config::WakeMode::External);
+
+    crate::env::set_var("JCODE_WAKE_MODE", "external");
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.server.wake_mode, crate::config::WakeMode::External);
+    restore_env_var("JCODE_WAKE_MODE", prev);
+}
+
+#[test]
 fn spawn_hook_defaults_to_none_and_parses_from_toml() {
     assert_eq!(Config::default().terminal.spawn_hook, None);
 
