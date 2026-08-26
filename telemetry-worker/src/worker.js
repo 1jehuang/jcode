@@ -29,6 +29,7 @@ const CLI_EVENTS = [
   "auth_success",
   "onboarding_step",
   "feedback",
+  "telemetry_opt_out",
   "session_start",
   "prompt_submitted",
   "turn_end",
@@ -834,6 +835,7 @@ const RETENTION_DAYS = {
   subscription_budget_exhausted: 365,
   todo_session: 365,
   prompt_submitted: 30,
+  telemetry_opt_out: 365,
 };
 
 const PRUNE_BATCH_LIMIT = 10000;
@@ -1082,6 +1084,18 @@ async function insertEvent(env, body) {
       ["auth_failure_reason", body.auth_failure_reason || null],
       ["milestone_elapsed_ms", body.milestone_elapsed_ms || null],
       ...common,
+    ].filter(([name]) => columns.has(name)));
+  }
+
+  if (body.event === "telemetry_opt_out") {
+    return insertEventRow(env, body, [
+      ["telemetry_id", body.id],
+      ["event", body.event],
+      ["version", body.version],
+      ["os", body.os],
+      ["arch", body.arch],
+      ["step", body.step || "telemetry_settings"],
+      ...common.filter(([name]) => name !== "session_id"),
     ].filter(([name]) => columns.has(name)));
   }
 
