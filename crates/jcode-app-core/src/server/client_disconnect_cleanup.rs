@@ -24,8 +24,11 @@ enum DisconnectDisposition {
     Reloading,
 }
 
-fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisposition {
-    if !disconnected_while_processing {
+fn disconnect_disposition(
+    disconnected_while_processing: bool,
+    crash_on_disconnect: bool,
+) -> DisconnectDisposition {
+    if !disconnected_while_processing && !crash_on_disconnect {
         return DisconnectDisposition::Closed;
     }
 
@@ -55,6 +58,7 @@ pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
     client_is_processing: bool,
+    crash_on_disconnect: bool,
     processing_task: &mut Option<tokio::task::JoinHandle<()>>,
     event_handle: tokio::task::JoinHandle<()>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -79,7 +83,7 @@ pub(super) async fn cleanup_client_connection(
             .as_ref()
             .map(|handle| !handle.is_finished())
             .unwrap_or(false);
-    let disposition = disconnect_disposition(disconnected_while_processing);
+    let disposition = disconnect_disposition(disconnected_while_processing, crash_on_disconnect);
 
     {
         let mut debug_state = client_debug_state.write().await;
@@ -265,14 +269,30 @@ mod tests {
 
     #[test]
     fn idle_disconnect_is_closed() {
-        assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
+        assert_eq!(
+            disconnect_disposition(false, false),
+            DisconnectDisposition::Closed
+        );
+    }
+
+    #[test]
+    fn owned_idle_disconnect_is_crash() {
+        let _guard = crate::storage::lock_test_env();
+        crate::server::clear_reload_marker();
+        assert_eq!(
+            disconnect_disposition(false, true),
+            DisconnectDisposition::Crashed
+        );
     }
 
     #[test]
     fn running_disconnect_without_reload_is_crash() {
         let _guard = crate::storage::lock_test_env();
         crate::server::clear_reload_marker();
-        assert_eq!(disconnect_disposition(true), DisconnectDisposition::Crashed);
+        assert_eq!(
+            disconnect_disposition(true, false),
+            DisconnectDisposition::Crashed
+        );
     }
 
     #[test]
@@ -288,7 +308,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            disconnect_disposition(true),
+            disconnect_disposition(true, false),
             DisconnectDisposition::Reloading
         );
         crate::server::clear_reload_marker();
@@ -308,7 +328,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            disconnect_disposition(true),
+            disconnect_disposition(true, false),
             DisconnectDisposition::Reloading
         );
         crate::server::clear_reload_marker();

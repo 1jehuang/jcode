@@ -174,6 +174,30 @@ fn create_session_maps_to_subscribe() {
 }
 
 #[test]
+fn desktop_owned_session_requests_crash_on_disconnect() {
+    let mut state = BridgeState::with_crash_on_disconnect(true);
+    let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["crash_on_disconnect"], true);
+}
+
+#[test]
+fn detach_disarms_crash_on_disconnect() {
+    let mut state = BridgeState::with_crash_on_disconnect(true);
+    let out = state.api_request_to_legacy(&json!({
+        "req": "detach_session",
+        "id": 2,
+        "session_id": "abc",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["type"], "prepare_disconnect");
+}
+
+#[test]
 fn state_event_answers_pending_attach() {
     let home = ScopedJcodeHome::new("attach-title");
     let project = home.path.join("project");

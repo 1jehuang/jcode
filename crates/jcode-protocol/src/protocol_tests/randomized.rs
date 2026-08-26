@@ -70,6 +70,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             client_instance_id: client_instance_id.clone(),
             client_has_local_history,
             allow_session_takeover,
+            crash_on_disconnect: _,
             terminal_env: Vec::new(),
         };
         let decoded = parse_request_json(&serde_json::to_string(&req)?)?;
@@ -81,6 +82,7 @@ fn test_protocol_request_roundtrip_randomized_samples() -> Result<()> {
             client_instance_id: decoded_client_instance_id,
             client_has_local_history: decoded_client_has_local_history,
             allow_session_takeover: decoded_allow_session_takeover,
+            crash_on_disconnect: false,
             terminal_env: _,
         } = decoded
         else {

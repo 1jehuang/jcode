@@ -86,6 +86,8 @@ type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    /// Whether an unannounced transport loss should crash the attached session.
+    pub crash_on_disconnect: bool,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
     /// Next id to use on the legacy connection.
@@ -130,6 +132,15 @@ pub struct BridgeState {
     /// carry it without a round trip.
     current_effort: Option<String>,
     available_routes: Vec<ModelRouteInfo>,
+}
+
+impl BridgeState {
+    pub fn with_crash_on_disconnect(crash_on_disconnect: bool) -> Self {
+        Self {
+            crash_on_disconnect,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -365,6 +376,9 @@ impl BridgeState {
                     "id": id,
                     "working_dir": working_dir,
                 });
+                if self.crash_on_disconnect {
+                    subscribe["crash_on_disconnect"] = json!(true);
+                }
                 // Sessions rooted inside a jcode checkout are self-dev
                 // sessions: the daemon only enables the self-dev tools and
                 // prompt when the subscribe says so, and a client that opens
@@ -824,7 +838,13 @@ impl BridgeState {
                     json!({"type": "cancel_soft_interrupts", "id": id}),
                 )]
             }
-            "detach_session" => vec![Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok))],
+            "detach_session" => {
+                let id = self.legacy_id();
+                vec![
+                    Outbound::Legacy(json!({"type": "prepare_disconnect", "id": id})),
+                    Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok)),
+                ]
+            }
             "permission_response" => {
                 // The legacy protocol does not surface permission prompts on
                 // this path, so the bridge never emits `permission_request`

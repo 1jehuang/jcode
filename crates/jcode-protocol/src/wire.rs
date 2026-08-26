@@ -132,12 +132,21 @@ pub enum Request {
         client_has_local_history: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_session_takeover: bool,
+        /// Mark the attached session crashed if this connection disappears
+        /// without first sending `prepare_disconnect`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        crash_on_disconnect: bool,
         /// Terminal-identifying env vars (tmux/zellij/kitty/DISPLAY/...) captured
         /// from the connecting client so the server can route spawn/focus hooks
         /// to the client's terminal instead of its own stale startup env (#405).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         terminal_env: Vec<(String, String)>,
     },
+
+    /// Declare that this client is intentionally detaching before its transport
+    /// closes. This disarms `crash_on_disconnect` for graceful UI teardown.
+    #[serde(rename = "prepare_disconnect")]
+    PrepareDisconnect { id: u64 },
 
     /// Get full conversation history (for TUI sync on connect)
     #[serde(rename = "get_history")]

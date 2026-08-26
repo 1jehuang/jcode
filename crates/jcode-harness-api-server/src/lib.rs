@@ -211,6 +211,7 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
         }
     };
     let reply_to = hello["id"].as_u64().unwrap_or(0);
+    let client_name = hello["client"].as_str().unwrap_or_default();
     let compatible = hello["req"] == "hello"
         && hello["min_version"].as_u64().unwrap_or(0) <= u64::from(API_VERSION_MAJOR)
         && hello["max_version"].as_u64().unwrap_or(0) >= u64::from(API_VERSION_MAJOR);
@@ -259,7 +260,8 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
     let (legacy_read, mut legacy_write) = legacy.into_split();
     let mut legacy_reader = BufReader::new(legacy_read);
 
-    let mut state = translate::BridgeState::default();
+    let mut state =
+        translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
