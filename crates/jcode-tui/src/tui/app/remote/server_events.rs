@@ -1699,7 +1699,9 @@ pub(in crate::tui::app) fn handle_server_event(
             if session_changed || status_detail.is_some() {
                 app.status_detail = status_detail;
             }
-            app.remote_reasoning_effort = reasoning_effort;
+            if session_changed || reasoning_effort.is_some() {
+                app.remote_reasoning_effort = reasoning_effort;
+            }
             app.remote_service_tier = service_tier;
             app.remote_compaction_mode = Some(compaction_mode);
             app.set_side_panel_snapshot(side_panel);
