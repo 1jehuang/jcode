@@ -407,6 +407,7 @@ fn model_picker_route_is_current(
     route: &PickerOption,
     current_model: &str,
     current_provider: &str,
+    current_api_method: Option<&str>,
 ) -> bool {
     if model_name != current_model {
         return false;
@@ -418,9 +419,14 @@ fn model_picker_route_is_current(
     // and the current model would not preselect. Fall back to name-only
     // matching in that case.
     if current_provider.trim().eq_ignore_ascii_case("remote") {
-        return true;
+        return current_api_method
+            .map(|method| route.api_method.eq_ignore_ascii_case(method))
+            .unwrap_or(true);
     }
     jcode_provider_core::model_route_provider_labels_match(&route.provider, current_provider)
+        && current_api_method
+            .map(|method| route.api_method.eq_ignore_ascii_case(method))
+            .unwrap_or(true)
 }
 
 const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
@@ -1716,6 +1722,7 @@ impl App {
                                 route,
                                 &current_model,
                                 &current_provider,
+                                current_api_method.as_deref(),
                             );
                         entries.push(PickerEntry {
                             name: display_name.clone(),
@@ -1758,6 +1765,7 @@ impl App {
                         &route,
                         &current_model,
                         &current_provider,
+                        current_api_method.as_deref(),
                     );
                     let is_default = is_config_default(name, &route, None);
                     entries.push(PickerEntry {
@@ -4016,12 +4024,35 @@ mod tests {
             &openai_route,
             "gpt-5.5",
             "OpenAI",
+            None,
         ));
         assert!(!model_picker_route_is_current(
             "gpt-5.5",
             &copilot_route,
             "gpt-5.5",
             "OpenAI",
+            None,
+        ));
+    }
+
+    #[test]
+    fn model_picker_current_route_requires_matching_api_method() {
+        let oauth_route = picker_option_with_method("Anthropic", "claude-oauth");
+        let api_key_route = picker_option_with_method("Anthropic", "claude-api");
+
+        assert!(!model_picker_route_is_current(
+            "claude-fable-5",
+            &oauth_route,
+            "claude-fable-5",
+            "Claude",
+            Some("claude-api"),
+        ));
+        assert!(model_picker_route_is_current(
+            "claude-fable-5",
+            &api_key_route,
+            "claude-fable-5",
+            "Claude",
+            Some("claude-api"),
         ));
     }
 
