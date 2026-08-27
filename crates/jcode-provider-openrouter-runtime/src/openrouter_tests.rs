@@ -356,7 +356,7 @@ fn named_openai_compatible_provider_uses_per_model_image_input_support() {
 }
 
 #[test]
-fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
+fn named_openai_compatible_model_with_omitted_input_preserves_image_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
@@ -366,6 +366,7 @@ fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
         default_model: Some("text-model".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "text-model".to_string(),
+            context_window: Some(200_000),
             ..Default::default()
         }],
         ..Default::default()
@@ -374,11 +375,11 @@ fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
     let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
         .expect("local named profile should initialize without auth");
 
-    assert!(!provider.supports_image_input());
+    assert!(provider.supports_image_input());
 }
 
 #[test]
-fn named_openai_compatible_model_with_empty_input_defaults_to_text_only() {
+fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
@@ -399,7 +400,7 @@ fn named_openai_compatible_model_with_empty_input_defaults_to_text_only() {
     let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
         .expect("local named profile should initialize without auth");
 
-    assert!(!provider.supports_image_input());
+    assert!(provider.supports_image_input());
 }
 
 #[test]
