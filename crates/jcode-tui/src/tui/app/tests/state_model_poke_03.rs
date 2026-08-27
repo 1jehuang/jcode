@@ -842,10 +842,15 @@ fn test_tui_cerebras_paste_key_lifecycle_has_no_degraded_success_messages() {
                     assert!(login.success, "unexpected failed login event: {login:?}");
                     assert_eq!(login.provider, "Cerebras");
                     assert!(login.message.contains("Cerebras API key saved."));
+                    let expected_path = crate::storage::app_config_dir()
+                        .unwrap()
+                        .join("cerebras.env");
                     assert!(
                         login
                             .message
-                            .contains("Stored at ~/.config/jcode/cerebras.env.")
+                            .contains(&format!("Stored at {}.", expected_path.display())),
+                        "{}",
+                        login.message
                     );
                     assert!(login.message.contains("Fetching models now."));
                     assert!(!login.message.contains("did not switch models"));
