@@ -1118,7 +1118,7 @@ fn render_non_kitty_fit_stable(
     // completed off-thread and retained in FITTED_SOURCE_CACHE.
     let cropped = source.crop_imm(0, scroll_y_px, source.width(), crop_h_px);
     let source_bytes = cropped.as_bytes().len();
-    let protocol = picker.new_resize_protocol(cropped);
+    let protocol = runtime::new_resize_protocol(picker, cropped);
     if let Ok(mut debug) = MERMAID_DEBUG.lock() {
         debug.stats.image_state_misses += 1;
         debug.stats.fit_protocol_rebuilds += 1;
@@ -1496,7 +1496,7 @@ pub fn render_image_widget_viewport_precise(
         dbg.stats.viewport_protocol_rebuilds += 1;
     }
     let source_bytes = cropped.as_bytes().len();
-    let protocol = picker.new_resize_protocol(cropped);
+    let protocol = runtime::new_resize_protocol(picker, cropped);
 
     let mut state = IMAGE_STATE
         .lock()
