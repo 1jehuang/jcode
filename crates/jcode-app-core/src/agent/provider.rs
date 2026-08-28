@@ -57,6 +57,21 @@ impl Agent {
         Ok(())
     }
 
+    fn refresh_compaction_budget(&self) {
+        let compaction = self.registry.compaction();
+        match compaction.try_write() {
+            Ok(mut manager) => manager.set_budget(self.provider.context_window()),
+            Err(_) => crate::logging::warn(
+                "Could not refresh compaction token budget after provider change: compaction manager is busy",
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn compaction_token_budget(&self) -> usize {
+        self.registry.compaction().read().await.token_budget()
+    }
+
     pub fn provider_messages(&mut self) -> Vec<Message> {
         self.session.messages_for_provider()
     }
@@ -100,6 +115,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("route selection");
         self.log_env_snapshot("set_route_selection");
         Ok(())
@@ -128,6 +144,7 @@ impl Agent {
         self.session.model = Some(self.provider_model());
         let event = crate::provider::ProviderStateEvent::selected_model(source, resolved_model);
         self.provider_runtime_state.apply(event);
+        self.refresh_compaction_budget();
         self.persist_session_best_effort("model selection");
         self.log_env_snapshot("set_model");
         Ok(())

@@ -145,8 +145,7 @@ pub(crate) fn slash_command_palette_may_be_visible(
 ///
 /// Keep this in sync with `ui_input::draw_status`: these statuses can be safely
 /// refreshed by the one-cell spinner fast path when the status line is left aligned.
-/// Tool execution uses its own full-line activity indicator, and network waits use
-/// a static amber retry marker, so neither belongs here.
+/// Network waits use a static amber retry marker, so they do not belong here.
 pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
     matches!(
         status,
@@ -154,6 +153,7 @@ pub(crate) fn status_uses_primary_spinner(status: &ProcessingStatus) -> bool {
             | ProcessingStatus::Connecting(_)
             | ProcessingStatus::Thinking(_)
             | ProcessingStatus::Streaming
+            | ProcessingStatus::RunningTool(_)
     )
 }
 
@@ -1221,9 +1221,9 @@ mod tests {
     fn primary_spinner_statuses_are_explicit() {
         assert!(status_uses_primary_spinner(&ProcessingStatus::Sending));
         assert!(status_uses_primary_spinner(&ProcessingStatus::Streaming));
-        assert!(!status_uses_primary_spinner(
-            &ProcessingStatus::RunningTool("bash".to_string())
-        ));
+        assert!(status_uses_primary_spinner(&ProcessingStatus::RunningTool(
+            "bash".to_string()
+        )));
         assert!(!status_uses_primary_spinner(&ProcessingStatus::Idle));
         assert!(!status_uses_primary_spinner(
             &ProcessingStatus::WaitingForNetwork {

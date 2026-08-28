@@ -921,6 +921,10 @@ pub fn provider_display_label(provider_id: Option<&str>) -> Option<String> {
 pub fn activate_auth_change(request: &AuthActivationRequest) -> AuthActivationResult {
     let provider_id = request.provider_id();
     sync_process_env_from_saved_credentials(request, provider_id.as_deref());
+    // The notification handler may have probed auth while the newly saved
+    // credential was not yet reflected in the process environment. Discard
+    // that snapshot after activation so catalog rebuilding sees the new auth.
+    super::AuthStatus::invalidate_cache();
     let provider_label = provider_display_label(provider_id.as_deref());
     let activated_model = apply_auth_provider_runtime(provider_id.as_deref());
     AuthActivationResult {
@@ -1261,6 +1265,29 @@ mod tests {
             .as_deref(),
             Some("fresh-login-key"),
             "credential resolution must use the freshly saved key"
+        );
+    }
+
+    #[test]
+    fn api_key_login_invalidates_auth_status_cached_before_activation() {
+        let sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().openrouter,
+            crate::auth::AuthState::NotConfigured
+        );
+        sandbox
+            .write_env_file("openrouter.env", "OPENROUTER_API_KEY", "fresh-login-key")
+            .expect("write env file");
+
+        let mut auth = AuthChanged::new("openrouter");
+        auth.credential_source = Some(crate::protocol::AuthCredentialSource::ApiKeyFile);
+        auth.auth_method = Some(crate::protocol::AuthMethod::TuiPasteApiKey);
+        let _ = activate_auth_change(&AuthActivationRequest::new(None, Some(auth)));
+
+        assert_eq!(
+            crate::auth::AuthStatus::check_fast().openrouter,
+            crate::auth::AuthState::Available,
+            "catalog refresh must not reuse the pre-activation auth snapshot"
         );
     }
 

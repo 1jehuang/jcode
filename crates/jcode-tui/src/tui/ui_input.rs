@@ -3,8 +3,8 @@ use super::selection_highlight::highlight_line_selection;
 use super::tools_ui::{get_tool_activity_detail, summarize_batch_running_tools_compact};
 use super::visual_debug::{self, FrameCaptureBuilder};
 use super::{
-    ProcessingStatus, TuiState, accent_color, ai_color, animated_tool_color, asap_color, dim_color,
-    pending_color, queued_color, rainbow_prompt_color, user_color,
+    ProcessingStatus, TuiState, accent_color, ai_color, asap_color, dim_color, pending_color,
+    queued_color, rainbow_prompt_color, user_color,
 };
 use crate::message::ConnectionPhase;
 use crate::tui::app;
@@ -922,32 +922,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 Line::from(spans)
             }
             ProcessingStatus::RunningTool(ref name) => {
-                let half_width = 3;
-                let decorative = crate::perf::tui_policy().enable_decorative_animations;
-                // When decorative animations are disabled we still nudge the bar
-                // forward at a slow "liveness" rate so a long-running tool (e.g.
-                // bash) reads as alive instead of frozen.
-                let bar_speed = if decorative {
-                    2.0
-                } else {
-                    jcode_tui_style::theme::LIVENESS_INDICATOR_FPS / half_width as f32
-                };
-                let progress = elapsed * bar_speed % 1.0;
-                let filled_pos = ((progress * half_width as f32) as usize) % half_width;
-                let left_bar: String = (0..half_width)
-                    .map(|i| if i == filled_pos { '●' } else { '·' })
-                    .collect();
-                let right_bar: String = (0..half_width)
-                    .map(|i| {
-                        if i == (half_width - 1 - filled_pos) {
-                            '●'
-                        } else {
-                            '·'
-                        }
-                    })
-                    .collect();
-
-                let anim_color = animated_tool_color(elapsed);
+                let anim_color = ai_color();
                 let batch_prog = app.batch_progress();
                 let is_batch = name == "batch";
                 // For batch: compute initial total from the streaming tool call input
@@ -972,11 +947,11 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 let subagent = app.subagent_status();
 
                 let mut spans = vec![
-                    Span::styled(left_bar, Style::default().fg(anim_color)),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(name.to_string(), Style::default().fg(anim_color).bold()),
-                    Span::styled(" ", Style::default()),
-                    Span::styled(right_bar, Style::default().fg(anim_color)),
+                    Span::styled(spinner, Style::default().fg(anim_color)),
+                    Span::styled(
+                        format!(" running {}", name),
+                        Style::default().fg(anim_color).bold(),
+                    ),
                 ];
 
                 // For batch tool: show "completed/total · last_tool" progress

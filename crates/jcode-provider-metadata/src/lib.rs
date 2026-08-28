@@ -499,6 +499,27 @@ mod tests {
     }
 
     #[test]
+    fn belvedir_profile_uses_official_inference_router_configuration() {
+        assert_eq!(BELVEDIR_PROFILE.id, "belvedir");
+        assert_eq!(BELVEDIR_PROFILE.display_name, "Belvedir");
+        assert_eq!(
+            BELVEDIR_PROFILE.api_base,
+            "https://platform.belvedir.ai/api/v1/route"
+        );
+        assert_eq!(BELVEDIR_PROFILE.api_key_env, "BELVEDIR_API_KEY");
+        assert_eq!(BELVEDIR_PROFILE.env_file, "belvedir.env");
+        assert_eq!(BELVEDIR_PROFILE.default_model, Some("auto"));
+        assert!(BELVEDIR_PROFILE.requires_api_key);
+
+        let provider = resolve_login_provider("belvedir.ai").expect("Belvedir alias resolves");
+        assert_eq!(provider.id, "belvedir");
+        assert_eq!(
+            provider.target,
+            LoginProviderTarget::OpenAiCompatible(BELVEDIR_PROFILE)
+        );
+    }
+
+    #[test]
     fn ollama_profile_is_local_openai_compatible_without_required_api_key() {
         assert_eq!(OLLAMA_PROFILE.id, "ollama");
         assert_eq!(OLLAMA_PROFILE.api_base, "http://localhost:11434/v1");

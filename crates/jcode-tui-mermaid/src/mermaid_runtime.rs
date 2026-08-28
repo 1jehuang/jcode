@@ -80,6 +80,59 @@ fn detect_multiplexer_from_env() -> Multiplexer {
     )
 }
 
+fn tmux_reports_native_sixel(sixel_support: &str, client_termfeatures: &str) -> bool {
+    sixel_support.trim() == "1"
+        && client_termfeatures
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .any(|feature| feature == "sixel")
+}
+
+fn tmux_has_native_sixel() -> bool {
+    if detect_multiplexer_from_env() != Multiplexer::Tmux {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "#{sixel_support}\n#{client_termfeatures}",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut lines = output.lines();
+    tmux_reports_native_sixel(
+        lines.next().unwrap_or_default(),
+        lines.next().unwrap_or_default(),
+    )
+}
+
+/// Construct image state while allowing a sixel-capable tmux to retain images
+/// in its own screen buffer. Other protocols and older tmux versions keep the
+/// upstream ratatui-image passthrough behavior.
+pub(super) fn new_resize_protocol(picker: &Picker, image: DynamicImage) -> StatefulProtocol {
+    if picker.protocol_type() == ProtocolType::Sixel
+        && *TMUX_NATIVE_SIXEL.get_or_init(tmux_has_native_sixel)
+    {
+        let source = ImageSource::new(image, picker.font_size(), image::Rgba([0, 0, 0, 0]));
+        StatefulProtocol::new(
+            source,
+            picker.font_size(),
+            StatefulProtocolType::Sixel(Sixel {
+                is_tmux: false,
+                ..Sixel::default()
+            }),
+        )
+    } else {
+        picker.new_resize_protocol(image)
+    }
+}
+
 fn parse_env_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -810,6 +863,18 @@ mod tests {
             ),
             Multiplexer::Herdr
         );
+    }
+
+    #[test]
+    fn native_tmux_sixel_requires_server_and_client_support() {
+        assert!(tmux_reports_native_sixel(
+            "1\n",
+            "256,clipboard,mouse,sixel,title"
+        ));
+        assert!(tmux_reports_native_sixel("1", "RGB sixel hyperlinks"));
+        assert!(!tmux_reports_native_sixel("0", "sixel"));
+        assert!(!tmux_reports_native_sixel("1", "256,clipboard,mouse"));
+        assert!(!tmux_reports_native_sixel("1", "sixel-overwrite"));
     }
 
     #[test]

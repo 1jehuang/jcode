@@ -244,9 +244,7 @@ fn full_frame_status_animation_active_with_policy(
     // These animations are rendered as part of the full status line, not by the
     // spinner-only cell renderer in app/run_shell.rs, so they need the normal
     // active redraw loop while visible.
-    matches!(state.status(), ProcessingStatus::RunningTool(_))
-        || rate_limit_countdown_redraw_active(state)
-        || crate::build::read_build_progress().is_some()
+    rate_limit_countdown_redraw_active(state) || crate::build::read_build_progress().is_some()
 }
 
 fn primary_status_spinner_fast_path_available_with_policy(

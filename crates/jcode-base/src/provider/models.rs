@@ -251,7 +251,7 @@ fn openai_static_model_ids() -> Vec<String> {
 
     // Only advertise the explicit [1m] alias when the live catalog we fetched
     // says this backend exposes a >=1M context window for GPT-5.4.
-    if get_cached_context_limit("gpt-5.4").unwrap_or_default() >= 1_000_000 {
+    if cached_context_limit_for_model("gpt-5.4").unwrap_or_default() >= 1_000_000 {
         if let Some(index) = models.iter().position(|model| model == "gpt-5.4") {
             models.insert(index + 1, "gpt-5.4[1m]".to_string());
         } else {
@@ -307,7 +307,7 @@ fn model_exposes_1m_alias(normalized_model: &str) -> bool {
             return mode.exposes_1m_alias();
         }
     }
-    get_cached_context_limit(normalized_model).unwrap_or_default() >= 1_000_000
+    cached_context_limit_for_model(normalized_model).unwrap_or_default() >= 1_000_000
 }
 
 fn live_catalog_model_ids(service: &ModelCatalogService, scope: &str) -> Option<Vec<String>> {
@@ -474,7 +474,7 @@ pub fn persist_anthropic_model_catalog(catalog: &AnthropicModelCatalog) {
 }
 
 /// Look up a cached context limit for a model.
-fn get_cached_context_limit(model: &str) -> Option<usize> {
+pub fn cached_context_limit_for_model(model: &str) -> Option<usize> {
     let cache = CONTEXT_LIMIT_CACHE.read().ok()?;
     cache.get(model).copied()
 }
@@ -1118,7 +1118,11 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    context_limit_for_model_with_provider_and_cache(model, provider_hint, get_cached_context_limit)
+    context_limit_for_model_with_provider_and_cache(
+        model,
+        provider_hint,
+        cached_context_limit_for_model,
+    )
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {
