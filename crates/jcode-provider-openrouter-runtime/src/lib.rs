@@ -1036,8 +1036,10 @@ impl OpenRouterProvider {
         reasoning_effort_support: Option<bool>,
         profile_id: Option<&str>,
     ) -> Option<String> {
-        let supported =
-            reasoning_effort_support.unwrap_or(Self::profile_supports_reasoning_effort(profile_id));
+        let supported = reasoning_effort_support.unwrap_or(
+            Self::profile_supports_reasoning_effort(profile_id)
+                || Self::profile_supports_openai_reasoning_effort(profile_id),
+        );
         if !supported {
             return None;
         }
@@ -1045,7 +1047,13 @@ impl OpenRouterProvider {
             .provider
             .openai_reasoning_effort
             .as_deref()
-            .and_then(Self::normalize_reasoning_effort)
+            .and_then(|effort| {
+                if Self::profile_supports_openai_reasoning_effort(profile_id) {
+                    Self::normalize_openai_reasoning_effort(effort)
+                } else {
+                    Self::normalize_reasoning_effort(effort)
+                }
+            })
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {

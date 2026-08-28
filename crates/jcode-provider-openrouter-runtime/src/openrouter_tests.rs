@@ -1432,6 +1432,28 @@ fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
 }
 
 #[test]
+fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch() {
+    let configured = jcode_base::config::config()
+        .provider
+        .openai_reasoning_effort
+        .as_deref()
+        .and_then(OpenRouterProvider::normalize_openai_reasoning_effort);
+    assert_eq!(
+        OpenRouterProvider::initial_reasoning_effort(None, Some("zai")),
+        configured
+    );
+
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        reasoning_effort: Arc::new(RwLock::new(None)),
+        ..make_custom_compatible_provider()
+    };
+    provider.set_model("glm-5.3-flash").unwrap();
+    assert_eq!(provider.reasoning_effort(), configured);
+}
+
+#[test]
 fn openrouter_profile_exposes_unified_reasoning_effort() {
     let provider = make_provider();
 
