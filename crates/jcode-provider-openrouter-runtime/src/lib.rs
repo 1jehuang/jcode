@@ -1068,7 +1068,9 @@ impl OpenRouterProvider {
         // no profile id or the "openrouter" doctor-profile id (assigned when
         // the default api base matches the OpenRouter OpenAI-compat profile),
         // so both must qualify (issue: effort rejected on plain OpenRouter).
-        send_openrouter_headers && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter"))
+        (send_openrouter_headers
+            && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter")))
+            || profile_id.is_some_and(|id| id.eq_ignore_ascii_case("conifer"))
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {

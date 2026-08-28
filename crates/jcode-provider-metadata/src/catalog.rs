@@ -69,6 +69,17 @@ pub const BASETEN_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     requires_api_key: true,
 };
 
+pub const CONIFER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "conifer",
+    display_name: "Conifer",
+    api_base: "https://api.conifer.build/v1",
+    api_key_env: "CONIFER_API_KEY",
+    env_file: "conifer.env",
+    setup_url: "https://www.conifer.build/docs/api/",
+    default_model: None,
+    requires_api_key: true,
+};
+
 pub const CORTECS_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     id: "cortecs",
     display_name: "Cortecs",
@@ -467,7 +478,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 40] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 41] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -478,6 +489,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 40] = [
     ALIBABA_CODING_PLAN_PROFILE,
     AI302_PROFILE,
     BASETEN_PROFILE,
+    CONIFER_PROFILE,
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
     ORCAROUTER_PROFILE,
@@ -779,6 +791,19 @@ pub const BASETEN_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescrip
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(BASETEN_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(19), Some(19), Some(19), Some(19), Some(19)),
+};
+
+pub const CONIFER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "conifer",
+    display_name: "Conifer",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &["conifer-api"],
+    menu_detail: "API key, cost-routed gateway with local models",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(CONIFER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(40), Some(40), Some(40), Some(40), Some(40)),
 };
 
 pub const CORTECS_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
@@ -1204,7 +1229,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 52] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 53] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1225,6 +1250,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 52] = [
     ALIBABA_CODING_PLAN_LOGIN_PROVIDER,
     AI302_LOGIN_PROVIDER,
     BASETEN_LOGIN_PROVIDER,
+    CONIFER_LOGIN_PROVIDER,
     CORTECS_LOGIN_PROVIDER,
     DEEPSEEK_LOGIN_PROVIDER,
     COMTEGRA_LOGIN_PROVIDER,
