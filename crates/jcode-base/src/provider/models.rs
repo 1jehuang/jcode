@@ -1118,7 +1118,11 @@ pub fn context_limit_for_model_with_provider(
     model: &str,
     provider_hint: Option<&str>,
 ) -> Option<usize> {
-    context_limit_for_model_with_provider_and_cache(model, provider_hint, cached_context_limit_for_model)
+    context_limit_for_model_with_provider_and_cache(
+        model,
+        provider_hint,
+        cached_context_limit_for_model,
+    )
 }
 
 pub fn resolve_model_capabilities(model: &str, provider_hint: Option<&str>) -> ModelCapabilities {
