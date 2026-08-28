@@ -604,6 +604,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "MISTRAL_API_KEY" => &["mistral"],
         "GROQ_API_KEY" => &["groq"],
         "CEREBRAS_API_KEY" => &["cerebras"],
+        "BELVEDIR_API_KEY" => &["belvedir"],
         "XAI_API_KEY" => &["xai"],
         "OPENROUTER_API_KEY" => &["openrouter"],
         "AI_GATEWAY_API_KEY" => &["vercel-ai-gateway"],
