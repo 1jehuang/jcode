@@ -437,9 +437,9 @@ impl Provider for OpenRouterProvider {
 
         if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
             || self
-            .model_reasoning_config()
-            .and_then(|config| config.1.as_ref())
-            .is_some()
+                .model_reasoning_config()
+                .and_then(|config| config.1.as_ref())
+                .is_some()
         {
             let configured = self.configured_effort_for_model();
             if let Ok(mut effort) = self.reasoning_effort.try_write() {
