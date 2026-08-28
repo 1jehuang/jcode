@@ -226,6 +226,7 @@ impl ProviderActivation {
 /// Select the provider used when a new multi-provider runtime starts.
 /// Later model switches remain free to select any configured provider.
 pub fn select_initial_runtime_provider_key(provider_key_raw: &str) {
+    crate::env::set_var("JCODE_RUNTIME_PROVIDER", provider_key_raw);
     crate::env::set_var("JCODE_ACTIVE_PROVIDER", provider_key_raw);
     crate::env::set_var("JCODE_INITIAL_PROVIDER_EXPLICIT", "1");
     crate::logging::auth_event(
@@ -287,6 +288,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn initial_provider_selection_preserves_raw_runtime_key() {
+        let _guard = crate::storage::lock_test_env();
+        let _env = EnvGuard::new(&[
+            "JCODE_RUNTIME_PROVIDER",
+            "JCODE_ACTIVE_PROVIDER",
+            "JCODE_INITIAL_PROVIDER_EXPLICIT",
+        ]);
+
+        select_initial_runtime_provider_key("custom-provider-key");
+
+        assert_eq!(
+            std::env::var("JCODE_RUNTIME_PROVIDER").as_deref(),
+            Ok("custom-provider-key")
+        );
+        assert_eq!(
+            std::env::var("JCODE_ACTIVE_PROVIDER").as_deref(),
+            Ok("custom-provider-key")
+        );
     }
 
     #[test]
