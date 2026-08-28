@@ -393,9 +393,9 @@ pub const BELVEDIR_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_key_env: "BELVEDIR_API_KEY",
     env_file: "belvedir.env",
     setup_url: "https://docs.belvedir.ai/quickstart",
-    // Belvedir routes provider-prefixed model ids and exposes the models
-    // available to each project. Select from the live catalog after login.
-    default_model: None,
+    // Belvedir documents `auto` as the project router. Its inference base does
+    // not expose the conventional OpenAI-compatible `/models` endpoint.
+    default_model: Some("auto"),
     requires_api_key: true,
 };
 

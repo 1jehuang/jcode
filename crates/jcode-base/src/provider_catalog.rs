@@ -494,6 +494,9 @@ pub fn openai_compatible_profile_static_models(profile: OpenAiCompatibleProfile)
             push("gpt-oss-120b");
             push("zai-glm-4.7");
         }
+        // Belvedir's router accepts `auto`, but does not expose `/models` at
+        // its OpenAI-compatible inference base.
+        "belvedir" => push("auto"),
         // Celeris serves exactly one model per base URL today, and `/models`
         // requires auth, so keep the documented id available pre-refresh.
         "celeris" => {
@@ -567,6 +570,9 @@ pub fn openai_compatible_profile_context_limit(profile_id: &str, model: &str) ->
     let model = model.trim().to_ascii_lowercase();
 
     match profile_id.as_str() {
+        // The selected upstream model may vary. Use Jcode's conservative
+        // compatible-provider context budget for the Belvedir auto router.
+        "belvedir" if model == "auto" => Some(128_000),
         // DeepSeek V4 direct API models advertise a 1M token context window. The
         // direct profile runs through the OpenRouter/OpenAI-compatible provider
         // implementation, whose live catalog can be unavailable during startup.
