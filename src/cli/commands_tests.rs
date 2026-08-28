@@ -1330,6 +1330,18 @@ fn list_cli_providers_includes_auto_and_openai() {
 }
 
 #[test]
+fn list_cli_providers_includes_conifer() {
+    let providers = super::report_info::list_cli_providers();
+    let conifer = providers
+        .iter()
+        .find(|provider| provider.id == "conifer")
+        .expect("Conifer should be discoverable through `provider list`");
+
+    assert_eq!(conifer.display_name, "Conifer");
+    assert_eq!(conifer.auth_kind.as_deref(), Some("API key"));
+}
+
+#[test]
 fn version_command_plain_output_includes_core_fields() {
     let report = super::report_info::VersionReport {
         version: "v1.2.3 (abc1234)".to_string(),
