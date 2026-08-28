@@ -435,10 +435,11 @@ impl Provider for OpenRouterProvider {
             self.clear_pin_if_model_changed(&model_id, true);
         }
 
-        if self
-            .model_reasoning_config()
-            .and_then(|config| config.1.as_ref())
-            .is_some()
+        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+            || self
+                .model_reasoning_config()
+                .and_then(|config| config.1.as_ref())
+                .is_some()
         {
             let configured = self.configured_effort_for_model();
             if let Ok(mut effort) = self.reasoning_effort.try_write() {
@@ -757,6 +758,13 @@ impl Provider for OpenRouterProvider {
         let normalized_model_id = model_id.trim().to_ascii_lowercase();
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
+        }
+        // Config loading seeds explicit per-model context windows here. They
+        // must outrank built-in profile family guesses. See #1087.
+        if let Some(limit) =
+            jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
+        {
+            return limit;
         }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's

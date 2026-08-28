@@ -48,7 +48,7 @@ use ratatui::widgets::StatefulWidget;
 use ratatui_image::{
     CropOptions, Resize, ResizeEncodeRender, StatefulImage,
     picker::{Picker, ProtocolType, cap_parser::Parser},
-    protocol::StatefulProtocol,
+    protocol::{ImageSource, StatefulProtocol, StatefulProtocolType, sixel::Sixel},
 };
 use serde::Serialize;
 use std::borrow::Cow;
@@ -414,6 +414,9 @@ static VIDEO_EXPORT_MODE: AtomicBool = AtomicBool::new(false);
 /// Global picker for terminal capability detection
 /// Initialized once on first use
 static PICKER: OnceLock<Option<Picker>> = OnceLock::new();
+
+/// Whether the current tmux client can parse and retain sixel images itself.
+static TMUX_NATIVE_SIXEL: OnceLock<bool> = OnceLock::new();
 
 /// Track whether cache eviction has run
 static CACHE_EVICTED: OnceLock<()> = OnceLock::new();

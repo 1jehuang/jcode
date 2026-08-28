@@ -1,5 +1,16 @@
 use super::*;
 
+#[test]
+fn conifer_static_fallback_contains_the_issue_catalog() {
+    let profile = openai_compatible_profile_by_id("conifer").expect("Conifer profile");
+    let models = openai_compatible_profile_static_models(profile);
+
+    assert_eq!(models.len(), 96);
+    assert_eq!(models.first().map(String::as_str), Some("claude-fable-5"));
+    assert_eq!(models.last().map(String::as_str), Some("gemma-3-27b"));
+    assert!(models.iter().any(|model| model == "gpt-5.6-sol"));
+}
+
 struct EnvGuard {
     vars: Vec<(String, Option<String>)>,
 }

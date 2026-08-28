@@ -63,6 +63,18 @@ fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
     model == "claude-sonnet-5"
 }
 
+fn copilot_model_uses_responses_api(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("gpt-5.6")
+}
+
+fn copilot_api_path(uses_responses_api: bool) -> &'static str {
+    if uses_responses_api {
+        "responses"
+    } else {
+        "chat/completions"
+    }
+}
+
 impl CopilotApiProvider {
     #[cfg(test)]
     fn max_token_parameter_for_model(model: &str) -> &'static str {
@@ -440,8 +452,8 @@ impl CopilotApiProvider {
     /// Send a streaming request to Copilot API with retry logic
     async fn stream_request(
         &self,
-        messages: Vec<Value>,
-        tools: Vec<Value>,
+        body: Value,
+        uses_responses_api: bool,
         is_user_initiated: bool,
         tx: mpsc::Sender<Result<StreamEvent>>,
     ) {
@@ -453,7 +465,6 @@ impl CopilotApiProvider {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let max_tokens: u32 = 32_768;
         let initiator = if is_user_initiated { "user" } else { "agent" };
 
         const MAX_RETRIES: u32 = 3;
@@ -497,18 +508,6 @@ impl CopilotApiProvider {
                 }
             };
 
-            let mut body = json!({
-                "model": model,
-                "messages": messages,
-                "stream": true,
-            });
-            Self::add_max_token_parameter(&mut body, &model, max_tokens);
-            self.add_reasoning_effort_parameter(&mut body, &model);
-
-            if !tools.is_empty() {
-                body["tools"] = json!(tools);
-            }
-
             let request_id = Uuid::new_v4().to_string();
 
             // Retries use a fresh unpooled client: the fault that broke
@@ -524,8 +523,9 @@ impl CopilotApiProvider {
 
             let resp = attempt_client
                 .post(format!(
-                    "{}/chat/completions",
-                    copilot_auth::COPILOT_API_BASE
+                    "{}/{}",
+                    copilot_auth::COPILOT_API_BASE,
+                    copilot_api_path(uses_responses_api)
                 ))
                 .header("Authorization", format!("Bearer {}", bearer_token))
                 .header("Editor-Version", copilot_auth::EDITOR_VERSION)
@@ -619,7 +619,12 @@ impl CopilotApiProvider {
                 jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
 
             // Process SSE stream - returns Err on timeout/stream errors
-            match self.process_sse_stream(resp, attempt_tx).await {
+            let stream_result = if uses_responses_api {
+                self.process_responses_sse_stream(resp, attempt_tx).await
+            } else {
+                self.process_sse_stream(resp, attempt_tx).await
+            };
+            match stream_result {
                 Ok(()) => {
                     let _ = attempt_guard.finish().await;
                     return;
@@ -674,6 +679,46 @@ impl CopilotApiProvider {
                 )))
                 .await;
         }
+    }
+
+    async fn process_responses_sse_stream(
+        &self,
+        resp: reqwest::Response,
+        tx: mpsc::Sender<Result<StreamEvent>>,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        let timeout = jcode_base::provider::stream_idle_timeout();
+        let mut stream =
+            jcode_provider_openai::stream::OpenAIResponsesStream::new(resp.bytes_stream());
+        let mut input_tokens = 0;
+        let mut output_tokens = 0;
+
+        loop {
+            let event = match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(Some(event)) => event?,
+                Ok(None) => break,
+                Err(_) => anyhow::bail!(
+                    "Stream read timeout: no data received for {} seconds",
+                    timeout.as_secs()
+                ),
+            };
+            if let StreamEvent::TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                ..
+            } = &event
+            {
+                input_tokens = input.unwrap_or(0);
+                output_tokens = output.unwrap_or(0);
+            }
+            tx.send(Ok(event))
+                .await
+                .map_err(|_| anyhow::anyhow!("Stream receiver dropped"))?;
+        }
+
+        jcode_base::copilot_usage::record_request(input_tokens, output_tokens, true);
+        Ok(())
     }
 
     async fn process_sse_stream(
@@ -905,20 +950,51 @@ impl Provider for CopilotApiProvider {
             self.user_turn_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let built_messages = Self::build_messages(system, messages);
-        let built_tools = Self::build_tools(tools);
         let model_for_fingerprint = self.model();
-        let mut canonical_payload = json!({
-            "model": &model_for_fingerprint,
-            "messages": &built_messages,
-            "tools": &built_tools,
-        });
-        Self::add_max_token_parameter(&mut canonical_payload, &model_for_fingerprint, 32_768u32);
-        self.add_reasoning_effort_parameter(&mut canonical_payload, &model_for_fingerprint);
-        let system_value = built_messages
-            .first()
-            .filter(|message| message.get("role").and_then(|role| role.as_str()) == Some("system"))
-            .cloned();
+        let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
+        let (canonical_payload, fingerprint_input, system_value, built_tools) =
+            if uses_responses_api {
+                let input = jcode_provider_openai::build_responses_input(messages);
+                let tools = jcode_provider_openai::build_tools(tools);
+                let mut payload = json!({
+                    "model": &model_for_fingerprint,
+                    "input": &input,
+                    "stream": true,
+                    "max_output_tokens": 32_768u32,
+                });
+                if !system.is_empty() {
+                    payload["instructions"] = json!(system);
+                }
+                if !tools.is_empty() {
+                    payload["tools"] = json!(&tools);
+                }
+                (
+                    payload,
+                    input,
+                    (!system.is_empty()).then(|| json!(system)),
+                    tools,
+                )
+            } else {
+                let built_messages = Self::build_messages(system, messages);
+                let tools = Self::build_tools(tools);
+                let mut payload = json!({
+                    "model": &model_for_fingerprint,
+                    "messages": &built_messages,
+                    "stream": true,
+                });
+                Self::add_max_token_parameter(&mut payload, &model_for_fingerprint, 32_768u32);
+                self.add_reasoning_effort_parameter(&mut payload, &model_for_fingerprint);
+                if !tools.is_empty() {
+                    payload["tools"] = json!(&tools);
+                }
+                let system_value = built_messages
+                    .first()
+                    .filter(|message| {
+                        message.get("role").and_then(|role| role.as_str()) == Some("system")
+                    })
+                    .cloned();
+                (payload, built_messages, system_value, tools)
+            };
         let tools_value = if built_tools.is_empty() {
             None
         } else {
@@ -927,9 +1003,13 @@ impl Provider for CopilotApiProvider {
         jcode_provider_core::fingerprint::log_provider_canonical_input(
             "copilot",
             &model_for_fingerprint,
-            "chat_completions",
+            if uses_responses_api {
+                "responses"
+            } else {
+                "chat_completions"
+            },
             &canonical_payload,
-            &built_messages,
+            &fingerprint_input,
             system_value.as_ref(),
             tools_value.as_ref(),
             Some(built_tools.len()),
@@ -957,7 +1037,7 @@ impl Provider for CopilotApiProvider {
 
         tokio::spawn(async move {
             provider
-                .stream_request(built_messages, built_tools, is_user_initiated, tx)
+                .stream_request(canonical_payload, uses_responses_api, is_user_initiated, tx)
                 .await;
         });
 

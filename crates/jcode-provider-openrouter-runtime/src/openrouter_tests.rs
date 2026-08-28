@@ -356,7 +356,7 @@ fn named_openai_compatible_provider_uses_per_model_image_input_support() {
 }
 
 #[test]
-fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
+fn named_openai_compatible_model_with_omitted_input_preserves_image_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
@@ -366,6 +366,7 @@ fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
         default_model: Some("text-model".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
             id: "text-model".to_string(),
+            context_window: Some(200_000),
             ..Default::default()
         }],
         ..Default::default()
@@ -374,11 +375,11 @@ fn named_openai_compatible_model_with_omitted_input_defaults_to_text_only() {
     let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
         .expect("local named profile should initialize without auth");
 
-    assert!(!provider.supports_image_input());
+    assert!(provider.supports_image_input());
 }
 
 #[test]
-fn named_openai_compatible_model_with_empty_input_defaults_to_text_only() {
+fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
 
@@ -399,7 +400,7 @@ fn named_openai_compatible_model_with_empty_input_defaults_to_text_only() {
     let provider = OpenRouterProvider::new_named_openai_compatible("local-compat", &profile)
         .expect("local named profile should initialize without auth");
 
-    assert!(!provider.supports_image_input());
+    assert!(provider.supports_image_input());
 }
 
 #[test]
@@ -1431,6 +1432,28 @@ fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
 }
 
 #[test]
+fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch() {
+    let configured = jcode_base::config::config()
+        .provider
+        .openai_reasoning_effort
+        .as_deref()
+        .and_then(OpenRouterProvider::normalize_openai_reasoning_effort);
+    assert_eq!(
+        OpenRouterProvider::initial_reasoning_effort(None, Some("zai")),
+        configured
+    );
+
+    let provider = OpenRouterProvider {
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        reasoning_effort: Arc::new(RwLock::new(None)),
+        ..make_custom_compatible_provider()
+    };
+    provider.set_model("glm-5.3-flash").unwrap();
+    assert_eq!(provider.reasoning_effort(), configured);
+}
+
+#[test]
 fn openrouter_profile_exposes_unified_reasoning_effort() {
     let provider = make_provider();
 
@@ -1958,6 +1981,26 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 
     let provider = OpenRouterProvider::new().expect("provider");
 
+    assert_eq!(provider.context_window(), 1_000_000);
+}
+
+#[test]
+fn explicit_cached_context_window_precedes_zai_family_fallback() {
+    let model = "glm-5.3-issue-1087";
+    jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new(model.to_string())),
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        jcode_base::provider_catalog::openai_compatible_profile_context_limit("zai", model),
+        Some(200_000),
+        "the regression requires a conflicting static family guess"
+    );
     assert_eq!(provider.context_window(), 1_000_000);
 }
 

@@ -240,7 +240,7 @@ pub fn render_image_widget(
             dbg.stats.image_state_misses += 1;
         }
         let source_bytes = img.as_bytes().len();
-        let protocol = picker.new_resize_protocol(img);
+        let protocol = runtime::new_resize_protocol(picker, img);
 
         let mut state = IMAGE_STATE
             .lock()
@@ -467,7 +467,7 @@ fn render_image_widget_fit_inner(
             Resize::Fit(None)
         };
         let source_bytes = img.as_bytes().len();
-        let protocol = picker.new_resize_protocol(img);
+        let protocol = runtime::new_resize_protocol(picker, img);
 
         let mut state = IMAGE_STATE
             .lock()

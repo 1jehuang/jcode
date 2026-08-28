@@ -166,10 +166,12 @@ fn save_tokens(tokens: TokenResponse) -> Result<()> {
         oidc_issuer: OAUTH_ISSUER,
         oidc_client_id: OAUTH_CLIENT_ID,
     };
-    let home = std::env::var_os("GROK_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
-        .context("No home directory available for Grok Build credentials")?;
+    let home = grok_home(
+        std::env::var_os("GROK_HOME"),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+    .context("No home directory available for Grok Build credentials")?;
     std::fs::create_dir_all(&home)?;
     let path = home.join("auth.json");
     let mut credentials = std::fs::read(&path)
@@ -187,6 +189,17 @@ fn save_tokens(tokens: TokenResponse) -> Result<()> {
     crate::platform::set_permissions_owner_only(&temporary)?;
     std::fs::rename(&temporary, &path)?;
     Ok(())
+}
+
+fn grok_home(
+    grok_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    user_profile: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    grok_home.map(PathBuf::from).or_else(|| {
+        home.or(user_profile)
+            .map(|home| PathBuf::from(home).join(".grok"))
+    })
 }
 
 fn managed_cli_path() -> Result<PathBuf> {
@@ -342,7 +355,8 @@ pub async fn ensure_cli() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{credentials_json_has_login, ensure_cli, valid_version};
+    use super::{credentials_json_has_login, ensure_cli, grok_home, valid_version};
+    use std::path::PathBuf;
 
     #[test]
     fn accepts_only_safe_release_versions() {
@@ -362,6 +376,14 @@ mod tests {
         assert!(credentials_json_has_login(
             br#"{"https://auth.x.ai::client":{"key":"token"}}"#
         ));
+    }
+
+    #[test]
+    fn credential_home_falls_back_to_user_profile() {
+        assert_eq!(
+            grok_home(None, None, Some("C:\\Users\\jcode".into())),
+            Some(PathBuf::from("C:\\Users\\jcode").join(".grok"))
+        );
     }
 
     #[tokio::test]

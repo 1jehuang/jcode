@@ -1036,8 +1036,10 @@ impl OpenRouterProvider {
         reasoning_effort_support: Option<bool>,
         profile_id: Option<&str>,
     ) -> Option<String> {
-        let supported =
-            reasoning_effort_support.unwrap_or(Self::profile_supports_reasoning_effort(profile_id));
+        let supported = reasoning_effort_support.unwrap_or(
+            Self::profile_supports_reasoning_effort(profile_id)
+                || Self::profile_supports_openai_reasoning_effort(profile_id),
+        );
         if !supported {
             return None;
         }
@@ -1045,7 +1047,13 @@ impl OpenRouterProvider {
             .provider
             .openai_reasoning_effort
             .as_deref()
-            .and_then(Self::normalize_reasoning_effort)
+            .and_then(|effort| {
+                if Self::profile_supports_openai_reasoning_effort(profile_id) {
+                    Self::normalize_openai_reasoning_effort(effort)
+                } else {
+                    Self::normalize_reasoning_effort(effort)
+                }
+            })
     }
 
     fn profile_rejects_image_input(profile_id: Option<&str>) -> bool {
@@ -1060,7 +1068,9 @@ impl OpenRouterProvider {
         // no profile id or the "openrouter" doctor-profile id (assigned when
         // the default api base matches the OpenRouter OpenAI-compat profile),
         // so both must qualify (issue: effort rejected on plain OpenRouter).
-        send_openrouter_headers && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter"))
+        (send_openrouter_headers
+            && profile_id.is_none_or(|id| id.eq_ignore_ascii_case("openrouter")))
+            || profile_id.is_some_and(|id| id.eq_ignore_ascii_case("conifer"))
     }
 
     fn normalize_reasoning_effort(raw: &str) -> Option<String> {
@@ -1364,7 +1374,7 @@ impl OpenRouterProvider {
             .iter()
             .filter_map(|model| {
                 let id = model.id.trim();
-                if id.is_empty() {
+                if id.is_empty() || model.input.is_empty() {
                     return None;
                 }
                 let supports_images = model
