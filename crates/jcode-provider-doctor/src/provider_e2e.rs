@@ -428,7 +428,20 @@ pub async fn run_provider_e2e(
     }
 
     // --- Stage 2: live model catalog (or synthetic for offline) ---
-    let catalog_models: Vec<String> = if tier.requires_api_key() {
+    let catalog_models: Vec<String> = if tier.requires_api_key() && profile.id == "belvedir" {
+        // Belvedir's OpenAI-compatible router intentionally has no `/models`
+        // endpoint. Its documented public catalog surface is the project-level
+        // `auto` router, which the billable chat/stream/tool probes below verify
+        // against the live service. Do not fail before reaching those probes by
+        // requesting an endpoint the provider does not implement.
+        let models = jcode_base::provider_catalog::openai_compatible_profile_static_models(profile);
+        checks.push(DoctorCheck::passed(
+            checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+            label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+            "Belvedir uses its documented `auto` router (no /models endpoint)".to_string(),
+        ));
+        models
+    } else if tier.requires_api_key() {
         match fetch_live_openai_compatible_models(profile, api_key.unwrap_or_default()).await {
             Ok(models) => {
                 checks.push(DoctorCheck::passed(
