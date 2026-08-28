@@ -759,6 +759,13 @@ impl Provider for OpenRouterProvider {
         if let Some(limit) = self.static_context_limits.get(&normalized_model_id) {
             return *limit;
         }
+        // Config loading seeds explicit per-model context windows here. They
+        // must outrank built-in profile family guesses. See #1087.
+        if let Some(limit) =
+            jcode_base::provider::cached_context_limit_for_model(&normalized_model_id)
+        {
+            return limit;
+        }
         // Ollama caps the served window server-side (OLLAMA_CONTEXT_LENGTH,
         // default 4096) and silently truncates anything longer, so a model's
         // advertised trained window is not a safe budget. Until the native-API

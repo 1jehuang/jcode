@@ -1985,6 +1985,26 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 }
 
 #[test]
+fn explicit_cached_context_window_precedes_zai_family_fallback() {
+    let model = "glm-5.3-issue-1087";
+    jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
+    let provider = OpenRouterProvider {
+        model: Arc::new(RwLock::new(model.to_string())),
+        profile_id: Some("zai".to_string()),
+        supports_provider_features: false,
+        supports_model_catalog: false,
+        ..make_custom_compatible_provider()
+    };
+
+    assert_eq!(
+        jcode_base::provider_catalog::openai_compatible_profile_context_limit("zai", model),
+        Some(200_000),
+        "the regression requires a conflicting static family guess"
+    );
+    assert_eq!(provider.context_window(), 1_000_000);
+}
+
+#[test]
 fn named_openai_compatible_model_context_window_overrides_default() {
     let _lock = ENV_LOCK.lock();
     let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
