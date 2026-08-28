@@ -435,7 +435,8 @@ impl Provider for OpenRouterProvider {
             self.clear_pin_if_model_changed(&model_id, true);
         }
 
-        if self
+        if Self::profile_supports_openai_reasoning_effort(self.profile_id.as_deref())
+            || self
             .model_reasoning_config()
             .and_then(|config| config.1.as_ref())
             .is_some()
