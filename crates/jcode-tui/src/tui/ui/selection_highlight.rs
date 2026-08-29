@@ -9,11 +9,14 @@ use ratatui::prelude::*;
 
 pub(crate) fn selection_bg_for(base_bg: Option<Color>) -> Color {
     let fallback = rgb(32, 38, 48);
-    blend_color(base_bg.unwrap_or(fallback), accent_color(), 0.34)
+    // A selection is an active interaction, not passive decoration. Use a
+    // deliberately strong fill so it remains obvious over syntax highlighting,
+    // diff backgrounds, and dim assistant text.
+    blend_color(base_bg.unwrap_or(fallback), accent_color(), 0.58)
 }
 
 pub(crate) fn selection_fg_for(base_fg: Option<Color>) -> Option<Color> {
-    base_fg.map(|fg| blend_color(fg, Color::White, 0.15))
+    base_fg.map(|fg| blend_color(fg, Color::White, 0.32))
 }
 
 /// Apply a copy-selection highlight to a single display line between
