@@ -280,8 +280,17 @@ fn result_to_lines_with_capabilities(
                 return image_placeholder_lines(width, height);
             }
             let chat_width = max_width.map(|w| w as u16).unwrap_or(80);
-            let (rows, cols) =
-                inline_fit_geometry(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS);
+            let level = crate::mermaid_inline_expand_level(hash);
+            let cap_rows = match level {
+                0 => 16,
+                1 => INLINE_DIAGRAM_MAX_ROWS,
+                _ => 200,
+            };
+            let (rows, cols) = if level == 0 {
+                inline_fit_geometry(width, height, chat_width, cap_rows)
+            } else {
+                inline_fit_geometry_upscaled(width, height, chat_width, cap_rows)
+            };
             let mut lines = inline_image_placeholder_lines(hash, rows, cols);
             if uses_text_fallback {
                 lines.push(text_image_fallback_note_line());
@@ -314,6 +323,30 @@ mod fallback_note_tests {
             width: 640,
             height: 480,
         }
+    }
+
+    #[test]
+    fn clicked_mermaid_expand_level_changes_placeholder_height() {
+        let hash = 0x9a11_ce55_u64;
+        let result = || RenderResult::Image {
+            hash,
+            path: PathBuf::from("diagram.png"),
+            width: 1500,
+            height: 1125,
+        };
+
+        crate::set_mermaid_inline_expand_level(hash, 0);
+        let fit = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 1);
+        let large = result_to_lines_with_capabilities(result(), Some(95), false, true, false);
+        crate::set_mermaid_inline_expand_level(hash, 0);
+
+        assert!(
+            large.len() > fit.len(),
+            "click expansion must change Mermaid placeholder height: fit={}, large={}",
+            fit.len(),
+            large.len()
+        );
     }
 
     #[test]
