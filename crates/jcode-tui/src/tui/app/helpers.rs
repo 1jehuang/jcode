@@ -934,6 +934,57 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
     None
 }
 
+pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bool {
+    use base64::Engine;
+    use std::borrow::Cow;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(base64_data) else {
+        return false;
+    };
+    // `wl-copy` keeps serving the selection after this function returns. A
+    // short-lived arboard owner can disappear as soon as Clipboard is dropped.
+    if std::env::var("WAYLAND_DISPLAY").is_ok()
+        && let Ok(mut child) = std::process::Command::new("wl-copy")
+            .args(["--type", media_type])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    {
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut stdin| stdin.write_all(&bytes).is_ok());
+        if wrote && child.wait().is_ok_and(|status| status.success()) {
+            return true;
+        }
+    }
+    let Ok(decoded) = image::load_from_memory_with_format(
+        &bytes,
+        match media_type {
+            "image/jpeg" => image::ImageFormat::Jpeg,
+            "image/gif" => image::ImageFormat::Gif,
+            "image/webp" => image::ImageFormat::WebP,
+            _ => image::ImageFormat::Png,
+        },
+    ) else {
+        return false;
+    };
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: Cow::Owned(rgba.into_raw()),
+            })
+        })
+        .is_ok()
+}
+
 /// Extract an image URL from text that looks like an HTML img tag or a bare image URL.
 /// Returns the URL if found.
 pub(super) fn extract_image_url(text: &str) -> Option<String> {

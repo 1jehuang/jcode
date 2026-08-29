@@ -240,9 +240,10 @@ pub use content_render::terminal_theme;
 pub use content_render::{
     INLINE_DIAGRAM_MAX_ROWS, INLINE_FIT_MIN_ROWS, MermaidContent, TERMINAL_IMAGE_FALLBACK_NOTE,
     diagram_placeholder_lines, error_to_lines, estimate_image_height,
-    image_widget_placeholder_markdown, inline_fit_geometry, inline_image_placeholder_lines,
-    inline_transcript_aspect_goal, inline_transcript_aspect_goal_with_font,
-    parse_image_placeholder, parse_inline_image_placeholder, result_to_content, result_to_lines,
+    image_widget_placeholder_markdown, inline_fit_geometry, inline_fit_geometry_upscaled,
+    inline_image_placeholder_lines, inline_transcript_aspect_goal,
+    inline_transcript_aspect_goal_with_font, parse_image_placeholder,
+    parse_inline_image_placeholder, result_to_content, result_to_lines,
     text_image_fallback_note_line, transcript_preferred_aspect_ratio,
     transcript_preferred_aspect_ratio_with_font, write_video_export_marker,
 };
@@ -429,6 +430,27 @@ static RENDER_CACHE: LazyLock<Mutex<MermaidCache>> =
 /// UI markdown caches key off this so placeholder-only cached entries are
 /// naturally refreshed on the next redraw.
 static DEFERRED_RENDER_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+/// Mermaid source keyed by the same content hash used by inline image markers.
+/// This lets transcript clicks copy editable Mermaid text instead of PNG pixels.
+static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
+    MERMAID_SOURCE_BY_HASH
+        .lock()
+        .ok()
+        .and_then(|sources| sources.get(&hash).cloned())
+}
+
+pub(crate) fn remember_mermaid_source(hash: u64, content: &str) {
+    if let Ok(mut sources) = MERMAID_SOURCE_BY_HASH.lock() {
+        if sources.len() >= RENDER_CACHE_MAX && !sources.contains_key(&hash) {
+            sources.clear();
+        }
+        sources.insert(hash, content.to_string());
+    }
+}
 
 /// Count of `path.exists()`/`read_dir` filesystem stat syscalls performed by
 /// the render-cache lookup paths. The inline-image scroll hot path used to pay
