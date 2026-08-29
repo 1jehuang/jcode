@@ -1071,7 +1071,9 @@ impl App {
             .get(&image_id)
             .copied()
             .unwrap_or_default();
-        let next = current.next();
+        let next = ImageExpandLevel::from_index(
+            crate::tui::mermaid::next_distinct_mermaid_inline_level(image_id, current as u8),
+        );
         if matches!(next, ImageExpandLevel::Fit) {
             self.expanded_images.remove(&image_id);
         } else {

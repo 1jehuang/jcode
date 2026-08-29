@@ -910,7 +910,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     );
     assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
 
-    // Further label clicks continue the cycle: Large -> Full -> Fit.
+    // Large and Full have identical geometry for this landscape image, so the
+    // redundant Full state is skipped and the next click returns to Fit.
     let click_label = |app: &mut App| {
         app.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
@@ -922,14 +923,8 @@ fn test_click_on_inline_image_label_line_cycles_level() {
     click_label(&mut app);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second click should expand Large -> Full"
-    );
-    click_label(&mut app);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "cycle should wrap Full -> Fit"
+        "second click should skip duplicate Full geometry and return to Fit"
     );
 }
 
@@ -1349,18 +1344,13 @@ fn test_click_on_inline_image_body_cycles_level() {
         "clicking the image body should expand Fit -> Large"
     );
 
-    // Clicking the body again advances the cycle.
-    click(&mut app, body_col, body_row);
-    assert_eq!(
-        app.image_expand_level(IMAGE_ID),
-        ImageExpandLevel::Full,
-        "second body click should expand Large -> Full"
-    );
+    // Large and Full resolve to the same geometry for this landscape image, so
+    // the click cycle must omit Full rather than showing a duplicate size.
     click(&mut app, body_col, body_row);
     assert_eq!(
         app.image_expand_level(IMAGE_ID),
         ImageExpandLevel::Fit,
-        "third body click should wrap Full -> Fit"
+        "second body click should skip duplicate Full geometry and return to Fit"
     );
 
     // A click in the blank space to the right of the image must stay inert.

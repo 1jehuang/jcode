@@ -438,6 +438,8 @@ static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
 static MERMAID_INLINE_EXPAND_LEVEL: LazyLock<Mutex<HashMap<u64, u8>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static MERMAID_INLINE_EXPAND_EPOCH: AtomicU64 = AtomicU64::new(0);
+static MERMAID_INLINE_LEVEL_GEOMETRY: LazyLock<Mutex<HashMap<u64, [(u16, u16); 3]>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
     MERMAID_SOURCE_BY_HASH
@@ -463,6 +465,56 @@ pub fn set_mermaid_inline_expand_level(hash: u64, level: u8) {
 
 pub fn mermaid_inline_expand_epoch() -> u64 {
     MERMAID_INLINE_EXPAND_EPOCH.load(Ordering::Relaxed)
+}
+
+pub fn next_distinct_mermaid_inline_level(hash: u64, current: u8) -> u8 {
+    let Some(geometries) = MERMAID_INLINE_LEVEL_GEOMETRY
+        .lock()
+        .ok()
+        .and_then(|all| all.get(&hash).copied())
+    else {
+        return (current + 1) % 3;
+    };
+    let current = current.min(2);
+    for offset in 1..=3 {
+        let candidate = (current + offset) % 3;
+        if geometries[candidate as usize] != geometries[current as usize] {
+            return candidate;
+        }
+    }
+    0
+}
+
+pub fn register_inline_level_geometries(hash: u64, geometries: [(u16, u16); 3]) {
+    if let Ok(mut all) = MERMAID_INLINE_LEVEL_GEOMETRY.lock() {
+        all.insert(hash, geometries);
+    }
+}
+
+#[cfg(test)]
+mod distinct_level_tests {
+    use super::*;
+
+    #[test]
+    fn skips_duplicate_levels_in_two_size_cycle() {
+        let hash = 0xd157_1ac7;
+        register_inline_level_geometries(hash, [(10, 20), (20, 40), (20, 40)]);
+        assert_eq!(next_distinct_mermaid_inline_level(hash, 0), 1);
+        assert_eq!(next_distinct_mermaid_inline_level(hash, 1), 0);
+    }
+
+    #[test]
+    fn preserves_three_distinct_levels_and_collapses_one_size_cycle() {
+        let three = 0xd157_1ac8;
+        register_inline_level_geometries(three, [(10, 20), (20, 40), (30, 60)]);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 0), 1);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 1), 2);
+        assert_eq!(next_distinct_mermaid_inline_level(three, 2), 0);
+
+        let one = 0xd157_1ac9;
+        register_inline_level_geometries(one, [(10, 20); 3]);
+        assert_eq!(next_distinct_mermaid_inline_level(one, 0), 0);
+    }
 }
 
 pub(crate) fn mermaid_inline_expand_level(hash: u64) -> u8 {
