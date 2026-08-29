@@ -416,10 +416,28 @@ fn scale_to_fit_box<'a>(
 ) -> Cow<'a, DynamicImage> {
     let max_w_px = (target_cols as u32).saturating_mul(font_size.0.max(1) as u32);
     let max_h_px = (target_rows as u32).saturating_mul(font_size.1.max(1) as u32);
-    if source.width() <= max_w_px && source.height() <= max_h_px {
+    // Reuse only when the source already occupies exactly the requested cell
+    // geometry. Expanded Mermaid placeholders deliberately exceed the native
+    // PNG size; treating "smaller than the box" as already fitted left the
+    // native image at the top with blank placeholder rows underneath.
+    if cell_rect_for_image(source, font_size) == (target_cols, target_rows) {
         Cow::Borrowed(source)
     } else {
         Cow::Owned(source.resize(max_w_px, max_h_px, image::imageops::FilterType::Triangle))
+    }
+}
+
+#[cfg(test)]
+mod fit_box_tests {
+    use super::*;
+
+    #[test]
+    fn expanded_fit_scales_up_to_fill_placeholder_rows() {
+        let source = DynamicImage::new_rgba8(100, 100);
+        let scaled = scale_to_fit_box(&source, 20, 20, (10, 10));
+
+        assert!(matches!(scaled, Cow::Owned(_)));
+        assert_eq!(cell_rect_for_image(&scaled, (10, 10)), (20, 20));
     }
 }
 
