@@ -437,6 +437,7 @@ static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static MERMAID_INLINE_EXPAND_LEVEL: LazyLock<Mutex<HashMap<u64, u8>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static MERMAID_INLINE_EXPAND_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
     MERMAID_SOURCE_BY_HASH
@@ -447,12 +448,21 @@ pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
 
 pub fn set_mermaid_inline_expand_level(hash: u64, level: u8) {
     if let Ok(mut levels) = MERMAID_INLINE_EXPAND_LEVEL.lock() {
+        let previous = levels.get(&hash).copied().unwrap_or(0);
+        let level = level.min(2);
         if level == 0 {
             levels.remove(&hash);
         } else {
-            levels.insert(hash, level.min(2));
+            levels.insert(hash, level);
+        }
+        if previous != level {
+            MERMAID_INLINE_EXPAND_EPOCH.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+pub fn mermaid_inline_expand_epoch() -> u64 {
+    MERMAID_INLINE_EXPAND_EPOCH.load(Ordering::Relaxed)
 }
 
 pub(crate) fn mermaid_inline_expand_level(hash: u64) -> u8 {
