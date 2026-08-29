@@ -435,12 +435,32 @@ static DEFERRED_RENDER_EPOCH: AtomicU64 = AtomicU64::new(1);
 /// This lets transcript clicks copy editable Mermaid text instead of PNG pixels.
 static MERMAID_SOURCE_BY_HASH: LazyLock<Mutex<HashMap<u64, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static MERMAID_INLINE_EXPAND_LEVEL: LazyLock<Mutex<HashMap<u64, u8>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn mermaid_source_for_hash(hash: u64) -> Option<String> {
     MERMAID_SOURCE_BY_HASH
         .lock()
         .ok()
         .and_then(|sources| sources.get(&hash).cloned())
+}
+
+pub fn set_mermaid_inline_expand_level(hash: u64, level: u8) {
+    if let Ok(mut levels) = MERMAID_INLINE_EXPAND_LEVEL.lock() {
+        if level == 0 {
+            levels.remove(&hash);
+        } else {
+            levels.insert(hash, level.min(2));
+        }
+    }
+}
+
+pub(crate) fn mermaid_inline_expand_level(hash: u64) -> u8 {
+    MERMAID_INLINE_EXPAND_LEVEL
+        .lock()
+        .ok()
+        .and_then(|levels| levels.get(&hash).copied())
+        .unwrap_or(0)
 }
 
 pub(crate) fn remember_mermaid_source(hash: u64, content: &str) {
