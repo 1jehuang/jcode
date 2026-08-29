@@ -1192,6 +1192,53 @@ fn another_sessions_state_does_not_replace_the_attachment() {
     ));
 }
 
+#[test]
+fn legacy_request_ids_are_unique_across_bridge_connections() {
+    let mut first = BridgeState::default();
+    let mut second = BridgeState::default();
+    let first_attach = first.api_request_to_legacy(&json!({
+        "id": 1,
+        "req": "attach_session",
+        "session_id": "session_first",
+    }));
+    let second_attach = second.api_request_to_legacy(&json!({
+        "id": 1,
+        "req": "attach_session",
+        "session_id": "session_second",
+    }));
+    let request_id = |outbound: &[Outbound]| match &outbound[1] {
+        Outbound::Legacy(value) => value["id"].as_u64().expect("state request id"),
+        other => panic!("unexpected attach output: {other:?}"),
+    };
+
+    assert_ne!(request_id(&first_attach), request_id(&second_attach));
+}
+
+#[test]
+fn colliding_state_id_for_another_target_does_not_complete_attach() {
+    let mut state = BridgeState::default();
+    let attach = state.api_request_to_legacy(&json!({
+        "id": 7,
+        "req": "attach_session",
+        "session_id": "session_wanted",
+    }));
+    let state_id = match &attach[1] {
+        Outbound::Legacy(value) => value["id"].as_u64().expect("state request id"),
+        other => panic!("unexpected attach output: {other:?}"),
+    };
+
+    assert!(
+        state
+            .legacy_event_to_api(&json!({
+                "type": "state",
+                "id": state_id,
+                "session_id": "session_other",
+            }))
+            .is_empty()
+    );
+    assert!(state.session_id.is_none());
+}
+
 /// A session id becomes a filesystem path, so it must be treated as untrusted.
 ///
 /// The id arrives straight off the wire and is interpolated into

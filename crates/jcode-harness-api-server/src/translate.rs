@@ -9,7 +9,10 @@ use rusqlite::{Connection, params};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{
+    Mutex, MutexGuard, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default number of messages a `peek_session` returns. A preview is a glance,
@@ -83,6 +86,12 @@ pub enum Outbound {
 type SessionFileStatus = (bool, String, Option<u64>, Option<u64>);
 type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 
+// Legacy daemon replies are broadcast to every connected client. Request ids
+// must therefore be unique across bridge connections, not merely within one
+// `BridgeState`, or two panels issuing the same numbered request can each
+// mistake the other's reply for their own.
+static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
@@ -90,8 +99,6 @@ pub struct BridgeState {
     pub crash_on_disconnect: bool,
     /// Session id assigned by the daemon for this connection.
     pub session_id: Option<String>,
-    /// Next id to use on the legacy connection.
-    next_legacy_id: u64,
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
@@ -99,7 +106,7 @@ pub struct BridgeState {
     /// event is a request reply, not a model turn boundary.
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
-    pending_attach_id: Option<(u64, u64)>,
+    pending_attach_id: Option<(u64, u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
@@ -234,8 +241,7 @@ enum SimpleKind {
 
 impl BridgeState {
     fn legacy_id(&mut self) -> u64 {
-        self.next_legacy_id += 1;
-        self.next_legacy_id
+        NEXT_LEGACY_ID.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Translate one API request (raw JSON) into outbound actions.
@@ -360,7 +366,10 @@ impl BridgeState {
                 let id = self.legacy_id();
                 let state_id = self.legacy_id();
                 let catalog_id = self.legacy_id();
-                self.pending_attach_id = Some((state_id, api_id));
+                let requested_session = (req == "attach_session")
+                    .then(|| request["session_id"].as_str().map(str::to_string))
+                    .flatten();
+                self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_model_probe = Some(catalog_id);
                 let working_dir =
                     request["working_dir"]
@@ -894,9 +903,13 @@ impl BridgeState {
             "state" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 let id = event["id"].as_u64().unwrap_or(0);
-                if let Some((state_id, api_id)) = self.pending_attach_id
-                    && state_id == id
+                if let Some((state_id, api_id, requested_session)) = &self.pending_attach_id
+                    && *state_id == id
+                    && requested_session
+                        .as_deref()
+                        .is_none_or(|requested| requested == session_id)
                 {
+                    let api_id = *api_id;
                     self.pending_attach_id = None;
                     // `state` snapshots can also be broadcast for other live
                     // sessions. Only the reply correlated with this connection's
