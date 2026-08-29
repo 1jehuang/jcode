@@ -1,0 +1,9 @@
+{
+  "version": "0.81.2",
+  "date": "2026-08-28",
+  "fixes": [
+    "Inline Mermaid diagrams and raster images now cycle only through visibly distinct sizes when clicked",
+    "Resized Mermaid diagrams invalidate cached message geometry and no longer leave blank placeholder space underneath",
+    "Clicking an inline image copies its pixels, while clicking a Mermaid diagram copies its editable source code"
+  ]
+}
