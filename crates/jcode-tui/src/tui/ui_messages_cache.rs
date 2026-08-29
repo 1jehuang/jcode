@@ -18,7 +18,10 @@ where
         jcode_tui_messages::MessageCacheContext {
             diagram_mode: crate::config::config().display.diagram_mode,
             centered: markdown::center_code_blocks(),
-            mermaid_epoch: crate::tui::mermaid::deferred_render_epoch(),
+            // Message lines contain Mermaid placeholder rows. Size clicks must
+            // invalidate this cache just like a completed deferred render does.
+            mermaid_epoch: crate::tui::mermaid::deferred_render_epoch()
+                .wrapping_add(crate::tui::mermaid::mermaid_inline_expand_epoch()),
             mermaid_aspect_bucket: crate::tui::mermaid::current_preferred_aspect_ratio_bucket(),
             show_agentgrep_output: crate::config::config().display.show_agentgrep_output,
             show_bash_output: crate::config::config().display.show_bash_output,
