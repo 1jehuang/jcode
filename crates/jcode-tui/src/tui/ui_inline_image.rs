@@ -72,6 +72,14 @@ impl ImageExpandLevel {
         }
     }
 
+    pub(crate) fn from_index(index: u8) -> Self {
+        match index {
+            1 => Self::Large,
+            2 => Self::Full,
+            _ => Self::Fit,
+        }
+    }
+
     /// Anchored row cap for this level. Stays viewport independent so the
     /// width-keyed body cache remains valid across resizes. The `Full` cap is
     /// bounded by kitty's virtual-placement row limit (296 diacritic slots),
@@ -867,6 +875,27 @@ pub(crate) fn fit_geometry_anchored(
     }
 }
 
+fn register_level_geometries(item: &InlineImageItem, width: u16, fit: (u16, u16)) {
+    mermaid::register_inline_level_geometries(
+        item.id,
+        [
+            fit,
+            mermaid::inline_fit_geometry_upscaled(
+                item.width,
+                item.height,
+                width,
+                ImageExpandLevel::Large.anchored_cap_rows(),
+            ),
+            mermaid::inline_fit_geometry_upscaled(
+                item.width,
+                item.height,
+                width,
+                ImageExpandLevel::Full.anchored_cap_rows(),
+            ),
+        ],
+    );
+}
+
 /// Compute how many rows an inline image should occupy at `chat_width`, given a
 /// viewport height to cap against.
 #[cfg(test)]
@@ -937,6 +966,8 @@ pub(crate) fn anchored_image_lines(
     let mut lines = Vec::new();
     for item in items {
         let level = levels.expand_level(item.id);
+        let fit = fit_geometry_anchored(item.width, item.height, width, ImageExpandLevel::Fit);
+        register_level_geometries(item, width, fit);
         lines.push(Line::from(""));
         lines.push(image_label_line(item, width, images_visible, level));
         if images_visible {
@@ -978,6 +1009,8 @@ pub(crate) fn build_section(
 
     for item in items {
         let level = levels.expand_level(item.id);
+        let fit = fit_geometry(item.width, item.height, width, viewport_height);
+        register_level_geometries(item, width, fit);
         lines.push(image_label_line(item, width, images_visible, level));
 
         if images_visible {
@@ -985,9 +1018,7 @@ pub(crate) fn build_section(
             // cached, so a viewport-relative default fit is fine here. Expanded
             // levels use the discrete fixed caps so they grow predictably.
             let (rows, cols) = match level {
-                ImageExpandLevel::Fit => {
-                    fit_geometry(item.width, item.height, width, viewport_height)
-                }
+                ImageExpandLevel::Fit => fit,
                 _ => mermaid::inline_fit_geometry_upscaled(
                     item.width,
                     item.height,
