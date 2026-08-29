@@ -596,7 +596,7 @@ fn test_copy_selection_mouse_click_does_not_enter_mode() {
 }
 
 #[test]
-fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
+fn test_copy_selection_mouse_drag_auto_copies_and_keeps_highlight() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_copy_test_app();
     let copied = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -679,10 +679,13 @@ fn test_copy_selection_mouse_drag_auto_copies_and_exits_mode() {
     );
 
     assert!(!app.copy_selection_mode);
-    assert!(app.copy_selection_anchor.is_none());
-    assert!(app.copy_selection_cursor.is_none());
+    assert!(app.copy_selection_anchor.is_some());
+    assert!(app.copy_selection_cursor.is_some());
     assert!(copied.lock().unwrap().contains("println!(\"hello\");"));
-    assert_eq!(app.status_notice(), Some("Copied selection".to_string()));
+    assert_eq!(
+        app.status_notice(),
+        Some("Copied selection · highlight remains visible".to_string())
+    );
 }
 
 #[test]

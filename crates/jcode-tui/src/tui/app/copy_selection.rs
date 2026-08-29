@@ -389,6 +389,35 @@ impl App {
         success
     }
 
+    /// Copy a mouse-drag selection without clearing its visual highlight.
+    ///
+    /// Drag-to-copy is intentionally browser-like: the clipboard is updated on
+    /// release, but the selected text remains visibly selected until the next
+    /// click. Clearing it immediately made successful selections look
+    /// as though they had failed, especially for short or precise drags.
+    fn copy_current_selection_preserving_highlight<F>(&mut self, copy_text: F) -> bool
+    where
+        F: FnOnce(&str) -> bool,
+    {
+        let text = self.current_copy_selection_text().unwrap_or_default();
+        if text.is_empty() {
+            self.set_status_notice("Selection is empty");
+            return false;
+        }
+
+        let success = copy_text(&text);
+        self.copy_selection_mode = false;
+        self.copy_selection_dragging = false;
+        self.copy_selection_pending_anchor = None;
+        self.copy_selection_edge_autoscroll = None;
+        self.set_status_notice(if success {
+            "Copied selection · highlight remains visible"
+        } else {
+            "Failed to copy selection"
+        });
+        success
+    }
+
     pub(super) fn handle_copy_selection_key(
         &mut self,
         code: KeyCode,
@@ -586,7 +615,7 @@ impl App {
                 if self.copy_selection_mode {
                     return Some(false);
                 }
-                if !self.copy_current_selection_to_clipboard_with(copy_text) {
+                if !self.copy_current_selection_preserving_highlight(copy_text) {
                     self.exit_copy_selection_mode();
                 }
                 Some(false)
