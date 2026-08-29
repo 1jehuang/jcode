@@ -198,7 +198,29 @@ impl App {
         else {
             return false;
         };
-        self.cycle_image_expand(image_id);
+        let level = self.cycle_image_expand(image_id);
+        let size = match level {
+            crate::tui::ui::inline_image_ui::ImageExpandLevel::Fit => "fit",
+            crate::tui::ui::inline_image_ui::ImageExpandLevel::Large => "large",
+            crate::tui::ui::inline_image_ui::ImageExpandLevel::Full => "full",
+        };
+        if let Some(source) = crate::tui::mermaid::mermaid_source_for_hash(image_id) {
+            let copied = super::helpers::copy_to_clipboard(&source);
+            self.set_status_notice(if copied {
+                format!("Image size: {size} · Mermaid code copied")
+            } else {
+                format!("Image size: {size} · Could not copy Mermaid code")
+            });
+        } else if let Some((media_type, data)) =
+            super::super::ui::inline_image_ui::payload_for_copy(image_id)
+        {
+            let copied = super::helpers::copy_image_to_clipboard(&media_type, &data);
+            self.set_status_notice(if copied {
+                format!("Image size: {size} · Image copied")
+            } else {
+                format!("Image size: {size} · Could not copy image")
+            });
+        }
         true
     }
 

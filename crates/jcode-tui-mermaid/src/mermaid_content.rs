@@ -175,6 +175,29 @@ pub fn transcript_preferred_aspect_ratio(
 /// for the inline-fit pipeline: prepare-time placeholders and the draw-time
 /// scale use the same math so borders and labels hug the rendered pixels.
 pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u16) -> (u16, u16) {
+    inline_fit_geometry_impl(width, height, chat_width, cap_rows, false)
+}
+
+/// Expanded inline geometry may grow beyond the source's native pixel size.
+/// This matters especially for Mermaid renders, whose cached PNG can be smaller
+/// than the terminal pane: changing only the row cap would otherwise update the
+/// UI state and toast while leaving the displayed diagram exactly the same size.
+pub fn inline_fit_geometry_upscaled(
+    width: u32,
+    height: u32,
+    chat_width: u16,
+    cap_rows: u16,
+) -> (u16, u16) {
+    inline_fit_geometry_impl(width, height, chat_width, cap_rows, true)
+}
+
+fn inline_fit_geometry_impl(
+    width: u32,
+    height: u32,
+    chat_width: u16,
+    cap_rows: u16,
+    allow_upscale: bool,
+) -> (u16, u16) {
     if width == 0 || height == 0 {
         return (INLINE_FIT_MIN_ROWS, chat_width.min(2));
     }
@@ -192,7 +215,11 @@ pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u
 
     // Scale to fit *both* the width and the row cap, preserving aspect ratio,
     // exactly like the draw-time fit does.
-    let scale_num_w = avail_px.min(width);
+    let scale_num_w = if allow_upscale {
+        avail_px
+    } else {
+        avail_px.min(width)
+    };
     let scaled_h_by_w = height.saturating_mul(scale_num_w) / width.max(1);
     let (final_w_px, final_h_px) = if scaled_h_by_w <= cap_px {
         (scale_num_w, scaled_h_by_w)
