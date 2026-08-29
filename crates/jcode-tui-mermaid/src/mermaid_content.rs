@@ -280,17 +280,13 @@ fn result_to_lines_with_capabilities(
                 return image_placeholder_lines(width, height);
             }
             let chat_width = max_width.map(|w| w as u16).unwrap_or(80);
-            let level = crate::mermaid_inline_expand_level(hash);
-            let cap_rows = match level {
-                0 => 16,
-                1 => INLINE_DIAGRAM_MAX_ROWS,
-                _ => 200,
-            };
-            let (rows, cols) = if level == 0 {
-                inline_fit_geometry(width, height, chat_width, cap_rows)
-            } else {
-                inline_fit_geometry_upscaled(width, height, chat_width, cap_rows)
-            };
+            let geometries = [
+                inline_fit_geometry(width, height, chat_width, 16),
+                inline_fit_geometry_upscaled(width, height, chat_width, INLINE_DIAGRAM_MAX_ROWS),
+                inline_fit_geometry_upscaled(width, height, chat_width, 200),
+            ];
+            crate::register_inline_level_geometries(hash, geometries);
+            let (rows, cols) = geometries[crate::mermaid_inline_expand_level(hash) as usize];
             let mut lines = inline_image_placeholder_lines(hash, rows, cols);
             if uses_text_fallback {
                 lines.push(text_image_fallback_note_line());
