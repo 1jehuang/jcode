@@ -1448,7 +1448,16 @@ pub(super) async fn handle_client(
                     }
                 }
                 if let Some(target_session_id) = target_session_id {
-                    if crate::session::session_exists(&target_session_id) {
+                    // A brand-new desktop panel has no transcript on disk until
+                    // its first prompt. Its creator connection can detach before
+                    // the panel connection arrives, while the live agent is
+                    // already registered in memory. Treat that as an existing
+                    // session or the target-aware subscribe silently creates a
+                    // different session and every subsequent command reports a
+                    // wrong-session attachment.
+                    if crate::session::session_exists(&target_session_id)
+                        || sessions.read().await.contains_key(&target_session_id)
+                    {
                         let pre_resume_session_id = client_session_id.clone();
                         agent = crate::hooks::with_client_terminal_env(
                             active_terminal_env.clone(),
