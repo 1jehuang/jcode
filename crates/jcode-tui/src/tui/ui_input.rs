@@ -1118,6 +1118,22 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn running_tool_header_emphasizes_detail_over_tool_name() {
+        let accent = Color::Rgb(12, 34, 56);
+        let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content.as_ref(), "*");
+        assert_eq!(spans[0].style.fg, Some(accent));
+        assert_eq!(spans[1].content.as_ref(), " running bash");
+        assert_eq!(spans[1].style.fg, Some(dim_color()));
+        assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content.as_ref(), " · cargo test");
+        assert_eq!(spans[2].style.fg, Some(accent));
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn visual_line_move_follows_soft_wrapped_rows() {
         // 20 chars, width 10 => two visual rows, no newline in the input.
         let input = "abcdefghijklmnopqrst";
