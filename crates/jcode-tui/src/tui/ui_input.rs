@@ -946,13 +946,8 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                 let experimental_notice = app.active_experimental_feature_notice();
                 let subagent = app.subagent_status();
 
-                let mut spans = vec![
-                    Span::styled(spinner, Style::default().fg(anim_color)),
-                    Span::styled(
-                        format!(" running {}", name),
-                        Style::default().fg(anim_color).bold(),
-                    ),
-                ];
+                let mut spans =
+                    running_tool_header_spans(spinner, name, tool_detail.as_deref(), anim_color);
 
                 // For batch tool: show "completed/total · last_tool" progress
                 if is_batch {
@@ -962,11 +957,6 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
                         batch_prog,
                         batch_total_initial,
                     );
-                } else if let Some(detail) = tool_detail {
-                    spans.push(Span::styled(
-                        format!(" · {}", detail),
-                        Style::default().fg(dim_color()),
-                    ));
                 }
 
                 if let Some(notice) = experimental_notice {
@@ -1065,6 +1055,28 @@ pub(super) fn draw_status(frame: &mut Frame, app: &dyn TuiState, area: Rect, pen
         return;
     }
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn running_tool_header_spans(
+    spinner: &'static str,
+    name: &str,
+    detail: Option<&str>,
+    anim_color: Color,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled(spinner, Style::default().fg(anim_color)),
+        Span::styled(
+            format!(" running {}", name),
+            Style::default().fg(dim_color()),
+        ),
+    ];
+    if let Some(detail) = detail {
+        spans.push(Span::styled(
+            format!(" · {}", detail),
+            Style::default().fg(anim_color).bold(),
+        ));
+    }
+    spans
 }
 
 /// Append the "+N queued" suffix span (in the queued accent color) when there
