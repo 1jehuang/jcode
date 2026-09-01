@@ -167,6 +167,7 @@ pub fn anthropic_max_output_tokens(model: &str) -> u32 {
         "claude-sonnet-5",
         "claude-sonnet-4-6",
         "claude-sonnet-4.6",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-fable",
         "claude-mythos",
@@ -466,6 +467,7 @@ mod tests {
         // Full ladder: Fable 5 (live 2026-07-01), Sonnet 5 (live 2026-07-07),
         // Opus 5 (live 2026-07-24), Opus 4.7/4.8.
         for model in [
+            "claude-fable-5-1",
             "claude-fable-5",
             "claude-sonnet-5",
             "claude-opus-5",
