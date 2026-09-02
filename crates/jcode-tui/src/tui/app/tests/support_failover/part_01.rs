@@ -353,11 +353,18 @@ fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::Si
 /// `try_lock` fails because this thread holds the lock, the caller's own
 /// exclusion already covers the transition; a cross-thread `try_lock` miss
 /// falls back to the pre-serialization benign race for that one call.
+/// The shared per-process test home that `create_test_app` installs when no
+/// test has scoped its own `JCODE_HOME`.
+fn shared_test_jcode_home() -> &'static std::path::Path {
+    static TEST_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    TEST_HOME.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&path);
+        path
+    })
+}
+
 fn ensure_test_jcode_home_if_unset() {
-    use std::sync::OnceLock;
-
-    static TEST_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
-
     if std::env::var_os("JCODE_HOME").is_some() {
         return;
     }
@@ -377,17 +384,20 @@ fn ensure_test_jcode_home_if_unset() {
         return;
     }
 
-    let path = TEST_HOME.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&path);
-        path
-    });
-    crate::env::set_var("JCODE_HOME", path);
+    crate::env::set_var("JCODE_HOME", shared_test_jcode_home());
 }
 
 fn clear_persisted_test_ui_state() {
-    if let Ok(home) = crate::storage::jcode_dir() {
-        let ambient_dir = home.join("ambient");
+    // Only wipe ambient files in the *shared* per-process test home, and only
+    // while `JCODE_HOME` still points at it. `create_test_app` runs from ~800
+    // sites without the env lock, so following whatever `JCODE_HOME` happens
+    // to be set to deleted the ambient queue of a concurrently running test
+    // that scoped its own temporary home (#1142). A scoped home starts from an
+    // empty tempdir and has no stale ambient state to clear anyway.
+    let home_is_shared = std::env::var_os("JCODE_HOME")
+        .is_some_and(|home| std::path::Path::new(&home) == shared_test_jcode_home());
+    if home_is_shared {
+        let ambient_dir = shared_test_jcode_home().join("ambient");
         let _ = std::fs::remove_file(ambient_dir.join("queue.json"));
         let _ = std::fs::remove_file(ambient_dir.join("state.json"));
         let _ = std::fs::remove_file(ambient_dir.join("directives.json"));
