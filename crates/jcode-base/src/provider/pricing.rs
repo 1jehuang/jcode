@@ -409,7 +409,9 @@ mod tests {
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".jcode")
                 .join("cache")
-                .join(format!("{namespace}_endpoints_deepseek__deepseek-v4-pro-0813.json")),
+                .join(format!(
+                    "{namespace}_endpoints_deepseek__deepseek-v4-pro-0813.json"
+                )),
         );
         match prev_ns {
             Some(prev) => env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", prev),

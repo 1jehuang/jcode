@@ -144,7 +144,9 @@ pub fn models_dev_provider_id(jcode_provider: &str) -> Option<&'static str> {
 /// lookup (`[1m]` long-context alias, `provider/` prefixes for OpenRouter ids).
 fn normalize_model_id(model: &str) -> &str {
     let model = jcode_provider_core::model_id::strip_long_context_suffix(model).trim();
-    model.rsplit_once('@').map_or(model, |(bare, _)| bare.trim())
+    model
+        .rsplit_once('@')
+        .map_or(model, |(bare, _)| bare.trim())
 }
 
 /// Look up live pricing for `model` under a jcode provider key. Returns `None`
