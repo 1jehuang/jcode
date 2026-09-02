@@ -539,6 +539,24 @@ async fn register_visible_spawned_member(
     clippy::too_many_arguments,
     reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
 )]
+/// Resolve the reasoning effort for a spawned swarm worker (#1165).
+///
+/// Precedence mirrors the model path: an explicit `effort` on the spawn call
+/// wins, then the `agents.swarm_effort` config pin, and only then does the
+/// worker inherit the provider-wide reasoning effort (`None`).
+pub(super) fn resolve_swarm_spawn_effort(
+    requested_effort: Option<&str>,
+    configured_swarm_effort: Option<&str>,
+) -> Option<String> {
+    let clean = |effort: Option<&str>| {
+        effort
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_string)
+    };
+    clean(requested_effort).or_else(|| clean(configured_swarm_effort))
+}
+
 pub(super) async fn spawn_swarm_agent(
     req_session_id: &str,
     swarm_id: &str,
@@ -577,14 +595,14 @@ pub(super) async fn spawn_swarm_agent(
     let spawn_model = selection.model.clone();
     let spawn_provider_key = selection.provider_key.clone();
     let spawn_route_api_method = selection.route_api_method.clone();
-    let spawn_effort = requested_effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty())
-        .map(str::to_string);
+    let spawn_effort = resolve_swarm_spawn_effort(
+        requested_effort.as_deref(),
+        agents_config.swarm_effort.as_deref(),
+    );
     crate::logging::info(&format!(
-        "Swarm spawn model resolution: requested_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",
-        spawn_effort,
+        "Swarm spawn model resolution: requested_effort={:?} configured_swarm_effort={:?} configured_swarm_model={:?} coordinator_model={:?} coordinator_provider_key={:?} coordinator_route={:?} -> spawn_model={:?} spawn_provider_key={:?} spawn_route={:?}",
+        requested_effort,
+        agents_config.swarm_effort,
         configured_swarm_model,
         coordinator.model,
         coordinator.provider_key,
