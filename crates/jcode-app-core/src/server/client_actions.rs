@@ -954,7 +954,8 @@ pub(super) async fn handle_resume_all_sessions(
         };
 
         // Only act on idle sessions; a busy session is already making progress.
-        let Ok(agent_guard) = agent.try_lock() else {
+        // The owned guard doubles as the turn reservation (#1152).
+        let Ok(agent_guard) = Arc::clone(&agent).try_lock_owned() else {
             skipped += 1;
             continue;
         };
@@ -973,7 +974,6 @@ pub(super) async fn handle_resume_all_sessions(
             .session_short_name()
             .map(str::to_string)
             .unwrap_or_else(|| session_id[..8.min(session_id.len())].to_string());
-        drop(agent_guard);
 
         // Best-effort: record that the durable recovery intent was delivered.
         if let Err(error) = super::reload_recovery::mark_delivered_if_matching_continuation(
@@ -989,7 +989,7 @@ pub(super) async fn handle_resume_all_sessions(
 
         super::live_turn::spawn_tracked_live_turn(
             &session_id,
-            Arc::clone(&agent),
+            agent_guard,
             String::new(),
             Some(reminder),
             None,

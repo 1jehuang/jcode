@@ -157,6 +157,11 @@ impl Agent {
         self.provider.display_name()
     }
 
+    /// Reasoning effort the active provider is running with, if any.
+    pub fn provider_reasoning_effort(&self) -> Option<String> {
+        self.provider.reasoning_effort()
+    }
+
     pub fn provider_model(&self) -> String {
         let model = self.provider.model();
         self.provider

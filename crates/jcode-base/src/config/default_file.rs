@@ -423,6 +423,12 @@ wake_mode = "internal"
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #
+# Default reasoning effort for spawned swarm workers when the spawn call does
+# not pass an explicit `effort` ("low", "medium", "high", ...). Leave unset so
+# workers inherit the provider-wide reasoning effort.
+# Env override: JCODE_SWARM_EFFORT
+# swarm_effort = "medium"
+#
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
 #   "visible"  - open a headed terminal window (alias: "headed")
