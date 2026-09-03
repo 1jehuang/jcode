@@ -1,0 +1,19 @@
+{
+  "version": "0.81.5",
+  "date": "2026-09-03",
+  "features": [
+    "Add claude-fable-5-1 to the direct Anthropic catalog",
+    "Add agents.swarm_effort config pin and JCODE_SWARM_EFFORT override; show worker effort in swarm list"
+  ],
+  "fixes": [
+    "Persist sessions created with a title before the first visible message",
+    "Hold the idle-agent reservation through the wake turn and terminal status fanout",
+    "Price OpenRouter @endpoint-pinned models from the pinned endpoint",
+    "Accept disabled failover aliases",
+    "Clear inline images when the session is cleared",
+    "Isolate sandboxed homes from the macOS Keychain",
+    "Preserve macOS Ctrl+5 prompt jump",
+    "Update Claude OAuth client version",
+    "Fail fast on hard usage-limit exhaustion in auth-test instead of retrying"
+  ]
+}
