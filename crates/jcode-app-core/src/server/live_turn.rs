@@ -142,9 +142,12 @@ pub(super) async fn spawn_tracked_live_turn(
             .is_ok()
             .then(|| agent.latest_assistant_text_after(start_message_index))
             .flatten();
-        // Release the reservation before the status fanout so a follow-up wake
-        // can start as soon as the turn itself is over.
-        drop(agent);
+        // Keep the reservation until after the terminal status is published.
+        // Releasing it earlier lets a follow-up wake reserve the agent and
+        // publish `running`, which this turn's later `ready`/`failed` would
+        // then overwrite, hiding the newer turn and suppressing its
+        // coordinator completion notification.
+        let reservation = agent;
         match result {
             Ok(()) => {
                 update_member_status_with_report(
@@ -184,6 +187,7 @@ pub(super) async fn spawn_tracked_live_turn(
                 });
             }
         }
+        drop(reservation);
     });
 }
 
