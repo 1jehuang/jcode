@@ -35,9 +35,6 @@ const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages?beta=true";
 /// Claude Messages API endpoint for direct API-key access (no OAuth beta flag).
 const CLAUDE_API_KEY_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// User-Agent for OAuth requests (must match Claude CLI format)
-const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/1.0.0";
-
 /// Beta headers required for OAuth
 const OAUTH_BETA_HEADERS: &str = "oauth-2025-04-20,claude-code-20250219";
 
@@ -552,7 +549,10 @@ impl Sidecar {
             self.client
                 .post(CLAUDE_API_URL)
                 .header("Authorization", format!("Bearer {}", creds.access_token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header(
+                    "User-Agent",
+                    crate::provider::anthropic::CLAUDE_CLI_USER_AGENT,
+                )
                 .header("anthropic-version", "2023-06-01")
                 .header("anthropic-beta", OAUTH_BETA_HEADERS)
                 .header("content-type", "application/json")
