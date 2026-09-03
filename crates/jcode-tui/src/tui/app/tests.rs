@@ -1723,16 +1723,40 @@ fn assert_clear_usage_reset(app: &App) {
     assert!(!app.kv_cache.current_api_usage_recorded);
 }
 
+fn seed_stale_clear_image(app: &mut App) -> u64 {
+    app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        media_type: "image/png".to_string(),
+        data: "stale-image".to_string(),
+        label: Some("stale.png".to_string()),
+        source: crate::session::RenderedImageSource::UserInput,
+        anchor: None,
+    }];
+    let _ = crate::tui::TuiState::side_pane_images_signature(app);
+    app.expanded_images_version
+}
+
+fn assert_clear_image_reset(app: &App, previous_version: u64) {
+    assert!(app.remote_side_pane_images.is_empty());
+    assert_eq!(app.side_pane_images_signature_cache.get(), None);
+    assert!(app.expanded_images.is_empty());
+    assert_eq!(
+        app.expanded_images_version,
+        previous_version.wrapping_add(1)
+    );
+}
+
 #[test]
 fn local_clear_resets_provider_reported_context_usage() {
     let mut app = create_test_app();
     seed_stale_clear_usage(&mut app);
     seed_stale_clear_swarm_plan(&mut app);
+    let image_version = seed_stale_clear_image(&mut app);
 
     assert!(super::commands::handle_session_command(&mut app, "/clear"));
 
     assert_clear_usage_reset(&app);
     assert_clear_swarm_plan_reset(&app);
+    assert_clear_image_reset(&app, image_version);
 }
 
 #[test]
@@ -1745,6 +1769,7 @@ fn remote_clear_resets_provider_reported_context_usage() {
     app.is_remote = true;
     seed_stale_clear_usage(&mut app);
     seed_stale_clear_swarm_plan(&mut app);
+    let image_version = seed_stale_clear_image(&mut app);
     app.input = "/clear".to_string();
     app.cursor_pos = app.input.len();
 
@@ -1753,6 +1778,7 @@ fn remote_clear_resets_provider_reported_context_usage() {
 
     assert_clear_usage_reset(&app);
     assert_clear_swarm_plan_reset(&app);
+    assert_clear_image_reset(&app, image_version);
 }
 
 fn seed_stale_clear_swarm_plan(app: &mut App) {

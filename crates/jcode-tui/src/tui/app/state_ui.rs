@@ -185,6 +185,15 @@ impl App {
         self.side_pane_images_signature_cache.set(None);
     }
 
+    /// Drop rendered inline images and every cache keyed by their contents.
+    /// Use this when the entire transcript is discarded.
+    pub(crate) fn clear_inline_image_state(&mut self) {
+        self.remote_side_pane_images.clear();
+        self.invalidate_side_pane_images_signature();
+        self.expanded_images.clear();
+        self.expanded_images_version = self.expanded_images_version.wrapping_add(1);
+    }
+
     /// Bump the display-messages version without rescanning the transcript to
     /// recompute counters. Callers that have already maintained the cached
     /// counters incrementally (e.g. a single append) use this to stay O(1).
