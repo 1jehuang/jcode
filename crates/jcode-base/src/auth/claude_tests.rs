@@ -82,6 +82,30 @@ fn jcode_path_respects_jcode_home() {
 }
 
 #[test]
+fn sandboxed_jcode_home_is_detected_without_hiding_explicit_env_credentials() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
+
+    assert!(crate::storage::running_with_sandboxed_home());
+
+    let _token = EnvVarGuard::set(
+        CLAUDE_CODE_OAUTH_TOKEN_ENV,
+        std::path::Path::new("test-token"),
+    );
+    assert!(native_credentials_present());
+}
+
+#[test]
+fn real_jcode_home_is_not_treated_as_a_sandbox() {
+    let _lock = crate::storage::lock_test_env();
+    let real_home = dirs::home_dir().unwrap().join(".jcode");
+    let _home = EnvVarGuard::set("JCODE_HOME", &real_home);
+
+    assert!(!crate::storage::running_with_sandboxed_home());
+}
+
+#[test]
 fn load_auth_file_renames_existing_labels_to_animal_scheme() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().unwrap();

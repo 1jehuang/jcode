@@ -156,6 +156,25 @@ pub fn jcode_dir() -> Result<PathBuf> {
     Ok(home.join(".jcode"))
 }
 
+/// Whether `JCODE_HOME` redirects this process away from the user's real
+/// `~/.jcode` directory.
+///
+/// Sandboxed runs must not consult machine-global resources, such as the macOS
+/// Keychain, that cannot be redirected beneath `JCODE_HOME`.
+pub fn running_with_sandboxed_home() -> bool {
+    let Some(configured) = std::env::var_os("JCODE_HOME").map(PathBuf::from) else {
+        return false;
+    };
+    let Some(default) = dirs::home_dir().map(|home| home.join(".jcode")) else {
+        return true;
+    };
+
+    match (configured.canonicalize(), default.canonicalize()) {
+        (Ok(configured), Ok(default)) => configured != default,
+        _ => configured != default,
+    }
+}
+
 pub fn logs_dir() -> Result<PathBuf> {
     Ok(jcode_dir()?.join("logs"))
 }
