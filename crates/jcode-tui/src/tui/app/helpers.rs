@@ -214,15 +214,8 @@ pub(super) fn ctrl_bracket_fallback_to_esc(code: &mut KeyCode, modifiers: &mut K
     if !modifiers.contains(KeyModifiers::CONTROL) {
         return;
     }
-    match code {
-        KeyCode::Esc => {
-            *code = KeyCode::Char('[');
-        }
-        KeyCode::Char('5') => {
-            // Legacy tty mapping for Ctrl+]
-            *code = KeyCode::Char(']');
-        }
-        _ => {}
+    if *code == KeyCode::Esc {
+        *code = KeyCode::Char('[');
     }
 }
 
