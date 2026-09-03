@@ -8,10 +8,11 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-sol";
 ///
 /// NOTE: The Mythos preview family was retired by Anthropic and 404s, so it is
 /// intentionally NOT listed here. `claude-fable-5` was briefly retired but is
-/// live again. The list is curated best-first; position 0 is the flagship
+/// live again. `claude-fable-5-1` went live 2026-08-28. The list is curated best-first; position 0 is the flagship
 /// used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
     DEFAULT_CLAUDE_MODEL,
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-6",

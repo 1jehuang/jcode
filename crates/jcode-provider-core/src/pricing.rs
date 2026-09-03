@@ -68,6 +68,7 @@ pub fn anthropic_api_pricing_with_tier(
     }
 
     match base {
+        "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
         | "claude-opus-4-5" => exact(5.0, 25.0, 0.5, "Anthropic API pricing"),
@@ -319,6 +320,11 @@ mod tests {
         assert_eq!(fable.input_price_per_mtok_micros, Some(10_000_000));
         assert_eq!(fable.output_price_per_mtok_micros, Some(50_000_000));
         assert_eq!(fable.cache_read_price_per_mtok_micros, Some(1_000_000));
+
+        let fable_51 = anthropic_api_pricing("claude-fable-5-1").expect("priced model");
+        assert_eq!(fable_51.input_price_per_mtok_micros, Some(10_000_000));
+        assert_eq!(fable_51.output_price_per_mtok_micros, Some(50_000_000));
+        assert_eq!(fable_51.cache_read_price_per_mtok_micros, Some(250_000));
 
         let sonnet = anthropic_api_pricing("claude-sonnet-4-6").expect("priced model");
         assert_eq!(sonnet.input_price_per_mtok_micros, Some(3_000_000));
