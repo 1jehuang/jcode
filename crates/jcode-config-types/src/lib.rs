@@ -327,6 +327,7 @@ pub enum CrossProviderFailoverMode {
     #[default]
     Countdown,
     /// Do not resend the prompt to another provider automatically.
+    #[serde(alias = "off", alias = "false", alias = "disabled", alias = "none")]
     Manual,
 }
 
@@ -340,7 +341,7 @@ impl CrossProviderFailoverMode {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "manual" => Some(Self::Manual),
+            "manual" | "off" | "false" | "disabled" | "none" => Some(Self::Manual),
             "countdown" | "auto" | "automatic" => Some(Self::Countdown),
             _ => None,
         }
