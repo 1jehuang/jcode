@@ -143,7 +143,10 @@ pub fn models_dev_provider_id(jcode_provider: &str) -> Option<&'static str> {
 /// Strip jcode-local suffixes/prefixes a model id may carry before catalog
 /// lookup (`[1m]` long-context alias, `provider/` prefixes for OpenRouter ids).
 fn normalize_model_id(model: &str) -> &str {
-    jcode_provider_core::model_id::strip_long_context_suffix(model).trim()
+    let model = jcode_provider_core::model_id::strip_long_context_suffix(model).trim();
+    model
+        .rsplit_once('@')
+        .map_or(model, |(bare, _)| bare.trim())
 }
 
 /// Look up live pricing for `model` under a jcode provider key. Returns `None`
@@ -410,6 +413,8 @@ mod tests {
         // provider/model ids fall back to the bare model name.
         let kimi = lookup("openrouter", "moonshotai/kimi-k2").expect("priced");
         assert!((kimi.output_usd_per_mtok - 2.0).abs() < 1e-9);
+        let pinned = lookup("openrouter", "moonshotai/kimi-k2@Sail Research").expect("priced");
+        assert!((pinned.output_usd_per_mtok - 2.0).abs() < 1e-9);
 
         assert!(lookup("claude:api-key", "claude-unknown").is_none());
 

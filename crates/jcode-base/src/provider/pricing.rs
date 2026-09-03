@@ -135,7 +135,12 @@ pub(crate) fn openrouter_route_pricing(
     model: &str,
     provider: &str,
 ) -> Option<RouteCheapnessEstimate> {
-    let cache = openrouter::load_endpoints_disk_cache_public(model);
+    let (model, pinned_provider) = openrouter::parse_model_spec(model);
+    let provider = pinned_provider
+        .as_ref()
+        .map(|pin| pin.name.as_str())
+        .unwrap_or(provider);
+    let cache = openrouter::load_endpoints_disk_cache_public(&model);
     if let Some((endpoints, _)) = cache.as_ref() {
         if provider == "auto"
             && let Some(best) = endpoints.first()
@@ -160,7 +165,7 @@ pub(crate) fn openrouter_route_pricing(
         }
     }
 
-    openrouter::load_model_pricing_disk_cache_public(model).and_then(|pricing| {
+    openrouter::load_model_pricing_disk_cache_public(&model).and_then(|pricing| {
         openrouter_pricing_from_model_pricing(
             &pricing,
             RouteCostSource::OpenRouterCatalog,
@@ -365,6 +370,53 @@ mod tests {
         assert_eq!(estimate.input_price_per_mtok_micros, Some(2_500_000));
         assert_eq!(estimate.output_price_per_mtok_micros, Some(15_000_000));
         assert_eq!(estimate.cache_read_price_per_mtok_micros, Some(250_000));
+    }
+
+    #[test]
+    fn openrouter_pinned_endpoint_pricing_strips_pin_and_uses_endpoint_price() {
+        // Regression for #1095: `model@Provider` pins used to miss both the
+        // endpoint cache and the catalog and fall back to generic defaults.
+        let _guard = crate::storage::lock_test_env();
+        let prev_ns = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        let namespace = format!("pricing-test-{}", std::process::id());
+        env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", &namespace);
+
+        let model = "deepseek/deepseek-v4-pro-0813";
+        let endpoints: Vec<openrouter::EndpointInfo> = serde_json::from_value(serde_json::json!([
+            {
+                "provider_name": "DeepInfra",
+                "pricing": { "prompt": "0.0000003", "completion": "0.0000012" }
+            },
+            {
+                "provider_name": "Sail Research",
+                "pricing": { "prompt": "0.0000005", "completion": "0.0000015" }
+            }
+        ]))
+        .expect("endpoints");
+        openrouter::save_endpoints_disk_cache(model, &endpoints);
+
+        let pinned = openrouter_route_pricing(&format!("{model}@Sail Research"), "auto")
+            .expect("pinned endpoint priced");
+        assert_eq!(pinned.source, RouteCostSource::OpenRouterEndpoint);
+        assert_eq!(pinned.input_price_per_mtok_micros, Some(500_000));
+        assert_eq!(pinned.output_price_per_mtok_micros, Some(1_500_000));
+
+        let bare = openrouter_route_pricing(model, "auto").expect("auto route priced");
+        assert_eq!(bare.input_price_per_mtok_micros, Some(300_000));
+
+        let _ = std::fs::remove_file(
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".jcode")
+                .join("cache")
+                .join(format!(
+                    "{namespace}_endpoints_deepseek__deepseek-v4-pro-0813.json"
+                )),
+        );
+        match prev_ns {
+            Some(prev) => env::set_var("JCODE_OPENROUTER_CACHE_NAMESPACE", prev),
+            None => env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE"),
+        }
     }
 
     #[test]

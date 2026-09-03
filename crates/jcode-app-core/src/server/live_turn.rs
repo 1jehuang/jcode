@@ -13,7 +13,7 @@
 //! `Done`/`Error` event (id 0) so attached clients can settle the externally
 //! started turn in their UI.
 
-use super::client_lifecycle::process_message_streaming_mpsc;
+use super::client_lifecycle::process_locked_message_streaming_mpsc;
 use super::{
     SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
     update_member_status_with_report,
@@ -23,7 +23,7 @@ use crate::protocol::ServerEvent;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock, broadcast};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 
@@ -56,13 +56,17 @@ impl LiveTurnSwarmContext {
     }
 }
 
-/// Return the live agent for `session_id` when the session has at least one
-/// live client attachment and its agent is currently idle (lock not held).
+/// Reserve the live agent for `session_id` when the session has at least one
+/// live client attachment and its agent is currently idle.
+///
+/// The returned guard *is* the reservation: it stays held until the tracked
+/// turn finishes, so two concurrent wakes cannot both observe the agent as
+/// idle and then serialize behind each other (#1152).
 pub(super) async fn idle_live_agent(
     session_id: &str,
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
-) -> Option<Arc<Mutex<Agent>>> {
+) -> Option<OwnedMutexGuard<Agent>> {
     let agent = {
         let guard = sessions.read().await;
         guard.get(session_id).cloned()
@@ -79,8 +83,7 @@ pub(super) async fn idle_live_agent(
         return None;
     }
 
-    let is_idle = agent.try_lock().is_ok();
-    is_idle.then_some(agent)
+    agent.try_lock_owned().ok()
 }
 
 /// Spawn `message` as a full tracked turn in a live session.
@@ -92,7 +95,7 @@ pub(super) async fn idle_live_agent(
 /// finish rendering the externally started turn.
 pub(super) async fn spawn_tracked_live_turn(
     session_id: &str,
-    agent: Arc<Mutex<Agent>>,
+    mut agent: OwnedMutexGuard<Agent>,
     message: String,
     system_reminder: Option<String>,
     display_role: Option<crate::session::StoredDisplayRole>,
@@ -114,12 +117,8 @@ pub(super) async fn spawn_tracked_live_turn(
     let event_tx = session_event_fanout_sender(session_id.to_string(), Arc::clone(&swarm.members));
     let session_id = session_id.to_string();
     tokio::spawn(async move {
-        let start_message_index = {
-            let agent_guard = agent.lock().await;
-            agent_guard.message_count()
-        };
+        let start_message_index = agent.message_count();
         let result = if let Some(display_role) = display_role {
-            let mut agent = agent.lock().await;
             agent
                 .run_once_streaming_mpsc_with_display_role(
                     &message,
@@ -130,8 +129,8 @@ pub(super) async fn spawn_tracked_live_turn(
                 )
                 .await
         } else {
-            process_message_streaming_mpsc(
-                Arc::clone(&agent),
+            process_locked_message_streaming_mpsc(
+                &mut agent,
                 &message,
                 vec![],
                 system_reminder,
@@ -139,12 +138,18 @@ pub(super) async fn spawn_tracked_live_turn(
             )
             .await
         };
+        let completion_report = result
+            .is_ok()
+            .then(|| agent.latest_assistant_text_after(start_message_index))
+            .flatten();
+        // Keep the reservation until after the terminal status is published.
+        // Releasing it earlier lets a follow-up wake reserve the agent and
+        // publish `running`, which this turn's later `ready`/`failed` would
+        // then overwrite, hiding the newer turn and suppressing its
+        // coordinator completion notification.
+        let reservation = agent;
         match result {
             Ok(()) => {
-                let completion_report = {
-                    let agent_guard = agent.lock().await;
-                    agent_guard.latest_assistant_text_after(start_message_index)
-                };
                 update_member_status_with_report(
                     &session_id,
                     "ready",
@@ -182,6 +187,7 @@ pub(super) async fn spawn_tracked_live_turn(
                 });
             }
         }
+        drop(reservation);
     });
 }
 

@@ -22,6 +22,7 @@ pub use jcode_provider_openrouter::{
     EndpointInfo, ModelInfo, ModelPricing, ModelTimestampIndex, ProviderRouting,
     all_model_timestamps, load_endpoints_disk_cache_public, load_model_pricing_disk_cache_public,
     load_model_timestamp_index, model_created_timestamp, model_created_timestamp_from_index,
+    parse_model_spec, save_endpoints_disk_cache,
 };
 
 /// Whether the standard OpenRouter public catalog (disk cache) lists a model.

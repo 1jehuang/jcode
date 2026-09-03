@@ -549,6 +549,11 @@ pub struct AgentsConfig {
     /// string only when you deliberately want every swarm worker pinned to a
     /// specific model regardless of which model spawned them.
     pub swarm_model: Option<String>,
+    /// Optional default reasoning effort for spawned swarm/subagent sessions
+    /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`
+    /// call does not pass an explicit `effort`. Leave unset to let workers
+    /// inherit the provider-wide reasoning effort.
+    pub swarm_effort: Option<String>,
     /// Default terminal mode for swarm-created agents.
     pub swarm_spawn_mode: SwarmSpawnMode,
     /// Maximum percentage (1-90) of the chat column height the inline swarm
@@ -650,6 +655,7 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             swarm_model: None,
+            swarm_effort: None,
             swarm_spawn_mode: SwarmSpawnMode::default(),
             swarm_gallery_max_pct: None,
             swarm_strip_layout: SwarmStripLayout::default(),
