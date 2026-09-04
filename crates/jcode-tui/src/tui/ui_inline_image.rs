@@ -64,6 +64,10 @@ pub enum ImageExpandLevel {
 
 impl ImageExpandLevel {
     /// Next level in the click cycle (Fit -> Large -> Full -> Fit).
+    ///
+    /// Production now skips duplicate sizes via `navigation.rs`, so this is
+    /// only exercised by tests documenting the base cycle.
+    #[cfg(test)]
     pub(crate) fn next(self) -> Self {
         match self {
             ImageExpandLevel::Fit => ImageExpandLevel::Large,
