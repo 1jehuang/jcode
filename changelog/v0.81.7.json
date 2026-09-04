@@ -1,0 +1,9 @@
+{
+  "version": "0.81.7",
+  "date": "2026-09-04",
+  "features": [
+    "Add GPT-6 Astra (gpt-6-astra) to the OpenAI model catalog and make it the default OpenAI model",
+    "Carry attached images into /fork and /btw prompts"
+  ],
+  "fixes": []
+}
