@@ -1717,10 +1717,13 @@ async fn handle_remote_key_internal(
                         ));
                         return Ok(());
                     }
+                    // Attached images belong to the forked prompt, not the
+                    // parent's next message.
+                    let images = std::mem::take(&mut app.pending_images);
                     let prepared = input::PreparedInput {
                         raw_input: prompt.to_string(),
                         expanded: prompt.to_string(),
-                        images: vec![],
+                        images,
                     };
                     route_prepared_input_to_new_remote_session(app, remote, prepared).await?;
                     return Ok(());
