@@ -1888,6 +1888,12 @@ struct CommunicateInput {
     /// Reasoning effort for spawned agents (none|minimal|low|medium|high|xhigh|max).
     #[serde(default)]
     effort: Option<String>,
+    /// Deliberately NOT a supported override: worker models are operator-
+    /// controlled via `agents.swarm_model` (see b76f96561). Captured only so the
+    /// tool can tell the caller the value was ignored instead of silently
+    /// spawning on the coordinator's model (#1175).
+    #[serde(default)]
+    model: Option<String>,
     /// Short human-readable label for a spawned agent shown in swarm UI.
     /// Required and nonblank for the explicit `spawn` action.
     #[serde(default)]
@@ -1895,6 +1901,24 @@ struct CommunicateInput {
 }
 
 impl CommunicateInput {
+    /// Explain that a per-spawn `model` was ignored. Worker models are chosen by
+    /// the operator (`agents.swarm_model`) or inherited from the coordinator;
+    /// silently dropping the request made "review with a different model" fail
+    /// invisibly (#1175).
+    fn ignored_spawn_model_note(&self) -> Option<String> {
+        let requested = self
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())?;
+        Some(format!(
+            "\nNote: `model: {requested}` was ignored. Per-spawn model overrides are not supported; \
+workers use `agents.swarm_model` when set, otherwise they inherit the coordinator's model. \
+Ask the operator to set `[agents] swarm_model` in ~/.jcode/config.toml (route-pinned values \
+like `openai-api:gpt-5.5` work) or run `swarm list_models` to see the effective pin."
+        ))
+    }
+
     fn spawn_initial_message(&self) -> Option<String> {
         self.initial_message
             .as_ref()
@@ -2722,6 +2746,7 @@ impl Tool for CommunicateTool {
 
             "spawn" => {
                 let label = params.required_spawn_label()?;
+                let ignored_model_note = params.ignored_spawn_model_note();
                 let request = Request::CommSpawn {
                     id: REQUEST_ID,
                     session_id: ctx.session_id.clone(),
@@ -2738,8 +2763,9 @@ impl Tool for CommunicateTool {
                         if !new_session_id.is_empty() =>
                     {
                         Ok(ToolOutput::new(format!(
-                            "Spawned new agent: {}",
-                            new_session_id
+                            "Spawned new agent: {}{}",
+                            new_session_id,
+                            ignored_model_note.as_deref().unwrap_or("")
                         )))
                     }
                     Ok(response) => {
