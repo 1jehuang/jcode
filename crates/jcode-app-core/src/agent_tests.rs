@@ -178,6 +178,17 @@ impl Provider for NativeCompactionStreamProvider {
     ) -> Result<EventStream> {
         let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(4);
         tokio::spawn(async move {
+            // Response usage is deliberately far below the provider-reported
+            // pre-compaction size so a regression that relabels usage as
+            // `pre_tokens` is caught (#1178).
+            let _ = tx
+                .send(Ok(StreamEvent::TokenUsage {
+                    input_tokens: Some(24_000),
+                    output_tokens: Some(10),
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                }))
+                .await;
             let _ = tx
                 .send(Ok(StreamEvent::Compaction {
                     trigger: "openai_native".to_string(),
@@ -376,11 +387,17 @@ async fn run_turn_streaming_mpsc_emits_native_compaction_for_client_cache_reset(
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::Compaction {
             trigger,
+            pre_tokens,
             messages_compacted,
             ..
         } = event
         {
             assert_eq!(trigger, "openai_native");
+            assert_eq!(
+                pre_tokens,
+                Some(80_000),
+                "remote compaction must forward the provider's pre-compaction count"
+            );
             assert!(
                 messages_compacted.is_some_and(|count| count > 0),
                 "native compaction should report a non-empty compacted prefix"
