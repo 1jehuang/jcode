@@ -216,6 +216,29 @@ fn telemetry_subcommands_parse() {
 }
 
 #[test]
+fn mcp_trust_subcommands_parse() {
+    let trust = Args::try_parse_from(["jcode", "mcp", "trust", "/tmp/project", "--yes"])
+        .expect("mcp trust should parse");
+    assert!(matches!(
+        trust.command,
+        Some(Command::Mcp {
+            action: McpCommand::Trust {
+                path: Some(_),
+                yes: true
+            }
+        })
+    ));
+
+    let revoke = Args::try_parse_from(["jcode", "mcp", "revoke"]).expect("mcp revoke should parse");
+    assert!(matches!(
+        revoke.command,
+        Some(Command::Mcp {
+            action: McpCommand::Revoke { path: None }
+        })
+    ));
+}
+
+#[test]
 fn test_provider_choice_aliases_parse() {
     let args = Args::try_parse_from(["jcode", "--provider", "z.ai", "run", "smoke"]).unwrap();
     assert_eq!(args.provider, ProviderChoice::Zai);

@@ -25,6 +25,7 @@ pub(crate) fn initial_title(args: &Args) -> String {
         Some(Command::Version { .. }) => "jcode version".to_string(),
         Some(Command::Usage { .. }) => "jcode usage".to_string(),
         Some(Command::Telemetry(_)) => "jcode telemetry".to_string(),
+        Some(Command::Mcp { .. }) => "jcode mcp".to_string(),
         Some(Command::SelfDev { .. }) => "jcode:selfdev".to_string(),
         Some(Command::Debug { .. }) => "jcode debug".to_string(),
         Some(Command::Auth(_)) => "jcode auth".to_string(),
