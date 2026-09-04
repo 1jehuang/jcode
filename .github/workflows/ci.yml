@@ -369,8 +369,10 @@ jobs:
         run: |
           ./scripts/check_powershell_syntax.ps1
 
-      - name: Enforce warning budget (Linux)
-        if: runner.os == 'Linux'
+      # Linux and macOS. Windows still has its own cfg-gated surface and is
+      # not yet warning-clean, so it stays out of the gate (#1177).
+      - name: Enforce warning budget (Linux, macOS)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
         shell: bash
         run: |
           scripts/check_warning_budget.sh
