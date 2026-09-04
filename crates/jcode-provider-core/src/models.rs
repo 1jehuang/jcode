@@ -59,6 +59,10 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
     DEFAULT_OPENAI_MODEL,
+    // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
+    // OpenRouter as of 2026-09). Listed explicitly because the frontier
+    // auto-promoter only accepts bare numeric ids and would skip the suffix.
+    "gpt-6-astra",
     "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
@@ -98,6 +102,7 @@ mod gpt_5_6_catalog_tests {
     #[test]
     fn openai_catalog_exposes_the_complete_gpt_5_6_family() {
         for model in [
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-pro",
             "gpt-5.6-pro[web]",
@@ -278,9 +283,10 @@ pub fn context_limit_for_model_with_provider_and_cache(
         return Some(128_000);
     }
 
-    // GPT-5.4-family models should default to the long-context window.
-    // The live Codex OAuth catalog can still override this via the dynamic cache above.
-    if model.starts_with("gpt-5.4") {
+    // GPT-5.4-family and GPT-6-family models should default to the long-context
+    // window. The live Codex OAuth catalog can still override this via the
+    // dynamic cache above.
+    if model.starts_with("gpt-5.4") || model.starts_with("gpt-6") {
         return Some(1_000_000);
     }
 
