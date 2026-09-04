@@ -248,6 +248,7 @@ fn registry_still_matches(session: &LiveClaudeSession) -> bool {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn remove_registry_if_same(session: &LiveClaudeSession) {
     if registry_still_matches(session) {
         let _ = std::fs::remove_file(&session.registry_path);
