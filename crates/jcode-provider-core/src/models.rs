@@ -2,7 +2,7 @@
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
 
 /// Quality-first default for OpenAI-capable routes.
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-sol";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 
 /// Available Claude models used by model lists and provider routing.
 ///
@@ -58,11 +58,11 @@ pub fn is_openai_api_only_pro_model(model: &str) -> bool {
 }
 
 pub const ALL_OPENAI_MODELS: &[&str] = &[
-    DEFAULT_OPENAI_MODEL,
     // GPT-6 Astra: newest OpenAI flagship (live on api.openai.com and
     // OpenRouter as of 2026-09). Listed explicitly because the frontier
     // auto-promoter only accepts bare numeric ids and would skip the suffix.
-    "gpt-6-astra",
+    DEFAULT_OPENAI_MODEL,
+    "gpt-5.6-sol",
     "gpt-5.6-pro",
     // ChatGPT web-only route. The `[web]` suffix is intentionally part of the
     // jcode model id so it can never be mistaken for an API/Codex model with
@@ -114,6 +114,8 @@ mod gpt_5_6_catalog_tests {
         }
         assert!(is_openai_api_only_pro_model("gpt-5.6-pro"));
         assert!(!is_openai_api_only_pro_model("gpt-5.6-sol"));
+        assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-6-astra");
+        assert_eq!(ALL_OPENAI_MODELS[0], "gpt-6-astra");
     }
 }
 
