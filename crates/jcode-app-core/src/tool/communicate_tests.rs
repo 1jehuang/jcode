@@ -1141,6 +1141,30 @@ fn existing_tool_keeps_prompt_while_new_tool_loads_edit() {
 }
 
 #[test]
+fn ignored_spawn_model_is_reported_not_silently_dropped() {
+    // #1175: a per-spawn `model` is not a supported override. The caller must
+    // be told, so a "review with a different model" plan cannot fail invisibly.
+    let with_model: CommunicateInput = serde_json::from_value(json!({
+        "action": "spawn",
+        "label": "reviewer",
+        "model": "z-ai/glm-5.2:free"
+    }))
+    .unwrap();
+    let note = with_model
+        .ignored_spawn_model_note()
+        .expect("note for ignored model");
+    assert!(note.contains("z-ai/glm-5.2:free"));
+    assert!(note.contains("agents.swarm_model"));
+
+    let without_model: CommunicateInput =
+        serde_json::from_value(json!({"action": "spawn", "label": "reviewer"})).unwrap();
+    assert!(without_model.ignored_spawn_model_note().is_none());
+    let blank_model: CommunicateInput =
+        serde_json::from_value(json!({"action": "spawn", "label": "r", "model": "  "})).unwrap();
+    assert!(blank_model.ignored_spawn_model_note().is_none());
+}
+
+#[test]
 fn format_swarm_model_list_renders_routes_and_pin() {
     let routes = vec![
         jcode_provider_core::ModelRoute {
