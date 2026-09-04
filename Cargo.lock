@@ -3838,6 +3838,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "uuid",
 ]
 
 [[package]]
