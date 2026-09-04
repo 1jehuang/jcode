@@ -485,7 +485,7 @@ impl McpConfig {
         warnings
     }
 
-    fn expand_environment_variables(&mut self) {
+    pub(super) fn expand_environment_variables(&mut self) {
         let warnings =
             self.expand_environment_variables_with(|variable| std::env::var(variable).ok());
         for warning in warnings {
@@ -681,7 +681,7 @@ impl McpConfig {
     /// order: `.jcode/mcp.json`, then `.mcp.json` (Claude Code project config),
     /// then `.claude/mcp.json` (legacy compatibility). Later files override
     /// same-named servers from earlier ones.
-    fn load_project_locals(project_root: &std::path::Path) -> Self {
+    pub(super) fn load_project_locals(project_root: &std::path::Path) -> Self {
         let mut merged = Self::default();
         for relative in [".jcode/mcp.json", ".mcp.json", ".claude/mcp.json"] {
             let path = project_root.join(relative);
@@ -731,7 +731,8 @@ impl McpConfig {
         }
 
         // Claude Code user/global config (~/.claude.json): top-level mcpServers
-        // plus per-project entries for the project directory.
+        // plus per-project entries for the project directory. The file itself is
+        // user-owned, so both forms stay on the trusted side of the repo boundary.
         if claude_mcp_enabled
             && let Ok(claude_json) = crate::storage::user_home_path(".claude.json")
         {
@@ -767,17 +768,55 @@ impl McpConfig {
             }
         }
 
-        // Project-local config files, resolved against the project directory.
+        // Project-local config files can execute arbitrary commands as the user.
+        // Expand one complete merge candidate, then fingerprint and execute that
+        // same snapshot. A file or referenced-environment change fails closed.
+        let mut merged_is_expanded = false;
         if let Some(project_root) = project_dir {
-            Self::merge_servers_preferring_runnable(
-                &mut merged.servers,
-                Self::load_project_locals(project_root).servers,
-            );
+            let mut project_config = Self::load_project_locals(project_root);
+            project_config.servers.retain(|_, server| server.is_stdio());
+            let project_server_names: std::collections::HashSet<_> =
+                project_config.servers.keys().cloned().collect();
+            let mut candidate = merged.clone();
+            Self::merge_servers_preferring_runnable(&mut candidate.servers, project_config.servers);
+            candidate.expand_environment_variables();
+            let review_config = Self {
+                servers: candidate
+                    .servers
+                    .iter()
+                    .filter(|(name, server)| {
+                        project_server_names.contains(*name) && server.is_stdio()
+                    })
+                    .map(|(name, server)| (name.clone(), server.clone()))
+                    .collect(),
+            };
+            match super::trust::review_project_config(project_root, &review_config) {
+                Ok(Some(review)) if super::trust::project_mcp_is_trusted(&review) => {
+                    merged = candidate;
+                    merged_is_expanded = true;
+                }
+                Ok(Some(review)) => {
+                    crate::logging::warn(&format!(
+                        "MCP: blocked {} untrusted project-local server(s) for {:?}; run `jcode mcp trust` from that directory to review them",
+                        review.servers.len(),
+                        review.project_root
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    crate::logging::warn(&format!(
+                        "MCP: failed to verify project-local configuration for {:?}; servers remain blocked: {error}",
+                        project_root
+                    ));
+                }
+            }
         }
 
         // Claude Code expands environment references after source precedence is
         // resolved, so remote servers receive already-expanded URLs and headers.
-        merged.expand_environment_variables();
+        if !merged_is_expanded {
+            merged.expand_environment_variables();
+        }
 
         // Drop entries jcode cannot run (unknown transport, or a remote entry
         // without a URL) so they don't fail to connect, but log them so the
