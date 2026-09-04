@@ -106,6 +106,40 @@ fn test_mcp_config_deserialization() {
 }
 
 #[test]
+fn test_mcp_config_timeout_secs_defaults_to_none_and_accepts_override() {
+    // Issues #802 / #1174: per-server reply timeout. Absent keeps the 30s
+    // default; an explicit value is honored.
+    let json = r#"{
+            "mcpServers": {
+                "fast": {"command": "fast-mcp"},
+                "slow": {"command": "slow-mcp", "timeout_secs": 120}
+            }
+        }"#;
+    let config: McpConfig = serde_json::from_str(json).unwrap();
+    let fast = config.servers.get("fast").unwrap();
+    let slow = config.servers.get("slow").unwrap();
+    assert_eq!(fast.timeout_secs, None);
+    assert_eq!(slow.timeout_secs, Some(120));
+    assert_eq!(
+        crate::mcp::request_timeout_for(fast),
+        crate::mcp::DEFAULT_MCP_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        crate::mcp::request_timeout_for(slow),
+        std::time::Duration::from_secs(120)
+    );
+    // Zero is treated as "unset" rather than an instant timeout.
+    let zero = McpServerConfig {
+        timeout_secs: Some(0),
+        ..slow.clone()
+    };
+    assert_eq!(
+        crate::mcp::request_timeout_for(&zero),
+        crate::mcp::DEFAULT_MCP_REQUEST_TIMEOUT
+    );
+}
+
+#[test]
 fn test_mcp_config_empty() {
     let json = r#"{}"#;
     let config: McpConfig = serde_json::from_str(json).unwrap();

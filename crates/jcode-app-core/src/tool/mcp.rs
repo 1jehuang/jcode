@@ -436,6 +436,7 @@ impl McpManagementTool {
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             }
         } else {
             let manager = self.manager.read().await;
@@ -785,6 +786,7 @@ mod tests {
                 headers: HashMap::new(),
                 enabled: Some(false),
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = Arc::new(RwLock::new(McpManager::with_config(config)));
