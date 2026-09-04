@@ -307,6 +307,7 @@ impl Provider for OpenRouterProvider {
         let api_base = self.api_base.clone();
         let auth = self.auth.clone();
         let send_openrouter_headers = self.send_openrouter_headers;
+        let conversation_id = self.conversation_id.clone();
         let request_for_retries = request;
         let model_for_stream = model.clone();
         let provider_pin = Arc::clone(&self.provider_pin);
@@ -326,6 +327,7 @@ impl Provider for OpenRouterProvider {
                 api_base,
                 auth,
                 send_openrouter_headers,
+                conversation_id,
                 request_for_retries,
                 tx,
                 provider_pin,
@@ -815,6 +817,9 @@ impl Provider for OpenRouterProvider {
             static_context_limits: self.static_context_limits.clone(),
             static_image_input_support: self.static_image_input_support.clone(),
             send_openrouter_headers: self.send_openrouter_headers,
+            // A fork is a new conversation (new session or subagent), so it
+            // gets its own stable id.
+            conversation_id: new_conversation_id(),
             models_cache: Arc::clone(&self.models_cache),
             model_catalog_refresh: Arc::clone(&self.model_catalog_refresh),
             provider_routing: Arc::new(RwLock::new(
