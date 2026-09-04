@@ -269,9 +269,13 @@ fn globally_preferred_model_rank(model: &str) -> (u8, usize) {
     if normalized == openai_default {
         return (0, 0);
     }
-    // Some catalogs expose the clean release id instead of jcode's Sol route.
-    if normalized == "gpt-5.6" {
+    // Previous OpenAI flagship profile, then the clean release id some catalogs
+    // expose instead of jcode's Sol route. Both still outrank the Claude default.
+    if normalized == "gpt-5.6-sol" {
         return (1, 0);
+    }
+    if normalized == "gpt-5.6" {
+        return (1, 1);
     }
     if normalized == claude_default {
         return (2, 0);
