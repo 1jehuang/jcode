@@ -622,6 +622,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 enabled: Some(false),
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -656,6 +657,7 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config);
@@ -763,6 +765,7 @@ done
                 headers: std::collections::HashMap::new(),
                 enabled: None,
                 disabled: None,
+                timeout_secs: None,
             },
         );
         let manager = McpManager::with_config(config.clone());
