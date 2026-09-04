@@ -3374,3 +3374,79 @@ fn opencode_session_ids_are_uuids_and_unique() {
     assert_ne!(a, b);
     assert!(uuid::Uuid::parse_str(&a).is_ok());
 }
+
+/// Wire-level check for issue #1167: a real `chat/completions` request whose
+/// api_base host is `opencode.ai` carries `x-opencode-session`, and a
+/// request to another host does not. The DNS override points the hostname at
+/// a local listener, so the full stream path (including retries) is exercised.
+fn spawn_header_capturing_server() -> (std::net::SocketAddr, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let mut buf = vec![0u8; 65536];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+    (addr, rx)
+}
+
+fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let (addr, rx) = spawn_header_capturing_server();
+        let client = reqwest::Client::builder()
+            .resolve(host, addr)
+            .build()
+            .expect("client");
+        let api_base = format!("http://{host}:{}/zen/go/v1", addr.port());
+        let (tx, mut events) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
+        super::openrouter_sse_stream::run_stream_with_retries(
+            client,
+            api_base,
+            ProviderAuth::None {
+                label: "test".to_string(),
+            },
+            false,
+            conversation_id.to_string(),
+            serde_json::json!({"model": "m", "messages": [], "stream": true}),
+            tx,
+            Arc::new(Mutex::new(None)),
+            "m".to_string(),
+        )
+        .await;
+        while events.recv().await.is_some() {}
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("server captured request")
+    })
+}
+
+#[test]
+fn opencode_session_header_is_sent_on_the_wire_only_to_opencode_hosts() {
+    let raw = captured_request_for_host("opencode.ai", "conv-wire-1167").to_ascii_lowercase();
+    assert!(
+        raw.contains("x-opencode-session: conv-wire-1167"),
+        "opencode.ai request lacked the header:\n{raw}"
+    );
+
+    let raw = captured_request_for_host("example.test", "conv-wire-1167").to_ascii_lowercase();
+    assert!(
+        !raw.contains("x-opencode-session"),
+        "non-opencode host received the header:\n{raw}"
+    );
+}
