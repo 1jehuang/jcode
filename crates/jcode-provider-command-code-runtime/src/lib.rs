@@ -303,11 +303,15 @@ impl Provider for CommandCodeProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
-        self.catalog
-            .model_ids()
-            .into_iter()
-            .map(|model| Box::leak(model.into_boxed_str()) as &'static str)
-            .collect()
+        jcode_provider_command_code::CURATED_MODELS.to_vec()
+    }
+
+    fn available_models_display(&self) -> Vec<String> {
+        self.catalog.model_ids()
+    }
+
+    fn available_models_for_switching(&self) -> Vec<String> {
+        self.catalog.model_ids()
     }
 
     async fn prefetch_models(&self) -> Result<()> {

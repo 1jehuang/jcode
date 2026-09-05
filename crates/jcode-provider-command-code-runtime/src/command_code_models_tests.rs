@@ -71,7 +71,8 @@ fn command_code_live_catalog_is_exposed_by_provider() {
         .catalog
         .refresh_with(|| Ok(vec!["live/model-x".into()]))
         .unwrap();
-    assert_eq!(provider.available_models(), vec!["live/model-x"]);
+    assert_eq!(provider.available_models_display(), vec!["live/model-x"]);
+    assert_eq!(provider.available_models_for_switching(), vec!["live/model-x"]);
 }
 
 #[test]
