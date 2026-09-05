@@ -15,7 +15,7 @@ use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-struct MockProvider;
+struct MockProvider(Option<&'static str>);
 
 #[async_trait]
 impl Provider for MockProvider {
@@ -36,11 +36,15 @@ impl Provider for MockProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self)
+        Arc::new(Self(self.0))
     }
 
     fn model(&self) -> String {
         "mock-model".to_string()
+    }
+
+    fn service_tier(&self) -> Option<String> {
+        self.0.map(str::to_string)
     }
 }
 
@@ -101,11 +105,17 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 }
 
 #[tokio::test]
+async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy() {
+    for tier in [Some("priority"), Some("flex"), None] {
+        assert_busy_history_service_tier(tier).await;
+    }
+}
+
 #[expect(
     clippy::await_holding_lock,
     reason = "test intentionally keeps the agent busy lock held to exercise persisted-history fallback"
 )]
-async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy() {
+async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -132,7 +142,7 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     });
     session.save().expect("save session");
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
     let registry = Registry::empty();
     let mut live_session = session.clone();
     live_session.title = Some("live agent".to_string());
@@ -192,12 +202,14 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
             session_id: returned_session_id,
             messages,
             activity,
+            service_tier,
             ..
         } => {
             assert_eq!(id, 42);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].content, "persisted fallback history");
+            assert_eq!(service_tier.as_deref(), tier);
             let activity = activity.expect("fallback activity snapshot");
             assert!(activity.is_processing);
         }
@@ -212,11 +224,24 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 }
 
 #[tokio::test]
+async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
+    for tier in [Some("priority"), Some("flex"), None] {
+        assert_model_catalog_service_tier(tier, true).await;
+    }
+}
+
+#[tokio::test]
+async fn handle_get_model_catalog_preserves_live_service_tier() {
+    for tier in [Some("priority"), Some("flex"), None] {
+        assert_model_catalog_service_tier(tier, false).await;
+    }
+}
+
 #[expect(
     clippy::await_holding_lock,
     reason = "test intentionally keeps the agent busy lock held to exercise model-catalog fallback"
 )]
-async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
+async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: bool) {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -231,14 +256,14 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
     session.model = Some("persisted-model".to_string());
     session.save().expect("save session");
 
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         Registry::empty(),
         session.clone(),
         None,
     )));
-    let busy_guard = agent.lock().await;
+    let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
     let (stream_a, mut stream_b) = crate::transport::stream_pair().expect("stream pair");
     let (_reader_a, writer_a) = stream_a.into_split();
@@ -272,12 +297,21 @@ async fn handle_get_model_catalog_does_not_wait_for_busy_agent_lock() {
             session_id: returned_session_id,
             provider_name,
             provider_model,
+            service_tier,
             ..
         } => {
             assert_eq!(id, 43);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(provider_name.as_deref(), Some("mock"));
-            assert_eq!(provider_model.as_deref(), Some("persisted-model"));
+            assert_eq!(
+                provider_model.as_deref(),
+                Some(if busy {
+                    "persisted-model"
+                } else {
+                    "mock-model"
+                })
+            );
+            assert_eq!(service_tier.as_deref(), tier);
         }
         other => panic!("expected history event, got {:?}", other),
     }
