@@ -34,14 +34,7 @@ fn event(value: Value) -> Option<StreamEvent> {
                 .cloned()
                 .unwrap_or(Value::Null),
         }),
-        "finish-step" => Some(StreamEvent::MessageEnd {
-            stop_reason: obj
-                .get("rawFinishReason")
-                .or_else(|| obj.get("finishReason"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }),
-        "finish" => {
+        "finish-step" | "finish" => {
             let reason = obj
                 .get("rawFinishReason")
                 .or_else(|| obj.get("finishReason"))

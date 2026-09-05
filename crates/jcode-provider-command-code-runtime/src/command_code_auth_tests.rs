@@ -78,6 +78,40 @@ fn command_code_generate_request_uses_endpoint_and_stream() {
     );
 }
 
+#[test]
+fn command_code_reasoning_recovery_changes_the_retry_body() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let provider =
+            CommandCodeProvider::new("key-1".into(), "sess-1".into(), "zai-org/GLM-5.3".into());
+        let first = provider
+            .generate_request(&[user_message("hi")], &[], "system")
+            .unwrap()
+            .build()
+            .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_slice(first.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(first["params"]["reasoning_effort"], "max");
+
+        provider.reasoning.classify_pre_stream_rejection(
+            "zai-org/GLM-5.3",
+            422,
+            "reasoning_effort unsupported",
+        );
+        let retry = provider
+            .generate_request(&[user_message("hi")], &[], "system")
+            .unwrap()
+            .build()
+            .unwrap();
+        let retry: serde_json::Value =
+            serde_json::from_slice(retry.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert!(retry["params"].get("reasoning_effort").is_none());
+    });
+}
+
 #[tokio::test]
 async fn command_code_stream_decodes_text_delta_and_error() {
     let lf_byte: u8 = 10;

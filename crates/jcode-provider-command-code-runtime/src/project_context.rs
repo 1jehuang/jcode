@@ -55,18 +55,21 @@ pub fn project_context_cache(cwd: impl AsRef<Path>) -> ProjectContext {
                 .collect()
         })
         .unwrap_or_default();
+    let mut structure = std::fs::read_dir(&cwd)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect::<Vec<_>>();
+    structure.sort();
+    structure.truncate(64);
     let value = ProjectContext {
         cwd: cwd.display().to_string(),
         date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
         environment: std::env::consts::OS.to_string(),
-        structure: std::fs::read_dir(&cwd)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .take(64)
-            .collect(),
+        structure,
         git_status,
         commits,
         entries: Vec::new(),

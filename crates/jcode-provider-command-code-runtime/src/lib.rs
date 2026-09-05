@@ -95,9 +95,7 @@ impl CommandCodeProvider {
     }
 
     pub fn with_pool(mut self, accounts: Vec<(String, String)>) -> Self {
-        if let Some((_, key)) = accounts.first() {
-            self.active_key = Arc::new(RwLock::new(key.clone()));
-        }
+        self.active_key = Arc::new(RwLock::new(self.api_key.clone()));
         self.pool = Arc::new(accounts);
         self
     }
@@ -199,9 +197,16 @@ impl Provider for CommandCodeProvider {
                 continue;
             }
             if attempt == 0 && status == 429 {
+                let active_key = self
+                    .active_key
+                    .read()
+                    .ok()
+                    .filter(|key| !key.is_empty())
+                    .map(|key| key.clone())
+                    .unwrap_or_else(|| self.api_key.clone());
                 let _ = quota::command_code_credits(
                     &self.client,
-                    &self.api_key,
+                    &active_key,
                     None,
                     session,
                     &self.quota,
@@ -210,17 +215,48 @@ impl Provider for CommandCodeProvider {
                 let retry_after = retry_after_header
                     .or_else(|| response_retry_after(&head))
                     .unwrap_or(0);
-                if retry_after <= 5 {
-                    attempt += 1;
-                    tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
-                    continue;
-                }
-                if let Some((_, key)) = self.pool.iter().find(|(_, key)| key != &self.api_key) {
-                    if let Ok(mut active) = self.active_key.write() {
-                        *active = key.clone();
+                let current_label = self
+                    .pool
+                    .iter()
+                    .find(|(_, key)| key == &active_key)
+                    .map(|(label, _)| label.clone())
+                    .unwrap_or_else(|| session.to_string());
+                let labels = self
+                    .pool
+                    .iter()
+                    .map(|(label, _)| label.clone())
+                    .collect::<Vec<_>>();
+                let candidates =
+                    failover::command_code_pool_candidates(&labels, Some(&current_label));
+                match failover::handle_command_code_error_failover(
+                    &current_label,
+                    status,
+                    Some(std::time::Duration::from_secs(retry_after)),
+                    &candidates,
+                    false,
+                    attempt,
+                ) {
+                    failover::CommandCodeFailoverAction::StickWait { delay } => {
+                        attempt += 1;
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
-                    attempt += 1;
-                    continue;
+                    failover::CommandCodeFailoverAction::Rotate { next_account, .. } => {
+                        let Some((_, key)) =
+                            self.pool.iter().find(|(label, _)| label == &next_account)
+                        else {
+                            anyhow::bail!("Command Code failover selected an unknown account");
+                        };
+                        if let Ok(mut active) = self.active_key.write() {
+                            *active = key.clone();
+                        }
+                        attempt += 1;
+                        continue;
+                    }
+                    failover::CommandCodeFailoverAction::AllExhausted { message } => {
+                        anyhow::bail!(message)
+                    }
+                    failover::CommandCodeFailoverAction::NoAction => {}
                 }
                 anyhow::bail!(
                     "Command Code rate limited; account cooled for {}s",
@@ -258,10 +294,15 @@ impl Provider for CommandCodeProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
+        let active_key = self
+            .active_key
+            .read()
+            .map(|key| key.clone())
+            .unwrap_or_else(|_| self.api_key.clone());
         Arc::new(CommandCodeProvider {
             client: self.client.clone(),
             api_key: self.api_key.clone(),
-            active_key: self.active_key.clone(),
+            active_key: Arc::new(RwLock::new(active_key)),
             pool: self.pool.clone(),
             session_id: self.session_id.clone(),
             model: Arc::new(RwLock::new(self.model())),

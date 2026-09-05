@@ -143,3 +143,11 @@ async fn command_code_finish_step_usage_precedes_one_terminal() {
     }
     assert_eq!(terminals, 1);
 }
+
+#[test]
+fn command_code_finish_step_error_is_not_success() {
+    assert!(matches!(
+        decode_line(r#"{"type":"finish-step","finishReason":"error"}"#),
+        Some(jcode_message_types::StreamEvent::Error { .. })
+    ));
+}
