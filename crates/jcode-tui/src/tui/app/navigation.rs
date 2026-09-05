@@ -1612,7 +1612,9 @@ impl App {
                 }
                 self.set_diagram_focus(true);
                 handled_scroll = true;
-            } else if self.diagram_focus {
+            } else {
+                // Wheel input belongs to the pane under the pointer, even while
+                // keyboard focus stays in chat. Do not fall through at pan limits.
                 match mouse.kind {
                     MouseEventKind::ScrollUp => self.pan_diagram(0, -1),
                     MouseEventKind::ScrollDown => self.pan_diagram(0, 1),
@@ -1667,7 +1669,7 @@ impl App {
         }
 
         if handled_scroll {
-            finish_mouse_event!(!immediate_redraw, "pane_or_focused_diagram_scroll");
+            finish_mouse_event!(!immediate_redraw, "hovered_pane_scroll");
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))

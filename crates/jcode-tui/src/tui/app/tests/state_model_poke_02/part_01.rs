@@ -380,7 +380,7 @@ fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
 }
 
 #[test]
-fn test_mouse_scroll_over_unfocused_diagram_scrolls_chat_without_resizing_pane() {
+fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(120, 30, 0, 80);
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
@@ -397,50 +397,103 @@ fn test_mouse_scroll_over_unfocused_diagram_scrolls_chat_without_resizing_pane()
     let _ = render_and_snap(&app, &mut terminal);
     let max_scroll = crate::tui::ui::last_max_scroll();
     assert!(max_scroll > 2, "expected scrollable chat content");
-    crate::tui::ui::record_layout_snapshot(
-        Rect::new(0, 0, 80, 30),
-        Some(Rect::new(80, 0, 40, 30)),
-        None,
-        None,
-    );
+    for (position, messages_area, diagram_area) in [
+        (
+            crate::config::DiagramPanePosition::Side,
+            Rect::new(0, 0, 80, 30),
+            Rect::new(80, 0, 40, 30),
+        ),
+        (
+            crate::config::DiagramPanePosition::Top,
+            Rect::new(0, 12, 120, 18),
+            Rect::new(0, 0, 120, 12),
+        ),
+    ] {
+        app.diagram_pane_position = position;
+        crate::tui::ui::record_layout_snapshot(messages_area, Some(diagram_area), None, None);
+        for focused in [false, true] {
+            for (column, row) in [
+                (diagram_area.x, diagram_area.y),
+                (diagram_area.x + 10, diagram_area.y + 5),
+                (diagram_area.right() - 1, diagram_area.bottom() - 1),
+            ] {
+                for (kind, expected) in [
+                    (MouseEventKind::ScrollUp, (5, 4)),
+                    (MouseEventKind::ScrollDown, (5, 6)),
+                    (MouseEventKind::ScrollLeft, (4, 5)),
+                    (MouseEventKind::ScrollRight, (6, 5)),
+                ] {
+                    app.diagram_focus = focused;
+                    app.diagram_scroll_x = 5;
+                    app.diagram_scroll_y = 5;
 
-    for (column, row) in [(80, 0), (90, 10), (119, 29)] {
-        app.auto_scroll_paused = false;
-        app.scroll_offset = 0;
-        app.mouse_scroll_queue = 0;
-        app.mouse_scroll_target = None;
-        app.diagram_focus = false;
+                    let scroll_only = app.handle_mouse_event(MouseEvent {
+                        kind,
+                        column,
+                        row,
+                        modifiers: KeyModifiers::empty(),
+                    });
 
-        let scroll_only = app.handle_mouse_event(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column,
-            row,
-            modifiers: KeyModifiers::empty(),
-        });
-
-        assert!(
-            !scroll_only,
-            "unfocused diagram wheel at ({column},{row}) should request chat redraw"
-        );
-        assert!(
-            app.auto_scroll_paused,
-            "unfocused diagram wheel at ({column},{row}) should pause chat auto-scroll"
-        );
-        assert_ne!(
-            app.scroll_offset, 0,
-            "unfocused diagram wheel at ({column},{row}) should move chat scroll offset"
-        );
-        assert_eq!(app.diagram_pane_ratio, 40);
-        assert_eq!(app.diagram_pane_ratio_from, 40);
-        assert_eq!(app.diagram_pane_ratio_target, 40);
-        assert!(app.diagram_pane_anim_start.is_none());
+                    assert!(scroll_only, "diagram wheel should be scroll-only");
+                    assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), expected);
+                    assert_eq!(app.diagram_focus, focused, "hover must not steal focus");
+                    assert!(
+                        !app.auto_scroll_paused,
+                        "hover must not pause chat auto-scroll"
+                    );
+                    assert_eq!(app.scroll_offset, 0, "hover must not scroll chat");
+                    assert_eq!(app.mouse_scroll_queue, 0);
+                    assert_eq!(app.mouse_scroll_target, None);
+                    assert_eq!(app.diagram_pane_ratio, 40);
+                    assert_eq!(app.diagram_pane_ratio_from, 40);
+                    assert_eq!(app.diagram_pane_ratio_target, 40);
+                    assert!(app.diagram_pane_anim_start.is_none());
+                }
+            }
+        }
     }
 
     crate::tui::mermaid::clear_active_diagrams();
 }
 
 #[test]
-fn test_mouse_scroll_over_focused_diagram_can_noop_at_top() {
+fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
+    let _render_lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(120, 30, 0, 80);
+    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+    app.diagram_pane_enabled = true;
+    app.diagram_pane_position = crate::config::DiagramPanePosition::Side;
+    app.diagram_focus = true;
+
+    crate::tui::mermaid::register_active_diagram(0x447, 900, 450, None);
+    let _ = render_and_snap(&app, &mut terminal);
+    assert!(crate::tui::ui::last_max_scroll() > 2);
+    crate::tui::ui::record_layout_snapshot(
+        Rect::new(0, 0, 80, 30),
+        Some(Rect::new(80, 0, 40, 30)),
+        None,
+        None,
+    );
+    app.diagram_scroll_x = 5;
+    app.diagram_scroll_y = 5;
+
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 79,
+        row: 10,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    assert!(app.auto_scroll_paused);
+    assert_ne!(app.scroll_offset, 0);
+    assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), (5, 5));
+    assert!(app.diagram_focus, "wheel must not change keyboard focus");
+
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+#[test]
+fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
@@ -458,22 +511,26 @@ fn test_mouse_scroll_over_focused_diagram_can_noop_at_top() {
         None,
     );
 
-    let before = app.diagram_scroll_y;
-    let scroll_only = app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::ScrollUp,
-        column: 90,
-        row: 10,
-        modifiers: KeyModifiers::empty(),
-    });
+    for focused in [false, true] {
+        app.diagram_focus = focused;
+        let scroll_only = app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 90,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        });
 
-    assert!(
-        scroll_only,
-        "focused diagram still owns plain wheel events over the diagram"
-    );
-    assert_eq!(
-        app.diagram_scroll_y, before,
-        "this test documents the remaining user-visible no-op case for trace diagnostics"
-    );
+        assert!(
+            scroll_only,
+            "hovered diagram owns wheel events even at its limit"
+        );
+        assert_eq!(app.diagram_scroll_y, 0);
+        assert_eq!(app.diagram_focus, focused);
+        assert_eq!(
+            app.mouse_scroll_target, None,
+            "must not enqueue chat scrolling"
+        );
+    }
 
     crate::tui::mermaid::clear_active_diagrams();
 }
