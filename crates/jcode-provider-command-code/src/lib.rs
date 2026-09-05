@@ -14,7 +14,7 @@ pub const CREDITS_URL_BASE: &str = "https://api.commandcode.ai/alpha/billing/cre
 /// CLI identification headers expected on every request (D-06).
 pub const USER_AGENT: &str = "cli";
 pub const COMMAND_CODE_VERSION_HEADER: &str = "x-command-code-version";
-pub const COMMAND_CODE_VERSION: &str = "1.0.0";
+pub const COMMAND_CODE_VERSION: &str = "0.52.1";
 pub const SESSION_ID_HEADER: &str = "x-session-id";
 
 /// Browser OAuth loopback flow for explicit add/replace (D-03).

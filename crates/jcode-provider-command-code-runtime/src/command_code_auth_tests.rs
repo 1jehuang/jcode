@@ -9,7 +9,7 @@ use crate::auth::{
 use crate::{CommandCodeProvider, decode_text_only_stream};
 use futures::StreamExt;
 use jcode_message_types::{ContentBlock, Message, Role, StreamEvent};
-use jcode_provider_command_code::{GENERATE_URL, WhoamiIdentity};
+use jcode_provider_command_code::{COMMAND_CODE_VERSION, GENERATE_URL, WhoamiIdentity};
 fn valid_identity(id: &str, name: &str) -> WhoamiIdentity {
     serde_json::from_value(serde_json::json!({
         "user": {"id": id, "userName": name, "orgId": "org-1"}
@@ -53,6 +53,11 @@ fn command_code_generate_request_uses_endpoint_and_stream() {
     assert_eq!(headers.get(reqwest::header::USER_AGENT).unwrap(), "cli");
     assert_eq!(headers.get("x-session-id").unwrap(), "sess-1");
     assert!(headers.get("x-command-code-version").is_some());
+    assert_eq!(
+        headers.get("x-command-code-version").unwrap(),
+        COMMAND_CODE_VERSION
+    );
+    assert!(headers.get("x-project-slug").is_some());
     let body_bytes = request
         .body()
         .expect("json body")
@@ -65,6 +70,11 @@ fn command_code_generate_request_uses_endpoint_and_stream() {
             .and_then(|params| params.get("stream"))
             .and_then(serde_json::Value::as_bool),
         Some(true)
+    );
+    assert_eq!(body_json["params"]["reasoning_effort"], "max");
+    assert_eq!(
+        body_json["config"]["workingDir"],
+        std::env::current_dir().unwrap().display().to_string()
     );
 }
 
@@ -145,7 +155,7 @@ fn command_code_oauth_state_gate_and_request_parse() {
     assert!(!oauth_state_matches("state-1", "state-2"));
     assert!(!oauth_state_matches("", "anything"));
     assert!(!oauth_state_matches("short", "state-1"));
-    let head = "GET /callback?apiKey=k%20x&state=state-1&userId=u1&userName=dev&keyName=n HTTP/1.1\r\nHost: 127.0.0.1:5959\r\n\r\n";
+    let head = "POST /callback HTTP/1.1\r\nHost: 127.0.0.1:5959\r\nContent-Type: application/json\r\n\r\n{\"apiKey\":\"k x\",\"state\":\"state-1\",\"userId\":\"u1\",\"userName\":\"dev\",\"keyName\":\"n\"}";
     let callback = parse_callback_from_request(head).expect("parsed callback");
     assert_eq!(callback.api_key, "k x");
     assert_eq!(callback.state, "state-1");
@@ -153,4 +163,20 @@ fn command_code_oauth_state_gate_and_request_parse() {
     assert_eq!(callback.user_name, "dev");
     assert_eq!(callback.key_name.as_deref(), Some("n"));
     assert!(parse_callback_from_request("GET / HTTP/1.1\r\n\r\n").is_none());
+    assert!(
+        parse_callback_from_request("GET /callback?apiKey=k&state=s&userName=u HTTP/1.1\r\n\r\n")
+            .is_none()
+    );
+    assert!(
+        parse_callback_from_request(
+            "POST /callback HTTP/1.1\r\nContent-Type: text/plain\r\n\r\n{} "
+        )
+        .is_none()
+    );
+    assert!(
+        parse_callback_from_request(
+            "POST /wrong HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{} "
+        )
+        .is_none()
+    );
 }

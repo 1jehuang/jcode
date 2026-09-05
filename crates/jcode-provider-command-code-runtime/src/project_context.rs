@@ -7,9 +7,16 @@ use std::{
 };
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProjectContext {
+    #[serde(rename = "workingDir")]
     pub cwd: String,
+    pub date: String,
+    pub environment: String,
+    pub structure: Vec<String>,
+    #[serde(rename = "gitStatus")]
     pub git_status: Option<String>,
+    #[serde(rename = "recentCommits")]
     pub commits: Vec<String>,
+    #[serde(skip)]
     pub entries: Vec<String>,
     pub agents: Option<String>,
 }
@@ -50,16 +57,19 @@ pub fn project_context_cache(cwd: impl AsRef<Path>) -> ProjectContext {
         .unwrap_or_default();
     let value = ProjectContext {
         cwd: cwd.display().to_string(),
-        git_status,
-        commits,
-        entries: std::fs::read_dir(&cwd)
+        date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+        environment: std::env::consts::OS.to_string(),
+        structure: std::fs::read_dir(&cwd)
             .ok()
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok())
-            .take(64)
             .map(|e| e.file_name().to_string_lossy().into_owned())
+            .take(64)
             .collect(),
+        git_status,
+        commits,
+        entries: Vec::new(),
         agents: read_agents(&cwd),
     };
     if let Ok(mut lock) = cache.lock() {

@@ -34,6 +34,36 @@ pub fn compose_provider(account: CommandCodeAccount, model: &str) -> Result<Comm
     Ok(provider)
 }
 
+/// Compose from the daemon-owned persisted account set so pre-stream quota
+/// failover can rotate credentials without touching caller-owned state.
+pub fn compose_provider_from_store(
+    store: &crate::auth::CommandCodeStore,
+    model: &str,
+) -> Result<CommandCodeProvider> {
+    let active = store.active.as_deref();
+    let accounts = store
+        .accounts
+        .iter()
+        .filter(|a| {
+            !a.api_key.trim().is_empty()
+                && !a.user_id.trim().is_empty()
+                && !a.user_name.trim().is_empty()
+        })
+        .collect::<Vec<_>>();
+    let selected = accounts
+        .iter()
+        .find(|a| active.is_none() || a.label.as_deref() == active)
+        .or_else(|| accounts.first())
+        .ok_or_else(|| anyhow::anyhow!("no verified Command Code account"))?;
+    let provider = compose_provider((*selected).clone(), model)?;
+    Ok(provider.with_pool(
+        accounts
+            .into_iter()
+            .map(|a| (a.label.clone().unwrap_or_default(), a.api_key.clone()))
+            .collect(),
+    ))
+}
+
 pub fn bounded_context() -> crate::project_context::ProjectContext {
     project_context_cache(std::env::current_dir().unwrap_or_default())
 }

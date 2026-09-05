@@ -40,11 +40,38 @@ use std::sync::{Arc, RwLock};
 /// Active transport connection label surfaced to the status bar hook.
 pub const CONNECTION: &str = "HTTP/2";
 
+fn project_slug(path: &std::path::Path) -> String {
+    let slug = path
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    slug.trim_matches('-').chars().take(64).collect::<String>()
+}
+
+fn response_retry_after(body: &str) -> Option<u64> {
+    body.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower
+            .strip_prefix("retry-after:")
+            .and_then(|v| v.trim().parse().ok())
+    })
+}
+
 /// Minimal native /alpha/generate text streaming provider (tracer slice;
 /// full event mapping and composition land in plans 03/05).
 pub struct CommandCodeProvider {
     pub client: reqwest::Client,
     pub api_key: String,
+    active_key: Arc<RwLock<String>>,
+    pool: Arc<Vec<(String, String)>>,
     pub session_id: String,
     model: Arc<RwLock<String>>,
     pub(crate) catalog: Arc<models::CommandCodeCatalog>,
@@ -57,12 +84,22 @@ impl CommandCodeProvider {
         Self {
             client: reqwest::Client::new(),
             api_key,
+            active_key: Arc::new(RwLock::new(String::new())),
+            pool: Arc::new(Vec::new()),
             session_id,
             model: Arc::new(RwLock::new(model)),
             catalog: Arc::new(models::CommandCodeCatalog::new()),
             reasoning: Arc::new(efforts::CommandCodeReasoningCapability::default()),
             quota: Arc::new(quota::CommandCodeQuotaCache::new()),
         }
+    }
+
+    pub fn with_pool(mut self, accounts: Vec<(String, String)>) -> Self {
+        if let Some((_, key)) = accounts.first() {
+            self.active_key = Arc::new(RwLock::new(key.clone()));
+        }
+        self.pool = Arc::new(accounts);
+        self
     }
 
     /// Build the canonical /alpha/generate POST (headers + stream:true).
@@ -74,15 +111,29 @@ impl CommandCodeProvider {
     ) -> Result<reqwest::RequestBuilder> {
         let context =
             project_context::project_context_cache(std::env::current_dir().unwrap_or_default());
-        let body = json!({
+        let model = self.model();
+        let reasoning = (!self.reasoning.reasoning_denied(&model)).then_some("max");
+        let mut body = json!({
             "config": context,
             "memory": "", "taste": null, "skills": null, "permissionMode": "standard", "mode": "agent",
-            "params": {"model": *self.model.read().map_err(|_| anyhow::anyhow!("model poison"))?, "messages": serialize_messages(messages), "tools": tools, "system": system, "max_tokens": 64000, "stream": true},
+            "params": {"model": model, "messages": serialize_messages(messages), "tools": tools, "system": system, "max_tokens": 64000, "stream": true, "reasoning_effort": reasoning},
         });
+        if reasoning.is_none() {
+            body["params"]
+                .as_object_mut()
+                .map(|params| params.remove("reasoning_effort"));
+        }
         Ok(self
             .client
             .post(GENERATE_URL)
-            .bearer_auth(&self.api_key)
+            .bearer_auth(
+                self.active_key
+                    .read()
+                    .ok()
+                    .filter(|key| !key.is_empty())
+                    .map(|key| key.clone())
+                    .unwrap_or_else(|| self.api_key.clone()),
+            )
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::USER_AGENT, USER_AGENT)
             .header(COMMAND_CODE_VERSION_HEADER, COMMAND_CODE_VERSION)
@@ -90,6 +141,10 @@ impl CommandCodeProvider {
             .header("x-cli-environment", "production")
             .header("x-taste-learning", "false")
             .header("x-co-flag", "false")
+            .header(
+                "x-project-slug",
+                project_slug(&std::env::current_dir().unwrap_or_default()),
+            )
             .json(&body))
     }
 }
@@ -128,6 +183,11 @@ impl Provider for CommandCodeProvider {
                 break response;
             }
             let status = response.status().as_u16();
+            let retry_after_header = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             let head = response.text().await.unwrap_or_default();
             if attempt == 0
                 && self
@@ -147,9 +207,25 @@ impl Provider for CommandCodeProvider {
                     &self.quota,
                 )
                 .await;
-                attempt += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                continue;
+                let retry_after = retry_after_header
+                    .or_else(|| response_retry_after(&head))
+                    .unwrap_or(0);
+                if retry_after <= 5 {
+                    attempt += 1;
+                    tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
+                    continue;
+                }
+                if let Some((_, key)) = self.pool.iter().find(|(_, key)| key != &self.api_key) {
+                    if let Ok(mut active) = self.active_key.write() {
+                        *active = key.clone();
+                    }
+                    attempt += 1;
+                    continue;
+                }
+                anyhow::bail!(
+                    "Command Code rate limited; account cooled for {}s",
+                    retry_after
+                );
             }
             anyhow::bail!(
                 "Command Code generate failed: {} (head: {})",
@@ -174,13 +250,19 @@ impl Provider for CommandCodeProvider {
     }
 
     fn available_models(&self) -> Vec<&'static str> {
-        jcode_provider_command_code::CURATED_MODELS.to_vec()
+        self.catalog
+            .model_ids()
+            .into_iter()
+            .map(|model| Box::leak(model.into_boxed_str()) as &'static str)
+            .collect()
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(CommandCodeProvider {
             client: self.client.clone(),
             api_key: self.api_key.clone(),
+            active_key: self.active_key.clone(),
+            pool: self.pool.clone(),
             session_id: self.session_id.clone(),
             model: Arc::new(RwLock::new(self.model())),
             catalog: self.catalog.clone(),

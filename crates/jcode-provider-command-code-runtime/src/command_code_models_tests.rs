@@ -6,6 +6,7 @@ use crate::models::{
     CommandCodeCatalog, canonicalize_command_code_model, parse_command_code_models,
 };
 use jcode_provider_command_code::CURATED_MODELS;
+use jcode_provider_core::Provider;
 use std::time::Duration;
 
 fn fresh_catalog() -> CommandCodeCatalog {
@@ -60,6 +61,17 @@ fn command_code_catalog_failure_keeps_curated_fallback() {
     // Even an empty live payload must not wipe the fallback.
     assert!(catalog.refresh_with(|| Ok(Vec::new())).is_err());
     assert_eq!(catalog.model_ids(), before);
+}
+
+#[test]
+fn command_code_live_catalog_is_exposed_by_provider() {
+    let provider =
+        crate::CommandCodeProvider::new("k".into(), "s".into(), "zai-org/GLM-5.3".into());
+    provider
+        .catalog
+        .refresh_with(|| Ok(vec!["live/model-x".into()]))
+        .unwrap();
+    assert_eq!(provider.available_models(), vec!["live/model-x"]);
 }
 
 #[test]

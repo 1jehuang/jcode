@@ -232,9 +232,8 @@ pub fn register_external_provider_runtimes() {
             let model = std::env::var("JCODE_COMMAND_CODE_MODEL")
                 .unwrap_or_else(|_| "zai-org/GLM-5.3".to_string());
             Some(std::sync::Arc::new(
-                jcode_provider_command_code_runtime::integration::compose_provider(
-                    account, &model,
-                ).ok()?,
+                jcode_provider_command_code_runtime::integration::compose_provider(account, &model)
+                    .ok()?,
             )
                 as std::sync::Arc<dyn crate::provider::Provider>)
         },

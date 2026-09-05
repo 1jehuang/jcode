@@ -100,6 +100,7 @@ pub fn issue_oauth_state() -> String {
 
 /// Minimal percent-decoding for query values (plus as space and two-hex
 /// escapes); malformed escapes keep the raw bytes.
+#[allow(dead_code)]
 fn urlencode_decode(value: &str) -> String {
     let raw = value.replace('+', " ");
     let bytes = raw.as_bytes();
@@ -127,26 +128,37 @@ fn urlencode_decode(value: &str) -> String {
 /// query string. Returns None for anything malformed or missing fields.
 pub fn parse_callback_from_request(request_head: &str) -> Option<OAuthCallback> {
     let request_line = request_head.lines().next()?;
-    let path = request_line.split_whitespace().nth(1)?;
-    let body = request_head.split("\r\n\r\n").nth(1).unwrap_or("");
-    let query = path.split_once('?').map(|(_, q)| q).unwrap_or(body);
-    let mut api_key = String::new();
-    let mut state = String::new();
-    let mut user_id = String::new();
-    let mut user_name = String::new();
-    let mut key_name = None;
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        let value = urlencode_decode(value);
-        match key {
-            "apiKey" => api_key = value,
-            "state" => state = value,
-            "userId" => user_id = value,
-            "userName" => user_name = value,
-            "keyName" => key_name = Some(value),
-            _ => {}
-        }
+    if request_line.split_whitespace().next()? != "POST" {
+        return None;
     }
+    let path = request_line.split_whitespace().nth(1)?;
+    if path != "/callback" {
+        return None;
+    }
+    let content_type = request_head
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Type:").map(str::trim))
+        .unwrap_or("");
+    if !content_type.eq_ignore_ascii_case("application/json") {
+        return None;
+    }
+    let body = request_head.split("\r\n\r\n").nth(1).unwrap_or("");
+    let object = serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .as_object()?
+        .clone();
+    let api_key = object.get("apiKey")?.as_str()?.to_string();
+    let state = object.get("state")?.as_str()?.to_string();
+    let user_id = object
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let user_name = object.get("userName")?.as_str()?.to_string();
+    let key_name = object
+        .get("keyName")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     if api_key.is_empty() || state.is_empty() || user_name.is_empty() {
         return None;
     }

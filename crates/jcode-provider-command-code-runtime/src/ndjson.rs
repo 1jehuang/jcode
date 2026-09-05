@@ -34,9 +34,35 @@ fn event(value: Value) -> Option<StreamEvent> {
                 .cloned()
                 .unwrap_or(Value::Null),
         }),
-        "finish-step" => {
-            let fallback = Value::Object(obj.clone());
-            let usage = obj.get("usage").unwrap_or(&fallback);
+        "finish-step" => Some(StreamEvent::MessageEnd {
+            stop_reason: obj
+                .get("rawFinishReason")
+                .or_else(|| obj.get("finishReason"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }),
+        "finish" => {
+            let reason = obj
+                .get("rawFinishReason")
+                .or_else(|| obj.get("finishReason"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if reason.as_deref() == Some("error") {
+                return Some(StreamEvent::Error {
+                    message: "Command Code upstream ended the turn with finishReason \"error\""
+                        .into(),
+                    retry_after_secs: None,
+                });
+            }
+            Some(StreamEvent::MessageEnd {
+                stop_reason: reason,
+            })
+        }
+        "usage" => {
+            let usage = obj
+                .get("totalUsage")
+                .or_else(|| obj.get("usage"))
+                .unwrap_or(&Value::Null);
             Some(StreamEvent::TokenUsage {
                 input_tokens: usage.get("inputTokens").and_then(Value::as_u64),
                 output_tokens: usage.get("outputTokens").and_then(Value::as_u64),
@@ -48,13 +74,6 @@ fn event(value: Value) -> Option<StreamEvent> {
                     .and_then(Value::as_u64),
             })
         }
-        "finish" => Some(StreamEvent::MessageEnd {
-            stop_reason: obj
-                .get("rawFinishReason")
-                .or_else(|| obj.get("finishReason"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }),
         "error" => {
             let error = obj
                 .get("error")
@@ -96,6 +115,34 @@ where
             match line {
                 Ok(line) => {
                     for part in line.lines() {
+                        if let Ok(raw) = serde_json::from_str::<Value>(
+                            part.trim()
+                                .strip_prefix("data:")
+                                .map(str::trim)
+                                .unwrap_or(part.trim()),
+                        ) && raw.get("type").and_then(Value::as_str) == Some("finish-step")
+                            && !done
+                        {
+                            if let Some(usage) = raw.get("totalUsage").or_else(|| raw.get("usage"))
+                            {
+                                let _ = tx
+                                    .send(Ok(StreamEvent::TokenUsage {
+                                        input_tokens: usage
+                                            .get("inputTokens")
+                                            .and_then(Value::as_u64),
+                                        output_tokens: usage
+                                            .get("outputTokens")
+                                            .and_then(Value::as_u64),
+                                        cache_read_input_tokens: usage
+                                            .pointer("/inputTokenDetails/cacheReadTokens")
+                                            .and_then(Value::as_u64),
+                                        cache_creation_input_tokens: usage
+                                            .pointer("/inputTokenDetails/cacheWriteTokens")
+                                            .and_then(Value::as_u64),
+                                    }))
+                                    .await;
+                            }
+                        }
                         if let Some(value) = decode_line(part) {
                             if done {
                                 continue;
