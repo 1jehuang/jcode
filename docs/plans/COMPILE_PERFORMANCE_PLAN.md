@@ -5,9 +5,9 @@ without sacrificing full-feature builds.
 
 See also:
 
-- [`COMPILE_TIME_ISOLATION_REFACTOR.md`](./COMPILE_TIME_ISOLATION_REFACTOR.md)
-- [`REFACTORING.md`](./REFACTORING.md)
-- [`MODULAR_ARCHITECTURE_RFC.md`](./MODULAR_ARCHITECTURE_RFC.md)
+- [`COMPILE_TIME_ISOLATION_REFACTOR.md`](../COMPILE_TIME_ISOLATION_REFACTOR.md)
+- [`REFACTORING.md`](../REFACTORING.md)
+- [`MODULAR_ARCHITECTURE_RFC.md`](../MODULAR_ARCHITECTURE_RFC.md)
 
 ## Goals
 
@@ -232,7 +232,7 @@ Observed spread from these warm-only checkpoints:
 ### Phase 3 — Workspace boundary design
 
 The refined layered target, dependency rules, and migration guidance live in
-[`docs/MODULAR_ARCHITECTURE_RFC.md`](MODULAR_ARCHITECTURE_RFC.md). The crate list
+[`docs/MODULAR_ARCHITECTURE_RFC.md`](../MODULAR_ARCHITECTURE_RFC.md). The crate list
 below is the compile-performance-oriented destination sketch and should be read
 as compatible with that RFC, not as the only acceptable final packaging.
 

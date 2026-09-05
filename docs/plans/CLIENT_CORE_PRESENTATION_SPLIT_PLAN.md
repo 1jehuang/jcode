@@ -4,13 +4,13 @@ Status: Proposed
 
 This document audits the current TUI/client stack and proposes a safe, incremental split between a reusable `client-core` layer and the ratatui/crossterm presentation layer.
 
-The goal is to make the current single-surface client easier to maintain, while also unblocking the multi-surface direction described in [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](./MULTI_SESSION_CLIENT_ARCHITECTURE.md).
+The goal is to make the current single-surface client easier to maintain, while also unblocking the multi-surface direction described in [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](../MULTI_SESSION_CLIENT_ARCHITECTURE.md).
 
 See also:
 
-- [`REFACTORING.md`](./REFACTORING.md)
-- [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](./MULTI_SESSION_CLIENT_ARCHITECTURE.md)
-- [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md)
+- [`REFACTORING.md`](../REFACTORING.md)
+- [`MULTI_SESSION_CLIENT_ARCHITECTURE.md`](../MULTI_SESSION_CLIENT_ARCHITECTURE.md)
+- [`SERVER_ARCHITECTURE.md`](../SERVER_ARCHITECTURE.md)
 
 ## Executive Summary
 

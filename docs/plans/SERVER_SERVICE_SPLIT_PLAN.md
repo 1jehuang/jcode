@@ -16,8 +16,8 @@ The intent is to improve ownership boundaries and reduce argument fanout without
 
 See also:
 
-- [`SERVER_ARCHITECTURE.md`](./SERVER_ARCHITECTURE.md)
-- [`SWARM_ARCHITECTURE.md`](./SWARM_ARCHITECTURE.md)
+- [`SERVER_ARCHITECTURE.md`](../SERVER_ARCHITECTURE.md)
+- [`SWARM_ARCHITECTURE.md`](../SWARM_ARCHITECTURE.md)
 - [`UNIFIED_SELFDEV_SERVER_PLAN.md`](./UNIFIED_SELFDEV_SERVER_PLAN.md)
 
 ## Executive Summary
