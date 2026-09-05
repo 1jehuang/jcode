@@ -1319,6 +1319,8 @@ pub struct App {
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,
     side_panel_image_zoom_percent: u8,
+    // Full-screen preview of a clicked panel image. Panel scroll/focus stay intact.
+    panel_image_preview: Option<u64>,
     diff_pane_focus: bool,
     diff_pane_auto_scroll: bool,
     side_panel: crate::side_panel::SidePanelSnapshot,

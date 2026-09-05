@@ -2601,7 +2601,12 @@ pub(super) fn handle_modal_key(
 }
 
 pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<bool> {
-    if app.changelog_scroll.is_some() {
+    // This overlay seam is shared by local/replay and live remote clients.
+    if app.panel_image_preview.is_some() {
+        if matches!(code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+            app.close_panel_image_preview();
+        }
+    } else if app.changelog_scroll.is_some() {
         app.handle_changelog_key(code)?;
     } else if app.help_scroll.is_some() {
         app.handle_help_key(code)?;

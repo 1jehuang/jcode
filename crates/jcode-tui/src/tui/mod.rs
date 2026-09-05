@@ -625,6 +625,10 @@ pub trait TuiState {
     fn diff_pane_scroll_x(&self) -> i32;
     /// Zoom percentage for image widgets rendered inside the side panel.
     fn side_panel_image_zoom_percent(&self) -> u8;
+    /// Image shown in the dismissible full-screen panel preview.
+    fn panel_image_preview(&self) -> Option<u64> {
+        None
+    }
     /// Whether the pinned diff pane is focused
     fn diff_pane_focus(&self) -> bool;
     /// Session-scoped side panel state managed by the side_panel tool

@@ -1247,6 +1247,7 @@ pub(super) fn draw_pinned_content_cached(
                         ) {
                             match plan {
                                 FitImageRenderPlan::Full { area } => {
+                                    super::panel_image_preview::record_image(area, placement.hash);
                                     mermaid::render_image_widget_scale(
                                         placement.hash,
                                         area,
@@ -1259,6 +1260,7 @@ pub(super) fn draw_pinned_content_cached(
                                     scroll_y,
                                     zoom_percent,
                                 } => {
+                                    super::panel_image_preview::record_image(area, placement.hash);
                                     mermaid::render_image_widget_viewport_precise(
                                         placement.hash,
                                         area,
@@ -1272,6 +1274,7 @@ pub(super) fn draw_pinned_content_cached(
                             }
                         }
                     } else {
+                        super::panel_image_preview::record_image(img_area, placement.hash);
                         mermaid::render_image_widget_scale(
                             placement.hash,
                             img_area,
@@ -1294,6 +1297,7 @@ pub(super) fn draw_pinned_content_cached(
                             )
                         })
                         .unwrap_or(0);
+                    super::panel_image_preview::record_image(img_area, placement.hash);
                     mermaid::render_image_widget_viewport_precise(
                         placement.hash,
                         img_area,
@@ -1529,6 +1533,7 @@ pub(super) fn draw_side_panel_markdown(
                             ) {
                                 let visible_widget_rect = match plan {
                                     FitImageRenderPlan::Full { area } => {
+                                        super::panel_image_preview::record_image(area, placement.hash);
                                         mermaid::render_image_widget_scale(
                                             placement.hash,
                                             area,
@@ -1542,6 +1547,7 @@ pub(super) fn draw_side_panel_markdown(
                                         scroll_y,
                                         zoom_percent,
                                     } => {
+                                        super::panel_image_preview::record_image(area, placement.hash);
                                         mermaid::render_image_widget_viewport_precise(
                                             placement.hash,
                                             area,
@@ -1594,6 +1600,7 @@ pub(super) fn draw_side_panel_markdown(
                                 });
                             }
                         } else {
+                            super::panel_image_preview::record_image(img_area, placement.hash);
                             mermaid::render_image_widget_scale(
                                 placement.hash,
                                 img_area,
@@ -1617,6 +1624,7 @@ pub(super) fn draw_side_panel_markdown(
                                 )
                             })
                             .unwrap_or(0);
+                        super::panel_image_preview::record_image(img_area, placement.hash);
                         mermaid::render_image_widget_viewport_precise(
                             placement.hash,
                             img_area,

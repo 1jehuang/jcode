@@ -273,6 +273,7 @@ fn apply_judge_visible_context_if_needed(session: &mut Session, title_override: 
 /// else ever tells the client to drop the old session's pages. Shared by both
 /// `/clear` implementations so they cannot drift apart again.
 pub(crate) fn clear_side_panel_for_new_session(app: &mut App) {
+    app.close_panel_image_preview();
     app.apply_side_panel_snapshot(crate::side_panel::SidePanelSnapshot::default());
     app.last_side_panel_focus_id = None;
     app.diff_pane_scroll = 0;
