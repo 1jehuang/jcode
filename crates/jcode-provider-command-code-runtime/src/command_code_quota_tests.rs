@@ -1,5 +1,6 @@
 use super::failover::*;
 use super::quota::*;
+use jcode_provider_core::Provider;
 use serde_json::json;
 use std::time::Duration;
 
@@ -64,4 +65,28 @@ fn failover_sticks_short_429_and_rotates_long_pre_stream() {
         ),
         CommandCodeFailoverAction::NoAction
     );
+}
+
+#[test]
+fn quota_and_cooldown_are_visible_in_provider_details() {
+    let provider = crate::CommandCodeProvider::new("key".into(), "session".into(), "model".into())
+        .with_pool(vec![("account-1".into(), "key".into())]);
+    provider.quota.insert(
+        "account-1",
+        CommandCodeCredits {
+            credits: Some(3.0),
+            ..Default::default()
+        },
+    );
+    jcode_provider_core::set_account_cooldown(
+        "command-code",
+        "account-1",
+        "quota",
+        Some(Duration::from_secs(60)),
+    );
+    let details = provider.provider_details_for_model("model");
+    assert!(details[0].1.contains("account=account-1"));
+    assert!(details[0].1.contains("credits=3"));
+    assert!(details[0].1.contains("cooldown=quota"));
+    jcode_provider_core::clear_account_cooldown("command-code", "account-1");
 }

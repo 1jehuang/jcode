@@ -100,6 +100,23 @@ impl CommandCodeProvider {
         self
     }
 
+    fn active_account(&self) -> (String, String) {
+        let key = self
+            .active_key
+            .read()
+            .ok()
+            .filter(|key| !key.is_empty())
+            .map(|key| key.clone())
+            .unwrap_or_else(|| self.api_key.clone());
+        let label = self
+            .pool
+            .iter()
+            .find(|(_, candidate)| candidate == &key)
+            .map(|(label, _)| label.clone())
+            .unwrap_or_else(|| self.session_id.clone());
+        (label, key)
+    }
+
     /// Build the canonical /alpha/generate POST (headers + stream:true).
     pub fn generate_request(
         &self,
@@ -291,6 +308,36 @@ impl Provider for CommandCodeProvider {
             .into_iter()
             .map(|model| Box::leak(model.into_boxed_str()) as &'static str)
             .collect()
+    }
+
+    async fn prefetch_models(&self) -> Result<()> {
+        let (label, key) = self.active_account();
+        let _ = self.catalog.refresh_live(&self.client, &key).await;
+        let _ = quota::command_code_credits(&self.client, &key, None, &label, &self.quota).await;
+        Ok(())
+    }
+
+    fn provider_details_for_model(&self, _model: &str) -> Vec<(String, String)> {
+        let (label, _) = self.active_account();
+        let mut details = vec![format!("account={label}")];
+        if let Some(credits) = self.quota.get(&label) {
+            if let Some(balance) = credits.credits {
+                details.push(format!("credits={balance}"));
+            }
+            for (name, window) in [("5h", credits.five_hour), ("week", credits.weekly)] {
+                if let Some(window) = window {
+                    details.push(format!(
+                        "{name}={}/{}",
+                        window.used.unwrap_or(0.0),
+                        window.cap.unwrap_or(0.0)
+                    ));
+                }
+            }
+        }
+        if let Some(cooldown) = jcode_provider_core::get_account_cooldown("command-code", &label) {
+            details.push(format!("cooldown={}", cooldown.reason));
+        }
+        vec![("Command Code".into(), details.join("; "))]
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
