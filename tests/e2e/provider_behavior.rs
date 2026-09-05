@@ -946,3 +946,80 @@ async fn test_system_prompt_no_claude_code_identity() -> Result<()> {
 
     Ok(())
 }
+
+/// Phase 6 Task 1 Tracer: wire native Command Code streaming case through isolated daemon/client helpers
+#[tokio::test]
+async fn test_command_code_isolated_daemon_streaming() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime_dir = short_runtime_dir(format!(
+        "jcode-test-cmdc-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir)?;
+    let socket_path = runtime_dir.join("jcode.sock");
+    let debug_socket_path = runtime_dir.join("jcode-debug.sock");
+
+    // Verify catalog resolves command-code descriptor
+    let descriptor = jcode::provider_catalog::resolve_login_provider("command-code")
+        .expect("command-code login provider must resolve");
+    assert_eq!(descriptor.id, "command-code");
+    assert_eq!(descriptor.display_name, "Command Code");
+
+    // Set up mock provider representing native streaming response
+    let provider = Arc::new(MockProvider::new());
+    provider.queue_response(vec![
+        StreamEvent::TextDelta("Hello from Command Code native streaming!".to_string()),
+        StreamEvent::TokenUsage {
+            input_tokens: Some(15),
+            output_tokens: Some(10),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        },
+        StreamEvent::MessageEnd {
+            stop_reason: Some("end_turn".to_string()),
+        },
+        StreamEvent::SessionId("cmdc-stream-session-1".to_string()),
+    ]);
+
+    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let server_instance = server::Server::new_with_paths(
+        provider_dyn,
+        socket_path.clone(),
+        debug_socket_path.clone(),
+    );
+
+    let server_handle = tokio::spawn(async move { server_instance.run().await });
+
+    let mut client = wait_for_subscribed_server_client(&socket_path).await?;
+    let msg_id = client.send_message("Hello native Command Code").await?;
+
+    let mut saw_text = false;
+    let mut saw_done = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let Ok(event) = tokio::time::timeout(Duration::from_secs(1), client.read_event()).await
+        else {
+            continue;
+        };
+        match event? {
+            ServerEvent::TextDelta { text } if text.contains("Hello from Command Code native streaming!") => {
+                saw_text = true;
+            }
+            ServerEvent::Done { id } if id == msg_id => {
+                saw_done = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    abort_server_and_cleanup(&server_handle, &socket_path, &debug_socket_path);
+
+    assert!(saw_text, "Did not receive streamed TextDelta from isolated daemon");
+    assert!(saw_done, "Did not receive Done event for message");
+
+    Ok(())
+}
