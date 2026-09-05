@@ -74,7 +74,10 @@ pub const FIELD_TEXT: &str = "text";
 /// optional data: prefix; blank/dropped lines become Ignored.
 pub fn decode_record_line(line: &str) -> GenerateRecord {
     let trimmed = line.trim();
-    let payload = trimmed.strip_prefix("data:").map(str::trim).unwrap_or(trimmed);
+    let payload = trimmed
+        .strip_prefix("data:")
+        .map(str::trim)
+        .unwrap_or(trimmed);
     if payload.is_empty() {
         return GenerateRecord::Ignored;
     }

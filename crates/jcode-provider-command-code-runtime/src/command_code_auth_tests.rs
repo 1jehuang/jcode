@@ -53,10 +53,17 @@ fn command_code_generate_request_uses_endpoint_and_stream() {
     assert_eq!(headers.get(reqwest::header::USER_AGENT).unwrap(), "cli");
     assert_eq!(headers.get("x-session-id").unwrap(), "sess-1");
     assert!(headers.get("x-command-code-version").is_some());
-    let body_bytes = request.body().expect("json body").as_bytes().expect("body bytes");
+    let body_bytes = request
+        .body()
+        .expect("json body")
+        .as_bytes()
+        .expect("body bytes");
     let body_json: serde_json::Value = serde_json::from_slice(body_bytes).expect("body json");
     assert_eq!(
-        body_json.get("params").and_then(|params| params.get("stream")).and_then(serde_json::Value::as_bool),
+        body_json
+            .get("params")
+            .and_then(|params| params.get("stream"))
+            .and_then(serde_json::Value::as_bool),
         Some(true)
     );
 }
@@ -64,18 +71,15 @@ fn command_code_generate_request_uses_endpoint_and_stream() {
 #[tokio::test]
 async fn command_code_stream_decodes_text_delta_and_error() {
     let lf_byte: u8 = 10;
-    let mut chunk_a = bytes::Bytes::from_static(b"{\"type\":\"text-delta\",\"text\":\"hel\"}")
-        .to_vec();
+    let mut chunk_a =
+        bytes::Bytes::from_static(b"{\"type\":\"text-delta\",\"text\":\"hel\"}").to_vec();
     chunk_a.push(lf_byte);
     let chunk_a = bytes::Bytes::from(chunk_a);
-    let mut chunk_b = bytes::Bytes::from_static(b"{\"type\":\"error\",\"message\":\"boom\"}")
-        .to_vec();
+    let mut chunk_b =
+        bytes::Bytes::from_static(b"{\"type\":\"error\",\"message\":\"boom\"}").to_vec();
     chunk_b.push(lf_byte);
     let chunk_b = bytes::Bytes::from(chunk_b);
-    let stream = futures::stream::iter(vec![
-        Ok::<_, std::io::Error>(chunk_a),
-        Ok(chunk_b),
-    ]);
+    let stream = futures::stream::iter(vec![Ok::<_, std::io::Error>(chunk_a), Ok(chunk_b)]);
     let framed = crate::FramedStringStream::new(Box::pin(stream));
     let mut events = decode_text_only_stream(Box::pin(framed)).expect("decoder");
     let mut collected = Vec::new();
@@ -119,7 +123,12 @@ fn command_code_persistence_requires_verified_identity() {
         org_id: None,
         key_name: None,
     };
-    let ok = persist_verified_account(&store, account.clone(), &valid_identity("u1", "user-1"), None);
+    let ok = persist_verified_account(
+        &store,
+        account.clone(),
+        &valid_identity("u1", "user-1"),
+        None,
+    );
     assert!(ok.is_ok());
     let rejected = persist_verified_account(
         &store,

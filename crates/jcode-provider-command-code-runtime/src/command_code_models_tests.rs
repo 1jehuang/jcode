@@ -3,7 +3,7 @@
 
 use crate::efforts::{CommandCodeReasoningCapability, is_reasoning_effort_rejection};
 use crate::models::{
-    canonicalize_command_code_model, parse_command_code_models, CommandCodeCatalog,
+    CommandCodeCatalog, canonicalize_command_code_model, parse_command_code_models,
 };
 use jcode_provider_command_code::CURATED_MODELS;
 use std::time::Duration;
@@ -21,13 +21,24 @@ fn command_code_catalog_success_replaces_curated_fallback() {
             .iter()
             .all(|model| CURATED_MODELS.contains(&model.as_str()))
     );
-    let replaced = ["zai-org/GLM-5.3", "deepseek/deepseek-v4-flash", "new-model/x"];
+    let replaced = [
+        "zai-org/GLM-5.3",
+        "deepseek/deepseek-v4-flash",
+        "new-model/x",
+    ];
     let stored = replaced.iter().map(|model| model.to_string()).collect();
     let replaced_catalog = replaced
         .iter()
         .map(|model| model.to_string())
         .collect::<Vec<_>>();
-    assert_eq!(stored, vec!["zai-org/GLM-5.3".to_string(), "deepseek/deepseek-v4-flash".to_string(), "new-model/x".to_string()]);
+    assert_eq!(
+        stored,
+        vec![
+            "zai-org/GLM-5.3".to_string(),
+            "deepseek/deepseek-v4-flash".to_string(),
+            "new-model/x".to_string()
+        ]
+    );
     assert!(catalog.refresh_with(move || Ok(stored)).expect("refresh"));
     assert_eq!(catalog.model_ids().len(), replaced_catalog.len());
     assert!(catalog.model_ids().contains(&"new-model/x".to_string()));
@@ -38,7 +49,11 @@ fn command_code_catalog_success_replaces_curated_fallback() {
 fn command_code_catalog_failure_keeps_curated_fallback() {
     let catalog = fresh_catalog();
     let before = catalog.model_ids();
-    assert!(catalog.refresh_with(|| Err(anyhow::anyhow!("discovery offline"))).is_err());
+    assert!(
+        catalog
+            .refresh_with(|| Err(anyhow::anyhow!("discovery offline")))
+            .is_err()
+    );
     assert_eq!(catalog.model_ids(), before);
     assert!(!catalog.is_recent(Duration::from_secs(1)));
     assert!(catalog.observed_at().is_none());
@@ -90,18 +105,30 @@ fn command_code_alias_resolves_to_case_sensitive_canonical_ids() {
         None
     );
     assert_eq!(canonicalize_command_code_model("", &catalog), None);
-    assert_eq!(canonicalize_command_code_model("totally-unknown", &catalog), None);
+    assert_eq!(
+        canonicalize_command_code_model("totally-unknown", &catalog),
+        None
+    );
 }
 
 #[test]
 fn command_code_reasoning_rejection_matches_only_reasoning_errors() {
-    assert!(is_reasoning_effort_rejection(400, "reasoning_effort unsupported: ultra"));
+    assert!(is_reasoning_effort_rejection(
+        400,
+        "reasoning_effort unsupported: ultra"
+    ));
     assert!(is_reasoning_effort_rejection(422, "Invalid effort value"));
-    assert!(is_reasoning_effort_rejection(400, "Unsupported effort for model"));
+    assert!(is_reasoning_effort_rejection(
+        400,
+        "Unsupported effort for model"
+    ));
     // Unrelated client errors must not classify as reasoning rejections.
     assert!(!is_reasoning_effort_rejection(400, "malformed json body"));
     assert!(!is_reasoning_effort_rejection(401, "unauthorized"));
-    assert!(!is_reasoning_effort_rejection(500, "reasoning_effort mismatch"));
+    assert!(!is_reasoning_effort_rejection(
+        500,
+        "reasoning_effort mismatch"
+    ));
     assert!(!is_reasoning_effort_rejection(429, "rate limited"));
 }
 

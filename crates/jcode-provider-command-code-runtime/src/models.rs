@@ -26,7 +26,10 @@ struct CatalogSnapshot {
 impl CatalogSnapshot {
     fn curated() -> Self {
         Self {
-            models: CURATED_MODELS.iter().map(|model| (*model).to_string()).collect(),
+            models: CURATED_MODELS
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect(),
             fetched_at: Instant::now(),
             observed_at: SystemTime::now(),
             live: false,
@@ -71,28 +74,26 @@ impl CommandCodeCatalog {
     }
 
     pub fn observed_at(&self) -> Option<SystemTime> {
-        self.snapshot.read().ok().and_then(|snapshot| {
-            snapshot.live.then_some(snapshot.observed_at)
-        })
+        self.snapshot
+            .read()
+            .ok()
+            .and_then(|snapshot| snapshot.live.then_some(snapshot.observed_at))
     }
 
     /// Replace-on-success refresh: the fetch closure encapsulates the live
     /// GET so both the network path and offline tests exercise the same gate.
     /// A non-empty replacement is stored wholesale; failures keep the
     /// previous snapshot (curated fallback never disappears).
-    pub fn refresh_with(
-        &self,
-        fetch: impl FnOnce() -> Result<Vec<String>>,
-    ) -> Result<bool> {
+    pub fn refresh_with(&self, fetch: impl FnOnce() -> Result<Vec<String>>) -> Result<bool> {
         let live_models = fetch()?;
         if live_models.is_empty() {
             anyhow::bail!("Command Code /provider/v1/models returned zero models");
         }
-        let models = live_models
-            .into_iter()
-            .take(MAX_MODELS)
-            .collect::<Vec<_>>();
-        let mut snapshot = self.snapshot.write().map_err(|_| anyhow::anyhow!("catalog lock poisoned"))?;
+        let models = live_models.into_iter().take(MAX_MODELS).collect::<Vec<_>>();
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow::anyhow!("catalog lock poisoned"))?;
         *snapshot = CatalogSnapshot {
             models,
             fetched_at: Instant::now(),

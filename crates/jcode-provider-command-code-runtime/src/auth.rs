@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use jcode_base::auth::account_store::write_json_secret_locked;
 use jcode_provider_command_code::{
-    PROVIDER_KEY, OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, OAUTH_TIMEOUT_SECS, WHOAMI_URL,
+    OAUTH_LOOPBACK_HOST, OAUTH_LOOPBACK_PORT, OAUTH_TIMEOUT_SECS, PROVIDER_KEY, WHOAMI_URL,
     WhoamiIdentity, whoami_identity_valid,
 };
 use serde::{Deserialize, Serialize};
@@ -36,10 +36,7 @@ impl CommandCodeAccount {
 
 /// Whoami gate with live HTTP: GET /alpha/whoami with the bearer key and
 /// require a non-empty user id and username before any persistence happens.
-pub async fn verify_whoami(
-    client: &reqwest::Client,
-    api_key: &str,
-) -> Result<WhoamiIdentity> {
+pub async fn verify_whoami(client: &reqwest::Client, api_key: &str) -> Result<WhoamiIdentity> {
     let response = client
         .get(WHOAMI_URL)
         .bearer_auth(api_key)
@@ -51,10 +48,18 @@ pub async fn verify_whoami(
     let head = response.text().await.unwrap_or_default();
     let head = head.chars().take(512).collect::<String>();
     if !status.is_success() {
-        anyhow::bail!("Command Code /alpha/whoami failed: {} (head: {})", status, head);
+        anyhow::bail!(
+            "Command Code /alpha/whoami failed: {} (head: {})",
+            status,
+            head
+        );
     }
-    let identity: WhoamiIdentity = serde_json::from_str(&head)
-        .with_context(|| format!("Command Code /alpha/whoami returned unparseable body: {}", head))?;
+    let identity: WhoamiIdentity = serde_json::from_str(&head).with_context(|| {
+        format!(
+            "Command Code /alpha/whoami returned unparseable body: {}",
+            head
+        )
+    })?;
     verify_identity(&identity)?;
     Ok(identity)
 }
@@ -87,12 +92,10 @@ pub fn oauth_state_matches(expected: &str, actual: &str) -> bool {
 
 /// Issue a fresh 32-character alphanumeric OAuth state value.
 pub fn issue_oauth_state() -> String {
-    use rand::distr::Alphanumeric;
     use rand::Rng;
+    use rand::distr::Alphanumeric;
     let mut rng = rand::rng();
-    (0..32)
-        .map(|_| rng.sample(Alphanumeric) as char)
-        .collect()
+    (0..32).map(|_| rng.sample(Alphanumeric) as char).collect()
 }
 
 /// Minimal percent-decoding for query values (plus as space and two-hex
@@ -125,7 +128,8 @@ fn urlencode_decode(value: &str) -> String {
 pub fn parse_callback_from_request(request_head: &str) -> Option<OAuthCallback> {
     let request_line = request_head.lines().next()?;
     let path = request_line.split_whitespace().nth(1)?;
-    let query = path.split_once('?')?.1;
+    let body = request_head.split("\r\n\r\n").nth(1).unwrap_or("");
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or(body);
     let mut api_key = String::new();
     let mut state = String::new();
     let mut user_id = String::new();
@@ -177,7 +181,12 @@ fn http_reply(status_line: &str, body: &str) -> Vec<u8> {
 /// Hand-built JSON body so no escaped quotes are needed in source.
 fn json_success_body(success: bool) -> String {
     const DQ: char = 34 as char;
-    format!("{{{}success{}:{}}}", DQ, DQ, if success { "true" } else { "false" })
+    format!(
+        "{{{}success{}:{}}}",
+        DQ,
+        DQ,
+        if success { "true" } else { "false" }
+    )
 }
 
 /// Explicit OAuth add/replace flow: verify the state value first, then the
@@ -232,7 +241,10 @@ fn blocking_oauth_accept(expected_state: &str) -> Result<OAuthCallback> {
     let bad_reply = http_reply("HTTP/1.1 400 Bad Request", &json_success_body(false));
     loop {
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("Command Code OAuth callback timed out after {}s", OAUTH_TIMEOUT_SECS);
+            anyhow::bail!(
+                "Command Code OAuth callback timed out after {}s",
+                OAUTH_TIMEOUT_SECS
+            );
         }
         match listener.accept() {
             Ok((mut socket, _addr)) => {
@@ -243,10 +255,11 @@ fn blocking_oauth_accept(expected_state: &str) -> Result<OAuthCallback> {
                     head.push_str(&String::from_utf8_lossy(&buffer[..read]));
                 }
                 if let Some(callback) = parse_callback_from_request(&head) {
-                    let _ = std::io::Write::write_all(&mut socket, &ok_reply);
                     if oauth_state_matches(expected_state, &callback.state) {
+                        let _ = std::io::Write::write_all(&mut socket, &ok_reply);
                         return Ok(callback);
                     }
+                    let _ = std::io::Write::write_all(&mut socket, &bad_reply);
                 } else {
                     let _ = std::io::Write::write_all(&mut socket, &bad_reply);
                 }
@@ -261,8 +274,7 @@ fn blocking_oauth_accept(expected_state: &str) -> Result<OAuthCallback> {
 
 /// Storage file for the daemon-authoritative credential store.
 pub fn auth_store_path() -> Result<std::path::PathBuf> {
-    Ok(jcode_base::storage::app_config_dir()?
-        .join("command_code_accounts.json"))
+    Ok(jcode_base::storage::app_config_dir()?.join("command_code_accounts.json"))
 }
 
 /// Resolve the daemon-authoritative active account for provider construction.
@@ -270,15 +282,17 @@ pub fn active_account() -> Option<CommandCodeAccount> {
     let path = auth_store_path().ok()?;
     let store = CommandCodeStore::load(&path);
     let label = store.active.as_deref();
-    store.accounts.into_iter().find(|account| label.is_none() || account.label.as_deref() == label)
+    store
+        .accounts
+        .into_iter()
+        .find(|account| label.is_none() || account.label.as_deref() == label)
 }
 
 /// The credential check happens on every /alpha/whoami flow; tests inject a
 /// mock. A persisted key always returns the long-lived credential directly.
 
 /// Locked, daemon-authoritative store for Command Code accounts.
-#[derive(Default)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct CommandCodeStore {
     #[serde(default)]
     pub accounts: Vec<CommandCodeAccount>,
@@ -310,10 +324,7 @@ pub fn upsert_account_locked(
     let label = requested_label
         .filter(|label| !label.trim().is_empty())
         .unwrap_or_else(|| {
-            jcode_base::auth::account_store::next_account_label(
-                PROVIDER_KEY,
-                store.accounts.len(),
-            )
+            jcode_base::auth::account_store::next_account_label(PROVIDER_KEY, store.accounts.len())
         });
     account.label = Some(label.clone());
     if let Some(existing) = store
@@ -365,7 +376,7 @@ pub fn import_command_code_auth_snapshot(
     snapshot_path: &std::path::Path,
     whoami: impl Fn(&str) -> Result<WhoamiIdentity>,
 ) -> Result<Option<CommandCodeAccount>> {
-    let mut store = CommandCodeStore::load(store_path);
+    let store = CommandCodeStore::load(store_path);
     if store.imported_at.is_some() {
         return Ok(None);
     }
@@ -384,13 +395,13 @@ pub fn import_command_code_auth_snapshot(
         }
     });
     let imported = match candidate {
-        Some((api_key, value)) => {
-            Some((api_key.clone(), value, whoami(&api_key)))
-        }
+        Some((api_key, value)) => Some((api_key.clone(), value, whoami(&api_key))),
         None => None,
     };
     let mut store = CommandCodeStore::load(store_path);
-    store.imported_at.get_or_insert_with(|| Utc::now().to_rfc3339());
+    store
+        .imported_at
+        .get_or_insert_with(|| Utc::now().to_rfc3339());
     store.save(store_path)?;
     match imported {
         Some((api_key, value, identity_result)) => {
@@ -418,4 +429,31 @@ pub fn import_command_code_auth_snapshot(
         }
         None => Ok(None),
     }
+}
+
+/// Startup adapter: perform the one-time import with the real whoami gate.
+/// Runs in a short-lived thread so synchronous provider registration can call it
+/// even when the daemon already owns a Tokio runtime.
+pub fn import_snapshot_at_startup() {
+    let Ok(store) = auth_store_path() else { return };
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let snapshot = std::path::PathBuf::from(home).join(".commandcode/auth.json");
+    if !snapshot.exists() {
+        return;
+    }
+    let _ = std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let client = reqwest::Client::new();
+        let _ = import_command_code_auth_snapshot(&store, &snapshot, |key| {
+            runtime.block_on(verify_whoami(&client, key))
+        });
+    })
+    .join();
 }

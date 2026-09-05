@@ -227,14 +227,16 @@ pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider_fallible(
         crate::provider::external::COMMAND_CODE_RUNTIME,
         || {
+            jcode_provider_command_code_runtime::auth::import_snapshot_at_startup();
             let account = jcode_provider_command_code_runtime::auth::active_account()?;
+            let model = std::env::var("JCODE_COMMAND_CODE_MODEL")
+                .unwrap_or_else(|_| "zai-org/GLM-5.3".to_string());
             Some(std::sync::Arc::new(
-                jcode_provider_command_code_runtime::CommandCodeProvider::new(
-                    account.api_key,
-                    account.label.unwrap_or_else(|| "command-code".to_string()),
-                    "zai-org/GLM-5.3".to_string(),
-                ),
-            ) as std::sync::Arc<dyn crate::provider::Provider>)
+                jcode_provider_command_code_runtime::integration::compose_provider(
+                    account, &model,
+                ).ok()?,
+            )
+                as std::sync::Arc<dyn crate::provider::Provider>)
         },
     );
     crate::provider::external::register_external_provider(
