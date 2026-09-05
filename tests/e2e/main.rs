@@ -9,6 +9,7 @@ mod test_support;
 mod ambient;
 mod binary_integration;
 mod burst_spawn;
+mod disconnect;
 mod provider_behavior;
 mod reload_multiclient;
 mod safety;

@@ -132,8 +132,9 @@ pub enum Request {
         client_has_local_history: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         allow_session_takeover: bool,
-        /// Mark the attached session crashed if this connection disappears
-        /// without first sending `prepare_disconnect`.
+        /// Legacy ownership hint, retained for wire compatibility. Disconnects
+        /// only mark a session crashed when they interrupt unfinished processing,
+        /// regardless of this flag. Idle/completed sessions close normally.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         crash_on_disconnect: bool,
         /// Terminal-identifying env vars (tmux/zellij/kitty/DISPLAY/...) captured
@@ -144,7 +145,8 @@ pub enum Request {
     },
 
     /// Declare that this client is intentionally detaching before its transport
-    /// closes. This disarms `crash_on_disconnect` for graceful UI teardown.
+    /// closes. Retained for compatibility with older servers that use
+    /// `crash_on_disconnect` for idle sessions too.
     #[serde(rename = "prepare_disconnect")]
     PrepareDisconnect { id: u64 },
 

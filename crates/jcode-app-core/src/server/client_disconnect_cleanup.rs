@@ -24,11 +24,10 @@ enum DisconnectDisposition {
     Reloading,
 }
 
-fn disconnect_disposition(
-    disconnected_while_processing: bool,
-    crash_on_disconnect: bool,
-) -> DisconnectDisposition {
-    if !disconnected_while_processing && !crash_on_disconnect {
+fn disconnect_disposition(disconnected_while_processing: bool) -> DisconnectDisposition {
+    // Losing the UI is only a session crash when it interrupts unfinished work.
+    // In particular, force-quitting Desktop after Done is an ordinary close.
+    if !disconnected_while_processing {
         return DisconnectDisposition::Closed;
     }
 
@@ -37,6 +36,17 @@ fn disconnect_disposition(
     } else {
         DisconnectDisposition::Crashed
     }
+}
+
+fn disconnected_while_processing(
+    client_is_processing: bool,
+    processing_task: Option<&tokio::task::JoinHandle<()>>,
+) -> bool {
+    // Socket EOF is prioritized over processing_done_rx. A finished task is
+    // authoritative even if the client's cached processing flag is still set.
+    processing_task
+        .map(|handle| !handle.is_finished())
+        .unwrap_or(client_is_processing)
 }
 
 async fn session_has_live_successor(
@@ -58,7 +68,6 @@ pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
     client_is_processing: bool,
-    crash_on_disconnect: bool,
     processing_task: &mut Option<tokio::task::JoinHandle<()>>,
     event_handle: tokio::task::JoinHandle<()>,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
@@ -78,12 +87,10 @@ pub(super) async fn cleanup_client_connection(
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
 ) -> Result<()> {
-    let disconnected_while_processing = client_is_processing
-        || processing_task
-            .as_ref()
-            .map(|handle| !handle.is_finished())
-            .unwrap_or(false);
-    let disposition = disconnect_disposition(disconnected_while_processing, crash_on_disconnect);
+    let disposition = disconnect_disposition(disconnected_while_processing(
+        client_is_processing,
+        processing_task.as_ref(),
+    ));
 
     // A live processing task owns the agent mutex. Abort it before trying to
     // persist the disconnect disposition; otherwise cleanup waits two seconds,
@@ -269,24 +276,35 @@ pub(super) async fn cleanup_client_connection(
 
 #[cfg(test)]
 mod tests {
-    use super::{DisconnectDisposition, disconnect_disposition};
+    use super::{DisconnectDisposition, disconnect_disposition, disconnected_while_processing};
 
     #[test]
     fn idle_disconnect_is_closed() {
         assert_eq!(
-            disconnect_disposition(false, false),
+            disconnect_disposition(false),
             DisconnectDisposition::Closed
         );
     }
 
-    #[test]
-    fn owned_idle_disconnect_is_crash() {
-        let _guard = crate::storage::lock_test_env();
-        crate::server::clear_reload_marker();
+    #[tokio::test]
+    async fn completed_task_overrides_stale_processing_flag() {
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
-            disconnect_disposition(false, true),
-            DisconnectDisposition::Crashed
+            disconnect_disposition(disconnected_while_processing(true, Some(&task))),
+            DisconnectDisposition::Closed
         );
+    }
+
+    #[tokio::test]
+    async fn unfinished_task_is_processing_even_without_cached_flag() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        assert!(disconnected_while_processing(false, Some(&task)));
+        task.abort();
+        assert!(disconnected_while_processing(true, None));
+        assert!(!disconnected_while_processing(false, None));
     }
 
     #[test]
@@ -294,7 +312,7 @@ mod tests {
         let _guard = crate::storage::lock_test_env();
         crate::server::clear_reload_marker();
         assert_eq!(
-            disconnect_disposition(true, false),
+            disconnect_disposition(true),
             DisconnectDisposition::Crashed
         );
     }
@@ -312,9 +330,10 @@ mod tests {
             None,
         );
         assert_eq!(
-            disconnect_disposition(true, false),
+            disconnect_disposition(true),
             DisconnectDisposition::Reloading
         );
+        assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
         crate::server::clear_reload_marker();
         crate::env::remove_var("JCODE_RUNTIME_DIR");
     }
@@ -332,7 +351,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            disconnect_disposition(true, false),
+            disconnect_disposition(true),
             DisconnectDisposition::Reloading
         );
         crate::server::clear_reload_marker();
