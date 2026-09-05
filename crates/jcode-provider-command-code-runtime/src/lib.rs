@@ -3,12 +3,29 @@
 //! (plan 04) and the composed Provider (plan 05).
 
 pub mod auth;
+pub mod efforts;
+pub mod models;
+pub mod ndjson;
+pub mod project_context;
+pub mod quota;
+pub mod failover;
+pub mod serializer;
+pub mod integration;
 
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
+use ndjson::decode_ndjson_stream;
 
 #[cfg(test)]
 mod command_code_auth_tests;
+#[cfg(test)]
+mod command_code_models_tests;
+#[cfg(test)]
+mod command_code_quota_tests;
+#[cfg(test)]
+mod command_code_streaming_tests;
+#[cfg(test)]
+mod command_code_integration_tests;
 
 use anyhow::Result;
 use jcode_message_types::{Message, StreamEvent, ToolDefinition};
@@ -101,7 +118,7 @@ impl Provider for CommandCodeProvider {
             .bytes_stream()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
         let text_lines = FramedStringStream::new(byte_stream);
-        decode_text_only_stream(Box::pin(text_lines))
+        decode_ndjson_stream(Box::pin(text_lines))
     }
 
     fn set_model(&self, model: &str) -> Result<()> {

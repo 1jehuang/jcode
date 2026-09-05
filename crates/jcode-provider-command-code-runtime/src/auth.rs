@@ -265,6 +265,14 @@ pub fn auth_store_path() -> Result<std::path::PathBuf> {
         .join("command_code_accounts.json"))
 }
 
+/// Resolve the daemon-authoritative active account for provider construction.
+pub fn active_account() -> Option<CommandCodeAccount> {
+    let path = auth_store_path().ok()?;
+    let store = CommandCodeStore::load(&path);
+    let label = store.active.as_deref();
+    store.accounts.into_iter().find(|account| label.is_none() || account.label.as_deref() == label)
+}
+
 /// The credential check happens on every /alpha/whoami flow; tests inject a
 /// mock. A persisted key always returns the long-lived credential directly.
 
