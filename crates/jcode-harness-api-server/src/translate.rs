@@ -371,19 +371,9 @@ impl BridgeState {
                     .flatten();
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_model_probe = Some(catalog_id);
-                let working_dir =
-                    request["working_dir"]
-                        .as_str()
-                        .map(str::to_string)
-                        .or_else(|| {
-                            std::env::current_dir()
-                                .ok()
-                                .map(|d| d.display().to_string())
-                        });
                 let mut subscribe = json!({
                     "type": "subscribe",
                     "id": id,
-                    "working_dir": working_dir,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);
@@ -393,15 +383,24 @@ impl BridgeState {
                 // prompt when the subscribe says so, and a client that opens
                 // the repo without saying so gets an agent that cannot build
                 // the very app it is running in.
-                if working_dir
-                    .as_deref()
-                    .is_some_and(Self::path_is_inside_jcode_repo)
-                {
-                    subscribe["selfdev"] = json!(true);
-                }
-                if req == "attach_session"
-                    && let Some(target) = request["session_id"].as_str()
-                {
+                if req == "create_session" {
+                    let working_dir =
+                        request["working_dir"]
+                            .as_str()
+                            .map(str::to_string)
+                            .or_else(|| {
+                                std::env::current_dir()
+                                    .ok()
+                                    .map(|d| d.display().to_string())
+                            });
+                    subscribe["working_dir"] = json!(working_dir);
+                    if working_dir
+                        .as_deref()
+                        .is_some_and(Self::path_is_inside_jcode_repo)
+                    {
+                        subscribe["selfdev"] = json!(true);
+                    }
+                } else if let Some(target) = request["session_id"].as_str() {
                     subscribe["target_session_id"] = json!(target);
                 }
                 // The daemon assigns the session during subscribe but reports
