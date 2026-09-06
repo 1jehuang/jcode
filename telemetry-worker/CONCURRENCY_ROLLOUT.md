@@ -29,6 +29,19 @@ v2 data. The shared development daemon was not restarted as part of this repair.
 Until client rollout, an empty trusted-user report is expected, not zero actual
 concurrency. Existing clients continue to produce legacy/untrusted measurements.
 
+## Validation and remaining boundary
+
+- 82 Worker tests passed, including real SQLite ingestion/query checks and the
+  reduced compound-SELECT budget required by production D1.
+- 60 telemetry-core tests and 100 repeated parallel lease/crash stress runs passed.
+- Six focused Agent ownership, viewer-attachment, and failed-resume tests passed.
+- The documented report ran successfully against production D1. A rebuilt
+  final-source Rust probe repeated the expected results and CI exclusion.
+- A full executable build was stopped under host memory pressure. An additional
+  existing resume/attachment regression run was terminated while linking before
+  its tests ran. Neither is claimed as passing. No public client release or
+  shared-daemon replacement was performed.
+
 ## Query later
 
 ```sh
