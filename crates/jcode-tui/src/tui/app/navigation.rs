@@ -1685,7 +1685,8 @@ impl App {
         }
 
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
-            && let Some(hash) = crate::tui::ui::panel_image_preview::image_at(mouse.column, mouse.row)
+            && let Some(hash) =
+                crate::tui::ui::panel_image_preview::image_at(mouse.column, mouse.row)
         {
             self.panel_image_preview = Some(hash);
             crate::tui::mermaid::clear_image_state();

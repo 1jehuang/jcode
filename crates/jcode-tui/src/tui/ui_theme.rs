@@ -20,4 +20,3 @@ pub(super) fn activity_indicator(elapsed: f32, fps: f32) -> &'static str {
         crate::perf::tui_policy().enable_decorative_animations,
     )
 }
-

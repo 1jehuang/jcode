@@ -280,10 +280,7 @@ mod tests {
 
     #[test]
     fn idle_disconnect_is_closed() {
-        assert_eq!(
-            disconnect_disposition(false),
-            DisconnectDisposition::Closed
-        );
+        assert_eq!(disconnect_disposition(false), DisconnectDisposition::Closed);
     }
 
     #[tokio::test]
@@ -311,10 +308,7 @@ mod tests {
     fn running_disconnect_without_reload_is_crash() {
         let _guard = crate::storage::lock_test_env();
         crate::server::clear_reload_marker();
-        assert_eq!(
-            disconnect_disposition(true),
-            DisconnectDisposition::Crashed
-        );
+        assert_eq!(disconnect_disposition(true), DisconnectDisposition::Crashed);
     }
 
     #[test]

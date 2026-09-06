@@ -1533,7 +1533,10 @@ pub(super) fn draw_side_panel_markdown(
                             ) {
                                 let visible_widget_rect = match plan {
                                     FitImageRenderPlan::Full { area } => {
-                                        super::panel_image_preview::record_image(area, placement.hash);
+                                        super::panel_image_preview::record_image(
+                                            area,
+                                            placement.hash,
+                                        );
                                         mermaid::render_image_widget_scale(
                                             placement.hash,
                                             area,
@@ -1547,7 +1550,10 @@ pub(super) fn draw_side_panel_markdown(
                                         scroll_y,
                                         zoom_percent,
                                     } => {
-                                        super::panel_image_preview::record_image(area, placement.hash);
+                                        super::panel_image_preview::record_image(
+                                            area,
+                                            placement.hash,
+                                        );
                                         mermaid::render_image_widget_viewport_precise(
                                             placement.hash,
                                             area,
