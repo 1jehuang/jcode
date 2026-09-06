@@ -1519,6 +1519,8 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | PermissionRequest { session_id, .. }
         | SessionStatus { session_id, .. }
         | ModelInfo { session_id, .. }
+        | RuntimeInfo { session_id, .. }
+        | ConnectionPhase { session_id, .. }
         | Models { session_id, .. }
         | Compacted { session_id, .. }
         | SessionRenamed { session_id, .. }

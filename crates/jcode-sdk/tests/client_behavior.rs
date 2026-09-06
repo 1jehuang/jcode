@@ -625,3 +625,85 @@ fn a_lost_connection_fails_requests_in_flight() {
         .expect_err("a dropped harness must fail the request");
     assert_eq!(error.code(), "disconnected");
 }
+
+#[test]
+fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
+    let client = fake_harness(|frame, writer| {
+        let ApiRequest::SetModel { session_id, model } = &frame.request else {
+            panic!("unexpected request: {:?}", frame.request);
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(model, "openai-api:new-model");
+        push(
+            ApiEvent::ConnectionPhase {
+                session_id: session_id.clone(),
+                phase: "connecting".into(),
+            },
+            writer,
+        );
+        // The stream can interleave with a synchronous command in either order.
+        push(
+            ApiEvent::ModelInfo {
+                session_id: session_id.clone(),
+                provider: Some("openai-api".into()),
+                model: Some("new-model".into()),
+                reasoning_effort: None,
+            },
+            writer,
+        );
+        reply(frame, ApiEvent::Ok, writer);
+        push(
+            ApiEvent::RuntimeInfo {
+                session_id: session_id.clone(),
+                provider: Some("openai-api".into()),
+                model: Some("new-model".into()),
+                reasoning_effort: None,
+                routes: vec![ModelRouteInfo {
+                    model: "new-model".into(),
+                    provider: "openai-api".into(),
+                    api_method: "responses".into(),
+                    available: true,
+                    detail: "ready".into(),
+                }],
+            },
+            writer,
+        );
+    });
+    let events = client.events(Some("s1"));
+    let unrelated = client.events(Some("s2"));
+    client
+        .set_model("s1", "openai-api:new-model")
+        .expect("model switch");
+    assert!(matches!(
+        events.next_timeout(Duration::from_secs(1)),
+        Some(ApiEvent::ConnectionPhase { .. })
+    ));
+    assert!(matches!(events.next_timeout(Duration::from_secs(1)),
+        Some(ApiEvent::ModelInfo { model, .. }) if model.as_deref() == Some("new-model")));
+    assert!(matches!(events.next_timeout(Duration::from_secs(1)),
+        Some(ApiEvent::RuntimeInfo { routes, .. }) if routes.len() == 1 && routes[0].available));
+    assert!(unrelated.next_timeout(Duration::from_millis(20)).is_none());
+}
+
+#[test]
+fn model_switch_refusal_is_a_typed_error_not_a_success() {
+    let client = fake_harness(|frame, writer| {
+        assert!(matches!(frame.request, ApiRequest::SetModel { .. }));
+        reply(
+            frame,
+            ApiEvent::Error {
+                code: jcode_harness_api::ErrorCode::InvalidRequest,
+                message: "provider credential is missing".into(),
+            },
+            writer,
+        );
+    });
+    let error = client
+        .set_model("s1", "unavailable-model")
+        .expect_err("switch must fail");
+    assert_eq!(
+        error.kind,
+        jcode_sdk::ErrorKind::Harness(jcode_harness_api::ErrorCode::InvalidRequest)
+    );
+    assert!(error.message.contains("credential"));
+}
