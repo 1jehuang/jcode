@@ -846,8 +846,20 @@ fn build_header_lines_with_auth(
 
     // Auth inventory: `/login` heading, then one provider per line (dim
     // hollow dot for unconfigured providers).
-    let auth_lines = build_auth_status_lines(auth, active);
-    let login_heading = "/login to add provider".to_string();
+    let (login_heading, auth_lines) = if let Some(host) = crate::tui::ssh_remote_host() {
+        // The native protocol reports the active route, not a complete remote
+        // credential inventory. Do not render the laptop's (or an empty)
+        // inventory as if it described providers configured on the server.
+        (
+            format!("On {host}: run jcode login, then reconnect"),
+            Vec::new(),
+        )
+    } else {
+        (
+            "/login to add provider".to_string(),
+            build_auth_status_lines(auth, active),
+        )
+    };
     lines.push(
         Line::from(Span::styled(
             login_heading,

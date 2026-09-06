@@ -1074,6 +1074,9 @@ pub(super) fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Op
 
 #[cfg(test)]
 pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     GIT_INFO_CACHE
         .lock()
         .ok()
@@ -1082,6 +1085,9 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
 #[cfg(not(test))]
 pub(super) fn gather_git_info() -> Option<GitInfo> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(5);
@@ -1122,6 +1128,9 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 pub(super) fn gather_todos_and_goals_for_session(
     session_id: Option<&str>,
 ) -> (Vec<TodoItem>, Vec<crate::todo::TodoGoal>) {
+    if crate::tui::is_ssh_remote() {
+        return (Vec::new(), Vec::new());
+    }
     use std::time::Instant;
 
     const TTL: Duration = Duration::from_secs(1);
@@ -1178,6 +1187,12 @@ pub(super) fn gather_todos_and_goals_for_session(
 }
 
 pub(super) fn gather_ambient_info(ambient_enabled: bool) -> Option<AmbientWidgetData> {
+    if crate::tui::is_ssh_remote() {
+        // The cache and queue are laptop-local. The native protocol does not
+        // currently carry remote scheduler state, so leave both widget/footer
+        // absent instead of displaying unrelated local tasks.
+        return None;
+    }
     use std::time::Instant;
     const TTL: Duration = Duration::from_secs(2);
 

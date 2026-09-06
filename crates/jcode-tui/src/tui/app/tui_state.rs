@@ -695,6 +695,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn available_skills(&self) -> Vec<String> {
+        if crate::tui::is_ssh_remote() {
+            return self.remote_skills.clone();
+        }
         if self.is_remote && !self.remote_skills.is_empty() {
             self.remote_skills.clone()
         } else {

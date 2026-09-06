@@ -200,3 +200,45 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
         assert_eq!(app.remote_provider_model.as_deref(), Some("remote-model"));
     });
 }
+
+#[test]
+fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
+    with_ssh_remote_test_home(|| {
+        let mut app = App::new_for_remote(None);
+        app.remote_provider_name = Some("remote-provider".into());
+        app.remote_provider_model = Some("remote-model".into());
+        app.remote_skills = vec!["remote-only-skill".into()];
+        let (persistent, secondary) = crate::tui::ui::header::build_header_sections(&app, 100);
+        let text = persistent
+            .iter()
+            .chain(secondary.iter())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("On test-remote: run jcode login, then reconnect"),
+            "{text}"
+        );
+        assert!(!text.contains("/login to add provider"), "{text}");
+        assert!(
+            !text.contains('○'),
+            "must not claim an empty remote credential inventory: {text}"
+        );
+        assert_eq!(crate::tui::TuiState::provider_model(&app), "remote-model");
+        assert_eq!(crate::tui::TuiState::provider_name(&app), "remote-provider");
+        assert!(text.contains("/remote-only-skill"), "{text}");
+        app.remote_skills.clear();
+        assert!(crate::tui::TuiState::available_skills(&app).is_empty());
+        assert!(super::helpers::gather_ambient_info(false).is_none());
+        assert!(super::helpers::gather_ambient_info(true).is_none());
+        let info = crate::tui::TuiState::info_widget_data(&app);
+        assert!(info.ambient_info.is_none());
+        assert!(info.git_info.is_none());
+        assert!(crate::tui::scheduled_notification_text(info.ambient_info.as_ref()).is_none());
+    });
+}
