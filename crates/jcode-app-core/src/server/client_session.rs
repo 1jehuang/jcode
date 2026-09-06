@@ -897,7 +897,23 @@ pub(super) async fn handle_subscribe(
     let _ = client_event_tx.send(ServerEvent::SessionId {
         session_id: client_session_id.to_string(),
     });
+    prewarm_idle_agent(agent);
     let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+fn prewarm_idle_agent(agent: &Arc<Mutex<Agent>>) -> bool {
+    // Never wait behind an active turn on reconnect. Taking the guard before
+    // spawning also prevents a delayed warmup task from starting after a new
+    // foreground request has already consumed its preparation slot.
+    let Ok(guard) = Arc::clone(agent).try_lock_owned() else {
+        return false;
+    };
+    tokio::spawn(async move {
+        // Only local prefix preparation is awaited. Provider implementations
+        // start network warmup in the background and return immediately.
+        guard.prewarm_provider().await;
+    });
+    true
 }
 
 async fn subscribe_should_mark_ready(

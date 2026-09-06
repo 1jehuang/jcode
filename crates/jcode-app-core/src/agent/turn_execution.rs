@@ -384,6 +384,18 @@ impl Agent {
         self.stdin_request_tx = Some(tx);
     }
 
+    /// Prepare the static provider prefix while a client is idle. Unlike
+    /// `tool_definitions`, this does not pin the tool snapshot or consume the
+    /// one-shot late-MCP-discovery check before the first real turn.
+    pub(crate) async fn prewarm_provider(&self) {
+        let tools = match &self.locked_tools {
+            Some(tools) => tools.clone(),
+            None => self.build_filtered_tool_definitions().await,
+        };
+        let prompt = self.build_system_prompt_split(None);
+        self.provider.prewarm(&tools, &prompt.static_part).await;
+    }
+
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;

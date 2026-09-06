@@ -1,8 +1,8 @@
 use super::{
     apply_or_defer_subscribe_working_dir, claim_live_target_agent, effective_subscribe_working_dir,
     handle_clear_session, handle_reload, handle_resume_session, handle_subscribe,
-    mark_remote_reload_started, remove_detached_source_if_unclaimed, rename_shutdown_signal,
-    rename_swarm_member_session, restored_session_was_interrupted,
+    mark_remote_reload_started, prewarm_idle_agent, remove_detached_source_if_unclaimed,
+    rename_shutdown_signal, rename_swarm_member_session, restored_session_was_interrupted,
     session_was_interrupted_by_reload, subscribe_should_mark_ready,
     subscribe_working_dir_replacement,
 };
@@ -25,6 +25,52 @@ use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
+
+struct IdlePrewarmProvider(Arc<tokio::sync::Notify>);
+
+#[async_trait]
+impl Provider for IdlePrewarmProvider {
+    async fn prewarm(&self, _tools: &[ToolDefinition], _system: &str) {
+        self.0.notify_one();
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        panic!("idle prewarm must not generate a response");
+    }
+
+    fn name(&self) -> &str {
+        "idle-prewarm-test"
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self(Arc::clone(&self.0)))
+    }
+}
+
+#[tokio::test]
+async fn idle_prewarm_starts_before_user_input_and_skips_busy_sessions() {
+    let notification = Arc::new(tokio::sync::Notify::new());
+    let provider: Arc<dyn Provider> = Arc::new(IdlePrewarmProvider(Arc::clone(&notification)));
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let _env = crate::storage::lock_test_env();
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let busy = agent.lock().await;
+    assert!(
+        !prewarm_idle_agent(&agent),
+        "reconnect must not wait for an active turn"
+    );
+    drop(busy);
+    assert!(prewarm_idle_agent(&agent));
+    tokio::time::timeout(std::time::Duration::from_secs(5), notification.notified())
+        .await
+        .expect("idle subscription should prewarm before any user message");
+}
 
 fn test_swarm_member(session_id: &str, status: &str) -> SwarmMember {
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
