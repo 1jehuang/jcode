@@ -951,6 +951,9 @@ pub struct App {
     /// has sent. Without a budget, a model that stops updating its todos gets
     /// nudged on every turn forever, silently burning an API call per tick.
     todo_completion_gate_attempts: u8,
+    /// Last session/todo/goal state challenged by the ownership gate. Repeating
+    /// the same check cannot resolve an external blocker or stale assessment.
+    last_todo_ownership_fingerprint: Option<String>,
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,

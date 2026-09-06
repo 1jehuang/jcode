@@ -37,6 +37,7 @@ impl App {
         self.set_split_view_enabled(restored.split_view_enabled, restored.split_view_enabled);
         self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
         self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
+        self.last_todo_ownership_fingerprint = restored.last_todo_ownership_fingerprint;
 
         let mut queued_messages = restored.queued_messages;
         let mut recovered_followups = Vec::new();
@@ -457,6 +458,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            last_todo_ownership_fingerprint: None,
             todo_final_response_requested: false,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
@@ -905,6 +907,7 @@ impl App {
             todo_confidence_spike_challenged: false,
             todo_gate_digest_delivered: false,
             todo_completion_gate_attempts: 0,
+            last_todo_ownership_fingerprint: None,
             todo_final_response_requested: false,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,

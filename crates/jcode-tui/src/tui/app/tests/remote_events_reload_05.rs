@@ -160,9 +160,13 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
         // re-arming; this test is about the spike-challenge flag, not the
         // default-on re-arm behavior.
         reloaded_app.auto_poke_default_on = false;
-        assert!(!reloaded_app.schedule_auto_poke_followup_if_needed());
+        assert!(reloaded_app.schedule_auto_poke_followup_if_needed());
         assert!(!reloaded_app.auto_poke_incomplete_todos);
-        assert!(!reloaded_app.todo_confidence_spike_challenged);
+        assert!(reloaded_app.todo_confidence_spike_challenged);
+        assert_eq!(
+            reloaded_app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
         assert!(reloaded_app.hidden_queued_system_messages.is_empty());
     });
 }
@@ -189,6 +193,21 @@ fn test_completion_gate_nudges_stop_after_budget_exhausted() {
             }],
         )
         .expect("save low-confidence completed todo");
+        // Isolate the confidence retry budget from the ownership gate, which
+        // deliberately does not retry unchanged assessments.
+        crate::todo::save_goals(
+            &app.session.id,
+            &[crate::todo::TodoGoal {
+                delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+                autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+                iteration_maturity: Some(crate::todo::IterationMaturity::OutcomeReached),
+                feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+                feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+                feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Complete),
+                ..Default::default()
+            }],
+        )
+        .expect("save passing ownership assessment");
 
         // Each scheduled nudge consumes budget. Simulate the dispatch loop by
         // clearing the queued state between iterations (as if the turn ran and
@@ -304,8 +323,171 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
         )
         .expect("save remote goal assessment");
 
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
+    });
+}
+
+fn save_blocked_ownership_fixture(session_id: &str) {
+    crate::todo::save_todos(
+        session_id,
+        &[crate::todo::TodoItem {
+            id: "usb".to_string(),
+            content: "Verify installer USB".to_string(),
+            status: "completed".to_string(),
+            confidence: Some(crate::todo::ConfidenceState::Verified),
+            completion_confidence: Some(crate::todo::ConfidenceState::Verified),
+            confidence_history: vec![crate::todo::ConfidenceState::Verified],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    crate::todo::save_goals(
+        session_id,
+        &[crate::todo::TodoGoal {
+            difficulty: Some(crate::todo::Difficulty::Involved),
+            delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+            autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
+            iteration_maturity: Some(crate::todo::IterationMaturity::ConstraintsExhausted),
+            stopping_evidence: Some("USB read-back passed. Target laptop is unavailable.".into()),
+            feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
+            feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
+            feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Partial),
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+}
+
+fn dispatch_ownership_followup(app: &mut App) {
+    assert!(app.schedule_auto_poke_followup_if_needed());
+    assert_eq!(app.queued_messages.len(), 1);
+    assert!(app.queued_messages[0].starts_with(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE));
+    app.queued_messages.clear();
+    app.pending_queued_dispatch = false;
+}
+
+#[test]
+fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        app.todo_final_response_requested = false;
+        save_blocked_ownership_fixture(&app.session.id);
+        let goals = crate::todo::load_goals(&app.session.id).unwrap();
+        dispatch_ownership_followup(&mut app);
+        for _ in 0..5 {
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+        }
+        assert_eq!(app.todo_completion_gate_attempts, 1);
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.todo_final_response_requested);
         assert!(app.queued_messages.is_empty());
+        assert_eq!(crate::todo::load_goals(&app.session.id).unwrap(), goals);
+    });
+}
+
+#[test]
+fn ownership_gate_rechecks_changed_assessment_and_respects_budget() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_blocked_ownership_fixture(&app.session.id);
+        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            goals[0].stopping_evidence =
+                Some(format!("Checked available hardware, attempt {attempt}"));
+            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            dispatch_ownership_followup(&mut app);
+        }
+        let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+        goals[0].stopping_evidence = Some("One more assessment change".into());
+        crate::todo::save_goals(&app.session.id, &goals).unwrap();
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(!app.auto_poke_incomplete_todos);
+    });
+}
+
+#[test]
+fn ownership_gate_rearms_after_reopened_work_or_explicit_poke() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_blocked_ownership_fixture(&app.session.id);
+        dispatch_ownership_followup(&mut app);
+        let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
+        todos[0].status = "in_progress".into();
+        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        todos[0].status = "completed".into();
+        crate::todo::save_todos(&app.session.id, &todos).unwrap();
+        dispatch_ownership_followup(&mut app);
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+        super::commands::disable_auto_poke(&mut app);
+        app.auto_poke_incomplete_todos = true;
+        dispatch_ownership_followup(&mut app);
+    });
+}
+
+#[test]
+fn ownership_gate_survives_reload_and_is_scoped_to_session() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_blocked_ownership_fixture(&app.session.id);
+        dispatch_ownership_followup(&mut app);
+        app.save_input_for_reload(&app.session.id);
+        let restored = App::restore_input_for_reload(&app.session.id).unwrap();
+        let mut reloaded = create_test_app();
+        reloaded.session.id = app.session.id.clone();
+        reloaded.auto_poke_incomplete_todos = true;
+        reloaded.apply_restored_reload_input(restored);
+        assert!(!reloaded.schedule_auto_poke_followup_if_needed());
+        reloaded.session.id.push_str("-different-session");
+        save_blocked_ownership_fixture(&reloaded.session.id);
+        dispatch_ownership_followup(&mut reloaded);
+    });
+}
+
+#[test]
+fn remote_done_does_not_repeat_ownership_notice() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.is_remote = true;
+        app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id));
+        app.auto_poke_incomplete_todos = true;
+        save_blocked_ownership_fixture(app.remote_session_id.as_deref().unwrap());
+        for id in 42..45 {
+            app.is_processing = true;
+            app.status = ProcessingStatus::Streaming;
+            app.current_message_id = Some(id);
+            app.handle_server_event(crate::protocol::ServerEvent::Done { id }, &mut remote);
+            assert_eq!(app.queued_messages.len(), usize::from(id == 42));
+            app.queued_messages.clear();
+            app.pending_queued_dispatch = false;
+        }
+        assert_eq!(
+            app.display_messages()
+                .iter()
+                .filter(|message| {
+                    message
+                        .content
+                        .contains("Checking end-to-end ownership before finishing")
+                })
+                .count(),
+            1
+        );
     });
 }
 
@@ -668,6 +850,13 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
             }],
         )
         .expect("save passing goal");
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
         assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(
             app.auto_poke_incomplete_todos,
@@ -694,6 +883,7 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         )
         .expect("save passing goal");
         app.auto_poke_incomplete_todos = true; // pretend a stale arm survived
+        app.todo_final_response_requested = true; // final handoff already delivered
         assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(
             !app.auto_poke_incomplete_todos,

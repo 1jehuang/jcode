@@ -1638,6 +1638,7 @@ impl App {
                 // simply do nothing this turn.
                 crate::logging::info("AUTO_POKE_DECISION action=idle reason=no_todos incomplete=0");
                 self.todo_final_response_requested = false;
+                self.last_todo_ownership_fingerprint = None;
                 return false;
             }
             // Deferred quality checks land here, once, instead of interrupting
@@ -1653,7 +1654,23 @@ impl App {
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            let ownership_fingerprint =
+                serde_json::to_string(&(&todo_session_id, &todos, &goals)).ok();
+            if ownership_needs_followup
+                && ownership_fingerprint.is_some()
+                && self.last_todo_ownership_fingerprint == ownership_fingerprint
+            {
+                // The agent has already had a chance to address this exact
+                // assessment. Leave the honest scores intact and stop, rather
+                // than buying another turn that only repeats the final answer.
+                // Do not fall through to the successful-completion handoff.
+                crate::logging::info(
+                    "AUTO_POKE_DECISION action=idle reason=unchanged_ownership_assessment",
+                );
+                return false;
+            }
             if ownership_needs_followup && gate_budget_left {
+                self.last_todo_ownership_fingerprint = ownership_fingerprint;
                 self.todo_completion_gate_attempts =
                     self.todo_completion_gate_attempts.saturating_add(1);
                 crate::telemetry::record_todo_gate(crate::telemetry::TodoGateKind::Ownership);
@@ -1748,6 +1765,7 @@ impl App {
         // latched until this point so the synthetic final-response turn cannot
         // retrigger the same evidence gate against unchanged completed todos.
         self.todo_confidence_spike_challenged = false;
+        self.last_todo_ownership_fingerprint = None;
         let fingerprint =
             serde_json::to_string(&incomplete).unwrap_or_else(|_| poke_message.clone());
         if self.last_auto_poke_fingerprint.as_ref() == Some(&fingerprint) {

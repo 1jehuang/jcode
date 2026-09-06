@@ -23,6 +23,7 @@ pub(super) struct RestoredReloadInput {
     pub split_view_enabled: bool,
     pub todos_view_enabled: bool,
     pub todo_confidence_spike_challenged: bool,
+    pub last_todo_ownership_fingerprint: Option<String>,
 }
 
 impl App {
@@ -237,6 +238,7 @@ impl App {
             && !self.split_view_enabled
             && !self.todos_view_enabled
             && !self.todo_confidence_spike_challenged
+            && self.last_todo_ownership_fingerprint.is_none()
         {
             // Nothing to save, but a stale file from an earlier run could
             // still hold old queued messages/input. Leaving it behind would
@@ -327,6 +329,7 @@ impl App {
                 "split_view_enabled": self.split_view_enabled,
                 "todos_view_enabled": self.todos_view_enabled,
                 "todo_confidence_spike_challenged": self.todo_confidence_spike_challenged,
+                "last_todo_ownership_fingerprint": self.last_todo_ownership_fingerprint,
             });
             let _ = std::fs::write(&path, data.to_string());
         }
@@ -568,6 +571,10 @@ impl App {
                 split_view_enabled,
                 todos_view_enabled,
                 todo_confidence_spike_challenged,
+                last_todo_ownership_fingerprint: value
+                    .get("last_todo_ownership_fingerprint")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
             });
         }
 
@@ -594,6 +601,7 @@ impl App {
             split_view_enabled: false,
             todos_view_enabled: false,
             todo_confidence_spike_challenged: false,
+            last_todo_ownership_fingerprint: None,
         })
     }
 
