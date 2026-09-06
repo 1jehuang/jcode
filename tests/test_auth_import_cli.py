@@ -14,7 +14,7 @@ import tempfile
 import time
 import unittest
 
-BINARY = str(Path(sys.argv.pop(1)).resolve()) if len(sys.argv) > 1 and not sys.argv[1].startswith('-') else None
+BINARY = None
 SECRET = 'synthetic-import-cli-not-a-real-access-token'
 REFRESH = 'synthetic-import-cli-not-a-real-refresh-token'
 
@@ -25,9 +25,10 @@ def envelope(provider='openai'):
     return json.dumps({'version': 1, 'provider': provider, 'credential': credential}).encode()
 
 
-@unittest.skipUnless(BINARY, 'supply a built CLI path')
 class ImportCLI(unittest.TestCase):
     def setUp(self):
+        if BINARY is None:
+            self.skipTest('supply a built CLI path')
         self.tmp = tempfile.TemporaryDirectory(prefix='jcode-import-cli-')
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -175,4 +176,6 @@ class ImportCLI(unittest.TestCase):
 
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and not sys.argv[1].startswith('-'):
+        BINARY = str(Path(sys.argv.pop(1)).resolve())
     unittest.main(verbosity=2)

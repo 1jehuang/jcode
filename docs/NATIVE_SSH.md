@@ -214,3 +214,37 @@ apply to Claude. No Claude callback or token exchange was attempted. The harness
 now isolates scenarios in fresh PTYs and waits for unambiguous cancellation
 messages to avoid mistaking historical terminal redraws for completion. All 18
 offline harness checks and the expanded live acceptance passed.
+
+### Local credential import acceptance
+
+`tests/test_native_ssh_import.py` requires `JCODE_NATIVE_SSH_IMPORT=1`,
+`JCODE_NATIVE_SSH_BINARY`, `JCODE_NATIVE_SSH_HOST`, `JCODE_NATIVE_SSH_CWD`, and
+`JCODE_NATIVE_SSH_IMPORT_REMOTE_EXECUTABLE` (the actual remote ELF). It creates
+fresh local and remote homes with unmistakably synthetic credentials. Its safety
+wrapper refuses anything except the selected synthetic payload before invoking
+the real receiver CLI. No personal credentials are imported by the test.
+
+On 2026-09-06 at 11:07 UTC, the real local TUI, OpenSSH, remote CLI and daemon
+passed all six scenarios: cancel, confirm/import, and repeat/refuse for each of
+OpenAI and Claude.
+
+| Requirement | Observed check |
+| --- | --- |
+| Explicit opt-in | A fresh real PTY displayed the destination warning. Cancellation invoked no import subprocess and created no selected-provider store. |
+| Selected-provider transfer | Exact synthetic selected-provider credentials crossed stdin only after `confirm`; the other local and remote credential stores remained byte-identical. |
+| Persistent private storage | The receiver wrote a 0600 store. A separate real `auth status --json` reported the selected provider as available. This indicates configured credentials, not provider acceptance. |
+| No silent overwrite | A second confirmed import failed and preserved the first store unchanged. |
+| Secret handling | PTY output, observed process arguments, logs/history and other local/remote artifacts contained no synthetic tokens outside the exact credential stores. |
+| Process cleanup | Each of six fresh PTYs exited via `/quit` and reaped owned SSH children and adapter sockets. The two isolated test daemons were separately stopped using their verified PID/start-time/home identities. |
+
+Supporting checks passed: 11 base transfer tests, 35 CLI argument tests, 11
+startup tests, 28 SSH TUI tests, and 9 real built-CLI receiver tests. The receiver
+tests include concurrent no-replace publication, malformed/oversized input,
+terminal refusal, a real 30-second stalled-pipe deadline, and invalid/help
+arguments leaving existing file contents, modes, timestamps and directory trees
+untouched. Eleven offline SSH harness safety tests also passed.
+
+These checks establish the import workflow with synthetic credentials. They do
+not establish successful provider-backed inference, personal token validity, or
+long-term refresh-token coexistence. Closed loopback HTTP proxies were used as
+defense in depth, not as proof of zero network packets.
