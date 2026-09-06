@@ -512,7 +512,7 @@ pub(super) async fn handle_client(
     let t0 = std::time::Instant::now();
     let mut new_agent =
         crate::hooks::with_client_terminal_env(active_terminal_env.clone(), async {
-            Agent::new_with_initial_working_dir(
+            Agent::new_provisional_with_initial_working_dir(
                 Arc::clone(&provider),
                 registry.clone(),
                 Some(&initial_working_dir),
@@ -704,6 +704,7 @@ pub(super) async fn handle_client(
     // subscribe. Under heavy swarm file-activity load, ignored bus frames can
     // otherwise monopolize the select loop before the initial subscribe/read.
     let mut client_subscribed = false;
+    let mut provisional_session = true;
     let mut pending_request = Some(initial_request);
 
     loop {
@@ -1107,6 +1108,20 @@ pub(super) async fn handle_client(
                 ));
                 crate::logging::event_info("SERVER_REQUEST_LIFECYCLE", fields);
             }
+        }
+
+        // Legacy/direct clients can send a prompt without Subscribe. Their
+        // first session action commits ownership, but inspection/attach does not.
+        if provisional_session
+            && matches!(
+                &request,
+                Request::Message { .. }
+                    | Request::SoftInterrupt { .. }
+                    | Request::RunSubagent { .. }
+            )
+        {
+            agent.lock().await.activate_concurrency_tracking();
+            provisional_session = false;
         }
 
         match request {
@@ -1612,6 +1627,9 @@ pub(super) async fn handle_client(
                             break;
                         }
                     } else {
+                        if provisional_session {
+                            agent.lock().await.activate_concurrency_tracking();
+                        }
                         handle_subscribe(
                             id,
                             subscribe_working_dir,
@@ -1639,6 +1657,9 @@ pub(super) async fn handle_client(
                         .await;
                     }
                 } else {
+                    if provisional_session {
+                        agent.lock().await.activate_concurrency_tracking();
+                    }
                     handle_subscribe(
                         id,
                         subscribe_working_dir,
@@ -1669,6 +1690,7 @@ pub(super) async fn handle_client(
                     }
                 }
                 client_subscribed = true;
+                provisional_session = false;
             }
 
             Request::GetHistory { id } => {
@@ -1759,6 +1781,7 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
             } => {
+                let pre_resume_session_id = client_session_id.clone();
                 let resume_working_dir = {
                     let agent_guard = agent.lock().await;
                     agent_guard.working_dir().map(str::to_string)
@@ -1809,6 +1832,9 @@ pub(super) async fn handle_client(
                     ),
                 )
                 .await?;
+                if client_session_id != pre_resume_session_id {
+                    provisional_session = false;
+                }
                 session_control = refresh_session_control_handle(
                     &client_session_id,
                     &agent,

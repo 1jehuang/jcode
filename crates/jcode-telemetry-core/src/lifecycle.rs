@@ -31,7 +31,6 @@ pub(super) fn emit_lifecycle_event(
                 reason.as_str(),
                 DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT),
             );
-            observe_session_concurrency(active);
         }
         let state = match guard.as_ref() {
             Some(s) => SessionTelemetry {
@@ -363,7 +362,6 @@ pub(super) fn emit_lifecycle_event(
     if let Ok(payload) = serde_json::to_value(&todo_event) {
         let _ = send_payload(payload, DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
     }
-    unregister_active_session(&state.session_id);
     if session_success {
         emit_onboarding_step_once("first_session_success", None, None);
     }

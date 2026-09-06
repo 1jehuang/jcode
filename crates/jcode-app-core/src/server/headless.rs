@@ -90,10 +90,11 @@ pub(super) async fn create_headless_session(
     let working_dir_string = working_dir
         .as_ref()
         .map(|dir| dir.to_string_lossy().into_owned());
-    let mut new_agent = Agent::new_with_initial_working_dir(
+    let mut new_agent = Agent::new_with_parent_and_initial_working_dir(
         Arc::clone(&provider),
         registry,
         working_dir_string.as_deref(),
+        report_back_to_session_id.clone(),
     );
     new_agent.set_memory_enabled(memory_enabled);
     // Inline swarm mode renders a live gallery of worker viewports in the

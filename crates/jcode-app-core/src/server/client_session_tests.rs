@@ -24,6 +24,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
+#[path = "client_session_tests/concurrency.rs"]
+mod concurrency;
+
 struct MockProvider;
 
 struct IdlePrewarmProvider(Arc<tokio::sync::Notify>, bool);

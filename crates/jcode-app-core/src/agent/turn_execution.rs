@@ -197,6 +197,7 @@ impl Agent {
         let preserve_working_dir = self.session.working_dir.clone();
 
         self.session.mark_closed();
+        self.finish_concurrency_tracking();
         self.persist_session_best_effort("pre-clear session close state");
 
         let mut new_session = Session::create(None, None);
@@ -210,6 +211,7 @@ impl Agent {
         new_session.ensure_initial_session_context_message();
 
         self.session = new_session;
+        self.begin_concurrency_tracking();
         self._tool_policy_registration = crate::tool::register_session_tool_policy(
             &self.session.id,
             self.allowed_tools.clone(),
@@ -677,6 +679,9 @@ impl Agent {
         let previous_status = session.status.clone();
 
         let assign_start = Instant::now();
+        // A failed load must leave the current Agent and its concurrency lease
+        // alive. Close it only after the replacement is ready to install.
+        self.mark_closed();
         // Restore provider_session_id for Claude CLI session resume
         self.provider_session_id = session.provider_session_id.clone();
         self.session = session;
@@ -719,6 +724,7 @@ impl Agent {
 
         let mark_active_start = Instant::now();
         self.session.mark_active();
+        self.begin_concurrency_tracking();
         let mark_active_ms = mark_active_start.elapsed().as_millis();
         self.sync_memory_dedup_state_from_session();
 

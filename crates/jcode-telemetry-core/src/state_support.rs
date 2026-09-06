@@ -77,14 +77,6 @@ pub(super) fn session_starts_path(id: &str) -> Option<PathBuf> {
     telemetry_state_path(&format!("telemetry_session_starts_{}.txt", id))
 }
 
-pub(super) fn active_sessions_dir() -> Option<PathBuf> {
-    telemetry_state_path("telemetry_active_sessions")
-}
-
-pub(super) fn active_session_file(session_id: &str) -> Option<PathBuf> {
-    active_sessions_dir().map(|dir| dir.join(format!("{}.active", session_id)))
-}
-
 pub(super) fn write_private_file(path: &PathBuf, value: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -168,66 +160,21 @@ pub(super) fn update_session_start_history(
     )
 }
 
-pub(super) fn prune_active_session_files(dir: &PathBuf) -> u32 {
-    let _ = std::fs::create_dir_all(dir);
-    let now = SystemTime::now();
-    let max_age = Duration::from_secs(24 * 60 * 60);
-    let mut count = 0u32;
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return 0,
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        let fresh = entry
-            .metadata()
-            .ok()
-            .and_then(|meta| meta.modified().ok())
-            .and_then(|modified| now.duration_since(modified).ok())
-            .map(|age| age <= max_age)
-            .unwrap_or(false);
-        if fresh {
-            count = count.saturating_add(1);
-        } else {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-    count
-}
-
-pub(super) fn register_active_session(session_id: &str) -> (u32, u32) {
-    let Some(dir) = active_sessions_dir() else {
-        return (0, 0);
-    };
-    let existing = prune_active_session_files(&dir);
-    if let Some(path) = active_session_file(session_id) {
-        write_private_dir_file(&path, "1");
-    }
-    (existing.saturating_add(1), existing)
-}
-
-pub(super) fn observe_active_sessions() -> u32 {
-    active_sessions_dir()
-        .map(|dir| prune_active_session_files(&dir))
-        .unwrap_or(0)
-}
-
-pub(super) fn unregister_active_session(session_id: &str) {
-    if let Some(path) = active_session_file(session_id) {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 pub(super) fn get_or_create_id() -> Option<String> {
     let path = telemetry_id_path()?;
-    if let Ok(id) = std::fs::read_to_string(&path) {
-        let id = id.trim().to_string();
-        if !id.is_empty() {
-            return Some(id);
-        }
+    if let Some(id) = read_existing_id() {
+        return Some(id);
+    }
+    // Simultaneous first launches must use one installation ID. Serialize the
+    // absent-ID path and publish atomically so fast-path readers never see a
+    // partially written ID. Failure must not emit an unpersisted random ID.
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let _lock = super::concurrency::lock_path(&path.with_extension("lock")).ok()?;
+    if let Some(id) = read_existing_id() {
+        return Some(id);
     }
     let id = uuid::Uuid::new_v4().to_string();
-    write_private_file(&path, &id);
+    super::concurrency::atomic_private_write(&path, id.as_bytes()).ok()?;
     Some(id)
 }
 

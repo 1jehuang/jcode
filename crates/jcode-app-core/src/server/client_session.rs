@@ -1565,11 +1565,6 @@ pub(super) async fn handle_resume_session(
         }
     }
 
-    {
-        let mut agent_guard = agent.lock().await;
-        agent_guard.mark_closed();
-    }
-
     let (result, is_canary) = {
         let mut agent_guard = agent.lock().await;
         let result =
