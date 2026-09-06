@@ -725,6 +725,31 @@ fn untouched_session_is_not_persisted_until_real_conversation_starts() -> Result
 }
 
 #[test]
+fn empty_fork_is_persisted_before_first_visible_message() -> Result<()> {
+    let _env_lock = lock_env();
+    let temp_home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
+    let mut child = Session::create(Some("session_empty_parent".into()), None);
+    child.append_fork_notice("session_empty_parent", "empty parent");
+    assert_eq!(child.visible_conversation_message_count(), 0);
+    child.save()?;
+
+    let restored = Session::load(&child.id)?;
+    assert_eq!(restored.parent_id.as_deref(), Some("session_empty_parent"));
+    assert_eq!(restored.visible_conversation_message_count(), 0);
+    assert!(
+        restored
+            .messages
+            .last()
+            .unwrap()
+            .content_preview()
+            .contains("forked")
+    );
+    assert!(!session_path("session_empty_parent")?.exists());
+    Ok(())
+}
+
+#[test]
 fn session_created_with_title_is_persisted_before_first_visible_message() -> Result<()> {
     // Regression for #1144: `Session::create(_, Some(title))` was skipped by
     // the untouched-session gate, so later lookups by id found nothing.

@@ -1,6 +1,11 @@
 use super::*;
 
 impl Agent {
+    /// Read-only source for splitting a new session before its first persistence.
+    pub(crate) fn session_for_split(&self) -> &Session {
+        &self.session
+    }
+
     pub fn session_memory_profile_snapshot(
         &mut self,
     ) -> crate::session::SessionMemoryProfileSnapshot {

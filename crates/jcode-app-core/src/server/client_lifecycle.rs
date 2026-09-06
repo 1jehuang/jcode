@@ -2029,7 +2029,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Split { id } => {
-                handle_split(id, &client_session_id, &client_event_tx).await;
+                handle_split(id, &client_session_id, &agent, &client_event_tx).await;
             }
 
             Request::Transfer { id } => {
