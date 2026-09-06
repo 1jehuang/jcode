@@ -1,11 +1,15 @@
 use super::*;
+use std::borrow::Cow;
 
 /// Provider-bound payload after the `pre_request` transform stage.
-pub(super) struct OutgoingRequest {
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolDefinition>,
-    pub system_static: String,
-    pub system_dynamic: String,
+///
+/// Borrowed when nothing rewrote the request, so the hot path (no hook
+/// configured) costs zero clones over the previous direct borrow.
+pub(super) struct OutgoingRequest<'a> {
+    pub messages: Cow<'a, [Message]>,
+    pub tools: Cow<'a, [ToolDefinition]>,
+    pub system_static: Cow<'a, str>,
+    pub system_dynamic: Cow<'a, str>,
     /// True when a hook rewrote at least one part of the request. Drives
     /// cache re-accounting: the tracker's snapshot must follow what the
     /// provider actually received, not what the session holds.
@@ -19,19 +23,19 @@ pub(super) struct OutgoingRequest {
 /// nothing, so the hot path is a single branch. A hook that echoes its input
 /// (e.g. `cat`) counts as unmodified: `rewritten` compares canonical JSON,
 /// not hook exit status.
-pub(super) async fn apply_pre_request_transform(
+pub(super) async fn apply_pre_request_transform<'a>(
     session_id: &str,
     working_dir: Option<&str>,
-    messages: &[Message],
-    tools: &[ToolDefinition],
-    system_static: &str,
-    system_dynamic: &str,
-) -> OutgoingRequest {
+    messages: &'a [Message],
+    tools: &'a [ToolDefinition],
+    system_static: &'a str,
+    system_dynamic: &'a str,
+) -> OutgoingRequest<'a> {
     let passthrough = || OutgoingRequest {
-        messages: messages.to_vec(),
-        tools: tools.to_vec(),
-        system_static: system_static.to_string(),
-        system_dynamic: system_dynamic.to_string(),
+        messages: Cow::Borrowed(messages),
+        tools: Cow::Borrowed(tools),
+        system_static: Cow::Borrowed(system_static),
+        system_dynamic: Cow::Borrowed(system_dynamic),
         rewritten: false,
     };
     if !crate::hooks::hook_configured("pre_request") {
@@ -91,6 +95,8 @@ pub(super) async fn apply_pre_request_transform(
             return passthrough();
         }
     };
+    // into_owned() only clones on the rewrite path; passthrough above stays
+    // borrowed.
 
     // An echo (cat-style hook) is not a rewrite: only flag — and re-account —
     // when the wire bytes actually differ.
@@ -99,10 +105,10 @@ pub(super) async fn apply_pre_request_transform(
         || new_static != system_static
         || new_dynamic != system_dynamic;
     OutgoingRequest {
-        messages,
-        tools,
-        system_static: new_static,
-        system_dynamic: new_dynamic,
+        messages: Cow::Owned(messages),
+        tools: Cow::Owned(tools),
+        system_static: Cow::Owned(new_static),
+        system_dynamic: Cow::Owned(new_dynamic),
         rewritten,
     }
 }
