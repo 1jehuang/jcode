@@ -347,6 +347,10 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 
 For custom OpenAI-compatible endpoints, jcode now prompts for the API base and supports local localhost servers without requiring an API key.
 
+The native OpenAI providers use Responses WebSocket v2 with opportunistic
+background prewarming and HTTPS fallback. See [OpenAI WebSocket transport](docs/OPENAI_WEBSOCKET.md)
+for behavior, controls, and verification.
+
 ### Config-file setup for self-hosted endpoints and MCP
 
 If you prefer to configure things by editing files instead of using the login UI, jcode supports both a custom OpenAI-compatible endpoint config and MCP config files.

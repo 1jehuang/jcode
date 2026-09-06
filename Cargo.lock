@@ -3794,6 +3794,7 @@ dependencies = [
  "jcode-provider-openai",
  "jcode-schema-dialect",
  "reqwest 0.12.28",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",

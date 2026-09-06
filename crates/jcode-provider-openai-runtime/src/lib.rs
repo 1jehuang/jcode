@@ -273,6 +273,9 @@ fn openai_request_model(request: &Value) -> String {
 /// to send only new items instead of the full conversation each turn.
 struct PersistentWsState {
     ws_stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    /// Actual handshake identity. Never logged. Forks can update shared
+    /// credentials without directly clearing this provider's private socket.
+    identity: (String, Option<String>, String),
     last_response_id: String,
     connected_at: Instant,
     last_activity_at: Instant,
@@ -714,6 +717,7 @@ pub struct OpenAIProvider {
     websocket_failure_streaks: Arc<RwLock<HashMap<String, u32>>>,
     /// Persistent WebSocket connection for incremental continuation
     persistent_ws: Arc<Mutex<Option<PersistentWsState>>>,
+    prewarm: Arc<openai_websocket_prewarm::PrewarmSlot>,
     /// Browser-backed ChatGPT state for web-only models such as GPT-5.6 Pro.
     chatgpt_web: Arc<chatgpt_web::ChatGptWebState>,
     /// True when this runtime was created without API credentials. It can still
@@ -858,6 +862,7 @@ impl OpenAIProvider {
             websocket_cooldowns: Arc::clone(&WEBSOCKET_COOLDOWNS),
             websocket_failure_streaks: Arc::clone(&WEBSOCKET_FAILURE_STREAKS),
             persistent_ws: Arc::new(Mutex::new(None)),
+            prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::new(AtomicBool::new(browser_only)),
         };
@@ -949,6 +954,7 @@ impl OpenAIProvider {
     }
 
     fn clear_persistent_ws_try(&self, reason: &str) {
+        self.prewarm.clear();
         if let Ok(mut persistent_ws) = self.persistent_ws.try_lock() {
             if persistent_ws.is_some() {
                 jcode_base::logging::info(&format!(
@@ -961,6 +967,7 @@ impl OpenAIProvider {
     }
 
     async fn clear_persistent_ws(&self, reason: &str) {
+        self.prewarm.clear();
         let mut persistent_ws = self.persistent_ws.lock().await;
         if persistent_ws.is_some() {
             jcode_base::logging::info(&format!("Clearing persistent OpenAI WS state: {}", reason));
@@ -1188,6 +1195,61 @@ impl OpenAIProvider {
         format!("{}/compact", Self::responses_url(credentials))
     }
 
+    /// Shared request settings keep speculative warmup and foreground generation
+    /// identical even when reasoning, tools, cache policy, or service tier change.
+    async fn response_request(
+        &self,
+        input: &[Value],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Value {
+        let model_id = self.model_id().await;
+        let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
+        self.response_request_for_model(&model_id, input, tools, system, is_chatgpt_mode)
+    }
+
+    fn response_request_for_model(
+        &self,
+        model_id: &str,
+        input: &[Value],
+        tools: &[ToolDefinition],
+        system: &str,
+        is_chatgpt_mode: bool,
+    ) -> Value {
+        let api_tools = build_tools(tools);
+        let reasoning_effort = self
+            .reasoning_effort
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            // No explicit user effort: fall back to the model's jcode-side
+            // default (e.g. `low` for GPT-5.6 Sol).
+            .or_else(|| Self::default_reasoning_effort_for_model(model_id));
+        // Map the `swarm` sentinel (and any future aliases) to the real effort
+        // value the API understands.
+        let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
+        let service_tier = self
+            .service_tier
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        let native_compaction_threshold =
+            self.native_compaction_threshold_for_context_window(self.context_window());
+        Self::build_response_request(
+            model_id,
+            system.to_string(),
+            input,
+            &api_tools,
+            is_chatgpt_mode,
+            self.max_output_tokens,
+            api_reasoning_effort.as_deref(),
+            service_tier.as_deref(),
+            self.prompt_cache_key.as_deref(),
+            self.prompt_cache_retention.as_deref(),
+            native_compaction_threshold,
+        )
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "request construction threads explicit per-request OpenAI settings without hidden state"
@@ -1337,7 +1399,7 @@ impl OpenAIProvider {
             .map(|mode| mode.as_str().to_string())
             .unwrap_or_else(|_| "busy".to_string());
         format!(
-            "transport_mode={} {}",
+            "transport_mode={} websocket_protocol=v2 {}",
             transport_mode,
             self.diagnostic_persistent_ws_summary()
         )
@@ -1360,6 +1422,7 @@ mod chatgpt_web;
 mod openai_provider_impl;
 #[path = "openai_stream_runtime.rs"]
 mod openai_stream_runtime;
+mod openai_websocket_prewarm;
 
 #[path = "openai/websocket_health.rs"]
 mod websocket_health;

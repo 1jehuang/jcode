@@ -50,7 +50,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHandle<()>) {
+pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test websocket listener");
@@ -77,6 +77,7 @@ async fn test_persistent_ws_state() -> (PersistentWsState, tokio::task::JoinHand
     (
         PersistentWsState {
             ws_stream: client_ws,
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),
@@ -130,6 +131,7 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
     (
         PersistentWsState {
             ws_stream: client_ws,
+            identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
             last_response_id: "resp_test".to_string(),
             connected_at: Instant::now(),
             last_activity_at: Instant::now(),

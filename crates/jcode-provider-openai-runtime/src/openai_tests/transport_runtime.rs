@@ -295,7 +295,9 @@ fn test_websocket_first_activity_payload_counts_typed_control_events() {
 
 #[test]
 fn test_websocket_completion_timeout_is_long_enough_for_reasoning() {
-    let timeout = std::hint::black_box(jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS);
+    let timeout = std::hint::black_box(
+        jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS,
+    );
     assert!(
         timeout >= 120,
         "completion timeout regressed to {}s; reasoning models may need several minutes",
@@ -378,7 +380,9 @@ fn test_websocket_next_activity_timeout_resets_after_api_activity() {
     let remaining = websocket_next_activity_timeout_secs(ws_started_at, last_api_activity_at, true)
         .expect("idle timeout should use last activity, not total request age");
     assert!(
-        remaining >= jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS.saturating_sub(3),
+        remaining
+            >= jcode_provider_openai::websocket_health::WEBSOCKET_COMPLETION_TIMEOUT_SECS
+                .saturating_sub(3),
         "expected full idle budget to reset after activity, got {remaining}"
     );
 }
@@ -531,6 +535,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         .expect("connect websocket client");
     let persistent_ws = Arc::new(Mutex::new(Some(PersistentWsState {
         ws_stream: client_ws,
+        identity: openai_websocket_prewarm::prewarm_identity(&prewarm_test_credentials()),
         last_response_id: "resp_previous".to_string(),
         connected_at: Instant::now(),
         last_activity_at: Instant::now(),
@@ -543,6 +548,7 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
 
     let result = try_persistent_ws_continuation(
         &persistent_ws,
+        &Arc::new(RwLock::new(prewarm_test_credentials())),
         &serde_json::json!({"model": "gpt-5.6-sol"}),
         &[
             serde_json::json!({"type": "message", "role": "user", "content": "first"}),
@@ -559,4 +565,31 @@ async fn persistent_ws_does_not_reuse_response_cancelled_before_completion() {
         "an incomplete response may contain unseen tool calls and must not be reused"
     );
     server.await.expect("test websocket server");
+}
+
+#[tokio::test]
+async fn persistent_ws_rejects_identity_changed_by_another_fork() {
+    let (state, server) = test_persistent_ws_state().await;
+    let persistent_ws = Arc::new(Mutex::new(Some(state)));
+    let mut credentials = prewarm_test_credentials();
+    credentials.access_token = "another-account-token".into();
+    let (tx, _rx) = mpsc::channel(10);
+    let result = try_persistent_ws_continuation(
+        &persistent_ws,
+        &Arc::new(RwLock::new(credentials)),
+        &serde_json::json!({"model":"gpt-5.6-sol"}),
+        &[
+            serde_json::json!({"role":"user", "content":"previous"}),
+            serde_json::json!({"role":"user", "content":"new account"}),
+        ],
+        2,
+        &tx,
+    )
+    .await;
+    assert!(matches!(result, PersistentWsResult::NotAvailable));
+    assert!(persistent_ws.lock().await.is_none());
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("stale authenticated socket should close")
+        .expect("server task");
 }

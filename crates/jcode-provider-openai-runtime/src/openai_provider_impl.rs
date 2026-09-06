@@ -24,6 +24,61 @@ impl Provider for OpenAIProvider {
         OpenAIProvider::set_credential_mode(self, mode)
     }
 
+    async fn prewarm(&self, tools: &[ToolDefinition], system: &str) {
+        if self.is_browser_only()
+            || is_chatgpt_web_model(&self.model())
+            || std::env::var("JCODE_OPENAI_PREWARM").is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off"
+                )
+            })
+        {
+            return;
+        }
+        let mode = self
+            .transport_mode
+            .try_read()
+            .map(|mode| *mode)
+            .unwrap_or(OpenAITransportMode::HTTPS);
+        if matches!(mode, OpenAITransportMode::HTTPS) {
+            return;
+        }
+        // An existing response chain is more useful than a speculative prefix.
+        // Never contend with active generation or keepalive for its socket.
+        match self.persistent_ws.try_lock() {
+            Ok(guard) if guard.is_none() => {}
+            _ => return,
+        }
+        // Unlike foreground completion, preparation must not wait for model
+        // discovery or OAuth refresh. A changed/fallback model simply makes
+        // this speculative request incompatible at adoption time.
+        let model = self.model();
+        let model = model.strip_suffix("[1m]").unwrap_or(&model);
+        let Ok(credentials) = self.credentials.try_read() else {
+            return;
+        };
+        let request = self.response_request_for_model(
+            model,
+            &[],
+            tools,
+            system,
+            Self::is_chatgpt_mode(&credentials),
+        );
+        drop(credentials);
+        if matches!(mode, OpenAITransportMode::Auto)
+            && websocket_cooldown_remaining(
+                &self.websocket_cooldowns,
+                &openai_request_model(&request),
+            )
+            .await
+            .is_some()
+        {
+            return;
+        }
+        self.prewarm.start(Arc::clone(&self.credentials), &request);
+    }
+
     async fn complete(
         &self,
         messages: &[ChatMessage],
@@ -40,43 +95,9 @@ impl Provider for OpenAIProvider {
 
         let input = build_responses_input(messages);
         let input_item_count = input.len();
-        let api_tools = build_tools(tools);
-        let model_id = self.model_id().await;
-        let (instructions, is_chatgpt_mode) = {
-            let credentials = self.credentials.read().await;
-            (system.to_string(), Self::is_chatgpt_mode(&credentials))
-        };
-        let reasoning_effort = self
-            .reasoning_effort
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
-            // No explicit user effort: fall back to the model's jcode-side
-            // default (e.g. `low` for GPT-5.6 Sol).
-            .or_else(|| Self::default_reasoning_effort_for_model(&model_id));
-        // Map the `swarm` sentinel (and any future aliases) to the real effort
-        // value the API understands.
-        let api_reasoning_effort = self.api_reasoning_effort(reasoning_effort.as_deref());
-        let service_tier = self
-            .service_tier
-            .read()
-            .map(|guard| guard.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
-        let native_compaction_threshold =
-            self.native_compaction_threshold_for_context_window(self.context_window());
-        let request = Self::build_response_request(
-            &model_id,
-            instructions,
-            &input,
-            &api_tools,
-            is_chatgpt_mode,
-            self.max_output_tokens,
-            api_reasoning_effort.as_deref(),
-            service_tier.as_deref(),
-            self.prompt_cache_key.as_deref(),
-            self.prompt_cache_retention.as_deref(),
-            native_compaction_threshold,
-        );
+        let request = self.response_request(&input, tools, system).await;
+        let model_id = openai_request_model(&request);
+        let is_chatgpt_mode = Self::is_chatgpt_mode(&*self.credentials.read().await);
 
         // --- Persistent WebSocket continuation path ---
         // Try to reuse an existing WebSocket connection with previous_response_id
@@ -92,6 +113,26 @@ impl Provider for OpenAIProvider {
             OpenAITransportMode::WebSocket => true,
             OpenAITransportMode::Auto => Self::should_prefer_websocket(&model_id),
         };
+        if use_websocket_transport {
+            let warmed = self
+                .prewarm
+                .take_ready(&request, &*self.credentials.read().await);
+            if let Some(state) = warmed {
+                let mut guard = persistent_ws.lock().await;
+                if guard.is_none() {
+                    let connected_at = state.connected_at;
+                    *guard = Some(state);
+                    drop(guard);
+                    spawn_persistent_ws_keepalive(
+                        Arc::downgrade(&persistent_ws),
+                        connected_at,
+                        model_id.clone(),
+                    );
+                }
+            }
+        } else {
+            self.prewarm.clear();
+        }
         let request_tools = request
             .get("tools")
             .cloned()
@@ -100,7 +141,7 @@ impl Provider for OpenAIProvider {
         let request_tool_count = request_tools
             .as_array()
             .map(|tools| tools.len())
-            .unwrap_or(api_tools.len());
+            .unwrap_or(tools.len());
         let canonical_payload = serde_json::json!({
             "model": request.get("model"),
             "instructions": request.get("instructions"),
@@ -230,6 +271,7 @@ impl Provider for OpenAIProvider {
                         jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
                     let continuation_result = try_persistent_ws_continuation(
                         &persistent_ws,
+                        &credentials,
                         &request,
                         &input,
                         input_item_count,
@@ -1209,6 +1251,7 @@ impl Provider for OpenAIProvider {
             websocket_cooldowns: Arc::clone(&self.websocket_cooldowns),
             websocket_failure_streaks: Arc::clone(&self.websocket_failure_streaks),
             persistent_ws: Arc::new(Mutex::new(None)),
+            prewarm: Arc::new(openai_websocket_prewarm::PrewarmSlot::default()),
             chatgpt_web: Arc::new(chatgpt_web::ChatGptWebState::new()),
             browser_only: Arc::clone(&self.browser_only),
         })

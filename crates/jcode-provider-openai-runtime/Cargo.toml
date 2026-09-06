@@ -30,6 +30,7 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["c
 dirs = "5"
 
 [dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 # The migrated openai tests use jcode-base's test-env sandbox.
 jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
 tempfile = "3"

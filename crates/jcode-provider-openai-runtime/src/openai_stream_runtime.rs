@@ -393,6 +393,7 @@ pub(super) enum PersistentWsResult {
 /// using `previous_response_id` to send only incremental input.
 pub(super) async fn try_persistent_ws_continuation(
     persistent_ws: &Arc<Mutex<Option<PersistentWsState>>>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
     request: &Value,
     input: &[Value],
     input_item_count: usize,
@@ -414,6 +415,19 @@ pub(super) async fn try_persistent_ws_continuation(
             return PersistentWsResult::NotAvailable;
         }
     };
+
+    if state.identity != openai_websocket_prewarm::prewarm_identity(&*credentials.read().await) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "handshake_identity_changed".to_string()),
+            ],
+        );
+        return PersistentWsResult::NotAvailable;
+    }
 
     // Check connection age - reconnect before the 60-min server limit
     if state.connected_at.elapsed() >= Duration::from_secs(WEBSOCKET_PERSISTENT_MAX_AGE_SECS) {
@@ -513,8 +527,13 @@ pub(super) async fn try_persistent_ws_continuation(
     // rs_...". The full input still needs reasoning items for fresh requests,
     // but deltas must only contain genuinely new client-side input/tool
     // callbacks.
-    let (incremental_items, skipped_reasoning_items) =
-        persistent_ws_incremental_items(input, state.last_input_item_count);
+    let (incremental_items, skipped_reasoning_items) = if state.message_count == 0 {
+        // A generate:false warmup has no model output in its context. Preserve
+        // all history (including encrypted reasoning) for its first generation.
+        (input.to_vec(), 0)
+    } else {
+        persistent_ws_incremental_items(input, state.last_input_item_count)
+    };
     if skipped_reasoning_items > 0 {
         jcode_base::logging::info(&format!(
             "Skipped {} reasoning item(s) in persistent WS continuation delta to avoid duplicate rs_* replay",
@@ -1045,42 +1064,10 @@ pub(super) async fn stream_response_websocket_persistent(
     ));
     emit_status_detail(&tx, "opening websocket").await;
     let creds = credentials.read().await;
-    let is_chatgpt_mode = !creds.refresh_token.is_empty() || creds.id_token.is_some();
-    let ws_url = OpenAIProvider::responses_ws_url(&creds);
-    let mut ws_request = ws_url.into_client_request().map_err(|err| {
-        OpenAIStreamFailure::Other(anyhow::anyhow!(
-            "Failed to build websocket request: {}",
-            err
-        ))
-    })?;
-
-    let auth_header =
-        HeaderValue::from_str(&format!("Bearer {}", access_token)).map_err(|err| {
-            OpenAIStreamFailure::Other(anyhow::anyhow!("Invalid Authorization header: {}", err))
-        })?;
-    ws_request
-        .headers_mut()
-        .insert("Authorization", auth_header);
-    ws_request
-        .headers_mut()
-        .insert("Content-Type", HeaderValue::from_static("application/json"));
-
-    if is_chatgpt_mode {
-        ws_request
-            .headers_mut()
-            .insert("originator", HeaderValue::from_static(ORIGINATOR));
-        if let Some(account_id) = creds.account_id.as_ref() {
-            let account_header = HeaderValue::from_str(account_id).map_err(|err| {
-                OpenAIStreamFailure::Other(anyhow::anyhow!(
-                    "Invalid chatgpt-account-id header: {}",
-                    err
-                ))
-            })?;
-            ws_request
-                .headers_mut()
-                .insert("chatgpt-account-id", account_header);
-        }
-    }
+    let ws_request = openai_websocket_prewarm::websocket_request(&creds, &access_token)
+        .map_err(OpenAIStreamFailure::Other)?;
+    let mut identity = openai_websocket_prewarm::prewarm_identity(&creds);
+    identity.0 = access_token;
     drop(creds);
 
     emit_connection_phase(&tx, ConnectionPhase::Connecting).await;
@@ -1436,6 +1423,7 @@ pub(super) async fn stream_response_websocket_persistent(
         );
         *guard = Some(PersistentWsState {
             ws_stream,
+            identity,
             last_response_id: resp_id,
             connected_at,
             last_activity_at: Instant::now(),
