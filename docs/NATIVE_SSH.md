@@ -95,3 +95,23 @@ behavior. They do not by themselves establish that an actual SSH-launched TUI,
 remote provider login, and real remote tools work end to end. Deployment reports
 must separately identify real SSH/TUI observations, controlled-provider evidence,
 and any blocked provider-backed acceptance.
+
+### Real CLI acceptance
+
+`tests/test_native_ssh_cli.py` is opt-in and uses actual OpenSSH, a built CLI, and
+a real PTY. Set `JCODE_NATIVE_SSH_BINARY`, `JCODE_NATIVE_SSH_HOST`,
+`JCODE_NATIVE_SSH_REMOTE_BINARY`, and `JCODE_NATIVE_SSH_CWD`. The remote wrapper
+should select an isolated daemon runtime. With no configuration it skips without
+network access. The script only sends context-only messages, never inference.
+
+On 2026-09-06 this passed between an Arch Linux client and an Ubuntu EC2 host:
+capability handshake, piped EOF/final Pong, remote context persistence and fresh
+reattach, invalid-cwd/unsupported-flag refusal, actual TUI remote-history display,
+no local transcript, 0700 adapter directory, SSH child/socket cleanup on both
+`/quit` and SIGHUP, and daemon/session survival afterward. The installed niri
+shortcut was separately exercised with the actual kernel key chord.
+
+175 focused Rust tests passed, including nine real-socket disconnect cases with
+a controlled provider. Those establish lifecycle behavior, not live external
+model inference. Provider-backed development still requires remote login and was
+not claimed as passed by the context-only SSH acceptance.
