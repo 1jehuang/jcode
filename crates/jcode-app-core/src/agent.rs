@@ -186,6 +186,8 @@ pub struct Agent {
     active_skill: Option<String>,
     allowed_tools: Option<HashSet<String>>,
     disabled_tools: HashSet<String>,
+    /// Generation-scoped ownership of this Agent's global tool-policy entry.
+    _tool_policy_registration: crate::tool::SessionToolPolicyRegistration,
     /// MCP top-level definition exposure policy captured when the session starts.
     mcp_tools_mode: crate::config::McpToolsMode,
     /// Auto-mode token estimate above which MCP definitions are deferred.
@@ -293,7 +295,12 @@ impl Agent {
         let working_dir = session.working_dir.as_deref().map(std::path::Path::new);
         let agents_md_snapshot = crate::prompt::load_agents_md_files_from_dir(working_dir);
         let initial_provider_model = provider.model();
-        let agent = Self {
+        let tool_policy_registration = crate::tool::register_session_tool_policy(
+            &session.id,
+            allowed_tools.clone(),
+            disabled_tools.clone(),
+        );
+        Self {
             provider,
             registry,
             skills,
@@ -301,6 +308,7 @@ impl Agent {
             active_skill: None,
             allowed_tools,
             disabled_tools,
+            _tool_policy_registration: tool_policy_registration,
             mcp_tools_mode: tool_config.mcp_tools,
             mcp_tools_token_threshold: tool_config.mcp_tools_token_threshold,
             provider_session_id: None,
@@ -328,13 +336,7 @@ impl Agent {
             inline_output_tap: false,
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
-        };
-        crate::tool::set_session_tool_policy(
-            &agent.session.id,
-            agent.allowed_tools.clone(),
-            agent.disabled_tools.clone(),
-        );
-        agent
+        }
     }
 
     fn current_skills_snapshot(&self) -> Arc<SkillRegistry> {
