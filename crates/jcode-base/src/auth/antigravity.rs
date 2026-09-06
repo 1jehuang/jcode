@@ -240,6 +240,7 @@ pub async fn login(no_browser: bool) -> Result<AntigravityTokens> {
             &auth_url,
             "Scan this QR on another device if this machine has no browser:",
             "    ",
+            crate::auth::browser_suppressed(no_browser),
         ) {
             eprintln!("{qr}\n");
         }
@@ -302,6 +303,7 @@ async fn manual_login(
         auth_url,
         "Scan this QR on another device if needed:",
         "    ",
+        crate::auth::browser_suppressed(no_browser),
     ) {
         eprintln!("{qr}\n");
     }

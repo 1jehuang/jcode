@@ -1029,6 +1029,7 @@ async fn login_copilot_device_flow(no_browser: bool) -> Result<()> {
         &device_resp.verification_uri,
         "  Or scan this QR on another device to open the verification page:",
         "    ",
+        crate::auth::browser_suppressed(no_browser),
     ) {
         eprintln!("{qr}");
         eprintln!();

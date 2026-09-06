@@ -195,7 +195,7 @@ pub(crate) enum Command {
         #[arg(long, short = 'a')]
         account: Option<String>,
 
-        /// Do not try to open a browser locally. Useful over SSH or on headless machines.
+        /// Do not open a local browser. Show a login QR for another device (useful over SSH).
         #[arg(long, alias = "headless")]
         no_browser: bool,
 

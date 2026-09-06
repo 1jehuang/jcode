@@ -78,8 +78,15 @@ pub fn markdown_section_for_tui(data: &str, heading: &str) -> Option<String> {
     Some(format!("{heading}\n\n```text\n{qr}\n```"))
 }
 
-pub fn indented_section(data: &str, heading: &str, indent: &str) -> Option<String> {
-    if !qr_rendering_enabled() {
+/// CLI login QR output is automatic when the browser is suppressed. Browser-based
+/// login remains opt-in, and the TUI keeps its separate rendering policy.
+pub fn indented_section(
+    data: &str,
+    heading: &str,
+    indent: &str,
+    browser_suppressed: bool,
+) -> Option<String> {
+    if !browser_suppressed && !qr_rendering_enabled() {
         return None;
     }
     let qr = render_unicode_qr(data).ok()?;
@@ -143,7 +150,8 @@ mod tests {
     fn indented_section_prefixes_each_line() {
         let _guard = lock_test_env();
         crate::env::set_var("JCODE_SHOW_LOGIN_QR", "1");
-        let section = indented_section("https://example.com/login", "Scan:", "    ").unwrap();
+        let section =
+            indented_section("https://example.com/login", "Scan:", "    ", false).unwrap();
         assert!(section.starts_with("Scan:\n\n    "));
         assert!(
             section
@@ -155,11 +163,23 @@ mod tests {
     }
 
     #[test]
+    fn browserless_cli_qr_is_enabled_without_env_opt_in() {
+        let _guard = lock_test_env();
+        crate::env::remove_var("JCODE_SHOW_LOGIN_QR");
+        crate::env::remove_var("JCODE_LOGIN_QR");
+        let section = indented_section("https://example.com/login", "Scan:", "    ", true)
+            .expect("browserless CLI login should always offer a QR");
+        assert!(section.starts_with("Scan:\n\n    "));
+        assert!(section.contains('█') || section.contains('▀') || section.contains('▄'));
+        assert!(markdown_section("https://example.com/login", "Scan:").is_none());
+    }
+
+    #[test]
     fn qr_sections_are_disabled_by_default() {
         let _guard = lock_test_env();
         crate::env::remove_var("JCODE_SHOW_LOGIN_QR");
         crate::env::remove_var("JCODE_LOGIN_QR");
         assert!(markdown_section("https://example.com/login", "Scan:").is_none());
-        assert!(indented_section("https://example.com/login", "Scan:", "    ").is_none());
+        assert!(indented_section("https://example.com/login", "Scan:", "    ", false).is_none());
     }
 }
