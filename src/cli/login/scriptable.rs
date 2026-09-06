@@ -256,6 +256,19 @@ pub(super) async fn start_scriptable_login(
         expires_at_ms,
         options.json,
     )?;
+    // Browserless CLI login routes here rather than through the interactive
+    // provider functions. Keep stdout machine-readable and never add a QR to
+    // JSON output, but offer it on stderr for human-readable headless login.
+    if !options.json
+        && let Some(qr) = crate::login_qr::indented_section(
+            &auth_url,
+            "Scan this QR on another device to sign in:",
+            "    ",
+            auth::browser_suppressed(options.no_browser),
+        )
+    {
+        eprintln!("{qr}");
+    }
     Ok(LoginFlowOutcome::Deferred)
 }
 
