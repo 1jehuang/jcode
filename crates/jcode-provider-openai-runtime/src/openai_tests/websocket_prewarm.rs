@@ -151,6 +151,10 @@ async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_stat
     });
 
     let provider = OpenAIProvider::new(prewarm_test_credentials());
+    *provider.credentials.write().await = prewarm_test_credentials();
+    provider
+        .set_transport("websocket")
+        .expect("force local websocket transport");
     provider.set_model("gpt-5.6-sol").expect("set test model");
     provider
         .set_reasoning_effort("high")
