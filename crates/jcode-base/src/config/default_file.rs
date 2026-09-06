@@ -419,7 +419,8 @@ wake_mode = "internal"
 #
 # Default model for spawned swarm/subagent sessions.
 # Leave unset (or "inherit"/"coordinator") so workers inherit the model of the
-# session that spawned them. Set a concrete model only to pin every worker to it.
+# session that spawned them. Set a concrete model to change the worker default.
+# An explicit `model` in the swarm tool overrides this default for new workers.
 # Env override: JCODE_SWARM_MODEL
 # swarm_model = "inherit"
 #

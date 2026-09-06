@@ -546,8 +546,8 @@ pub struct AgentsConfig {
     ///
     /// Leave unset (or use `"inherit"` / `"coordinator"`) to have spawned swarm
     /// agents inherit the spawning coordinator's model. Set to a concrete model
-    /// string only when you deliberately want every swarm worker pinned to a
-    /// specific model regardless of which model spawned them.
+    /// string to change the worker default. An explicit `model` in the swarm
+    /// tool overrides this default for newly spawned workers.
     pub swarm_model: Option<String>,
     /// Optional default reasoning effort for spawned swarm/subagent sessions
     /// (`"low"`, `"medium"`, `"high"`, ...). Applied when a `swarm spawn`

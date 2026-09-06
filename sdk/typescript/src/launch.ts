@@ -175,8 +175,8 @@ export interface LaunchOptions {
   /** Extra environment variables for the instance. */
   env?: Record<string, string>;
   /**
-   * Model used by every spawned swarm worker. Use `inherit` to keep workers on
-   * the coordinator's model and auth route. This operator-level setting takes
+   * Default model for spawned swarm workers, unless overridden per spawn.
+   * Use `inherit` to default to the coordinator's model and auth route. This setting takes
    * precedence over `env.JCODE_SWARM_MODEL`.
    */
   swarmModel?: string;

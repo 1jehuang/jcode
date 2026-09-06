@@ -70,6 +70,7 @@ async fn assign_next_prefers_worker_with_dependency_context() {
         None,
         None,
         None,
+        None,
         &client_tx,
         &sessions,
         &global_session_id,
