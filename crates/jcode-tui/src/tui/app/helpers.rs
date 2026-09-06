@@ -125,6 +125,14 @@ pub(crate) fn invalidate_ambient_info_cache() {
 pub(crate) fn open_path_or_url_detached(
     target: impl AsRef<std::ffi::OsStr>,
 ) -> std::io::Result<()> {
+    if crate::tui::is_ssh_remote() {
+        let target = target.as_ref().to_string_lossy();
+        if !target.starts_with("https://") && !target.starts_with("http://") {
+            return Err(std::io::Error::other(
+                "remote file opening is unavailable over SSH; open it on the remote host or ask the agent to read it",
+            ));
+        }
+    }
     if crate::auth::browser_suppressed(false) {
         return Err(std::io::Error::other(
             "opening files/URLs is suppressed (NO_BROWSER/JCODE_NO_BROWSER or test harness)",

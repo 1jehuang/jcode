@@ -107,7 +107,14 @@ pub(super) fn reconnect_status_message(app: &App, state: &RemoteRunState, detail
                 .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
         });
-    let resume_hint = if let Some(name) = &session_name {
+    let resume_hint = if let Some(host) = crate::tui::ssh_remote_host() {
+        let id = app
+            .remote_session_id
+            .as_deref()
+            .or(app.resume_session_id.as_deref())
+            .unwrap_or("pending");
+        format!(" · SSH {host} · remote session {id}")
+    } else if let Some(name) = &session_name {
         format!(" · resume: jcode --resume {}", name)
     } else {
         String::new()
@@ -146,7 +153,14 @@ pub(super) fn reload_wait_status_message(
                 .as_ref()
                 .and_then(|id| crate::id::extract_session_name(id))
         });
-    let resume_hint = if let Some(name) = &session_name {
+    let resume_hint = if let Some(host) = crate::tui::ssh_remote_host() {
+        let id = app
+            .remote_session_id
+            .as_deref()
+            .or(app.resume_session_id.as_deref())
+            .unwrap_or("pending");
+        format!(" · SSH {host} · remote session {id}")
+    } else if let Some(name) = &session_name {
         format!(" · resume: jcode --resume {}", name)
     } else {
         String::new()
@@ -423,6 +437,11 @@ pub(in crate::tui::app) async fn connect_with_retry(
         }
         Err(e) => {
             if state.reconnect_attempts == 0 && !app.server_spawning {
+                if let Some(host) = crate::tui::ssh_remote_host() {
+                    return Err(anyhow::anyhow!(
+                        "Failed to connect to the SSH adapter for {host}: {e}"
+                    ));
+                }
                 return Err(anyhow::anyhow!(
                     "Failed to connect to server. Is `jcode serve` running? Error: {}",
                     e

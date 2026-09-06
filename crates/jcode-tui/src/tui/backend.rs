@@ -368,7 +368,11 @@ impl RemoteConnection {
             allow_session_takeover,
             crash_on_disconnect: false,
             continue_on_disconnect: super::is_ssh_remote(),
-            terminal_env: crate::terminal_launch::snapshot_client_terminal_env(),
+            terminal_env: if super::is_ssh_remote() {
+                Vec::new()
+            } else {
+                crate::terminal_launch::snapshot_client_terminal_env()
+            },
         })
         .await?;
         let subscribe_ms = subscribe_start.elapsed().as_millis();

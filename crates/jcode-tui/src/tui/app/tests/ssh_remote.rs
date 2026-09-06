@@ -45,6 +45,12 @@ fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
             Some("SSH test-remote")
         );
         assert!(super::prompt_history::history_file_path().is_none());
+        let error = super::helpers::open_path_or_url_detached("/remote/file.md").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("remote file opening is unavailable")
+        );
         assert_eq!(crate::tui::subscribe_metadata(None).0, None);
         assert_eq!(
             crate::tui::subscribe_metadata(Some("/remote/project"))
@@ -79,11 +85,12 @@ fn ssh_remote_subscribe_keeps_remote_only_id_and_filters_control_done() {
             let id = match request {
                 crate::protocol::Request::Subscribe {
                     id, target_session_id, client_has_local_history, continue_on_disconnect,
-                    working_dir, ..
+                    working_dir, terminal_env, ..
                 } => {
                     assert_eq!(target_session_id.as_deref(), Some("remote-only-session"));
                     assert!(!client_has_local_history);
                     assert!(continue_on_disconnect);
+                    assert!(terminal_env.is_empty());
                     assert_eq!(working_dir.as_deref(), Some("/remote/project"));
                     assert!(id >= 1_u64 << 62);
                     id
