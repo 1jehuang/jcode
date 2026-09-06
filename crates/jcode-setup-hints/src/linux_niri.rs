@@ -17,6 +17,12 @@
 //!   inside the existing `binds { }` block (or inserts one), leaving every other
 //!   line untouched.
 //!
+//! Regular `cmd+;` and `cmd+'` bindings forward Desktop's pinned/home session
+//! aliases when `jcode-desktop` is focused. This runtime route uses `niri`, `jq`,
+//! and `wtype`. Other apps (or unavailable focus information) retain the terminal
+//! launcher, as do all self-dev and modified bindings. A forwarding failure does
+//! not also launch a terminal.
+//!
 //! The managed region is delimited by sentinel comments so re-installs are
 //! idempotent and a user can hand-remove it cleanly:
 //!
@@ -152,9 +158,24 @@ fn launch_shell_command(
     let term_q = sh_single_quote(terminal);
     let chord_q = sh_single_quote(chord);
     let subcmd = if self_dev { " self-dev" } else { "" };
+    // These global bindings consume Desktop's own shortcuts. Forward non-Super
+    // aliases instead of synthesizing the intercepted chord and looping. Keep
+    // the existing launcher verbatim for every other app/chord and self-dev.
+    let desktop_keys = match (self_dev, chord) {
+        (false, "cmd+;") => Some("-M ctrl -M alt -k Return -m alt -m ctrl"),
+        (false, "cmd+'") => Some("-M ctrl -k t -m ctrl"),
+        _ => None,
+    };
+    let desktop_route = desktop_keys
+        .map(|keys| {
+            format!(
+                "if [ \"$(niri msg -j focused-window 2>/dev/null | jq -r '.app_id // empty' 2>/dev/null)\" = 'jcode-desktop' ]; then exec wtype {keys}; fi; "
+            )
+        })
+        .unwrap_or_default();
     // cd with $HOME fallback, then exec the terminal running jcode.
     format!(
-        "if [ -d {dir_q} ]; then cd {dir_q}; else cd \"$HOME\"; fi; exec {term_q} {exe_q} --spawn-hotkey {chord_q}{subcmd}",
+        "{desktop_route}if [ -d {dir_q} ]; then cd {dir_q}; else cd \"$HOME\"; fi; exec {term_q} {exe_q} --spawn-hotkey {chord_q}{subcmd}",
         dir_q = dir_q,
         term_q = term_q,
         exe_q = exe_q,
@@ -417,6 +438,10 @@ fn line_offsets(s: &str) -> Vec<(usize, &str)> {
     }
     out
 }
+
+#[cfg(all(test, unix))]
+#[path = "linux_niri_shortcut_tests.rs"]
+mod shortcut_tests;
 
 #[cfg(test)]
 mod tests {
