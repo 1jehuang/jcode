@@ -994,7 +994,7 @@ pub(super) fn build_updates_box_lines(width: u16, max_lines: usize) -> Vec<Line<
 /// Build both header sections from one authentication snapshot. Credential
 /// discovery can touch several files on Windows, so the render path must not
 /// repeat it for the persistent and secondary portions of the same frame.
-pub(super) fn build_header_sections(
+pub(in crate::tui) fn build_header_sections(
     app: &dyn TuiState,
     width: u16,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
