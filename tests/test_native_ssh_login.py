@@ -23,6 +23,11 @@ Acceptance contract agreed with the TUI/CLI implementers:
 * /login shows 'SSH login: choose a provider' and remote provider choices.
 * /login openai shows the exact real VM-generated URL. Its state/PKCE challenge
   match the VM pending file, whose verifier is never returned to this machine.
+* /login claude begins and cancels only. Legacy Claude puts its verifier in URL
+  state, so that URL necessarily reaches the private in-memory PTY buffer. It is
+  never printed or persisted by the harness. The VM audits only its hash/length
+  and checks its PKCE challenge locally. The OpenAI verifier guarantee does NOT
+  apply to Claude. All Claude completion inputs are refused by the wrapper.
 * A synthetic callback reaches the real CLI via stdin, fails at state validation
   before token exchange, and never enters session/prompt history or log files.
 * /cancel removes only the attempt's flow-id pending file. A seeded legacy pending
@@ -38,6 +43,7 @@ Raw PTY output, PKCE verifiers, callback input, and credentials are never printe
 import contextlib
 import errno
 import fcntl
+import hashlib
 import io
 import json
 import os
@@ -72,7 +78,7 @@ CREDENTIAL_NAMES = {
 # runs the actual deployed CLI. Login stderr is inspected only for a fixed state
 # mismatch marker, never persisted or returned in an assertion diagnostic.
 REMOTE_WRAPPER = r'''
-import json, os, pathlib, subprocess, sys
+import base64, hashlib, json, os, pathlib, subprocess, sys
 from urllib.parse import parse_qs, urlsplit
 root = pathlib.Path(ROOT)
 env = {
@@ -99,7 +105,8 @@ def refuse():
     print("Acceptance safety guard refused login invocation", file=sys.stderr)
     sys.exit(93)
 
-if option("--provider") != "openai" or not option("--flow-id"):
+provider = option("--provider")
+if provider not in ("openai", "claude") or not option("--flow-id"):
     refuse()
 flow = option("--flow-id")
 import re
@@ -107,7 +114,9 @@ if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", flow):
     refuse()
 if "--complete" in args or any(arg.startswith("--auth-code") for arg in args):
     refuse()
-record = {"flow_id": flow, "provider": "openai"}
+if provider == "claude" and any(arg.startswith("--callback-url") for arg in args):
+    refuse()
+record = {"flow_id": flow, "provider": provider}
 payload = None
 if "--callback-url" in args:
     if option("--callback-url") != "-":
@@ -142,7 +151,7 @@ if record["operation"] == "start" and flag.exists():
     flag.unlink()
     with (root / "login-audit.jsonl").open("a") as out:
         out.write(json.dumps({"operation": "injected_start_failure", "flow_id": flow,
-                              "provider": "openai", "exit_code": 72}) + "\n")
+                              "provider": provider, "exit_code": 72}) + "\n")
     sys.stderr.buffer.write(message)
     sys.exit(72)
 result = subprocess.run([EXECUTABLE, *args], input=payload if payload is not None else b"",
@@ -152,7 +161,21 @@ record["state_mismatch"] = b"OAuth state mismatch" in result.stderr
 if record["operation"] == "start" and result.returncode == 0:
     try:
         prompt = json.loads(result.stdout)
-        record["auth_url"] = prompt["auth_url"]
+        url = prompt["auth_url"]
+        if provider == "openai":
+            record["auth_url"] = url
+        else:
+            # Claude's legacy URL state equals its verifier. Never persist the
+            # URL or return the verifier separately as observation metadata.
+            login = json.loads((root / "jcode" / "pending-login" / "flows" /
+                                flow / "claude.json").read_text())["login"]
+            query = parse_qs(urlsplit(url).query)
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(
+                login["verifier"].encode()).digest()).decode().rstrip("=")
+            record["auth_url_sha256"] = hashlib.sha256(url.encode()).hexdigest()
+            record["auth_url_length"] = len(url)
+            record["pkce_matches"] = query.get("code_challenge") == [challenge]
+            record["legacy_state_is_verifier"] = query.get("state") == [login["verifier"]]
     except (ValueError, KeyError):
         pass
 with (root / "login-audit.jsonl").open("a") as out:
@@ -212,14 +235,18 @@ else:
         print(json.dumps({"armed": True}))
     elif operation == "inspect":
         records = []
-        for path in (pending / "flows").rglob("openai.json"):
+        for path in (pending / "flows").rglob("*.json"):
+            if path.name not in ("openai.json", "claude.json"):
+                continue
             item = json.loads(path.read_text())
             login = item["login"]
-            records.append({"relative_path": str(path.relative_to(root / "jcode")),
-                            "mode": stat.S_IMODE(path.stat().st_mode),
-                            "state": login["state"], "redirect_uri": login["redirect_uri"],
-                            "challenge": base64.urlsafe_b64encode(hashlib.sha256(
-                                login["verifier"].encode()).digest()).decode().rstrip("=")})
+            record = {"relative_path": str(path.relative_to(root / "jcode")),
+                      "mode": stat.S_IMODE(path.stat().st_mode), "provider": path.stem}
+            if path.stem == "openai":
+                record.update(state=login["state"], redirect_uri=login["redirect_uri"],
+                              challenge=base64.urlsafe_b64encode(hashlib.sha256(
+                                  login["verifier"].encode()).digest()).decode().rstrip("="))
+            records.append(record)
         leaks, credentials = [], []
         needles = [value.encode() for value in request.get("needles", [])]
         for path in root.rglob("*"):
@@ -297,7 +324,7 @@ def inspect_remote(config, needles=()):
     return result
 
 
-def wait_remote_call(config, tui, operation, timeout=TIMEOUT):
+def wait_remote_call(config, tui, operation, timeout=TIMEOUT, provider=None):
     """Do not mistake a repaint of an old error for a new subprocess result.
 
     This polls the real remote wrapper audit, not a replacement protocol event.
@@ -307,7 +334,8 @@ def wait_remote_call(config, tui, operation, timeout=TIMEOUT):
     while time.monotonic() < deadline:
         tui.pump(0.2)
         snapshot = remote_control(config, "inspect", needles=[], credential_names=sorted(CREDENTIAL_NAMES))
-        if any(call["operation"] == operation for call in snapshot["calls"]):
+        if any(call["operation"] == operation and (provider is None or call["provider"] == provider)
+               for call in snapshot["calls"]):
             return snapshot
         require(tui.process.poll() is None, "Login PTY exited before remote subprocess result")
     raise AssertionError("Remote login subprocess did not record " + operation)
@@ -345,6 +373,16 @@ def verify_prompt(pending, call):
                           ("redirect_uri", pending["redirect_uri"]), ("code_challenge_method", "S256")):
         require(query.get(key) == [expected], f"VM auth URL does not match remote pending {key}")
     return url
+
+
+def private_url_match(text, call):
+    length = call["auth_url_length"]
+    require(0 < length <= 16384, "Invalid private authorization URL length")
+    for match in re.finditer("https://", text):
+        candidate = text[match.start():match.start() + length]
+        if hashlib.sha256(candidate.encode()).hexdigest() == call["auth_url_sha256"]:
+            return candidate
+    return None
 
 
 class LoginPTY:
@@ -421,12 +459,22 @@ class LoginPTY:
         raise AssertionError("Login PTY timed out waiting for " + marker.split("https://")[0] + "; raw output withheld")
 
     def command(self, command):
-        require(command in {"/login", "/login openai", "/login not-a-provider", "/cancel", "/quit"},
+        require(command in {"/login", "/login openai", "/login claude", "/login not-a-provider", "/cancel", "/quit"},
                 "Harness permits only non-inference login/quit commands")
         self.pump(0.2)
         mark = len(self.output)
         os.write(self.master, command.encode() + b"\r")
         return mark
+
+    def private_url(self, call, since=0):
+        deadline = time.monotonic() + TIMEOUT
+        while time.monotonic() < deadline:
+            self.pump()
+            url = private_url_match(native.visible(self.output[since:]), call)
+            if url:
+                return url
+            require(self.process.poll() is None, "Login PTY exited before private authorization URL")
+        raise AssertionError("Login PTY did not display the hash-matched private URL; output withheld")
 
     def callback(self, value, pending):
         parsed = urlsplit(value)
@@ -543,6 +591,35 @@ def run_acceptance(config):
                 require(not inspect_remote(config, needles)["pending"], "Failed remote login left pending state")
                 mark = tui.command("/cancel")
                 tui.wait("SSH login cancelled", mark)
+
+                # Claude initiation is network-free, but its legacy URL carries
+                # its PKCE verifier in state. Keep that URL private and never
+                # send ANY completion input, synthetic or otherwise, for Claude.
+                mark = tui.command("/login claude")
+                claude = wait_remote_call(config, tui, "start", provider="claude")
+                starts = [call for call in claude["calls"]
+                          if call["operation"] == "start" and call["provider"] == "claude"]
+                require(len(starts) == 1 and starts[0]["exit_code"] == 0,
+                        "Real remote Claude CLI did not begin authorization")
+                call = starts[0]
+                require(call.get("pkce_matches") and call.get("legacy_state_is_verifier"),
+                        "Claude URL did not match its VM-side pending PKCE state")
+                require(len(claude["pending"]) == 1 and claude["pending"][0]["mode"] == 0o600
+                        and claude["pending"][0]["relative_path"] ==
+                        f"pending-login/flows/{call['flow_id']}/claude.json",
+                        "Claude pending state was not private and scoped to the attempt")
+                private_url = tui.private_url(call, mark)
+                needles.append(private_url)
+                assert_local_clean(root, needles)
+                inspect_remote(config, needles)
+                mark = tui.command("/cancel")
+                tui.wait("SSH login cancelled", mark)
+                cancelled = inspect_remote(config, needles)
+                require(not cancelled["pending"] and any(
+                    entry["operation"] == "cancel" and entry["provider"] == "claude"
+                    and entry["flow_id"] == call["flow_id"] and entry["exit_code"] == 0
+                    for entry in cancelled["calls"]), "Claude /cancel did not remove its exact pending flow")
+                print("PASS Claude begin/cancel, VM-side PKCE match, URL kept private; legacy Claude URL state contains verifier")
                 tui.quit()
 
             assert_local_clean(root, needles)
@@ -566,6 +643,7 @@ def run_acceptance(config):
                               "remote_version": header["version"], "isolated_remote_root": config["ROOT"],
                               "server_socket": config["SERVER_SOCKET"], "daemon_identities": daemons,
                               "provider_turns_requested": 0, "oauth_completed": False,
+                              "claude": "begin/cancel only; legacy verifier-bearing URL stays in private PTY memory",
                               "token_exchange": "refused by real CLI state validation before exchange"}))
     finally:
         # No server-stop command, directory deletion, or process kill remotely.
@@ -587,8 +665,8 @@ def run_acceptance(config):
 
 
 class HarnessSelfTests(unittest.TestCase):
-    def exercise_wrapper(self, root, flags, payload=b"", result=None):
-        argv = ["remote-jcode", "login", "--provider", "openai", "--flow-id", "test-flow", *flags]
+    def exercise_wrapper(self, root, flags, payload=b"", result=None, provider="openai"):
+        argv = ["remote-jcode", "login", "--provider", provider, "--flow-id", "test-flow", *flags]
         result = result or subprocess.CompletedProcess([], 1, b"", b"OAuth state mismatch")
         stdout, stderr = io.BytesIO(), io.BytesIO()
         with mock.patch.object(sys, "argv", argv), \
@@ -656,6 +734,50 @@ class HarnessSelfTests(unittest.TestCase):
             self.assertNotIn("sensitive-stderr-marker", audit)
             self.assertEqual(json.loads(audit)["operation"], "injected_start_failure")
 
+    def test_claude_begin_audits_only_url_hash_and_vm_pkce_match(self):
+        import base64
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending = root / "jcode" / "pending-login" / "flows" / "test-flow"
+            pending.mkdir(parents=True)
+            verifier = "synthetic-claude-verifier-never-print"
+            challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+            (pending / "claude.json").write_text(json.dumps({"login": {"verifier": verifier}}))
+            url = "https://claude.ai/oauth/authorize?" + urlencode({"code_challenge": challenge, "state": verifier})
+            response = json.dumps({"auth_url": url}).encode()
+            status, run, stdout = self.exercise_wrapper(root, ["--print-auth-url"],
+                result=subprocess.CompletedProcess([], 0, response, b""), provider="claude")
+            self.assertEqual(status, 0)
+            self.assertEqual(stdout, response)
+            audit = (root / "login-audit.jsonl").read_text()
+            self.assertNotIn(verifier, audit)
+            self.assertNotIn(url, audit)
+            record = json.loads(audit)
+            self.assertNotIn("auth_url", record)
+            self.assertTrue(record["pkce_matches"] and record["legacy_state_is_verifier"])
+            self.assertEqual(private_url_match("before " + url + " after", record), url)
+            self.assertIsNone(private_url_match("https://claude.ai/wrong", record))
+            self.assertEqual(run.call_args.kwargs["input"], b"")
+
+    def test_claude_completion_is_unconditionally_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for flags in (["--callback-url", "-"], ["--callback-url=anything"],
+                          ["--auth-code", "-"], ["--complete"]):
+                with self.subTest(flags=flags):
+                    status, run, _ = self.exercise_wrapper(Path(directory), flags,
+                        payload=b"must-not-reach-cli", provider="claude")
+                    self.assertEqual(status, 93)
+                    run.assert_not_called()
+
+    def test_claude_cancel_runs_actual_cli_without_completion_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status, run, _ = self.exercise_wrapper(Path(directory), ["--cancel"],
+                result=subprocess.CompletedProcess([], 0, b'{"status":"cancelled"}', b""), provider="claude")
+            self.assertEqual(status, 0)
+            self.assertEqual(run.call_args.kwargs["input"], b"")
+            audit = json.loads((Path(directory) / "login-audit.jsonl").read_text())
+            self.assertEqual((audit["provider"], audit["operation"]), ("claude", "cancel"))
+
     def test_remote_error_wait_ignores_previous_callback_failure(self):
         tui = mock.Mock()
         tui.process.poll.return_value = None
@@ -676,6 +798,8 @@ class HarnessSelfTests(unittest.TestCase):
             (pending / "openai.json").write_text(json.dumps({"login": {
                 "state": "remote-state", "verifier": "never-export-this-verifier",
                 "redirect_uri": "http://localhost:1455/auth/callback"}}))
+            (pending / "claude.json").write_text(json.dumps({"login": {
+                "verifier": "claude-secret-verifier", "redirect_uri": "https://console.anthropic.com/oauth/code"}}))
             (root / "history.json").write_text("sensitive-callback-marker")
             request = {"operation": "inspect", "root": str(root), "owner": "owner",
                        "needles": ["sensitive-callback-marker"], "credential_names": sorted(CREDENTIAL_NAMES)}
@@ -683,9 +807,12 @@ class HarnessSelfTests(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 exec(compile(REMOTE_CONTROL, "remote-control", "exec"), {"REQUEST": request})
             self.assertNotIn("never-export-this-verifier", output.getvalue())
+            self.assertNotIn("claude-secret-verifier", output.getvalue())
             result = json.loads(output.getvalue())
             self.assertEqual(result["leaks"], ["history.json"])
-            self.assertEqual(result["pending"][0]["state"], "remote-state")
+            self.assertEqual(next(item for item in result["pending"] if item["provider"] == "openai")["state"], "remote-state")
+            claude = next(item for item in result["pending"] if item["provider"] == "claude")
+            self.assertNotIn("state", claude)
             with self.assertRaises(AssertionError):
                 exec(compile(REMOTE_CONTROL, "remote-control", "exec"),
                      {"REQUEST": dict(request, operation="cleanup_pending", owner="wrong-owner")})
