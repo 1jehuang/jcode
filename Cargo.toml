@@ -599,6 +599,7 @@ codegen-units = 256
 
 [dev-dependencies]
 async-stream = "0.3"
+jcode-harness-api = { path = "crates/jcode-harness-api" }
 # Used by tests/context_window_matrix.rs to assert the shared context-window
 # resolution invariants directly, without going through a live provider.
 jcode-provider-core = { path = "crates/jcode-provider-core" }

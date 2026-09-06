@@ -833,14 +833,17 @@ fn api_bridge_socket_flags_do_not_collide() {
     assert_eq!(args.socket.as_deref(), Some("/tmp/daemon.sock"));
     assert!(matches!(
         args.command,
-        Some(Command::ApiBridge { api_socket: Some(ref path) }) if path == "/tmp/api.sock"
+        Some(Command::ApiBridge { api_socket: Some(ref path), stdio: false }) if path == "/tmp/api.sock"
     ));
 
     // The bare form must resolve both paths from the environment.
     let bare = Args::try_parse_from(["jcode", "api-bridge"]).expect("bare api-bridge should parse");
     assert!(matches!(
         bare.command,
-        Some(Command::ApiBridge { api_socket: None })
+        Some(Command::ApiBridge {
+            api_socket: None,
+            stdio: false
+        })
     ));
 
     // `--socket` after the subcommand must not be silently accepted as the
@@ -849,8 +852,50 @@ fn api_bridge_socket_flags_do_not_collide() {
     assert!(
         matches!(
             ambiguous.map(|args| (args.socket, args.command)),
-            None | Some((Some(_), Some(Command::ApiBridge { api_socket: None })))
+            None | Some((
+                Some(_),
+                Some(Command::ApiBridge {
+                    api_socket: None,
+                    stdio: false
+                })
+            ))
         ),
         "`--socket` after api-bridge must bind the daemon socket, never the API socket"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn api_stdio_accepts_alias_and_daemon_socket_but_not_api_socket() {
+    for command in ["api", "api-bridge"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "--no-update",
+            "--socket",
+            "/isolated/daemon.sock",
+            command,
+            "--stdio",
+        ])
+        .expect("stdio bridge must accept the API alias and daemon override");
+        assert_eq!(args.socket.as_deref(), Some("/isolated/daemon.sock"));
+        assert!(args.no_update);
+        assert!(matches!(
+            args.command,
+            Some(Command::ApiBridge {
+                api_socket: None,
+                stdio: true
+            })
+        ));
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                command,
+                "--stdio",
+                "--api-socket",
+                "/isolated/api.sock",
+            ])
+            .is_err(),
+            "stdio must not silently ignore an API socket override"
+        );
+    }
 }

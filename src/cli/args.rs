@@ -564,6 +564,11 @@ pub(crate) enum Command {
         /// both ends of the bridge at the same path.
         #[arg(long = "api-socket")]
         api_socket: Option<String>,
+
+        /// Serve one API connection on stdin/stdout (for SSH SDK clients).
+        /// Starts the shared daemon if needed; does not create an API socket.
+        #[arg(long, conflicts_with = "api_socket")]
+        stdio: bool,
     },
 }
 

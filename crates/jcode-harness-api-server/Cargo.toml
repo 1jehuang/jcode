@@ -12,7 +12,7 @@ jcode-transport = { path = "../jcode-transport" }
 serde = "1"
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "io-std", "rt-multi-thread", "macros", "sync"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -19,11 +19,26 @@
 //! println!("{}", turn.text);
 //! # Ok::<(), jcode_sdk::Error>(())
 //! ```
+//!
+//! Connect to a remote user's persistent harness through system OpenSSH:
+//! ```no_run
+//! use jcode_sdk::{JcodeClient, SshConnectOptions};
+//! let client = JcodeClient::connect_ssh(SshConnectOptions::new("my-ssh-alias"))?;
+//! let sessions = client.list_sessions()?;
+//! # Ok::<(), jcode_sdk::Error>(())
+//! ```
+//! This uses existing SSH config, keys, agent, and known_hosts. Verify new host
+//! keys with SSH before connecting. The remote needs a release supporting
+//! `jcode api --stdio`, which is never installed or updated by this SDK. A POSIX
+//! remote shell is required. Dropping the final client clone kills and reaps its
+//! SSH child, not the remote shared daemon. `connect_timeout` bounds startup and
+//! hello independently of the ordinary request timeout.
 
 mod client;
 mod diagnostics;
 mod errors;
 mod launch;
+mod ssh;
 mod structured;
 
 #[cfg(test)]
@@ -41,6 +56,7 @@ pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
 };
+pub use ssh::SshConnectOptions;
 pub use structured::{
     RunStructuredError, RunStructuredOptions, StructuredEventCallback, StructuredOutputAttempt,
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,

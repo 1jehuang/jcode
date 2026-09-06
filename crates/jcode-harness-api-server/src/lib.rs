@@ -17,6 +17,9 @@
 pub mod background_progress;
 pub mod translate;
 
+#[cfg(all(test, unix))]
+mod stdio_tests;
+
 use anyhow::{Context, Result};
 use jcode_harness_api::{API_VERSION_MAJOR, ApiEvent, ErrorCode, ServerFrame};
 use serde_json::Value;
@@ -190,7 +193,40 @@ pub async fn run_bridge(api_socket: PathBuf, legacy_socket: PathBuf) -> Result<(
 }
 
 async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, write_half) = stream.into_split();
+    run_bridge_stream(read_half, write_half, legacy_socket).await
+}
+
+/// Serve the process's stdin/stdout as one API connection.
+///
+/// Read stdin on a plain thread, not Tokio's blocking pool: Tokio stdin cannot
+/// be cancelled and otherwise prevents process exit when the daemon disconnects
+/// while SSH still holds stdin open. This entrypoint is for a CLI process only.
+#[cfg(unix)]
+pub async fn run_bridge_stdio(legacy_socket: PathBuf) -> Result<()> {
+    let (input, mut writer) = std::os::unix::net::UnixStream::pair()?;
+    input.set_nonblocking(true)?;
+    let input = tokio::net::UnixStream::from_std(input)?;
+    std::thread::Builder::new()
+        .name("api-stdin".into())
+        .spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut writer);
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+        })?;
+    run_bridge_stream(input, tokio::io::stdout(), legacy_socket).await
+}
+
+/// Serve one stable API connection over a duplex byte stream, including SSH
+/// stdio. No API listener or filesystem socket is created for this connection.
+pub async fn run_bridge_stream<R, W>(
+    read_half: R,
+    mut write_half: W,
+    legacy_socket: PathBuf,
+) -> Result<()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
 
@@ -230,6 +266,10 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
         write_json_line(&mut write_half, &frame).await?;
         return Ok(());
     }
+    // Do not claim a usable connection before the native daemon is reachable.
+    let legacy = Stream::connect(&legacy_socket)
+        .await
+        .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -254,9 +294,6 @@ async fn handle_api_client(stream: Stream, legacy_socket: PathBuf) -> Result<()>
     write_json_line(&mut write_half, &hello_ok).await?;
 
     // 2. Dial the legacy daemon for this client.
-    let legacy = Stream::connect(&legacy_socket)
-        .await
-        .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
     let (legacy_read, mut legacy_write) = legacy.into_split();
     let mut legacy_reader = BufReader::new(legacy_read);
 
@@ -357,6 +394,7 @@ where
     let mut line = serde_json::to_string(value)?;
     line.push('\n');
     writer.write_all(line.as_bytes()).await?;
+    writer.flush().await?;
     Ok(())
 }
 
@@ -367,6 +405,68 @@ mod public_acceptance_tests {
     use std::ffi::OsString;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stdio_stream_handshake_ping_and_eof() {
+        let path = std::env::temp_dir().join(format!(
+            "jcode-stdio-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let (client, bridge) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(bridge);
+        let task = tokio::spawn(run_bridge_stream(read, write, path.clone()));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+        write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1,"client":"stdio-test"})).await.unwrap();
+        let (_daemon, _) = listener.accept().await.unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&line).unwrap()["ev"],
+            "hello_ok"
+        );
+        write_json_line(&mut client_write, &json!({"v":1,"id":2,"req":"ping"}))
+            .await
+            .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let pong: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(pong["ev"], "pong");
+        assert_eq!(pong["reply_to"], 2);
+        drop(client_write);
+        drop(reader);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn stdio_does_not_confirm_handshake_when_native_daemon_is_missing() {
+        let (mut client, bridge) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(bridge);
+        let task = tokio::spawn(run_bridge_stream(
+            read,
+            write,
+            PathBuf::from("/nonexistent-jcode-stdio-test/daemon.sock"),
+        ));
+        write_json_line(
+            &mut client,
+            &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1}),
+        )
+        .await
+        .unwrap();
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("connect legacy socket"));
+    }
 
     struct JcodeHomeGuard(Option<OsString>);
 

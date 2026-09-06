@@ -3045,6 +3045,7 @@ dependencies = [
  "global-hotkey",
  "hex",
  "jcode-build-meta",
+ "jcode-harness-api",
  "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",

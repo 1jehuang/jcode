@@ -164,7 +164,27 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             tui_launch::run_client().await?;
         }
         #[cfg(unix)]
-        Some(Command::ApiBridge { api_socket }) => {
+        Some(Command::ApiBridge { api_socket, stdio }) => {
+            if stdio {
+                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    spawn_server(
+                        &args.provider,
+                        args.model.as_deref(),
+                        args.provider_profile.as_deref(),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("api --stdio: timed out starting the jcode server")
+                })??;
+                jcode_harness_api_server::run_bridge_stdio(
+                    jcode_harness_api_server::legacy_socket_path(),
+                )
+                .await?;
+                return Ok(());
+            }
             // The daemon must be up for the bridge to translate onto, and a
             // user running this to try the SDK has usually never started one.
             // Starting it here turns "connection refused, good luck" into a
