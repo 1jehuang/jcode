@@ -609,6 +609,10 @@ pub(super) async fn handle_bus_event(
             true
         }
         Ok(BusEvent::LoginCompleted(login)) => {
+            if crate::tui::is_ssh_remote() {
+                app.set_status_notice("Local login does not change SSH server credentials");
+                return true;
+            }
             let success = login.success && login.provider != "copilot_code";
             let provider_hint = auth_provider_hint_for_login_provider(&login.provider);
             let auth = auth_changed_event_for_login_provider(&login.provider);

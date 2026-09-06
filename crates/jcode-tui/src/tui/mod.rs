@@ -1612,9 +1612,28 @@ pub struct PickerOption {
     pub estimated_reference_cost_micros: Option<u64>,
 }
 
+/// An SSH-backed socket is not a shared-filesystem local daemon. Keep this
+/// distinct from `App::is_remote`, which also describes ordinary local clients.
+pub(crate) fn ssh_remote_host() -> Option<String> {
+    std::env::var("JCODE_SSH_REMOTE")
+        .ok()
+        .filter(|host| !host.trim().is_empty())
+}
+
+pub(crate) fn is_ssh_remote() -> bool {
+    ssh_remote_host().is_some()
+}
+
 pub(crate) fn subscribe_metadata(
     remote_working_dir: Option<&str>,
 ) -> (Option<String>, Option<bool>) {
+    if is_ssh_remote() {
+        // Never infer a remote project (or self-dev mode) from the laptop cwd.
+        return (
+            remote_working_dir.map(str::to_string),
+            jcode_selfdev_types::client_selfdev_requested().then_some(true),
+        );
+    }
     let working_dir = std::env::current_dir().ok();
     resolve_subscribe_metadata(
         working_dir.as_deref(),

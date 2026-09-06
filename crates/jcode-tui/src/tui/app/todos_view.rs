@@ -40,6 +40,12 @@ impl App {
     /// Push (or move to the bottom) the inline todo card with fresh data. The
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            self.set_status_notice(
+                "Local todo view unavailable for SSH; ask the remote agent for todos",
+            );
+            return;
+        }
         let session_id = self.active_client_session_id().map(str::to_string);
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
@@ -62,6 +68,9 @@ impl App {
     /// Live-refresh the inline todo card when the session todo list changed.
     /// Returns true when the transcript was updated.
     pub(super) fn refresh_todo_card_if_needed(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         let Some(idx) = self.latest_todo_card_index() else {
             return false;
         };
@@ -82,6 +91,9 @@ impl App {
     /// (`display.pin_todos`). Returns true when the payload changed and the
     /// viewport should redraw. Disk reads are throttled to once per second.
     pub(super) fn refresh_pinned_todos_if_needed(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         if !crate::config::config().display.pin_todos {
             if self.pinned_todos_payload.is_some() {
                 self.pinned_todos_payload = None;
@@ -224,6 +236,9 @@ impl App {
     }
 
     fn refresh_todos_view_cache(&mut self, force: bool) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         let session_id = self.active_client_session_id();
         let todos = load_current_session_todos(session_id);
         let goals = load_current_session_goals(session_id);

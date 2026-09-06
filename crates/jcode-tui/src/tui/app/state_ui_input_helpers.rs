@@ -506,6 +506,19 @@ impl App {
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
         let input = input.trim_start();
 
+        if crate::tui::is_ssh_remote() {
+            // Do not enumerate local account labels, projects, or goals while
+            // completing a command intended for a different host.
+            if input.starts_with("/model ") || input.starts_with("/models ") {
+                return self.rank_suggestions(input, self.model_suggestion_candidates());
+            }
+            return if input.starts_with('/') {
+                self.rank_suggestions(input, self.command_candidates())
+            } else {
+                Vec::new()
+            };
+        }
+
         // Only show suggestions when input starts with /
         if !input.starts_with('/') {
             return vec![];
@@ -1334,6 +1347,9 @@ impl App {
     /// suggestion prompts (brand-new install / unauthenticated / new user) so
     /// the welcome layout and the suggestions stay in sync.
     pub fn onboarding_welcome_active(&self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         if self.onboarding_preview_mode {
             return true;
         }
@@ -1443,6 +1459,9 @@ impl App {
     /// Get suggestion prompts for new users on the initial empty screen.
     /// Returns (label, prompt_text) pairs. Empty once user is experienced or not authenticated.
     pub fn suggestion_prompts(&self) -> Vec<(String, String)> {
+        if crate::tui::is_ssh_remote() {
+            return Vec::new();
+        }
         let preview_mode = self.onboarding_preview_mode;
         let is_canary = if self.is_remote {
             self.remote_is_canary.unwrap_or(self.session.is_canary)

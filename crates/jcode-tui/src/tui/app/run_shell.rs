@@ -768,6 +768,9 @@ impl App {
         mut terminal: DefaultTerminal,
         remote_working_dir: Option<String>,
     ) -> Result<RunResult> {
+        if crate::tui::is_ssh_remote() {
+            self.session.working_dir = remote_working_dir.clone();
+        }
         super::terminal_liveness::capture_initial_tty();
         let mut event_stream = EventStream::new();
         let mut redraw_period = crate::tui::redraw_interval(&self);

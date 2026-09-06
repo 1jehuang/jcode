@@ -3,6 +3,9 @@ use crate::tui::{TuiState, detect_kv_cache_problem, ui};
 
 impl App {
     pub(super) fn current_skills_snapshot(&self) -> std::sync::Arc<crate::skill::SkillRegistry> {
+        if crate::tui::is_ssh_remote() {
+            return self.skills.clone();
+        }
         // Global skills from the shared registry plus this session's
         // project-local overlay, resolved fresh from the session working dir
         // (issue #457). The overlay never enters the shared registry.
@@ -32,6 +35,9 @@ impl App {
     /// this before rendering `/skills` (and on demand elsewhere) keeps newly
     /// added skills visible without a session restart (issue #431).
     pub(super) fn refresh_skills_snapshot(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
         // Only GLOBAL skills go into the shared registry and the cached
         // snapshot; the project-local overlay is composed per read in
         // `current_skills_snapshot` so it stays session-scoped (issue #457).

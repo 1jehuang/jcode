@@ -55,6 +55,7 @@ include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
+include!("tests/ssh_remote.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![

@@ -888,6 +888,9 @@ impl crate::tui::TuiState for App {
     }
 
     fn server_display_name(&self) -> Option<String> {
+        if let Some(host) = crate::tui::ssh_remote_host() {
+            return Some(format!("SSH {host}"));
+        }
         self.remote_server_short_name.clone().or_else(|| {
             if !self.is_remote {
                 return None;
@@ -1662,6 +1665,10 @@ impl crate::tui::TuiState for App {
     }
 
     fn auth_status(&self) -> crate::auth::AuthStatus {
+        if crate::tui::is_ssh_remote() {
+            // Host-local credentials say nothing about the remote provider.
+            return crate::auth::AuthStatus::default();
+        }
         // Render path: never pay a cold credential probe on the frame thread.
         // A TTL lapse serves the previous snapshot and refreshes in the
         // background; the auth generation bump repaints the header when the

@@ -336,6 +336,9 @@ impl App {
     }
 
     pub(super) fn maybe_refresh_overnight_display_card(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            return false;
+        }
         let now = Instant::now();
         if self
             .last_overnight_card_refresh

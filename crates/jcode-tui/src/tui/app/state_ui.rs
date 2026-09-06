@@ -89,6 +89,9 @@ impl App {
     }
 
     pub(super) fn note_client_focus(&mut self, force: bool) {
+        if crate::tui::is_ssh_remote() {
+            return;
+        }
         let Some(session_id) = self.active_client_session_id() else {
             return;
         };
@@ -703,6 +706,10 @@ impl App {
     }
 
     pub(super) fn refresh_side_panel_linked_content_if_due(&mut self) -> bool {
+        if crate::tui::is_ssh_remote() {
+            // Linked paths in server snapshots belong to the remote filesystem.
+            return false;
+        }
         let refresh_interval = crate::perf::tui_policy().linked_side_panel_refresh_interval;
 
         let should_refresh = self

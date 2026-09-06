@@ -61,6 +61,18 @@ impl App {
         if self.suppress_terminal_title_updates {
             return;
         }
+        if let Some(host) = crate::tui::ssh_remote_host() {
+            let session = self
+                .remote_session_id
+                .as_deref()
+                .or(self.resume_session_id.as_deref())
+                .unwrap_or("connecting");
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::SetTitle(format!("jcode SSH {host} {session}"))
+            );
+            return;
+        }
         let session_id = if self.is_remote {
             self.remote_session_id
                 .as_deref()
@@ -207,7 +219,7 @@ impl App {
     /// client is idle, re-exec onto the new binary so TUI-side changes apply too.
     /// Returns true when a client reload was requested.
     pub(super) fn maybe_self_reload_after_server_reload(&mut self) -> bool {
-        if !self.is_remote {
+        if !self.is_remote || crate::tui::is_ssh_remote() {
             return false;
         }
         let is_selfdev_session = self.remote_is_canary.unwrap_or(self.session.is_canary);

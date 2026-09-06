@@ -35,6 +35,10 @@ pub(in crate::tui::app) async fn handle_remote_update_command(
     app: &mut App,
     remote: &mut RemoteConnection,
 ) -> Result<()> {
+    if crate::tui::is_ssh_remote() {
+        app.set_status_notice("Update the client and SSH server separately, then reconnect");
+        return Ok(());
+    }
     reload_stale_remote_server_before_update(app, remote).await?;
 
     let session_id = app
@@ -363,16 +367,28 @@ async fn handle_remote_key_internal(
     }
 
     if input::is_next_prompt_new_session_hotkey(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "New-session routing") {
+            return Ok(());
+        }
         app.toggle_next_prompt_new_session_routing();
         return Ok(());
     }
 
     if app.dictation_key_matches(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local dictation") {
+            return Ok(());
+        }
         app.handle_dictation_trigger();
         return Ok(());
     }
 
     if app.new_terminal_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice(
+                "New local terminal disabled for SSH sessions; launch jcode --ssh separately",
+            );
+            return Ok(());
+        }
         app.handle_new_terminal_hotkey();
         return Ok(());
     }
@@ -392,11 +408,21 @@ async fn handle_remote_key_internal(
     // Accept an armed "merge the diverged update" offer (self-dev/remote
     // sessions surface the same update card as local ones).
     if app.merge_offer_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice("Update the SSH server on its host");
+            return Ok(());
+        }
         app.accept_update_merge_offer();
         return Ok(());
     }
 
     if app.open_resume_key_matches(code, modifiers) {
+        if crate::tui::is_ssh_remote() {
+            app.set_status_notice(
+                "Local session picker disabled for SSH; use --ssh HOST --resume REMOTE_ID",
+            );
+            return Ok(());
+        }
         app.open_session_picker();
         return Ok(());
     }
@@ -515,6 +541,9 @@ async fn handle_remote_key_internal(
         return Ok(());
     }
     if app.toggle_keys.todo_card.matches(code, modifiers) {
+        if app_mod::commands_dispatch::ssh_local_action_blocked(app, "Local todo view") {
+            return Ok(());
+        }
         app.toggle_todo_card();
         return Ok(());
     }
@@ -918,6 +947,10 @@ async fn handle_remote_key_internal(
             if !app.input.is_empty() {
                 let prepared = input::take_prepared_input(app);
                 let trimmed = prepared.expanded.trim();
+
+                if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
+                    return Ok(());
+                }
 
                 if let Some(topic) = trimmed
                     .strip_prefix("/help ")

@@ -186,7 +186,8 @@ fn disconnected_redraw_interval(initial_connect: bool) -> tokio::time::Interval 
 }
 
 pub(in crate::tui::app) fn reload_handoff_active(state: &RemoteRunState) -> bool {
-    state.server_reload_in_progress || super::session_persistence::reload_marker_active()
+    !crate::tui::is_ssh_remote()
+        && (state.server_reload_in_progress || super::session_persistence::reload_marker_active())
 }
 
 pub(in crate::tui::app) fn should_use_same_session_fast_path(
@@ -308,7 +309,10 @@ async fn recover_reloading_server(
     state: &mut RemoteRunState,
     detail: &str,
 ) -> Result<bool> {
-    if state.reload_recovery_attempted || crate::server_spawn::is_running().await {
+    if crate::tui::is_ssh_remote()
+        || state.reload_recovery_attempted
+        || crate::server_spawn::is_running().await
+    {
         return Ok(false);
     }
 
@@ -365,8 +369,9 @@ pub(in crate::tui::app) async fn connect_with_retry(
         return Ok(outcome);
     }
 
-    let client_has_local_history =
-        session_to_resume.is_some() && !app.display_messages().is_empty();
+    let client_has_local_history = !crate::tui::is_ssh_remote()
+        && session_to_resume.is_some()
+        && !app.display_messages().is_empty();
     let client_instance_id = app.remote_client_instance_id.clone();
     let allow_session_takeover = should_allow_reconnect_takeover(app, state, session_to_resume);
     let connect = RemoteConnection::connect_with_session(
@@ -594,7 +599,8 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
             app.reload_info.push(ctx.reconnect_notice_line());
         }
 
-        let must_reload_client = state.server_reload_in_progress || app.has_newer_binary();
+        let must_reload_client = !crate::tui::is_ssh_remote()
+            && (state.server_reload_in_progress || app.has_newer_binary());
 
         if must_reload_client {
             app.push_display_message(DisplayMessage::system(
@@ -649,13 +655,14 @@ pub(in crate::tui::app) async fn handle_post_connect<B: ratatui::backend::Backen
         && !reload_ctx_available
         && !hints.has_client_reload_marker
         && !history_already_loaded;
-    let same_session_reload_fast_path = should_use_same_session_fast_path(
-        state.reconnect_attempts > 0,
-        session_to_resume,
-        app.remote_session_id.as_deref(),
-        !app.display_messages.is_empty(),
-        reload_reconnect_needs_server_history,
-    );
+    let same_session_reload_fast_path = !crate::tui::is_ssh_remote()
+        && should_use_same_session_fast_path(
+            state.reconnect_attempts > 0,
+            session_to_resume,
+            app.remote_session_id.as_deref(),
+            !app.display_messages.is_empty(),
+            reload_reconnect_needs_server_history,
+        );
 
     if reload_reconnect_needs_server_history {
         app.pending_reload_reconnect_status = Some(PendingReloadReconnectStatus::AwaitingHistory {
@@ -749,6 +756,9 @@ pub(super) fn load_reload_reconnect_hints(
     app: &mut App,
     session_to_resume: Option<&str>,
 ) -> ReloadReconnectHints {
+    if crate::tui::is_ssh_remote() {
+        return ReloadReconnectHints::default();
+    }
     let reload_ctx_for_session = session_to_resume.and_then(|sid| {
         let result = ReloadContext::peek_for_session(sid);
         crate::logging::info(&format!(
