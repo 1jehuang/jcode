@@ -10,6 +10,12 @@ use crate::tui::{
 
 impl App {
     pub(crate) fn open_agents_picker(&mut self) {
+        if crate::tui::app::commands_dispatch::ssh_local_action_blocked(
+            self,
+            "Agent model configuration",
+        ) {
+            return;
+        }
         let models = [
             AgentModelTarget::Swarm,
             AgentModelTarget::Review,
@@ -74,6 +80,12 @@ impl App {
     }
 
     fn open_auth_provider_picker_inline(&mut self, logout: bool) {
+        if crate::tui::app::commands_dispatch::ssh_local_action_blocked(
+            self,
+            "Local authentication",
+        ) {
+            return;
+        }
         let status = crate::auth::AuthStatus::check_fast();
         let providers = crate::provider_catalog::tui_login_providers();
         let mut models = providers
@@ -175,6 +187,12 @@ impl App {
     }
 
     pub(crate) fn open_agent_model_picker(&mut self, target: AgentModelTarget) {
+        if crate::tui::app::commands_dispatch::ssh_local_action_blocked(
+            self,
+            "Agent model configuration",
+        ) {
+            return;
+        }
         let configured = load_agent_model_override(target);
         let inherit_summary = agent_model_default_summary(target, self);
         self.open_model_picker();

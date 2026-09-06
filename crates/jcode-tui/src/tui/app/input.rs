@@ -311,6 +311,9 @@ fn image_content(media_type: String, base64_data: String) -> ClipboardPasteConte
 }
 
 fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     super::download_image_url(url)
         .map(|(media_type, base64_data)| image_content(media_type, base64_data))
 }
@@ -381,6 +384,33 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch() {
+        if crate::tui::app::commands_dispatch::ssh_test_runs_in_child(
+            "ssh_clipboard_image_bytes_work_without_local_file_or_url_fetch",
+        ) {
+            return;
+        }
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || None,
+            || Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
+            |_| panic!("clipboard image bytes must not fetch a URL"),
+        );
+        assert!(matches!(
+            content,
+            super::ClipboardPasteContent::Image { .. }
+        ));
+        assert!(super::download_image_url_content("http://127.0.0.1/secret.png").is_none());
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || Some("http://127.0.0.1/secret.png".to_string()),
+            || panic!("text must stay text"),
+            super::download_image_url_content,
+        );
+        assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+    }
+
     use super::{
         ClipboardPasteContent, ClipboardPasteKind, dropped_image_files,
         is_clipboard_paste_shortcut, parse_dropped_paths, preferred_wayland_text_type,
@@ -625,6 +655,13 @@ use paste_guard::image_media_type;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
     paste_guard::note_paste();
+    if crate::tui::is_ssh_remote() {
+        // Text paths refer to the remote machine. Do not stat/read laptop
+        // files or download image URLs automatically while attached over SSH.
+        handle_text_paste(app, text);
+        app.set_status_notice("SSH paste: text only. File paths refer to the remote host; paste image bytes from the clipboard to attach an image.");
+        return;
+    }
     // Note: clipboard_image() is NOT checked here. Bracketed paste events from the
     // terminal always deliver text. Checking clipboard_image() here caused a bug where
     // text pastes were misidentified as images when the clipboard also had image data
@@ -736,6 +773,9 @@ pub(super) fn promote_dropped_images(app: &mut App) -> bool {
 }
 
 pub(super) fn parse_dropped_paths(text: &str) -> Option<Vec<PathBuf>> {
+    if crate::tui::is_ssh_remote() {
+        return None;
+    }
     let trimmed = text.trim();
     let literal_path = PathBuf::from(trimmed);
     if literal_path.is_file() {
@@ -1808,6 +1848,9 @@ impl App {
     }
 
     pub(crate) fn toggle_next_prompt_new_session_routing(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "New-session routing") {
+            return;
+        }
         self.route_next_prompt_to_new_session = !self.route_next_prompt_to_new_session;
         if self.route_next_prompt_to_new_session {
             self.set_status_notice("Next prompt → new session");
@@ -1849,6 +1892,9 @@ impl App {
 
     /// Spawn a brand-new jcode session in a new terminal window.
     pub(crate) fn handle_new_terminal_hotkey(&mut self) {
+        if super::commands_dispatch::ssh_local_action_blocked(self, "Opening a sibling terminal") {
+            return;
+        }
         let cwd = commands::active_working_dir(self)
             .filter(|path| path.is_dir())
             .or_else(|| std::env::current_dir().ok())
@@ -1887,6 +1933,9 @@ fn input_routes_to_new_session(app: &App) -> bool {
 fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     if !input_routes_to_new_session(app) {
         return false;
+    }
+    if super::commands_dispatch::ssh_local_action_blocked(app, "Local new-session routing") {
+        return true;
     }
 
     app.route_next_prompt_to_new_session = false;
@@ -2344,6 +2393,9 @@ pub(super) fn handle_pre_control_shortcuts(
         return true;
     }
     if app.dictation_key_matches(code, modifiers) {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Dictation setup") {
+            return true;
+        }
         app.handle_dictation_trigger();
         return true;
     }
@@ -2568,11 +2620,19 @@ pub(super) fn handle_modal_key(
     }
 
     if app.login_picker_overlay.is_some() {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Local login picker") {
+            app.login_picker_overlay = None;
+            return Ok(true);
+        }
         app.handle_login_picker_key(code, modifiers)?;
         return Ok(true);
     }
 
     if app.account_picker_overlay.is_some() {
+        if super::commands_dispatch::ssh_local_action_blocked(app, "Local account picker") {
+            app.account_picker_overlay = None;
+            return Ok(true);
+        }
         if let Some(command) = app.next_account_picker_action(code, modifiers)? {
             app.handle_account_picker_command(command);
         }
@@ -3653,6 +3713,21 @@ impl App {
 
     /// Submit input - just sets up message and flags, processing happens in next loop iteration
     pub(super) fn submit_input(&mut self) {
+        // Connected SSH input is dispatched through the wire client, never the
+        // local submit fallback (which reads skills and persists prompts).
+        if crate::tui::is_ssh_remote() {
+            let input = self.input.clone();
+            if super::commands_dispatch::dispatch_local_command(self, input.trim()) {
+                self.input.clear();
+                self.cursor_pos = 0;
+            } else {
+                super::commands_dispatch::ssh_local_action_blocked(
+                    self,
+                    "Local submission fallback",
+                );
+            }
+            return;
+        }
         promote_dropped_images(self);
         if self.activate_picker_from_preview() {
             return;
