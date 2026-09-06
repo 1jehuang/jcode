@@ -16,11 +16,12 @@ fn sync_output_style_from_config() {
 }
 
 pub async fn run() -> Result<()> {
+    // Parse once, before startup side effects. Invalid arguments and --help
+    // must not harden credential files or create configuration/telemetry state.
+    let args = Args::parse();
     // Credential import must refuse existing stores without normal startup
     // hardening, migrations, telemetry, or provider discovery touching them.
-    // A read-only early parse leaves every other command's ordering unchanged.
-    if let Ok(args) = Args::try_parse()
-        && args.ssh.is_none()
+    if args.ssh.is_none()
         && matches!(
             args.command,
             Some(Command::Auth(super::args::AuthCommand::Import { .. }))
@@ -138,7 +139,7 @@ pub async fn run() -> Result<()> {
     }
     startup_profile::mark("telemetry_check");
 
-    let args = parse_and_prepare_args()?;
+    let args = parse_and_prepare_args(args)?;
     spawn_background_update_check(&args);
 
     if let Err(e) = dispatch::run_main(args).await {
@@ -294,8 +295,7 @@ pub fn register_external_provider_runtimes() {
     );
 }
 
-fn parse_and_prepare_args() -> Result<Args> {
-    let args = Args::parse();
+fn parse_and_prepare_args(args: Args) -> Result<Args> {
     startup_profile::mark("args_parse");
 
     if let Some(chord) = args.spawn_hotkey.as_deref() {

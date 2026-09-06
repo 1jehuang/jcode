@@ -6,6 +6,7 @@ No personal credentials, external provider requests, or SSH are used here.
 """
 import json
 import os
+import pty
 from pathlib import Path
 import subprocess
 import sys
@@ -124,6 +125,53 @@ class ImportCLI(unittest.TestCase):
                 if process.poll() is None:
                     process.kill()
                     process.wait()
+
+    def test_terminal_input_is_refused_without_prompting(self):
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.run(self.command(), stdin=slave, capture_output=True,
+                                     env=self.env, timeout=5)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn(b'piped stdin', process.stdout)
+            self.assertFalse(self.home.exists())
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_invalid_arguments_and_help_do_not_modify_existing_credentials(self):
+        self.home.mkdir(mode=0o755)
+        store = self.home / 'openai-auth.json'
+        store.write_bytes(b'existing-store-not-to-be-touched')
+        store.chmod(0o644)
+        before = store.stat()
+        for args in [
+            ['auth', 'import', '--provider', 'openai', '--json'],
+            ['auth', 'import', '--provider', 'nonsense', '--stdin'],
+            ['auth', 'import', '--help'],
+            ['auth', 'import', '--stdin', '--overwrite'],
+        ]:
+            result = subprocess.run([BINARY, *args], input=b'', capture_output=True,
+                                    env=self.env, timeout=5)
+            self.assertEqual(result.returncode == 0, '--help' in args)
+            self.assertEqual(store.read_bytes(), b'existing-store-not-to-be-touched')
+            self.assertEqual((store.stat().st_mode, store.stat().st_mtime_ns),
+                             (before.st_mode, before.st_mtime_ns))
+            self.assertEqual(list(self.root.iterdir()), [self.home])
+            self.assertEqual(list(self.home.iterdir()), [store])
+
+    def test_stalled_writer_times_out_without_runtime_shutdown_hang(self):
+        process = subprocess.Popen(self.command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env=self.env)
+        try:
+            process.wait(timeout=35)  # deliberately keep stdin open and silent
+            stdout, _ = process.communicate()
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn(b'timed out', stdout)
+            self.assertFalse(self.home.exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
 
 
 if __name__ == '__main__':
