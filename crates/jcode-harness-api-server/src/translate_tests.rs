@@ -605,7 +605,8 @@ fn attaching_probes_and_reports_the_model() {
         "type": "history", "id": catalog_id, "messages": [],
         "provider_name": "anthropic", "provider_model": "claude-sonnet-4-5",
     }));
-    assert_eq!(frames.len(), 1);
+    assert_eq!(frames.len(), 2);
+    assert!(matches!(frames[1].event, ApiEvent::RuntimeInfo { .. }));
     assert_eq!(
         frames[0].reply_to, None,
         "the probe was not client-initiated"
@@ -1892,4 +1893,139 @@ fn rooted_file_operations_reject_traversal_and_symlink_escapes_and_bound_results
             ..
         } if kind == "missing"
     ));
+}
+
+#[test]
+fn an_empty_catalog_replaces_stale_models_and_is_cached() {
+    let mut state = state_with_session();
+    state.legacy_event_to_api(&json!({
+        "type": "available_models_updated", "available_models": ["old-model"]
+    }));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "available_models_updated", "available_models": [],
+        "available_model_routes": []
+    }));
+    assert!(matches!(&frames[1].event, ApiEvent::RuntimeInfo { routes, .. } if routes.is_empty()));
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "list_models", "id": 80, "session_id": "s1"
+    })));
+    assert!(matches!(event, ApiEvent::Models { models, .. } if models.is_empty()));
+}
+
+#[test]
+fn runtime_info_waits_for_initial_catalog_and_propagates_errors() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "get_runtime_info", "id": 81, "session_id": "s1"
+    }));
+    let Outbound::Legacy(probe) = &out[0] else {
+        panic!("must fetch catalog");
+    };
+    assert_eq!(probe["type"], "get_model_catalog");
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "error", "id": probe["id"], "message": "catalog unavailable"
+    }));
+    assert_eq!(frames[0].reply_to, Some(81));
+    assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
+
+    let out = state.api_request_to_legacy(&json!({
+        "req": "get_runtime_info", "id": 82, "session_id": "s1"
+    }));
+    let Outbound::Legacy(probe) = &out[0] else {
+        panic!("must retry catalog");
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": probe["id"], "provider_model": "ready-model",
+        "available_models": ["ready-model"], "messages": []
+    }));
+    assert_eq!(frames[0].reply_to, Some(82));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::RuntimeInfo { model, .. }
+        if model.as_deref() == Some("ready-model"))
+    );
+}
+
+#[test]
+fn route_availability_changes_are_broadcast_without_polling() {
+    let mut state = state_with_session();
+    for available in [true, false] {
+        let frames = state.legacy_event_to_api(&json!({
+            "type": "available_models_updated", "provider_model": "model",
+            "available_models": ["model"],
+            "available_model_routes": [{
+                "model": "model", "provider": "provider", "api_method": "api",
+                "available": available, "detail": "status"
+            }]
+        }));
+        assert_eq!(frames[1].reply_to, None);
+        assert!(
+            matches!(&frames[1].event, ApiEvent::RuntimeInfo { routes, .. }
+            if routes.len() == 1 && routes[0].available == available)
+        );
+    }
+}
+
+#[test]
+fn reattaching_does_not_reuse_the_previous_sessions_catalog() {
+    let mut state = state_with_session();
+    state.legacy_event_to_api(&json!({
+        "type": "available_models_updated", "provider_model": "old-model",
+        "reasoning_effort": "high", "available_models": ["old-model"]
+    }));
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session", "id": 83, "session_id": "s2"
+    }));
+    let Outbound::Legacy(request) = &out[1] else {
+        panic!("state request");
+    };
+    state.legacy_event_to_api(&json!({
+        "type": "state", "id": request["id"], "session_id": "s2"
+    }));
+    assert!(state.available_models.is_empty());
+    assert!(state.current_model.is_none());
+    assert!(state.current_effort.is_none());
+    let out = state.api_request_to_legacy(&json!({
+        "req": "get_runtime_info", "id": 84, "session_id": "s2"
+    }));
+    assert!(matches!(&out[0], Outbound::Legacy(request) if request["type"] == "get_model_catalog"));
+}
+
+#[test]
+fn explicit_null_effort_clears_cached_identity() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"reasoning_effort": "high"}));
+    state.note_models(&json!({"reasoning_effort": null}));
+    assert!(state.current_effort.is_none());
+}
+
+#[test]
+fn switching_provider_does_not_reuse_the_previous_providers_effort() {
+    for event in [
+        json!({"type": "model_changed", "id": 99, "provider_name": "second", "model": "new"}),
+        json!({"type": "available_models_updated", "provider_name": "second", "provider_model": "new"}),
+    ] {
+        let mut state = state_with_session();
+        state.note_models(&json!({"provider_name": "first", "reasoning_effort": "high"}));
+        let frames = state.legacy_event_to_api(&event);
+        assert!(matches!(
+            &frames[0].event,
+            ApiEvent::ModelInfo {
+                reasoning_effort: None,
+                ..
+            }
+        ));
+        assert!(state.current_effort.is_none());
+    }
+}
+
+#[test]
+fn model_change_without_provider_preserves_known_provider() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"provider_name": "known", "reasoning_effort": "high"}));
+    let frames =
+        state.legacy_event_to_api(&json!({"type": "model_changed", "id": 99, "model": "new"}));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { provider, reasoning_effort, .. }
+        if provider.as_deref() == Some("known") && reasoning_effort.as_deref() == Some("high"))
+    );
 }
