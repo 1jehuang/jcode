@@ -1,0 +1,23 @@
+{
+  "version": "0.83.0",
+  "date": "2026-09-06",
+  "title": "Native SSH sessions and remote login",
+  "highlights": [
+    "Run the local terminal UI against a remote Jcode server over SSH, keeping the workspace, tools, and agent execution on the remote host",
+    "Explicitly import a local Jcode-managed OpenAI or Claude login to a trusted SSH host after confirmation, without overwriting an existing remote credential store",
+    "Sign in to Novita with its built-in API-key login option"
+  ],
+  "improvements": [
+    "Authenticate supported providers on an SSH host from the local TUI with private login prompts and per-attempt cancellation",
+    "Native SSH sessions opt in to continuing active turns after a connection drops",
+    "Rust SDK clients can connect to native harnesses through system SSH"
+  ],
+  "fixes": [
+    "Attaching to unsaved live sessions uses the server's working directory, and brief client reloads preserve idle unsaved sessions",
+    "Forking an empty live session works and preserves the linked child session",
+    "Model catalogs retain reasoning effort and clear stale model or provider settings when sessions and providers change",
+    "SDK session event streams receive runtime details, route availability updates, and connection phases for the correct session",
+    "Session creation no longer waits for superseded telemetry work",
+    "Desktop session-launch shortcuts are forwarded correctly under niri"
+  ]
+}
