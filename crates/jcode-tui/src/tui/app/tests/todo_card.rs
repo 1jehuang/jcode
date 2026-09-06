@@ -577,7 +577,7 @@ fn pinned_todo_card_shows_tasks_without_expanding() {
         pinned_band_todo("next", "Queued task", "pending"),
     ];
     app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
-    app.push_display_message(DisplayMessage::user("TRANSCRIPT_VISIBLE"));
+    app.push_display_message(DisplayMessage::assistant("TRANSCRIPT_VISIBLE"));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
 
     let rendered = render_and_snap(&app, &mut terminal);
