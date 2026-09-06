@@ -24,6 +24,7 @@ pub mod refresh_state;
 mod status_types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_sandbox;
+pub mod transfer;
 pub mod validation;
 
 pub(crate) use commands::command_exists;
