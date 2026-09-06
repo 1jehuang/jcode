@@ -227,7 +227,7 @@ mod tests {
         use crate::tui::app::{input, tests::create_test_app};
         let mut app = create_test_app();
         app.is_remote = true;
-        for command in ["/config init", "/login", "/save test", "/reload", "/git"] {
+        for command in ["/config init", "/logout", "/save test", "/reload", "/git"] {
             assert!(super::dispatch_local_command(&mut app, command));
             assert!(
                 app.display_messages
@@ -279,7 +279,6 @@ mod tests {
     #[test]
     fn ssh_blocks_local_side_effects_but_preserves_wire_commands() {
         for command in [
-            "/login",
             "/logout all",
             "/account add",
             "/config edit",
@@ -311,6 +310,7 @@ mod tests {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
         for command in [
+            "/login",
             "hello",
             "explain !commands",
             "/cancel",
