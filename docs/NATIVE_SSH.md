@@ -23,8 +23,9 @@ ID is resolved on the remote server, not in local session storage.
 
 Authenticate the remote host directly from the local TUI with `/login`, or choose
 a provider explicitly, for example `/login openai` or `/login claude`. The browser
-approval happens on your laptop, while OAuth state, token exchange, and saved
-credentials stay on the SSH host. Paste the returned callback URL or authorization
+approval happens on your laptop, while pending login records, token exchange, and
+saved credentials stay on the SSH host. Treat authorization URLs as sensitive and
+do not share them. Paste the returned callback URL or authorization
 code into the pending login prompt, not into an ordinary chat message. OpenAI
 requires the full callback URL, even if the browser reports that its localhost
 callback page cannot be reached. `/cancel` cancels the pending login.
@@ -156,3 +157,15 @@ also passed against the installed binary. Unit tests cover successful remote
 provider refresh, but **real OAuth approval, successful external token exchange,
 and provider-backed inference were not completed**. Those require the user's
 provider approval and are not implied by the safe invalid-state acceptance.
+
+
+A follow-up real SSH run at 08:42 UTC also passed `/login claude` initiation and
+scoped cancellation in a fresh local PTY. The VM verified the URL's PKCE challenge
+against its private pending file, and the harness matched only a URL hash in
+memory. The full URL was not printed or persisted in local/remote artifacts.
+Claude's existing OAuth contract includes the verifier in the authorization URL's
+state, so the OpenAI-specific "verifier never transferred" assertion does **not**
+apply to Claude. No Claude callback or token exchange was attempted. The harness
+now isolates scenarios in fresh PTYs and waits for unambiguous cancellation
+messages to avoid mistaking historical terminal redraws for completion. All 18
+offline harness checks and the expanded live acceptance passed.
