@@ -10,6 +10,17 @@ pub(super) fn emit_lifecycle_event(
     if !is_enabled() {
         return;
     }
+    // Superseding a session does not exit the process. In particular, a new
+    // desktop panel constructs an Agent here while other sessions are active.
+    // Waiting for turn_end/session_end/todo delivery added up to three HTTP
+    // timeouts to that panel's creation, including one under SESSION_STATE.
+    // Keep the same ordered payloads on the worker, and reserve bounded flushes
+    // for lifecycle events where the process may actually be about to exit.
+    let delivery = if matches!(reason, SessionEndReason::Superseded) {
+        DeliveryMode::Background
+    } else {
+        DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT)
+    };
     let id = match get_or_create_id() {
         Some(id) => id,
         None => return,
@@ -21,16 +32,9 @@ pub(super) fn emit_lifecycle_event(
         };
         let now = Instant::now();
         if let Some(active) = guard.as_mut() {
-            // Shutdown is the last chance to persist a single-prompt turn. Use the
-            // bounded blocking path rather than abandoning it in the background
-            // queue when the process exits.
-            finalize_current_turn(
-                &id,
-                active,
-                now,
-                reason.as_str(),
-                DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT),
-            );
+            // Shutdown is the last chance to persist a single-prompt turn.
+            // Session replacement, unlike shutdown, can use the background queue.
+            finalize_current_turn(&id, active, now, reason.as_str(), delivery);
         }
         let state = match guard.as_ref() {
             Some(s) => SessionTelemetry {
@@ -157,11 +161,7 @@ pub(super) fn emit_lifecycle_event(
         return;
     }
     if !state.start_event_sent {
-        let _ = emit_session_start_for_state(
-            id.clone(),
-            &state,
-            DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT),
-        );
+        let _ = emit_session_start_for_state(id.clone(), &state, delivery);
     }
     let duration = state.started_at.elapsed();
     let session_success = state.had_assistant_response
@@ -357,10 +357,10 @@ pub(super) fn emit_lifecycle_event(
         errors,
     };
     if let Ok(payload) = serde_json::to_value(&event) {
-        let _ = send_payload(payload, DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
+        let _ = send_payload(payload, delivery);
     }
     if let Ok(payload) = serde_json::to_value(&todo_event) {
-        let _ = send_payload(payload, DeliveryMode::Blocking(BLOCKING_LIFECYCLE_TIMEOUT));
+        let _ = send_payload(payload, delivery);
     }
     if session_success {
         emit_onboarding_step_once("first_session_success", None, None);

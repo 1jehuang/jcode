@@ -411,6 +411,7 @@ impl Agent {
         parent_id: Option<String>,
         track_concurrency: bool,
     ) -> Self {
+        let start = Instant::now();
         let tool_selection = crate::config::config().tools.selection();
         let mut session = Session::create(parent_id, None);
         if let Some(working_dir) = working_dir {
@@ -434,12 +435,20 @@ impl Agent {
         if track_concurrency {
             agent.activate_concurrency_tracking();
         }
+        let setup_ms = start.elapsed().as_millis();
+        let telemetry_start = Instant::now();
         crate::telemetry::begin_session_with_parent(
             agent.provider.name(),
             &agent.provider.model(),
             agent.session.parent_id.clone(),
             false,
         );
+        logging::info(&format!(
+            "[TIMING] agent_new: setup={}ms, telemetry={}ms, total={}ms",
+            setup_ms,
+            telemetry_start.elapsed().as_millis(),
+            start.elapsed().as_millis(),
+        ));
         agent
     }
 

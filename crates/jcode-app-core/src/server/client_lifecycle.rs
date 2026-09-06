@@ -500,6 +500,7 @@ pub(super) async fn handle_client(
     let client_start = std::time::Instant::now();
 
     let provider = provider_template.fork_for_new_session();
+    let provider_fork_ms = client_start.elapsed().as_millis();
     let t0 = std::time::Instant::now();
     let registry = Registry::new(provider.clone()).await;
     let registry_ms = t0.elapsed().as_millis();
@@ -522,10 +523,12 @@ pub(super) async fn handle_client(
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
+    let prewarm_start = std::time::Instant::now();
     new_agent.prewarm_provider_idle().await;
+    let prewarm_ms = prewarm_start.elapsed().as_millis();
 
     crate::logging::info(&format!(
-        "[TIMING] handle_client setup: registry={registry_ms}ms, agent_new={agent_new_ms}ms, total={}ms",
+        "[TIMING] handle_client setup: provider_fork={provider_fork_ms}ms, registry={registry_ms}ms, agent_new={agent_new_ms}ms, prewarm={prewarm_ms}ms, total={}ms",
         client_start.elapsed().as_millis()
     ));
     let mut client_session_id = new_agent.session_id().to_string();

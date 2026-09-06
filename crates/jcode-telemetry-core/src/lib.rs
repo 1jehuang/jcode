@@ -1434,7 +1434,7 @@ fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
     concurrency::mark_legacy_concurrency_unavailable(&mut payload);
     #[cfg(test)]
     {
-        let _ = mode;
+        tests::TEST_DELIVERY_MODES.lock().unwrap().push(mode);
         if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
             emitted.push(payload);
         }
