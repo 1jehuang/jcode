@@ -4,14 +4,14 @@ use super::*;
 fn test_summarize_apply_patch_input_ignores_begin_marker() {
     let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n";
     let summary = tools_ui::summarize_apply_patch_input(patch);
-    assert_eq!(summary, "src/lib.rs");
+    assert_eq!(summary, "src/lib.rs (6 lines)");
 }
 
 #[test]
 fn test_summarize_apply_patch_input_multiple_files() {
     let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+b\n*** Update File: b.txt\n@@\n-c\n+d\n*** End Patch\n";
     let summary = tools_ui::summarize_apply_patch_input(patch);
-    assert_eq!(summary, "2 files");
+    assert_eq!(summary, "2 files (10 lines)");
 }
 
 #[test]
@@ -22,25 +22,26 @@ fn test_extract_apply_patch_primary_file() {
 }
 
 #[test]
-fn test_patch_summaries_omit_line_counts() {
+fn test_patch_summaries_preserve_line_counts() {
     let single = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
     assert_eq!(
         tools_ui::summarize_unified_patch_input(single),
-        "src/lib.rs"
+        "src/lib.rs (5 lines)"
     );
     let multiple = format!("{single}--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+new\n");
     assert_eq!(
         tools_ui::summarize_unified_patch_input(&multiple),
-        "2 files"
+        "2 files (9 lines)"
     );
     for patch in ["", "@@\n-old\n+new\n"] {
-        assert!(tools_ui::summarize_unified_patch_input(patch).is_empty());
-        assert!(tools_ui::summarize_apply_patch_input(patch).is_empty());
+        let expected = format!("({} lines)", patch.lines().count());
+        assert_eq!(tools_ui::summarize_unified_patch_input(patch), expected);
+        assert_eq!(tools_ui::summarize_apply_patch_input(patch), expected);
     }
 }
 
 #[test]
-fn test_patch_headers_use_colored_tokens_instead_of_line_counts() {
+fn test_patch_headers_preserve_line_counts_and_token_severity() {
     let _guard = viewport_snapshot_test_lock();
     for (name, patch) in [
         (
@@ -60,8 +61,8 @@ fn test_patch_headers_use_colored_tokens_instead_of_line_counts() {
             thought_signature: None,
         };
         for (tokens, color) in [
-            (0, rgb(118, 184, 118)),
-            (3_999, rgb(118, 184, 118)),
+            (0, rgb(118, 118, 118)),
+            (3_999, rgb(118, 118, 118)),
             (4_000, rgb(214, 184, 92)),
             (11_999, rgb(214, 184, 92)),
             (12_000, rgb(224, 118, 118)),
@@ -88,7 +89,10 @@ fn test_patch_headers_use_colored_tokens_instead_of_line_counts() {
             let label = crate::util::format_approx_token_count(tokens);
             for line in [&standalone[0], &batch] {
                 let text = line_plain_text(line);
-                assert!(!text.contains("lines"), "{name}: {text}");
+                assert!(
+                    text.contains(&format!("({} lines)", patch.lines().count())),
+                    "{name}: {text}"
+                );
                 assert!(text.ends_with(&label), "{name}: {text}");
                 let badge = line
                     .spans
@@ -109,7 +113,7 @@ fn test_token_badges_survive_full_terminal_draw() {
     for centered_mode in [false, true] {
         for width in [60, 120] {
             for (tokens, color) in [
-                (1_900, rgb(118, 184, 118)),
+                (1_900, rgb(118, 118, 118)),
                 (4_000, rgb(214, 184, 92)),
                 (12_000, rgb(224, 118, 118)),
             ] {
@@ -168,7 +172,7 @@ fn test_token_badges_survive_full_terminal_draw() {
                         .unwrap_or_else(|| panic!("missing tool row: {rows:#?}"))
                         as u16;
                     let row = &rows[y as usize];
-                    assert!(!row.contains("lines"), "{row}");
+                    assert!(row.contains("(6 lines)"), "{row}");
                     assert!(row.trim_end().ends_with(&label), "{row}");
                     let x = (0..width)
                         .find(|&x| {

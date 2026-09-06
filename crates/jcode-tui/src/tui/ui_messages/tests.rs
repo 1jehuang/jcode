@@ -2153,7 +2153,7 @@ fn render_tool_message_shows_token_badge() {
         .find(|span| span.content.contains("1.9k tok"))
         .expect("missing token badge");
 
-    assert_eq!(badge_span.style.fg, Some(rgb(118, 184, 118)));
+    assert_eq!(badge_span.style.fg, Some(rgb(118, 118, 118)));
 }
 
 #[test]

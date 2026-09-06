@@ -127,6 +127,7 @@ pub(crate) use batch::{batch_subcall_intent, batch_subcall_params};
 pub(super) use batch::{parse_batch_completion_counts, parse_batch_sub_outputs_by_index};
 
 pub(super) fn summarize_unified_patch_input(patch_text: &str) -> String {
+    let lines = patch_text.lines().count();
     let mut files: Vec<String> = Vec::new();
 
     for line in patch_text.lines() {
@@ -153,15 +154,16 @@ pub(super) fn summarize_unified_patch_input(patch_text: &str) -> String {
     }
 
     if files.len() == 1 {
-        files.remove(0)
+        format!("{} ({} lines)", files[0], lines)
     } else if !files.is_empty() {
-        format!("{} files", files.len())
+        format!("{} files ({} lines)", files.len(), lines)
     } else {
-        String::new()
+        format!("({} lines)", lines)
     }
 }
 
 pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
+    let lines = patch_text.lines().count();
     let mut files: Vec<String> = Vec::new();
 
     for line in patch_text.lines() {
@@ -182,11 +184,11 @@ pub(super) fn summarize_apply_patch_input(patch_text: &str) -> String {
     }
 
     if files.len() == 1 {
-        files.remove(0)
+        format!("{} ({} lines)", files[0], lines)
     } else if !files.is_empty() {
-        format!("{} files", files.len())
+        format!("{} files ({} lines)", files.len(), lines)
     } else {
-        String::new()
+        format!("({} lines)", lines)
     }
 }
 
@@ -1566,15 +1568,6 @@ pub(super) fn get_tool_summary_with_budget(
     }
 }
 
-/// Keep standalone and batch tool-output badges on the same severity palette.
-pub(super) fn tool_output_token_color(tokens: usize) -> Color {
-    match crate::util::approx_tool_output_token_severity(tokens) {
-        crate::util::ApproxTokenSeverity::Normal => rgb(118, 184, 118),
-        crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
-        crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
-    }
-}
-
 pub(super) fn render_batch_subcall_line(
     tool: &ToolCall,
     icon: &str,
@@ -1586,7 +1579,11 @@ pub(super) fn render_batch_subcall_line(
     let display_name = resolve_display_tool_name(&tool.name).to_string();
     let token_badge = output_content.map(|content| {
         let tokens = crate::util::estimate_tokens(content);
-        let color = tool_output_token_color(tokens);
+        let color = match crate::util::approx_tool_output_token_severity(tokens) {
+            crate::util::ApproxTokenSeverity::Normal => rgb(118, 118, 118),
+            crate::util::ApproxTokenSeverity::Warning => rgb(214, 184, 92),
+            crate::util::ApproxTokenSeverity::Danger => rgb(224, 118, 118),
+        };
         (crate::util::format_approx_token_count(tokens), color)
     });
     let intent = tool
