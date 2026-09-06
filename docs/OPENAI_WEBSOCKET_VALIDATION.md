@@ -119,3 +119,49 @@ parsing, S3 transport/model exclusions, S4 existing-socket precedence, S5 fork
 slot construction, S6 reset clearing, S7/S8 diagnostic outputs, S9 idle ordering,
 S10 canary snapshot behavior, S11 send-guard lifetime, and S12 both turn-path
 call orders. All 13 assertions passed, counting the two S12 paths separately.
+
+## Whole-result rerun after ledger completion
+
+The mapped checks were rerun on 2026-09-06 at 04:01–04:03 UTC, after the ledger
+was committed. No feature code changed during this pass. The checks produced
+these outcomes, rather than relying on the earlier completion assessment:
+
+| Mapped checks rerun | Observed outcome |
+| --- | --- |
+| Full OpenAI runtime suite, including handshake, payload, compatibility, cancellation, expiry, identity and recovery checks | 126 passed, 0 failed, 3 opt-in tests ignored. |
+| Both idle-session tests | 2 passed. Busy sessions skipped and pending preparation released the agent lock. |
+| Active-provider delegation | 1 passed. No completion invoked during preparation. |
+| Opt-in live warmup and continuation | Passed separately. Warmup ready in 550 ms; generated replies correct; prepared socket and subsequent response chain reused. |
+| All mapped source assertions and documentation checks | 21 assertions passed, including the original 13 plus default no-op, failure isolation, malformed-event rejection, diagnostic-field review, scope, ledger shape, links and raw-value checks. The scanner initially stopped at a test-only helper; its boundary was corrected and affected assertions rerun successfully. |
+| Protocol and all four lifecycle diagnostic outputs | Log re-scan found all five outputs. Ready/hit/miss/unavailable counts were 32/22/2/3, and protocol diagnostics appeared 112 times. These are cumulative log observations, not per-benchmark counts. |
+| Full TUI compilation | Passed again in 17.11 seconds. |
+| Running shared-server activation | Confirmed the feature-bearing `a495fb059-dirty-40e6123ec268` daemon remained active. The additional build did not need another feature reload. |
+| Actual daemon subscription through first generated reply | Passed again: `OK`, `websocket/persistent-reuse`, observed prewarm hit. |
+| Live OAuth limitation | Attempted again and remained unavailable: no prepared socket within eight seconds. API-key workflow passed; credentials were not changed to force this check through. |
+| Enabled-versus-disabled application experiment | Another 10 alternating pairs completed. All 20 responses correct; warm first-request reuse 10/10, cold reuse 0/10; warm latency lower in 8/10 pairs. |
+
+The repeated experiment's median first-text latency was **1,323.76 ms disabled
+versus 1,167.99 ms enabled**, a **155.77 ms (11.8%) reduction**. This independently
+repeated the intended benefit: lower foreground latency when preparation overlaps
+user think time. Two warmed trials were slower, confirming that a hit is not a
+per-request speedup guarantee. The first experiment remains recorded above, not
+replaced by a selected subset. Across both runs, all 40 replies were correct and
+18 of 20 pairs were faster with prewarming. Host compilation was concurrent with
+part of this second run, so these remain local workload observations.
+
+| Follow-up pair | Disabled (ms) | Enabled (ms) |
+| --- | ---: | ---: |
+| 1 | 1260.24 | 1155.53 |
+| 2 | 1229.01 | 1692.87 |
+| 3 | 3771.96 | 896.33 |
+| 4 | 1345.48 | 937.58 |
+| 5 | 1138.15 | 1142.67 |
+| 6 | 1302.03 | 934.20 |
+| 7 | 1347.84 | 1180.45 |
+| 8 | 1535.42 | 1439.54 |
+| 9 | 2321.96 | 1188.66 |
+| 10 | 1268.40 | 1257.73 |
+
+This pass closes the observed behavior-and-benefit loop for the implemented
+API-key workflow. Source-only and blocked checks retain the evidence types and
+limitations in the ledger; they are not relabeled as live runtime successes.
