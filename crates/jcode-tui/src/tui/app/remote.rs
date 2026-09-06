@@ -1907,6 +1907,10 @@ fn handle_disconnected_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+        return Ok(());
+    }
+
     if input::handle_scroll_overlay_key(app, code)? {
         return Ok(());
     }

@@ -122,6 +122,20 @@ fn ssh_login_unsupported_provider_never_starts_local_auth() {
 }
 
 #[test]
+fn ssh_login_disconnected_keys_stay_in_private_flow() {
+    with_app(|app| {
+        app.handle_ssh_login_command("/login");
+        app.handle_paste("/cancel".into());
+        super::super::remote::handle_disconnected_key(app, KeyCode::Enter, KeyModifiers::NONE)
+            .unwrap();
+        assert!(app.remote_login.is_none());
+        assert!(app.queued_messages.is_empty());
+        assert!(app.pending_turn.is_none());
+        assert!(app.input.is_empty());
+    });
+}
+
+#[test]
 fn ssh_login_success_refreshes_attached_daemon_and_catalog_without_local_login_event() {
     with_app(|app| {
         use tokio::io::{AsyncBufReadExt, BufReader};
