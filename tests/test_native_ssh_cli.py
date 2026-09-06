@@ -252,18 +252,10 @@ def owned_ssh(cli_pid):
             and processes[pid][2] and Path(os.fsdecode(processes[pid][2][0])).name == "ssh"}
 
 
-def owned_sockets(pid):
-    inodes = set()
-    try:
-        for fd in Path(f"/proc/{pid}/fd").iterdir():
-            with contextlib.suppress(OSError):
-                link = os.readlink(fd)
-                if link.startswith("socket:["):
-                    inodes.add(link[8:-1])
-        return {Path(parts[7]) for line in Path("/proc/net/unix").read_text().splitlines()[1:]
-                if len(parts := line.split()) >= 8 and parts[6] in inodes and "/jcode-ssh-" in parts[7]}
-    except (FileNotFoundError, ProcessLookupError):
-        return set()
+def owned_sockets(directory):
+    # Jcode hardening can deny /proc/<pid>/fd even for our own child. A unique
+    # TMPDIR passed only to this CLI makes filesystem observation unambiguous.
+    return {path for path in Path(directory).glob("jcode-ssh-*/native.sock") if path.is_socket()}
 
 
 def child_terminal():
@@ -272,10 +264,14 @@ def child_terminal():
 
 
 def tui_acceptance(config, env, local_cwd, session_id, sentinel):
+    # Only sockets live here. Keep this path short for Unix sockaddr limits,
+    # independently of potentially long JCODE_SCRATCH_DIR artifact paths.
+    socket_temp = tempfile.TemporaryDirectory(prefix="jssh-", dir="/tmp")
+    child_env = dict(env, TMPDIR=socket_temp.name)
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 180, 0, 0))
     process = subprocess.Popen(local_command(config, tail=("--resume", session_id)),
-                               stdin=slave, stdout=slave, stderr=slave, env=env,
+                               stdin=slave, stdout=slave, stderr=slave, env=child_env,
                                cwd=local_cwd, preexec_fn=child_terminal, close_fds=True)
     os.close(slave)
     selector = selectors.DefaultSelector()
@@ -289,7 +285,7 @@ def tui_acceptance(config, env, local_cwd, session_id, sentinel):
         deadline = time.monotonic() + duration
         while time.monotonic() < deadline:
             ssh_children.update(owned_ssh(process.pid))
-            sockets.update(owned_sockets(process.pid))
+            sockets.update(owned_sockets(socket_temp.name))
             for _, _ in selector.select(min(0.1, max(0, deadline - time.monotonic()))):
                 try:
                     chunk = os.read(master, 65536)
@@ -338,6 +334,7 @@ def tui_acceptance(config, env, local_cwd, session_id, sentinel):
             info = process_info(pid)
             require(info is None or info[1] != start_time, f"Owned SSH child {pid} remains after TUI exit")
         require(all(not path.exists() for path in sockets), f"Private adapter sockets survived exit: {sockets}")
+        require(all(not path.parent.exists() for path in sockets), "Private adapter directory survived CLI exit")
         print(f"PASS local PTY: SSH host + remote context, no onboarding, /quit reaped {len(ssh_children)} SSH child(ren)")
     finally:
         if process.poll() is None:
@@ -355,6 +352,7 @@ def tui_acceptance(config, env, local_cwd, session_id, sentinel):
                     os.kill(pid, signal.SIGKILL)
         selector.close()
         os.close(master)
+        socket_temp.cleanup()
 
 
 def run_acceptance(config):
@@ -437,6 +435,19 @@ def run_acceptance(config):
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_owned_socket_observation_uses_only_private_temp_root(self):
+        import socket
+        with tempfile.TemporaryDirectory(prefix="jssh-", dir="/tmp") as root:
+            directory = Path(root) / "jcode-ssh-owned"
+            directory.mkdir(mode=0o700)
+            path = directory / "native.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(str(path))
+                self.assertEqual(owned_sockets(root), {path})
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            path.unlink()
+            self.assertFalse(owned_sockets(root))
+
     def test_visible_strips_terminal_controls_not_payload(self):
         self.assertEqual(visible(b"\x1b]0;title\x07\x1b[31mSSH dev\x1b[0m sentinel"), "SSH dev sentinel")
 
