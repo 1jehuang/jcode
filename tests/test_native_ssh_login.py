@@ -69,6 +69,7 @@ PREFIX = native.PREFIX
 require = native.require
 TIMEOUT = native.TIMEOUT
 INVALID_CODE_PREFIX = "JCODE_SSH_LOGIN_INVALID_"
+CANCEL_COMPLETE = "Pending authorization was removed on the remote host."
 CREDENTIAL_NAMES = {
     "openai-auth.json", "claude-auth.json", "auth.json", ".credentials.json",
     "openai.env", "anthropic.env", "google-tokens.json", "gemini-auth.json",
@@ -543,7 +544,7 @@ def run_acceptance(config):
                         tui.wait(provider, mark)
                 require(not inspect_remote(config)["pending"], "Bare /login started OAuth before provider choice")
                 mark = tui.command("/cancel")
-                tui.wait("SSH login cancelled", mark)
+                tui.wait("No authorization was started.", mark)
 
                 mark = tui.command("/login openai")
                 tui.wait("https://auth.openai.com/", mark)
@@ -568,14 +569,22 @@ def run_acceptance(config):
                         "Synthetic stdin callback did not fail in the real CLI before token exchange")
                 assert_local_clean(root, needles)
                 mark = tui.command("/cancel")
-                tui.wait("SSH login cancelled", mark)
+                tui.wait(CANCEL_COMPLETE, mark)
                 cancelled = inspect_remote(config, needles)
                 require(not cancelled["pending"], "/cancel left owned remote pending OAuth state")
                 require(any(call["operation"] == "cancel" and call["exit_code"] == 0
                             and call["flow_id"] == starts[0]["flow_id"] for call in cancelled["calls"]),
                         "/cancel did not invoke the real remote CLI for the same flow-id")
                 print("PASS sensitive stdin callback refused at state check, no local auth/files, /cancel clears only owned flow")
+                tui.quit()
 
+            # Login display messages are not persisted into remote history.
+            # Fresh real PTYs prevent old cancellation/error redraws from being
+            # mistaken for the next operation's acknowledgement. Each /quit
+            # still checks owned SSH children and native socket cleanup.
+            with LoginPTY(config, env, root, session_id) as tui:
+                tui.wait(f"SSH {config['HOST']}")
+                tui.wait(sentinel)
                 mark = tui.command("/login not-a-provider")
                 tui.wait("SSH login supports:", mark)
                 require(not inspect_remote(config, needles)["pending"], "Unsupported provider created pending state")
@@ -590,8 +599,12 @@ def run_acceptance(config):
                 needles.append(error_marker)
                 require(not inspect_remote(config, needles)["pending"], "Failed remote login left pending state")
                 mark = tui.command("/cancel")
-                tui.wait("SSH login cancelled", mark)
+                tui.wait(CANCEL_COMPLETE, mark)
+                tui.quit()
 
+            with LoginPTY(config, env, root, session_id) as tui:
+                tui.wait(f"SSH {config['HOST']}")
+                tui.wait(sentinel)
                 # Claude initiation is network-free, but its legacy URL carries
                 # its PKCE verifier in state. Keep that URL private and never
                 # send ANY completion input, synthetic or otherwise, for Claude.
@@ -613,7 +626,7 @@ def run_acceptance(config):
                 assert_local_clean(root, needles)
                 inspect_remote(config, needles)
                 mark = tui.command("/cancel")
-                tui.wait("SSH login cancelled", mark)
+                tui.wait(CANCEL_COMPLETE, mark)
                 cancelled = inspect_remote(config, needles)
                 require(not cancelled["pending"] and any(
                     entry["operation"] == "cancel" and entry["provider"] == "claude"
@@ -665,6 +678,21 @@ def run_acceptance(config):
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_cancel_waits_are_unique_and_scenarios_use_fresh_ptys(self):
+        import ast
+        import inspect
+        tree = ast.parse(inspect.getsource(run_acceptance))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        ptys = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "LoginPTY"]
+        self.assertEqual(len(ptys), 3)
+        waits = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "wait"]
+        self.assertEqual(sum(isinstance(node.args[0], ast.Name) and node.args[0].id == "CANCEL_COMPLETE"
+                             for node in waits), 3)
+        self.assertFalse(any(isinstance(node.args[0], ast.Constant) and node.args[0].value == "SSH login cancelled"
+                             for node in waits))
+        self.assertNotIn(CANCEL_COMPLETE, "SSH login cancelled. No authorization was started.")
+        self.assertNotIn(CANCEL_COMPLETE, "SSH login cancelled locally, but remote cleanup could not be confirmed.")
+
     def exercise_wrapper(self, root, flags, payload=b"", result=None, provider="openai"):
         argv = ["remote-jcode", "login", "--provider", provider, "--flow-id", "test-flow", *flags]
         result = result or subprocess.CompletedProcess([], 1, b"", b"OAuth state mismatch")
