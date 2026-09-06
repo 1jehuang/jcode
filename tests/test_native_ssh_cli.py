@@ -17,7 +17,8 @@ Creates one uniquely marked, context-only remote session and leaves it there as
 an acceptance artifact. NEVER sends a model-turn message, installs software,
 changes SSH configuration, or stops the remote daemon. Local Jcode state is
 isolated, but system SSH keys/config/agent remain available. Linux /proc is used
-to verify owned SSH children and private adapter sockets disappear on TUI quit.
+to verify owned SSH children and private adapter sockets disappear on both TUI
+/quit and a second attach closed by SIGHUP (terminal-close behavior).
 """
 
 import contextlib
@@ -263,7 +264,8 @@ def child_terminal():
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
 
-def tui_acceptance(config, env, local_cwd, session_id, sentinel):
+def tui_acceptance(config, env, local_cwd, session_id, sentinel, *, exit_mode="quit"):
+    require(exit_mode in {"quit", "sighup"}, "Unknown TUI exit mode")
     # Only sockets live here. Keep this path short for Unix sockaddr limits,
     # independently of potentially long JCODE_SCRATCH_DIR artifact paths.
     socket_temp = tempfile.TemporaryDirectory(prefix="jssh-", dir="/tmp")
@@ -325,17 +327,22 @@ def tui_acceptance(config, env, local_cwd, session_id, sentinel):
         for path in sockets:
             require(path.parent.stat().st_mode & 0o777 == 0o700,
                     f"Native adapter directory is not private0700: {path.parent}")
-        os.write(master, b"/quit\r")
+        if exit_mode == "sighup":
+            # Signal only our local UI. Its handler must close/reap its owned
+            # SSH children while leaving the persistent remote daemon alive.
+            process.send_signal(signal.SIGHUP)
+        else:
+            os.write(master, b"/quit\r")
         deadline = time.monotonic() + 15
         while process.poll() is None and time.monotonic() < deadline:
             pump(0.1)
-        require(process.poll() == 0, f"TUI did not quit successfully:\n{visible(output)[-6000:]}")
+        require(process.poll() == 0, f"TUI did not exit0 after {exit_mode}:\n{visible(output)[-6000:]}")
         for pid, start_time in ssh_children:
             info = process_info(pid)
             require(info is None or info[1] != start_time, f"Owned SSH child {pid} remains after TUI exit")
         require(all(not path.exists() for path in sockets), f"Private adapter sockets survived exit: {sockets}")
         require(all(not path.parent.exists() for path in sockets), "Private adapter directory survived CLI exit")
-        print(f"PASS local PTY: SSH host + remote context, no onboarding, /quit reaped {len(ssh_children)} SSH child(ren)")
+        print(f"PASS local PTY: SSH host + remote context, no onboarding, {exit_mode} exited0 and reaped {len(ssh_children)} SSH child(ren)")
     finally:
         if process.poll() is None:
             process.terminate()
@@ -421,20 +428,29 @@ def run_acceptance(config):
 
         tui_acceptance(config, env, root, session_id, sentinel)
         assert_no_local_transcript(home, session_id, sentinel)
-        # A final new SSH ping/attach proves quitting the local UI did not stop
-        # the remote daemon or lose the context-only session.
+        # A second real local UI attach proves /quit preserved remote history,
+        # then exercises terminal-close signal cleanup independently of /quit.
+        tui_acceptance(config, env, root, session_id, sentinel, exit_mode="sighup")
+        assert_no_local_transcript(home, session_id, sentinel)
+        # A final new SSH ping/attach proves SIGHUP did not stop the remote
+        # daemon or lose the context-only session.
         with Bridge(config) as final:
             final.handshake()
             history = final.subscribe(header["working_dir"], instance, session_id)
             require(history["session_id"] == session_id and history_contains(history, sentinel),
                     "Remote daemon/session did not survive local UI quit")
-        print("PASS no local transcript, persistent remote daemon survives local UI quit")
+        print("PASS no local transcript, persistent remote daemon survives local UI quit and SIGHUP")
         print(json.dumps({"status": "passed", "host": config["HOST"], "session_id": session_id,
                           "sentinel": sentinel, "remote_version": header["version"],
-                          "remote_working_dir": header["working_dir"], "provider_turns_requested": 0}))
+                          "remote_working_dir": header["working_dir"], "provider_turns_requested": 0,
+                          "tui_exit_modes": ["quit", "sighup"]}))
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_unknown_exit_mode_refused_before_starting_process(self):
+        with self.assertRaisesRegex(AssertionError, "Unknown TUI exit mode"):
+            tui_acceptance({}, {}, None, "unused", "unused", exit_mode="unsafe")
+
     def test_owned_socket_observation_uses_only_private_temp_root(self):
         import socket
         with tempfile.TemporaryDirectory(prefix="jssh-", dir="/tmp") as root:
