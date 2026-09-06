@@ -575,6 +575,7 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
         ProviderChoice::Perplexity,
         ProviderChoice::TogetherAi,
         ProviderChoice::Deepinfra,
+        ProviderChoice::Novita,
         ProviderChoice::Xai,
         ProviderChoice::GrokBuild,
         ProviderChoice::Chutes,
@@ -630,6 +631,19 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_list_includes_novita_api_key_login() {
+        let providers = list_cli_providers();
+        let novita = providers
+            .iter()
+            .find(|provider| provider.id == "novita")
+            .unwrap();
+        assert_eq!(novita.display_name, "Novita AI");
+        assert_eq!(novita.auth_kind.as_deref(), Some("API key"));
+        assert_eq!(novita.detail.as_deref(), Some("Pay-as-you-go API key"));
+        assert!(novita.aliases.iter().any(|alias| alias == "novita.ai"));
+    }
 
     fn provider_status<'a>(
         report: &'a AuthStatusReport,

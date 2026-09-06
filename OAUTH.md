@@ -269,7 +269,7 @@ jcode --provider-profile my-api auth-test --no-tool-smoke
 
 This writes `[providers.my-api]` in `~/.jcode/config.toml` and stores the key in jcode's private app config dir, for example `~/.config/jcode/provider-my-api.env`. For localhost servers, use `--no-api-key`.
 
-Two notable presets are:
+Notable presets include:
 
 ### Fireworks
 - Login: `jcode login --provider fireworks`
@@ -278,6 +278,16 @@ Two notable presets are:
 - Base URL: `https://api.fireworks.ai/inference/v1`
 - Default model hint: `accounts/fireworks/routers/kimi-k2p5-turbo`
 - Docs: <https://docs.fireworks.ai/tools-sdks/openai-compatibility>
+
+### Novita AI
+- Login: `jcode login --provider novita` or `/login novita` in the TUI
+- Authentication: pay-as-you-go API key, not a subscription login or browser OAuth
+- Stored env file: `~/.config/jcode/novita.env`
+- API key env var: `NOVITA_API_KEY`
+- Base URL: `https://api.novita.ai/openai`
+- Default model hint: `zai-org/glm-5.3`
+- Get a key: <https://novita.ai/settings/key-management>
+- Docs: <https://novita.ai/docs/guides/llm-api>
 
 ### MiniMax
 - Login: `jcode login --provider minimax`

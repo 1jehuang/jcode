@@ -1,5 +1,49 @@
 use super::*;
 
+#[test]
+fn novita_login_saves_private_key_and_rejects_empty_replacement() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_key = std::env::var_os("NOVITA_API_KEY");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let profile = crate::provider_catalog::NOVITA_PROFILE;
+    login_openai_compatible_flow(
+        &profile,
+        &LoginOptions {
+            openai_compatible_api_key: Some(" novita_test_key ".into()),
+            ..LoginOptions::default()
+        },
+    )
+    .unwrap();
+    let path = crate::storage::app_config_dir()
+        .unwrap()
+        .join(profile.env_file);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("NOVITA_API_KEY=novita_test_key"));
+    assert_eq!(std::env::var("NOVITA_API_KEY").unwrap(), "novita_test_key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let err = login_openai_compatible_flow(
+        &profile,
+        &LoginOptions {
+            openai_compatible_api_key: Some("  ".into()),
+            ..LoginOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("No API key provided"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
+    set_or_clear_env("NOVITA_API_KEY", prev_key);
+    set_or_clear_env("JCODE_HOME", prev_home);
+}
+
 fn set_or_clear_env(key: &str, value: Option<std::ffi::OsString>) {
     if let Some(value) = value {
         crate::env::set_var(key, value);

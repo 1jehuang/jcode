@@ -339,6 +339,7 @@ jcode works with subscription-backed OAuth flows and many provider integrations,
 - **Azure OpenAI** (`jcode login --provider azure`)
 - **Alibaba Cloud Coding Plan** (`jcode login --provider alibaba-coding-plan`)
 - **Fireworks** (`jcode login --provider fireworks`)
+- **Novita AI** (`jcode login --provider novita`, API key)
 - **MiniMax** (`jcode login --provider minimax`)
 - **Meta Model API / Muse** (`jcode login --provider meta-muse`)
 - **LM Studio** (`jcode login --provider lmstudio`)
@@ -625,7 +626,7 @@ The above image is the first page of provider logins
 
 - **Native / first-party style providers:** `claude`, `openai`, `copilot`, `gemini`, `azure`, `alibaba-coding-plan`
 - **Aggregator / compatibility providers:** `openrouter`, `orcarouter`, `openai-compatible`
-- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
+- **Additional provider integrations:** `opencode`, `opencode-go`, `zai` / `kimi`, `302ai`, `baseten`, `cortecs`, `deepseek`, `firmware`, `huggingface`, `moonshotai`, `nebius`, `scaleway`, `stackit`, `groq`, `mistral`, `perplexity`, `togetherai`, `deepinfra`, `fireworks`, `novita`, `minimax`, `xai`, `lmstudio`, `ollama`, `chutes`, `cerebras`, `cursor`, `antigravity`, `google`
 
 Jcode also supports easy multi-account switching. Ran out of tokens on your first ChatGPT Pro subscription? /account and quickly switch to your second. 
 
@@ -820,6 +821,7 @@ Set up jcode on this machine for me.
    - Azure OpenAI: `~/.config/jcode/azure-openai.env`, `AZURE_OPENAI_*`, or an existing `az login`
    - OpenRouter: `OPENROUTER_API_KEY`
    - Fireworks: `~/.config/jcode/fireworks.env`, `FIREWORKS_API_KEY`
+   - Novita AI: `~/.config/jcode/novita.env`, `NOVITA_API_KEY`
    - MiniMax: `~/.config/jcode/minimax.env`, `MINIMAX_API_KEY`
    - NVIDIA NIM: `~/.config/jcode/nvidia-nim.env`, `NVIDIA_API_KEY`
    - Alibaba Cloud Coding Plan: existing jcode config/env if present

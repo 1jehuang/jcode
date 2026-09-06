@@ -622,6 +622,7 @@ fn provider_keys_for_env(env_key: &str) -> &'static [&'static str] {
         "TOGETHER_API_KEY" => &["togetherai", "together-ai", "together"],
         "DEEPINFRA_API_KEY" => &["deepinfra"],
         "FIREWORKS_API_KEY" => &["fireworks"],
+        "NOVITA_API_KEY" => &["novita", "novita-ai", "novita.ai"],
         "CHUTES_API_KEY" => &["chutes"],
         "BASETEN_API_KEY" => &["baseten"],
         "CORTECS_API_KEY" => &["cortecs"],

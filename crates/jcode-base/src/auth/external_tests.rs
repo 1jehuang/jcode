@@ -9,6 +9,32 @@ fn write_auth_file(path: &std::path::Path, value: serde_json::Value) {
 }
 
 #[test]
+fn novita_api_key_import_requires_trust() {
+    let _guard = crate::storage::lock_test_env();
+    let dir = TempDir::new().unwrap();
+    let prev = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = ExternalAuthSource::OpenCode.path().unwrap();
+    write_auth_file(
+        &path,
+        serde_json::json!({ "novita": { "type": "api", "key": "novita_test_secret" } }),
+    );
+    assert!(load_api_key_for_env("NOVITA_API_KEY").is_none());
+    trust_external_auth_source(ExternalAuthSource::OpenCode).unwrap();
+    assert_eq!(
+        load_api_key_for_env("NOVITA_API_KEY").as_deref(),
+        Some("novita_test_secret")
+    );
+
+    if let Some(prev) = prev {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
 fn opencode_api_key_imports_from_trusted_file() {
     let _guard = crate::storage::lock_test_env();
     let dir = TempDir::new().unwrap();

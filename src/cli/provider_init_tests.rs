@@ -44,6 +44,7 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::TogetherAi.as_arg_value(), "togetherai");
     assert_eq!(ProviderChoice::Deepinfra.as_arg_value(), "deepinfra");
     assert_eq!(ProviderChoice::Fireworks.as_arg_value(), "fireworks");
+    assert_eq!(ProviderChoice::Novita.as_arg_value(), "novita");
     assert_eq!(ProviderChoice::Minimax.as_arg_value(), "minimax");
     assert_eq!(ProviderChoice::Xai.as_arg_value(), "xai");
     assert_eq!(ProviderChoice::GrokBuild.as_arg_value(), "grok-build");
@@ -68,6 +69,23 @@ fn test_provider_choice_arg_values() {
     assert_eq!(ProviderChoice::Antigravity.as_arg_value(), "antigravity");
     assert_eq!(ProviderChoice::Google.as_arg_value(), "google");
     assert_eq!(ProviderChoice::Auto.as_arg_value(), "auto");
+}
+
+#[test]
+fn novita_cli_aliases_select_the_builtin_profile() {
+    use clap::ValueEnum;
+    for input in ["novita", "novita-ai", "novita.ai"] {
+        let choice = ProviderChoice::from_str(input, false).unwrap();
+        assert_eq!(choice, ProviderChoice::Novita);
+        assert_eq!(
+            profile_for_choice(&choice),
+            Some(provider_catalog::NOVITA_PROFILE)
+        );
+        assert_eq!(
+            login_provider_for_choice(&choice),
+            Some(provider_catalog::NOVITA_LOGIN_PROVIDER)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

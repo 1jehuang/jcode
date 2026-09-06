@@ -1262,3 +1262,20 @@ fn minimax_default_provider_applies_minimax_api_key_env_not_openrouter() {
         "MiniMax profile must use minimax.env, not openrouter.env"
     );
 }
+
+#[test]
+fn novita_static_models_are_available_before_live_catalog_refresh() {
+    let models = openai_compatible_profile_static_models(NOVITA_PROFILE);
+    assert_eq!(
+        models.first().map(String::as_str),
+        NOVITA_PROFILE.default_model
+    );
+    for model in [
+        "zai-org/glm-5.3",
+        "zai-org/glm-5.3-flash",
+        "moonshotai/kimi-k3",
+        "deepseek/deepseek-v4-pro-0813",
+    ] {
+        assert!(models.iter().any(|candidate| candidate == model));
+    }
+}

@@ -454,6 +454,43 @@ mod tests {
     }
 
     #[test]
+    fn novita_profile_and_login_are_available_on_all_surfaces() {
+        assert_eq!(NOVITA_PROFILE.api_base, "https://api.novita.ai/openai");
+        assert_eq!(NOVITA_PROFILE.api_key_env, "NOVITA_API_KEY");
+        assert_eq!(NOVITA_PROFILE.env_file, "novita.env");
+        assert_eq!(NOVITA_PROFILE.default_model, Some("zai-org/glm-5.3"));
+        assert!(NOVITA_PROFILE.requires_api_key);
+        assert!(openai_compatible_profiles().contains(&NOVITA_PROFILE));
+        for input in ["novita", "novita-ai", "novita.ai", " NOVITA "] {
+            assert_eq!(resolve_login_provider(input), Some(NOVITA_LOGIN_PROVIDER));
+        }
+        assert_eq!(
+            resolve_login_provider_loose("Novita AI"),
+            Some(NOVITA_LOGIN_PROVIDER)
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.auth_kind,
+            LoginProviderAuthKind::ApiKey
+        );
+        assert_eq!(
+            NOVITA_LOGIN_PROVIDER.target,
+            LoginProviderTarget::OpenAiCompatible(NOVITA_PROFILE)
+        );
+        for providers in [
+            cli_login_providers(),
+            tui_login_providers(),
+            server_bootstrap_login_providers(),
+            auto_init_login_providers(),
+            auth_status_login_providers(),
+        ] {
+            assert_eq!(
+                resolve_login_selection("novita", &providers),
+                Some(NOVITA_LOGIN_PROVIDER)
+            );
+        }
+    }
+
+    #[test]
     fn nvidia_nim_profile_uses_hosted_openai_compatible_configuration() {
         assert_eq!(
             NVIDIA_NIM_PROFILE.api_base,
