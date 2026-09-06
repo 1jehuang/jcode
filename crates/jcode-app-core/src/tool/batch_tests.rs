@@ -1,5 +1,126 @@
 use super::*;
 use serde_json::json;
+use std::sync::Arc;
+
+struct EchoTool;
+
+#[async_trait::async_trait]
+impl Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    fn description(&self) -> &str {
+        "Echo test input"
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        Ok(ToolOutput::new(input["text"].as_str().unwrap_or_default()))
+    }
+}
+
+fn test_context() -> ToolContext {
+    ToolContext {
+        session_id: "batch-registry-lifetime".to_string(),
+        message_id: "message".to_string(),
+        tool_call_id: "batch-call".to_string(),
+        working_dir: None,
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: super::super::ToolExecutionMode::Direct,
+    }
+}
+
+async fn registry_with_batch_and_echo() -> Registry {
+    let registry = Registry::empty();
+    let mut tools = registry.tools.write().await;
+    tools.insert("echo".to_string(), Arc::new(EchoTool));
+    tools.insert(
+        "batch".to_string(),
+        Arc::new(BatchTool::new(registry.downgrade())),
+    );
+    drop(tools);
+    registry
+}
+
+#[tokio::test]
+async fn registry_tool_map_drops_after_external_owners_are_dropped() {
+    let registry = Registry::empty();
+    let tools = Arc::downgrade(&registry.tools);
+
+    registry.tools.write().await.insert(
+        "batch".to_string(),
+        Arc::new(BatchTool::new(registry.downgrade())) as Arc<dyn Tool>,
+    );
+
+    drop(registry);
+
+    assert!(
+        tools.upgrade().is_none(),
+        "BatchTool must not strongly retain the registry tool map that owns it"
+    );
+}
+
+#[tokio::test]
+async fn batch_executes_through_surviving_registry_clone() {
+    let registry = registry_with_batch_and_echo().await;
+    let surviving_clone = registry.clone();
+    drop(registry);
+
+    let output = surviving_clone
+        .execute(
+            "batch",
+            json!({
+                "tool_calls": [{
+                    "tool": "echo",
+                    "intent": "Verify the surviving registry clone",
+                    "parameters": {"text": "still alive"}
+                }]
+            }),
+            test_context(),
+        )
+        .await
+        .expect("batch should use the surviving registry clone's tool map");
+
+    assert!(output.output.contains("still alive"));
+    assert!(output.output.contains("Completed: 1 succeeded, 0 failed"));
+}
+
+#[tokio::test]
+async fn batch_fails_cleanly_after_registry_tool_map_is_dropped() {
+    let registry = registry_with_batch_and_echo().await;
+    let batch = registry
+        .tools
+        .read()
+        .await
+        .get("batch")
+        .cloned()
+        .expect("batch tool should be registered");
+    drop(registry);
+
+    let error = batch
+        .execute(
+            json!({
+                "tool_calls": [{
+                    "tool": "echo",
+                    "intent": "Verify clean teardown",
+                    "parameters": {"text": "unreachable"}
+                }]
+            }),
+            test_context(),
+        )
+        .await
+        .expect_err("batch should reject execution after its registry is gone");
+
+    assert_eq!(
+        error.to_string(),
+        "Batch tool registry is no longer available"
+    );
+}
 
 #[test]
 fn description_includes_parallel_tool_call_example() {
@@ -127,7 +248,7 @@ fn test_normalize_arguments_aliases_to_parameters() {
 
 #[test]
 fn test_schema_only_requires_tool() {
-    let schema = BatchTool::new(Registry {
+    let registry = Registry {
         tools: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         skills: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::skill::SkillRegistry::default(),
@@ -135,8 +256,8 @@ fn test_schema_only_requires_tool() {
         compaction: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::compaction::CompactionManager::new(),
         )),
-    })
-    .parameters_schema();
+    };
+    let schema = BatchTool::new(registry.downgrade()).parameters_schema();
 
     assert_eq!(
         schema["properties"]["tool_calls"]["items"]["required"],

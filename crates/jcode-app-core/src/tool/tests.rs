@@ -6,6 +6,29 @@ use crate::message::{Message, ToolDefinition};
 use crate::provider::{EventStream, Provider};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::ffi::OsString;
+
+struct TestHomeGuard {
+    previous: Option<OsString>,
+}
+
+impl TestHomeGuard {
+    fn new(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", path);
+        Self { previous }
+    }
+}
+
+impl Drop for TestHomeGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            crate::env::set_var("JCODE_HOME", previous);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+}
 
 struct MockProvider;
 
@@ -30,6 +53,107 @@ impl Provider for MockProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(MockProvider)
     }
+}
+
+fn mcp_test_context(working_dir: &std::path::Path) -> ToolContext {
+    ToolContext {
+        session_id: "mcp-registry-lifetime".to_string(),
+        message_id: "message".to_string(),
+        tool_call_id: "mcp-call".to_string(),
+        working_dir: Some(working_dir.to_path_buf()),
+        stdin_request_tx: None,
+        graceful_shutdown_signal: None,
+        execution_mode: ToolExecutionMode::Direct,
+    }
+}
+
+async fn register_empty_mcp_tools(registry: &Registry, working_dir: &std::path::Path) {
+    let pool = Arc::new(crate::mcp::SharedMcpPool::new(
+        crate::mcp::McpConfig::default(),
+    ));
+    registry
+        .register_mcp_tools_for_dir(
+            None,
+            Some(pool),
+            Some("mcp-registry-lifetime".to_string()),
+            Some(working_dir.to_path_buf()),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn real_mcp_registration_does_not_retain_registry_tool_map() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+    let registry = Registry::empty();
+    let tools = Arc::downgrade(&registry.tools);
+
+    register_empty_mcp_tools(&registry, working_dir.path()).await;
+    assert!(registry.tool_names().await.iter().any(|name| name == "mcp"));
+
+    drop(registry);
+
+    assert!(
+        tools.upgrade().is_none(),
+        "McpManagementTool must not strongly retain the registry tool map that owns it"
+    );
+}
+
+#[tokio::test]
+async fn mcp_management_upgrades_registry_through_surviving_clone() {
+    let _env_lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+    let _home_guard = TestHomeGuard::new(home.path());
+    let working_dir = tempfile::tempdir().expect("create isolated MCP working directory");
+    let registry = Registry::empty();
+    let tools = Arc::downgrade(&registry.tools);
+
+    register_empty_mcp_tools(&registry, working_dir.path()).await;
+    let surviving_clone = registry.clone();
+    drop(registry);
+
+    let stale_tool = surviving_clone
+        .tools
+        .read()
+        .await
+        .get("mcp")
+        .cloned()
+        .expect("MCP management tool should be registered");
+    surviving_clone
+        .register("mcp__lifetime__sentinel".to_string(), stale_tool)
+        .await;
+
+    let output = surviving_clone
+        .execute(
+            "mcp",
+            serde_json::json!({"action": "reload"}),
+            mcp_test_context(working_dir.path()),
+        )
+        .await
+        .expect("MCP management should upgrade through the surviving registry clone");
+    assert!(output.output.contains("No servers found in config"));
+    assert!(
+        !surviving_clone
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "mcp__lifetime__sentinel"),
+        "reload should mutate the surviving registry through the weak handle"
+    );
+    assert!(
+        surviving_clone
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "mcp"),
+        "reload should preserve the MCP management tool"
+    );
+    assert!(tools.upgrade().is_some());
+
+    drop(surviving_clone);
+    assert!(tools.upgrade().is_none());
 }
 
 #[tokio::test]

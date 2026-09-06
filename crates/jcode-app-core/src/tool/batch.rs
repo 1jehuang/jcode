@@ -1,4 +1,4 @@
-use super::{Registry, Tool, ToolContext, ToolOutput};
+use super::{Registry, Tool, ToolContext, ToolOutput, WeakRegistry};
 use crate::bus::{BatchSubcallProgress, BatchSubcallState};
 use crate::message::ToolCall;
 use anyhow::Result;
@@ -94,11 +94,11 @@ fn ordered_batch_subcalls(
 }
 
 pub struct BatchTool {
-    registry: Registry,
+    registry: WeakRegistry,
 }
 
 impl BatchTool {
-    pub fn new(registry: Registry) -> Self {
+    pub(super) fn new(registry: WeakRegistry) -> Self {
         Self { registry }
     }
 }
@@ -216,6 +216,10 @@ impl Tool for BatchTool {
     }
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
+        let registry = self
+            .registry
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("Batch tool registry is no longer available"))?;
         let input = normalize_batch_input(input);
         let params: BatchInput = serde_json::from_value(input)?;
 
@@ -282,7 +286,7 @@ impl Tool for BatchTool {
         let mut stream: futures::stream::FuturesUnordered<_> = subcalls
             .iter()
             .map(|(i, tool_name, parameters)| {
-                let registry = self.registry.clone();
+                let registry = registry.clone();
                 let i = *i;
                 let tool_name = tool_name.clone();
                 let parameters = parameters.clone();

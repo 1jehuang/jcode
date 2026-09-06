@@ -166,6 +166,26 @@ pub struct Registry {
     compaction: Arc<RwLock<CompactionManager>>,
 }
 
+/// Non-owning handle used by tools stored inside a registry.
+///
+/// A tool cannot strongly own the registry containing it without creating an
+/// Arc cycle. Upgrade this handle only for the duration of a tool call.
+pub(super) struct WeakRegistry {
+    tools: std::sync::Weak<RwLock<HashMap<String, Arc<dyn Tool>>>>,
+    skills: Arc<RwLock<SkillRegistry>>,
+    compaction: Arc<RwLock<CompactionManager>>,
+}
+
+impl WeakRegistry {
+    pub(super) fn upgrade(&self) -> Option<Registry> {
+        Some(Registry {
+            tools: self.tools.upgrade()?,
+            skills: Arc::clone(&self.skills),
+            compaction: Arc::clone(&self.compaction),
+        })
+    }
+}
+
 impl Clone for Registry {
     fn clone(&self) -> Self {
         Self {
@@ -179,6 +199,14 @@ impl Clone for Registry {
 }
 
 impl Registry {
+    fn downgrade(&self) -> WeakRegistry {
+        WeakRegistry {
+            tools: Arc::downgrade(&self.tools),
+            skills: Arc::clone(&self.skills),
+            compaction: Arc::clone(&self.compaction),
+        }
+    }
+
     fn shared_skills_registry() -> Arc<RwLock<SkillRegistry>> {
         SkillRegistry::shared_registry()
     }
@@ -358,7 +386,7 @@ impl Registry {
         Self::insert_tool(
             &mut tools_map,
             "batch",
-            batch::BatchTool::new(registry.clone()),
+            batch::BatchTool::new(registry.downgrade()),
         );
         Self::insert_tool(
             &mut tools_map,
