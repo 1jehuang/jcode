@@ -359,7 +359,7 @@ pub(super) fn draw_messages(
 
     let total_lines = prepared.total_wrapped_lines();
     let viewport_height = render_area.height as usize;
-    // Pinned todo band (display.pin_todos): the full todo card rendered beneath
+    // Pinned todo band (display.pin_todos): a compact summary rendered beneath
     // the sticky previous-prompt preview, including at the top of the transcript.
     let (pinned_todo_band, pinned_todo_more_line) =
         pinned_todo_band_lines(app, text_render_area.width, render_area.height);
@@ -1379,42 +1379,54 @@ fn pinned_todo_band_lines(
         .iter()
         .map(|task| active_background_task_line(task, width))
         .collect();
-    let card_lines = if crate::config::config().display.pin_todos {
+    let mut lines = if crate::config::config().display.pin_todos {
         app.pinned_todos_payload()
             .map(|payload| {
-                let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                let mut msg = crate::tui::DisplayMessage::todos(payload.to_string());
+                // The cache keys by message, not renderer. Keep summary entries
+                // distinct from the full card used in the transcript/details.
+                msg.role = "pinned_todos_summary".to_string();
                 super::messages::get_cached_message_lines(
                     &msg,
                     width,
                     app.diff_mode(),
-                    super::messages::render_todos_message,
+                    super::messages::render_pinned_todos_summary,
                 )
             })
             .unwrap_or_default()
     } else {
         Vec::new()
     };
-    if card_lines.is_empty() && task_lines.is_empty() {
-        return (Vec::new(), None);
-    }
-
-    // Band budget: about a third of the viewport.
-    let budget = ((viewport_height as usize) / 3).clamp(2, 12);
-    let content_budget = budget.saturating_sub(task_lines.len()).max(2);
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let has_more = card_lines.len() > content_budget && !app.pinned_todos_expanded();
-    let mut more_line = None;
-    if has_more {
-        let shown = content_budget.saturating_sub(1);
-        let hidden = card_lines.len() - shown;
-        lines.extend(card_lines.into_iter().take(shown));
-        more_line = Some(lines.len());
-        lines.push(Line::from(Span::styled(
-            format!("  … +{} more (todo)", hidden),
-            Style::default().fg(dim_color()),
-        )));
-    } else {
-        lines.extend(card_lines);
+    // The summary is also the expand/collapse target. Collapsed todos consume
+    // exactly one row, independent of plan prose, groups, and task count.
+    let more_line = (!lines.is_empty()).then_some(0);
+    if more_line.is_some() && app.pinned_todos_expanded() {
+        lines[0].spans[0].content = "▾ ".into();
+        if let Some(payload) = app.pinned_todos_payload() {
+            let msg = crate::tui::DisplayMessage::todos(payload.to_string());
+            let card_lines = super::messages::get_cached_message_lines(
+                &msg,
+                width,
+                app.diff_mode(),
+                super::messages::render_todos_message,
+            );
+            // Leave transcript space even when a large plan is expanded.
+            let budget = ((viewport_height as usize) / 2)
+                .saturating_sub(task_lines.len() + 1)
+                .min(12);
+            if card_lines.len() > budget && budget > 0 {
+                lines.extend(card_lines.into_iter().take(budget - 1));
+                lines.push(super::truncate_line_with_ellipsis_to_width(
+                    &Line::from(Span::styled(
+                        "  … /todos for full list",
+                        Style::default().fg(dim_color()),
+                    )),
+                    width as usize,
+                ));
+            } else {
+                lines.extend(card_lines.into_iter().take(budget));
+            }
+        }
     }
     lines.extend(task_lines);
     (lines, more_line)

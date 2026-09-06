@@ -1526,8 +1526,8 @@ impl App {
                 super::super::layout_utils::point_in_rect(mouse.column, mouse.row, area)
             })
         {
-            self.pinned_todos_expanded = true;
-            finish_mouse_event!(false, "pinned_todos_expand");
+            self.pinned_todos_expanded = !self.pinned_todos_expanded;
+            finish_mouse_event!(false, "pinned_todos_toggle");
         }
 
         // A left press in the composer moves the caret first (native text-field

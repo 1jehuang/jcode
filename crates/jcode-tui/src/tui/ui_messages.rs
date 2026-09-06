@@ -1088,6 +1088,63 @@ fn strip_tool_result_timestamp_header(content: &str) -> &str {
     after_open[header_end + 1..].trim_start()
 }
 
+/// Compact pinned summary. Keep assessment metadata in the expanded card and
+/// prefer the active task over completed or merely queued work.
+pub(crate) fn render_pinned_todos_summary(
+    msg: &DisplayMessage,
+    width: u16,
+    _diff_mode: crate::config::DiffDisplayMode,
+) -> Vec<Line<'static>> {
+    let Ok(payload) = serde_json::from_str::<TodoCardPayload>(&msg.content) else {
+        return Vec::new();
+    };
+    let (todos, _, _) = payload.into_parts();
+    if todos.is_empty() {
+        return Vec::new();
+    }
+    let completed = todos
+        .iter()
+        .filter(|todo| todo.status == "completed")
+        .count();
+    let total = todos
+        .iter()
+        .filter(|todo| todo.status != "cancelled")
+        .count();
+    let current = todos
+        .iter()
+        .find(|todo| todo.status == "in_progress")
+        .or_else(|| {
+            todos
+                .iter()
+                .find(|todo| todo.status != "completed" && todo.status != "cancelled")
+        });
+    let (icon, label, color) = match current {
+        Some(todo) => (
+            if todo.status == "in_progress" {
+                "●"
+            } else {
+                "○"
+            },
+            todo.content.replace(['\r', '\n', '\t'], " "),
+            accent_color(),
+        ),
+        None if total == 0 => ("×", "Cancelled".to_string(), todo_meta_color()),
+        None => ("✓", "All done".to_string(), todo_score_color()),
+    };
+    vec![super::truncate_line_with_ellipsis_to_width(
+        &Line::from(vec![
+            Span::styled("▸ ", Style::default().fg(todo_meta_color())),
+            Span::styled(
+                format!("todo {completed}/{total}  "),
+                Style::default().fg(todo_meta_color()),
+            ),
+            Span::styled(format!("{icon} "), Style::default().fg(color)),
+            Span::raw(label),
+        ]),
+        width as usize,
+    )]
+}
+
 /// Render the inline todo-list card (`role == "todos"`). New payloads contain
 /// both todo items and goal assessments; the legacy item-array shape remains
 /// supported so older transcript entries keep rendering.

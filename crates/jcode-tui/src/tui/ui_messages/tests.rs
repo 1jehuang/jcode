@@ -477,6 +477,64 @@ fn render_overnight_message_uses_rounded_progress_card() {
 }
 
 #[test]
+fn pinned_todos_summary_prioritizes_current_work_and_omits_metadata() {
+    let msg = DisplayMessage::todos(serde_json::json!({
+        "todos": [
+            {"id":"1", "content":"Finished work", "status":"completed", "priority":"high"},
+            {"id":"2", "content":"Queued work", "status":"pending", "priority":"high"},
+            {"id":"3", "content":"Current work", "status":"in_progress", "priority":"high", "group":"Verbose group", "confidence":"verified"},
+            {"id":"4", "content":"Dropped work", "status":"cancelled", "priority":"high"}
+        ],
+        "plan": {"user_intention":"Verbose intention", "understands_user_intent":"clear"}
+    }).to_string());
+    let lines = render_pinned_todos_summary(&msg, 80, crate::config::DiffDisplayMode::Off);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(extract_line_text(&lines[0]), "▸ todo 1/3  ● Current work");
+}
+
+#[test]
+fn pinned_todos_summary_handles_pending_completed_cancelled_and_legacy_payloads() {
+    for (status, expected) in [
+        ("pending", "▸ todo 0/1  ○ Task"),
+        ("completed", "▸ todo 1/1  ✓ All done"),
+        ("cancelled", "▸ todo 0/0  × Cancelled"),
+    ] {
+        let msg = DisplayMessage::todos(
+            serde_json::json!([
+                {"id":"1", "content":"Task", "status":status, "priority":"high"}
+            ])
+            .to_string(),
+        );
+        let lines = render_pinned_todos_summary(&msg, 80, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(extract_line_text(&lines[0]), expected);
+    }
+    for payload in ["[]", "{}", "not json"] {
+        let msg = DisplayMessage::todos(payload.to_string());
+        assert!(
+            render_pinned_todos_summary(&msg, 80, crate::config::DiffDisplayMode::Off).is_empty()
+        );
+    }
+}
+
+#[test]
+fn pinned_todos_summary_stays_one_row_at_narrow_unicode_widths() {
+    let msg = DisplayMessage::todos(serde_json::json!([
+        {"id":"1", "content":"测试\ncurrent\twork 🦀 with a very long label", "status":"in_progress", "priority":"high"}
+    ]).to_string());
+    for width in [0, 1, 16, 20, 40, 80] {
+        let lines = render_pinned_todos_summary(&msg, width, crate::config::DiffDisplayMode::Off);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].width() <= width as usize,
+            "{width}: {:?}",
+            lines[0]
+        );
+        assert!(!extract_line_text(&lines[0]).contains(['\r', '\n', '\t']));
+    }
+}
+
+#[test]
 fn render_todos_message_shows_grouped_card_with_status_glyphs() {
     fn todo(id: &str, content: &str, status: &str, group: Option<&str>) -> crate::todo::TodoItem {
         crate::todo::TodoItem {
