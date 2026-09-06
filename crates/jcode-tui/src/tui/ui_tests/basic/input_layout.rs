@@ -11,11 +11,13 @@ fn first_prompt_preserves_welcome_header_spacing() {
                 ..Default::default()
             };
             let welcome = buffer_to_text(&render_full(&state, width, height));
+            // Unseen release notes may fill all the space above the header.
+            // Track a persistent header row, not the first nonblank screen row.
             let header_y = welcome
                 .lines()
-                .position(|line| !line.trim().is_empty())
+                .position(|line| line.contains("/model to switch"))
                 .unwrap();
-            assert!(header_y > 0, "welcome header should have top padding at {width}x{height}: {welcome}");
+            assert!(header_y > 0, "header is below the top: {welcome}");
 
             state.input.clear();
             state
@@ -24,7 +26,9 @@ fn first_prompt_preserves_welcome_header_spacing() {
             state.messages_version += 1;
             let submitted = buffer_to_text(&render_full(&state, width, height));
             assert_eq!(
-                submitted.lines().position(|line| !line.trim().is_empty()),
+                submitted
+                    .lines()
+                    .position(|line| line.contains("/model to switch")),
                 Some(header_y),
                 "submitting must not jump the transcript to the top: {submitted}"
             );
