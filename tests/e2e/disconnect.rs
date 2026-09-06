@@ -507,3 +507,71 @@ async fn remote_disconnect_while_idle_closes_session() -> Result<()> {
 async fn remote_disconnect_after_done_closes_session() -> Result<()> {
     abrupt_disconnect(Turn::Completed, true).await
 }
+
+#[tokio::test]
+async fn native_ping_ping_subscribe_history_keeps_one_socket() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime = tempfile::tempdir()?;
+    let socket = runtime.path().join("server.sock");
+    let debug_socket = runtime.path().join("debug.sock");
+    let server = server::Server::new_with_paths(
+        Arc::new(MockProvider::new()),
+        socket.clone(),
+        debug_socket.clone(),
+    );
+    let handle = tokio::spawn(async move { server.run().await });
+    let result = async {
+        wait_for_server_ready(&socket, &debug_socket).await?;
+        let connection = server::connect_socket(&socket).await?;
+        let (reader, mut writer) = connection.into_split();
+        let mut reader = BufReader::new(reader);
+        for ping_id in [71, 72] {
+            send_native(
+                &mut writer,
+                serde_json::json!({"type":"ping", "id":ping_id}),
+            )
+            .await?;
+            native_until(&mut reader, |event| {
+                matches!(event,
+                    ServerEvent::Pong {id, native_ssh_protocol: Some(1)} if *id == ping_id
+                )
+            })
+            .await?;
+        }
+        send_native(
+            &mut writer,
+            serde_json::json!({
+                "type":"subscribe", "id":73, "working_dir":std::env::current_dir()?,
+                "continue_on_disconnect":true,
+            }),
+        )
+        .await?;
+        let events = native_until(&mut reader, |event| {
+            matches!(event, ServerEvent::Done { id: 73 })
+        })
+        .await?;
+        let session_id = events
+            .iter()
+            .find_map(|event| match event {
+                ServerEvent::SessionId { session_id } => Some(session_id.clone()),
+                _ => None,
+            })
+            .context("subscribe after capability probes must create a session")?;
+        send_native(
+            &mut writer,
+            serde_json::json!({"type":"get_history", "id":74}),
+        )
+        .await?;
+        native_until(&mut reader, |event| {
+            matches!(event,
+                ServerEvent::History {id:74, session_id: id, ..} if id == &session_id
+            )
+        })
+        .await?;
+        drop((reader, writer));
+        Ok(())
+    }
+    .await;
+    abort_server_and_cleanup(&handle, &socket, &debug_socket);
+    result
+}

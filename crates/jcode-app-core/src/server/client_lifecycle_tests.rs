@@ -1424,6 +1424,14 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
         other => panic!("expected error response, got {other:?}"),
     }
 
+    line.clear();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client_reader.read_line(&mut line))
+            .await
+            .expect("non-Ping lightweight command must close its one-shot connection")
+            .expect("read EOF"),
+        0,
+    );
     drop(client_writer);
     server_task
         .await

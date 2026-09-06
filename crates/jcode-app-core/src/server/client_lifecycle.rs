@@ -441,6 +441,7 @@ pub(super) async fn handle_client(
         match decode_request(&line) {
             Ok(request) => {
                 if request.is_lightweight_control_request() {
+                    let keep_connection_open = matches!(request, Request::Ping { .. });
                     handle_lightweight_control_request(
                         request,
                         Arc::clone(&writer),
@@ -467,6 +468,12 @@ pub(super) async fn handle_client(
                         },
                     )
                     .await?;
+                    // Native SSH probes daemon capability before sending its
+                    // Subscribe on this same stream. Ping must not consume the
+                    // connection, unlike the other one-shot control requests.
+                    if keep_connection_open {
+                        continue;
+                    }
                     return Ok(());
                 }
                 break request;
