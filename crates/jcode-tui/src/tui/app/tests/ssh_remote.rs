@@ -28,9 +28,12 @@ fn with_ssh_remote_test_home(f: impl FnOnce()) {
 fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
     with_ssh_remote_test_home(|| {
         let mut local = crate::session::Session::create(None, None);
-        local
-            .messages
-            .push(crate::message::Message::user("local-only secret"));
+        local.add_message(
+            crate::message::Role::User,
+            vec![crate::message::ContentBlock::Text {
+                text: "local-only secret".into(),
+            }],
+        );
         local.save().expect("save local collision");
         let app = App::new_for_remote(Some(local.id.clone()));
         assert!(app.display_messages().is_empty());
