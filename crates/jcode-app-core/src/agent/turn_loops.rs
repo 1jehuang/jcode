@@ -2,6 +2,20 @@ use super::*;
 use crate::{terminal_eprintln as eprintln, terminal_print as print, terminal_println as println};
 
 impl Agent {
+    /// Speculatively prewarm the provider while a newly created session is idle.
+    ///
+    /// This deliberately bypasses `tool_definitions`, whose cache lock is only
+    /// appropriate once an actual turn starts. Late MCP registration or user
+    /// customization can therefore still change the foreground tool snapshot;
+    /// the provider is responsible for discarding an incompatible warmup.
+    pub(crate) async fn prewarm_provider_idle(&self) {
+        let tools = self.tool_definitions_for_debug().await;
+        let split_prompt = self.build_system_prompt_split(None);
+        self.provider
+            .prewarm(&tools, &split_prompt.static_part)
+            .await;
+    }
+
     /// Run turns until no more tool calls
     /// Maximum number of context-limit compaction retries before giving up.
     pub(super) const MAX_CONTEXT_LIMIT_RETRIES: u32 = 5;
@@ -64,6 +78,14 @@ impl Agent {
                     repaired
                 ));
             }
+            // Start provider transport setup before deriving and potentially
+            // compacting the request history. This is the first point where the
+            // stable request settings are available.
+            let mut tools = self.tool_definitions().await;
+            let mut split_prompt = self.build_system_prompt_split(None);
+            self.provider
+                .prewarm(&tools, &split_prompt.static_part)
+                .await;
             let (messages, compaction_event) = self.messages_for_provider();
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
@@ -80,15 +102,17 @@ impl Agent {
                         tokens_str
                     );
                 }
+                // Compaction clears the tool lock, so rebuild the foreground
+                // request metadata rather than relying on the pre-compaction snapshot.
+                tools = self.tool_definitions().await;
+                split_prompt = self.build_system_prompt_split(None);
             }
 
-            let tools = self.tool_definitions().await;
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending =
                 self.build_memory_prompt_nonblocking_shared(std::sync::Arc::clone(&messages), None);
             // Use split prompt for better caching - static content cached, dynamic not
-            let split_prompt = self.build_system_prompt_split(None);
             self.log_prompt_prefix_accounting(&split_prompt, &tools);
 
             // Check for client-side cache violations before memory injection.

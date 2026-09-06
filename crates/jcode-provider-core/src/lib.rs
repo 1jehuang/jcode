@@ -74,6 +74,12 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 /// Provider trait for LLM backends.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Prepare provider-specific request state before the foreground completion.
+    ///
+    /// The default is intentionally a no-op. Implementations must not send user
+    /// input through this hook or wait for a network warmup to finish.
+    async fn prewarm(&self, _tools: &[ToolDefinition], _system_static: &str) {}
+
     /// Send messages and get a streaming response.
     /// resume_session_id: Optional session ID to resume a previous conversation (provider-specific).
     async fn complete(

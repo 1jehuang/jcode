@@ -1718,6 +1718,24 @@ impl Default for MultiProvider {
 
 #[async_trait]
 impl Provider for MultiProvider {
+    async fn prewarm(&self, tools: &[ToolDefinition], system_static: &str) {
+        let provider = match self.active_provider() {
+            ActiveProvider::Claude => self.anthropic_provider().or_else(|| self.claude_provider()),
+            ActiveProvider::OpenAI => self.openai_provider(),
+            ActiveProvider::Copilot => self.copilot_provider(),
+            ActiveProvider::Antigravity => self.antigravity_provider(),
+            ActiveProvider::Gemini => self.gemini_provider(),
+            ActiveProvider::Cursor => self.cursor_provider(),
+            ActiveProvider::Bedrock => self
+                .bedrock_provider()
+                .map(|provider| provider as Arc<dyn Provider>),
+            ActiveProvider::OpenRouter => self.active_openrouter_execution_provider(),
+        };
+        if let Some(provider) = provider {
+            provider.prewarm(tools, system_static).await;
+        }
+    }
+
     async fn complete(
         &self,
         messages: &[Message],

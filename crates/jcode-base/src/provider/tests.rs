@@ -1030,6 +1030,82 @@ fn test_multi_provider_with_cursor() -> MultiProvider {
     }
 }
 
+struct PrewarmRecordingProvider {
+    name: &'static str,
+    prewarms: Arc<std::sync::atomic::AtomicUsize>,
+    completions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for PrewarmRecordingProvider {
+    async fn prewarm(&self, _tools: &[ToolDefinition], _system_static: &str) {
+        self.prewarms
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> anyhow::Result<EventStream> {
+        self.completions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("recording provider must not complete")
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            name: self.name,
+            prewarms: Arc::clone(&self.prewarms),
+            completions: Arc::clone(&self.completions),
+        })
+    }
+}
+
+#[test]
+fn prewarm_delegates_only_to_active_provider_without_completing() {
+    let runtime = enter_test_runtime();
+    runtime.block_on(async {
+        let active_prewarms = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let inactive_prewarms = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = test_multi_provider_with_cursor();
+        *provider
+            .cursor
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(PrewarmRecordingProvider {
+                name: "active",
+                prewarms: Arc::clone(&active_prewarms),
+                completions: Arc::clone(&completions),
+            }));
+        *provider
+            .openai
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(PrewarmRecordingProvider {
+                name: "inactive",
+                prewarms: Arc::clone(&inactive_prewarms),
+                completions: Arc::clone(&completions),
+            }));
+
+        provider.prewarm(&[], "static instructions").await;
+
+        assert_eq!(active_prewarms.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            inactive_prewarms.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(completions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    });
+}
+
 #[test]
 fn new_session_fork_reloads_changed_config_provider_and_model() {
     with_clean_provider_test_env(|| {
