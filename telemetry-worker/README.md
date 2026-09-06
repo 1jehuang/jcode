@@ -134,7 +134,7 @@ wrangler d1 execute jcode-telemetry --remote --file=migrations/0005_workflow_tur
 
 (...and so on through the latest numbered migration; each also has an
 `npm run migrate:<name>` alias, see Ops helpers below. The newest is
-`migrations/0018_web_quality_telemetry.sql` / `npm run migrate:web-quality`.)
+`migrations/0026_concurrency_tracking.sql` / `npm run migrate:concurrency`.)
 
 Then redeploy the worker:
 
@@ -180,7 +180,151 @@ npm run health
 npm run dau
 npm run users
 npm run token-value
+npm run concurrency
 ```
+
+## Reliable runtime concurrency
+
+`npm run concurrency` (or `npm run concurrency -- --json`) runs `concurrency.sql`.
+It reports **observed runtime Agent session peaks**, not people, active turns,
+or the number of users simultaneously online. An installation ID is not a
+person. Counts cover instrumented Agent lifetimes sharing a `JCODE_HOME` on one
+host, including idle agents. They exclude old clients without the new guard,
+other homes and other devices. Root means no parent. Child means a parent exists,
+including manual splits/transfers as well as automated agents, not just swarm
+workers. Root and child peaks are independent and must not be summed.
+
+### Migration and rollout order
+
+For an existing database already through migration 0025:
+
+```bash
+cd telemetry-worker
+npm test
+# Optional local D1 check, never point this at --remote:
+npx wrangler d1 execute jcode-telemetry --local --file=schema.sql
+npx wrangler d1 execute jcode-telemetry --local --file=migrations/0026_concurrency_tracking.sql
+npx wrangler d1 execute jcode-telemetry --local --command="SELECT * FROM trusted_concurrency_events LIMIT 1"
+
+# Production operations for the release coordinator, not automatic repair:
+npm run migrate:concurrency
+npx wrangler d1 execute jcode-telemetry --remote --command="PRAGMA table_info(concurrency_details)"
+npm run deploy
+npm run concurrency
+npm run health
+curl -s https://telemetry.jcode.sh/v1/health
+```
+
+Migration 0026 is additive and repeatable. It creates `concurrency_details`,
+`concurrency_event_quality` and `trusted_concurrency_events`. It does **not**
+rewrite or backfill `events` or `session_details`. The separate detail table
+avoids the nearly-full `events` column budget and stores both validated nullable
+columns and parsed raw concurrency JSON, including presence/type distinctions.
+Fresh installations get the same objects from `schema.sql`; do not run all old
+ALTER migrations on top of the fresh schema. Redeploy after the migration because
+existing worker isolates cache other schema columns. The new table's absence is
+not cached. Confirm the `FIREHOSE_CONCURRENCY` Analytics Engine binding is enabled
+and inspect worker logs for `concurrency detail write failed` after rollout.
+
+**Trusted results initially have zero observations and NULL peaks/coverage until
+corrected clients ship. This does not mean nobody multi-sessions.** Deploying
+the database and worker cannot fix measurements made by old clients.
+
+### Intake and trust contract
+
+Only `event="session_concurrency"`, `concurrency_tracking_version=2`,
+`concurrency_tracking_scope="runtime_agent_sessions"`, available=true events
+can be trusted. Each has `phase="start"|"end"`, `agent_role="root"|"child"`,
+a logical `session_id`, and a fresh `concurrency_session_id` for that runtime
+incarnation. Starts are emitted when a guard is created. Ends are emitted when
+it finishes. A crash can leave only a start, which is not an end peak.
+
+Validation requires JSON numeric safe integers, without coercion or clipping:
+
+- `max_concurrent_sessions >= active_sessions_at_start >= 1`.
+- `other_active_sessions_at_start = active_sessions_at_start - 1`.
+- JSON boolean `multi_sessioned = (max_concurrent_sessions > 1)`.
+- Root/child start counts are nonnegative, sum to the total, and include the
+  reporting agent's own role.
+- Each role peak is at least its start count, at most the total peak, and the
+  sum of independent role peaks is at least the total peak.
+- On a start event, each peak equals its corresponding start count.
+- Runtime `is_ci` is an explicit JSON boolean. CI events are excluded from
+  trusted reports, while CI-built release binaries are not automatically CI.
+
+The only numeric ceiling is JavaScript's exactly representable integer limit
+(9,007,199,254,740,991). Unsafe integers are quarantined, never capped to a
+plausible value. Raw JSON is the **parsed** payload, not original wire bytes.
+Missing fields, explicit null and zero remain distinguishable. Invalid metrics
+do not reject an otherwise valid parent event. They receive `quality=invalid`
+and a reason, with their parsed input retained in `raw_json`. Other statuses
+include missing_version, legacy_version, unsupported_version, legacy_scope,
+missing_fields and unavailable. Existing lifecycle rows without new details are
+legacy_unclassified. Dedicated events whose detail write failed are missing_detail.
+SQL rechecks the invariants and labels inconsistent stored data invalid_storage.
+“Trusted” means versioned and structurally validated, not authenticated or immune
+to malicious reporting. This is an anonymous unauthenticated endpoint.
+
+Old `session_start`/`session_end`/`session_crash` fields remain raw/untrusted even
+if an event claims v2. Their historical source was a process-global singleton,
+not one measurement per logical Agent. New clients may explicitly report
+scope=legacy_process_global, available=false with numeric fields omitted. No
+missing count is synthesized as zero in newly received compatibility details.
+
+### Coverage and interpretation
+
+The report uses the last 30 days by **server receipt time**. End peaks may cover
+time before that window. It shows all legacy and dedicated quality/CI buckets,
+dedicated non-CI event validation coverage, invalid reasons, starts without ends
+and ends without starts. Missing/unavailable/legacy events and runtime CI never
+enter peak summaries. Coverage is among received events, not the fraction of
+all installed clients or real sessions observed.
+
+Session peaks deduplicate end observations by installation + runtime incarnation.
+Starts without a trusted end are excluded from peak estimates. A valid end
+without a start in the window is included and separately counted. Per-install
+peaks are the highest observed trusted end peak per installation, not an exact
+continuous concurrency series or synchronized global peak. Session-weighted
+and installation-weighted averages have different denominators. Reporting loss,
+crashes and uninstrumented clients can bias both. The raw history has **no exact
+repair** because it did not record the required identities/lifetimes.
+
+Known severe legacy anomaly from the September 2026 investigation: a 30-day
+reported peak reached **85,318**. Release 0.81.4 also had **2,852 of 7,877**
+seven-day reports above 100, with a peak of **1,967**, so this was not merely CI.
+Those counts are preserved for audit but must not be quoted as reliable
+concurrency. Do not “correct” them by choosing an arbitrary cap.
+
+### Storage failure and retention
+
+For dedicated events, `firehose:true` refers only to the dedicated
+`jcode_concurrency_firehose` dataset, never the full main firehose which lacks
+concurrency metrics. Its append-only schema is blob1..16 = event, event_id,
+session_id, telemetry_id, version, os, arch, build_channel, country, raw_json,
+quality, quality_reason, scope, phase, role, runtime incarnation. double1..11 =
+tracking version, available, runtime is_ci, active_start, other_start, total_peak,
+root_start, child_start, root_peak, child_peak, multi. index1 is telemetry_id.
+Filter blob11='trusted', blob13='runtime_agent_sessions', double1=2, double2=1,
+double3=0 and blob14='end' before aggregating end peaks from double6. Unknown or
+invalid numeric copies use 0 because Analytics Engine has no NULL doubles;
+the quality filter is mandatory and excludes those copies. JSON in blob10 preserves version,
+scope, availability, runtime incarnation, phase, role, counts, booleans and
+missing keys. Oversized points are not silently truncated: firehose:false is
+reported while D1 can still retain the parsed payload. Analytics Engine is an
+approximately 90-day sampled fallback, not part of the D1 report denominator.
+
+Responses add `concurrency_durable` for relevant events. `durable:true` alone
+means the parent event succeeded, not that the concurrency detail did. A missing
+migration or detail write failure leaves the parent intact and returns
+concurrency_durable:false. Retrying the same event can insert a missing detail
+without rewriting an existing one. A dedicated event returns HTTP 503 (retryable)
+if neither its detail nor complete firehose point succeeds, even when the parent
+row was saved. Legacy lifecycle events do not fail over their concurrency detail.
+Numeric copies are directly queryable with Analytics Engine SQL. Raw blob10 is
+for audit, not a dependency on JSON-extraction support in that API.
+Dedicated event rows are retained for 365
+days (halved during emergency pruning), and their detail rows cascade on parent
+deletion. Lifecycle detail rows follow their existing parent retention.
 
 ## Token value dashboard
 
@@ -432,8 +576,8 @@ wrangler d1 execute jcode-telemetry --command "SELECT created_at, feedback_text,
 # Session starts by UTC hour (workflow timing)
 wrangler d1 execute jcode-telemetry --command "SELECT session_start_hour_utc, COUNT(*) AS sessions FROM events WHERE event = 'session_start' GROUP BY session_start_hour_utc ORDER BY session_start_hour_utc"
 
-# Multi-sessioning rate
-wrangler d1 execute jcode-telemetry --command "SELECT AVG(CASE WHEN multi_sessioned > 0 THEN 1.0 ELSE 0.0 END) AS multi_session_rate FROM events WHERE event IN ('session_end', 'session_crash') AND created_at > datetime('now', '-30 days')"
+# Reliable concurrency with coverage (legacy lifecycle counters are untrusted)
+npm run concurrency
 
 # Per-turn latency and success
 wrangler d1 execute jcode-telemetry --command "SELECT AVG(turn_active_duration_ms) AS avg_turn_ms, AVG(CASE WHEN turn_success > 0 THEN 1.0 ELSE 0.0 END) AS turn_success_rate FROM events WHERE event = 'turn_end' AND created_at > datetime('now', '-30 days')"

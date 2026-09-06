@@ -138,7 +138,7 @@ function makeDb(plan = {}) {
               if (plan.failInserts && /^INSERT/i.test(sql.trim())) {
                 throw new Error(plan.failureMessage || "generic transient error");
               }
-              return { meta: { changes: 1, size_after: sizeAfter } };
+              return { meta: { changes: /^DELETE/i.test(sql.trim()) ? 0 : 1, size_after: sizeAfter } };
             },
             async all() {
               executed.push({ sql, values });
