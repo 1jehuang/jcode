@@ -189,3 +189,32 @@ fn ssh_login_failed_completion_stays_private_and_cancel_clears_state() {
         });
     });
 }
+
+#[test]
+fn ssh_login_cancel_after_queued_error_still_requests_remote_cleanup() {
+    with_app(|app| {
+        // No spawned command can run before this block returns: the ready channel
+        // and dummy connection require no yielding on a single-thread runtime.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            app.handle_ssh_login_command("/login");
+            let login = app.remote_login.as_mut().unwrap();
+            login.provider = "openai".into();
+            login.phase = Phase::Completing;
+            login.operation = Some(Operation::Callback);
+            login.task = Some(Task::ready(Err("Already finished")));
+            app.cancel_ssh_login();
+            assert!(app.poll_ssh_login(&mut remote).await);
+            let login = app.remote_login.as_ref().unwrap();
+            assert!(login.phase == Phase::Cancelling);
+            assert!(login.operation == Some(Operation::Cancel));
+            assert!(login.task.is_some());
+        });
+        // Destroy queued tasks without executing a real SSH subprocess.
+        drop(runtime);
+    });
+}

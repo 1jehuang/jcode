@@ -22,6 +22,7 @@ enum Phase {
     Input,
     Completing,
     Cancelling,
+    Finished,
 }
 
 // Intentionally not Debug/Clone: the input buffer can contain an OAuth secret.
@@ -33,10 +34,12 @@ pub(super) struct RemoteLogin {
     input_kind: String,
     input: String,
     task: Option<Task>,
+    operation: Option<Operation>,
     quit_after_cancel: bool,
 }
 impl RemoteLogin {
     fn run(&mut self, operation: Operation, payload: Option<String>) {
+        self.operation = Some(operation);
         self.task = Some(Task::spawn(
             self.target.clone(),
             self.provider.clone(),
@@ -44,6 +47,20 @@ impl RemoteLogin {
             operation,
             payload,
         ));
+    }
+}
+
+impl Drop for RemoteLogin {
+    fn drop(&mut self) {
+        // A waiting-for-paste flow has no Task to cancel. Graceful teardown still
+        // invalidates its pending remote authorization, without touching credentials.
+        if self.task.is_none() && !self.provider.is_empty() && self.phase != Phase::Finished {
+            command::cleanup_detached(
+                self.target.clone(),
+                self.provider.clone(),
+                self.flow.clone(),
+            );
+        }
     }
 }
 
@@ -88,6 +105,7 @@ impl App {
             input_kind: String::new(),
             input: String::new(),
             task: None,
+            operation: None,
             quit_after_cancel: false,
         });
         if let Some(provider) = provider {
@@ -122,6 +140,9 @@ impl App {
     }
 
     fn finish_ssh_login_ui(&mut self) {
+        if let Some(login) = self.remote_login.as_mut() {
+            login.phase = Phase::Finished;
+        }
         self.remote_login = None;
         self.pending_login = None;
         self.input.clear();
@@ -388,6 +409,12 @@ impl App {
             }
             Err(message) => {
                 if login.phase == Phase::Cancelling {
+                    // Esc can race a result already queued by a finished task. In
+                    // that case the task never receives its cancellation signal.
+                    if login.operation != Some(Operation::Cancel) {
+                        login.run(Operation::Cancel, None);
+                        return true;
+                    }
                     self.finish_ssh_login_ui();
                     self.should_quit |= quit_after_cancel;
                     self.push_display_message(DisplayMessage::error("SSH login cancelled locally, but remote cleanup could not be confirmed. The pending authorization expires automatically. No local credentials were changed."));

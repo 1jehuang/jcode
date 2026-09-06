@@ -254,6 +254,23 @@ pub(super) struct Task {
     cancel: Option<oneshot::Sender<()>>,
     pub(super) reply: oneshot::Receiver<Result<Reply, &'static str>>,
 }
+
+pub(super) fn cleanup_detached(target: Target, provider: String, flow: String) {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            let (_keepalive, mut never_cancel) = oneshot::channel();
+            let _ = execute(
+                &target,
+                &provider,
+                &flow,
+                Operation::Cancel,
+                None,
+                &mut never_cancel,
+            )
+            .await;
+        });
+    }
+}
 impl Task {
     #[cfg(test)]
     pub(super) fn ready(result: Result<Reply, &'static str>) -> Self {
