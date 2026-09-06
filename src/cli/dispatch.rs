@@ -78,6 +78,11 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         // Do not run local resume lookup, provider bootstrap, or self-dev setup.
         return super::ssh::run(args).await;
     }
+    // Import is a narrow stdin-only credential operation. Do not trigger config
+    // migrations, provider discovery, or unrelated credential imports first.
+    if let Some(Command::Auth(AuthCommand::Import { json, .. })) = &args.command {
+        return super::auth_import::run(&args.provider, *json);
+    }
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -373,6 +378,7 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             debug::run_debug_command(&command, &arg, session, socket, wait).await?;
         }
         Some(Command::Auth(subcmd)) => match subcmd {
+            AuthCommand::Import { .. } => unreachable!("auth import handled before bootstrap"),
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
             AuthCommand::Doctor {
                 provider,

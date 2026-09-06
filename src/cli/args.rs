@@ -1048,6 +1048,16 @@ pub(crate) enum ProviderCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCommand {
+    /// Import one selected OAuth login from a trusted client (never overwrites a store)
+    Import {
+        /// Read the private credential envelope from stdin, never from command arguments
+        #[arg(long, required = true)]
+        stdin: bool,
+
+        /// Emit a secret-free JSON acknowledgement
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text

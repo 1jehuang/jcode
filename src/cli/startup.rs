@@ -16,6 +16,21 @@ fn sync_output_style_from_config() {
 }
 
 pub async fn run() -> Result<()> {
+    // Credential import must refuse existing stores without normal startup
+    // hardening, migrations, telemetry, or provider discovery touching them.
+    // A read-only early parse leaves every other command's ordering unchanged.
+    if let Ok(args) = Args::try_parse()
+        && args.ssh.is_none()
+        && matches!(
+            args.command,
+            Some(Command::Auth(super::args::AuthCommand::Import { .. }))
+        )
+    {
+        if let Some(cwd) = &args.cwd {
+            std::env::set_current_dir(cwd)?;
+        }
+        return dispatch::run_main(args).await;
+    }
     startup_profile::init();
 
     terminal::install_panic_hook();

@@ -2,6 +2,37 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn credential_import_cli_requires_stdin_and_preserves_explicit_provider() {
+    for provider in ["openai", "claude"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "auth",
+            "import",
+            "--provider",
+            provider,
+            "--stdin",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(args.provider.as_arg_value(), provider);
+        assert!(matches!(
+            args.command,
+            Some(Command::Auth(AuthCommand::Import {
+                stdin: true,
+                json: true
+            }))
+        ));
+    }
+    for args in [
+        vec!["jcode", "auth", "import", "--provider", "openai"],
+        vec!["jcode", "auth", "import", "--stdin", "--token", "secret"],
+        vec!["jcode", "auth", "import", "--stdin", "--overwrite"],
+    ] {
+        assert!(Args::try_parse_from(args).is_err());
+    }
+}
+
+#[test]
 fn native_ssh_attach_arguments_parse_and_do_not_steal_local_socket() {
     let args = Args::try_parse_from([
         "jcode",
