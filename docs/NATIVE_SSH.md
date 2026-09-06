@@ -33,8 +33,9 @@ callback page cannot be reached. `/cancel` cancels the pending login.
 This remote login surface supports the scriptable OAuth providers OpenAI, Claude,
 Gemini, Antigravity, Google, and Copilot. Google additionally requires its OAuth
 client configuration to be set up on the VM first. Other credential routes still
-require `jcode login` on the host. Native attach never copies or forwards existing local
-provider credentials, AWS credentials, an SSH agent, or repository contents.
+require `jcode login` on the host. Native attach never automatically copies local
+provider credentials. AWS credentials, SSH agents, and repository contents are
+never forwarded by this feature.
 
 Each native login attempt has its own remote flow ID, so two clients cannot
 replace each other's pending OAuth state. Callback input travels over SSH stdin,
@@ -42,6 +43,50 @@ not command-line arguments or chat messages. Cancelling a pending attempt remove
 only that attempt's state, not another login or previously saved credentials.
 Cancellation is not logout and cannot revoke credentials already issued by a
 completed exchange. Closing the UI terminates its owned authentication subprocess.
+
+### One-time import of a local login
+
+To avoid another browser login on a trusted SSH host, run one of these commands
+**inside the native SSH TUI**:
+
+```text
+/login --import-local openai
+/login --import-local claude
+```
+
+Read the destination-host warning, then type exactly `confirm` and press Enter.
+Before confirmation, no credential export is performed. Esc or `/cancel` at the
+confirmation prompt reads and copies nothing. After confirmation, the selected
+active account is read from the laptop's Jcode-managed OAuth store and sent over
+the pinned-host SSH connection through stdin, never command-line arguments or
+chat messages. The remote CLI stores it privately and the TUI requests a remote
+provider/catalog refresh. Reopen older client windows after updating both binaries.
+
+Important boundaries:
+
+- This is an explicit **one-time copy**, not automatic startup synchronization.
+  The remote host receives usable credentials, including refresh credentials.
+  Only do this for a host you trust with that provider account.
+- OpenAI and Claude **Jcode-managed OAuth accounts only** are supported. Other
+  accounts, external-tool stores, keychains, environment/API keys, AWS credentials,
+  and general configuration are not imported. Missing, malformed, or expired
+  source credentials are refused. Use ordinary remote `/login` instead.
+- Any existing selected-provider destination store is refused, even an empty or
+  malformed file. Claude's shared `auth.json` is also refused when it only contains
+  other providers. This conservative rule prevents overwriting concurrent changes.
+  No `--overwrite` switch exists. Other credential stores are preserved.
+- New credential files use mode 0600 within a 0700 Jcode data directory, with
+  atomic no-replace publication. Secret transport data is bounded to 64 KiB and
+  is not logged or written as a transport file. Import is currently Unix-only.
+- Acknowledged import means **credentials were stored**, not that the provider
+  accepted them. OAuth refresh-token rotation can cause either machine's copied
+  login to stop working. Independent remote `/login` avoids sharing refresh state.
+- Once transfer starts, cancellation/disconnection cannot promise rollback.
+  Check the remote login state before retrying. There is no automatic retry or sync.
+
+The receiver command `jcode auth import --provider openai --stdin --json` is for
+the native client, not for pasting tokens into a shell. There is deliberately no
+CLI export command that prints credentials.
 
 ## Protocol and compatibility
 
