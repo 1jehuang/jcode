@@ -71,6 +71,9 @@ pub enum ApiRequest {
     SoftInterrupt {
         session_id: String,
         content: String,
+        /// (media_type, base64_data) pairs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<(String, String)>,
         #[serde(default)]
         urgent: bool,
     },

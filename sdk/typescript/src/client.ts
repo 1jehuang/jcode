@@ -554,7 +554,22 @@ export class JcodeClient extends EventEmitter {
   }
 
   async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
-    await this.requestOk({ req: "soft_interrupt", session_id: sessionId, content, urgent });
+    await this.softInterruptWithImages(sessionId, content, [], urgent);
+  }
+
+  async softInterruptWithImages(
+    sessionId: string,
+    content: string,
+    images: ImageAttachment[],
+    urgent = false,
+  ): Promise<void> {
+    await this.requestOk({
+      req: "soft_interrupt",
+      session_id: sessionId,
+      content,
+      images: images.length > 0 ? images : undefined,
+      urgent,
+    });
   }
 
   async getHistory(sessionId: string): Promise<HistoryMessage[]> {

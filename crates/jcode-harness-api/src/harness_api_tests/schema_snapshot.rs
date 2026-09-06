@@ -51,6 +51,36 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
 }
 
 #[test]
+fn soft_interrupt_images_wire_shape_and_legacy_default() {
+    let frame = ClientFrame::new(
+        10,
+        ApiRequest::SoftInterrupt {
+            session_id: "s1".into(),
+            content: "look".into(),
+            images: vec![("image/png".into(), "aW1hZ2U=".into())],
+            urgent: true,
+        },
+    );
+    assert_eq!(
+        serde_json::to_string(&frame).unwrap(),
+        r#"{"v":1,"id":10,"req":"soft_interrupt","session_id":"s1","content":"look","images":[["image/png","aW1hZ2U="]],"urgent":true}"#
+    );
+
+    let legacy: ClientFrame = serde_json::from_str(
+        r#"{"v":1,"id":11,"req":"soft_interrupt","session_id":"s1","content":"old"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy.request,
+        ApiRequest::SoftInterrupt {
+            images,
+            urgent: false,
+            ..
+        } if images.is_empty()
+    ));
+}
+
+#[test]
 fn server_frame_wire_shape() {
     let frame = ServerFrame::reply(
         3,

@@ -339,6 +339,60 @@ fn acking_the_pending_message_reports_acceptance() {
 }
 
 #[test]
+fn image_soft_interrupt_preserves_pending_message_correlation() {
+    let mut state = state_with_session();
+    let normal = state.api_request_to_legacy(
+        &json!({"req": "send_message", "id": 2, "session_id": "s1", "content": "first"}),
+    );
+    let Outbound::Legacy(normal) = &normal[0] else {
+        panic!("expected legacy message");
+    };
+    let normal_id = normal["id"].as_u64().unwrap();
+
+    let interrupt = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 3, "session_id": "s1", "content": "look",
+        "images": [["image/png", "aW1hZ2U="]], "urgent": true
+    }));
+    let Outbound::Legacy(interrupt) = &interrupt[0] else {
+        panic!("expected legacy soft interrupt");
+    };
+    assert_eq!(interrupt["type"], "soft_interrupt");
+    assert_eq!(interrupt["images"], json!([["image/png", "aW1hZ2U="]]));
+    let interrupt_id = interrupt["id"].as_u64().unwrap();
+
+    let interrupt_ack = state.legacy_event_to_api(&json!({"type": "ack", "id": interrupt_id}));
+    assert_eq!(interrupt_ack.len(), 1);
+    assert_eq!(interrupt_ack[0].reply_to, Some(3));
+    assert!(matches!(interrupt_ack[0].event, ApiEvent::Ok));
+
+    let accepted = state.legacy_event_to_api(&json!({"type": "ack", "id": normal_id}));
+    assert!(matches!(
+        &accepted[0].event,
+        ApiEvent::MessageAccepted { session_id } if session_id == "s1"
+    ));
+    let done = state.legacy_event_to_api(&json!({"type": "done", "id": normal_id}));
+    assert!(matches!(&done[0].event, ApiEvent::TurnDone { .. }));
+}
+
+#[test]
+fn idle_soft_interrupt_done_becomes_turn_done() {
+    let mut state = state_with_session();
+    let interrupt = state.api_request_to_legacy(&json!({
+        "req": "soft_interrupt", "id": 3, "session_id": "s1", "content": "start"
+    }));
+    let Outbound::Legacy(interrupt) = &interrupt[0] else {
+        panic!("expected legacy soft interrupt");
+    };
+    let interrupt_id = interrupt["id"].as_u64().unwrap();
+
+    let done = state.legacy_event_to_api(&json!({"type": "done", "id": interrupt_id}));
+    assert!(matches!(
+        &done[0].event,
+        ApiEvent::TurnDone { session_id } if session_id == "s1"
+    ));
+}
+
+#[test]
 fn context_only_message_waits_for_persistence_event_and_replies_ok() {
     let mut state = state_with_session();
     let out = state.api_request_to_legacy(&json!({

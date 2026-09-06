@@ -93,6 +93,7 @@ export type ApiRequest =
       req: "soft_interrupt";
       session_id: string;
       content: string;
+      images?: ImageAttachment[];
       urgent?: boolean;
     }
   | { req: "get_history"; session_id: string }

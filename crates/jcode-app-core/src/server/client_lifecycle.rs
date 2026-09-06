@@ -129,6 +129,14 @@ struct SwarmStatusRefs<'a> {
     event_tx: &'a broadcast::Sender<SwarmEvent>,
 }
 
+fn should_start_idle_soft_interrupt(
+    client_is_processing: bool,
+    active_turn_registered: bool,
+    session_connection_busy: bool,
+) -> bool {
+    !client_is_processing && !active_turn_registered && !session_connection_busy
+}
+
 struct RequestHandlerWatchdog {
     done: Arc<AtomicBool>,
 }
@@ -1196,15 +1204,79 @@ pub(super) async fn handle_client(
                 images,
                 urgent,
             } => {
-                queue_soft_interrupt(
-                    id,
-                    content,
-                    images,
-                    urgent,
-                    SoftInterruptSource::User,
-                    &session_control,
-                    &client_event_tx,
-                );
+                // A soft interrupt has somewhere to go only while a turn is
+                // active. When the session is idle, queueing it would strand
+                // the user's prompt until an unrelated future message starts
+                // a turn. Claim the idle session and process it as the next
+                // user message instead. The connection-map claim is atomic
+                // with the cross-client busy check, so two attachments cannot
+                // both decide that the same session is idle.
+                let start_idle_turn = {
+                    let mut connections = client_connections.write().await;
+                    let active_turn_registered =
+                        !crate::turn_cancel_registry::active_turn_signals(&client_session_id)
+                            .is_empty();
+                    let session_connection_busy = connections
+                        .values()
+                        .any(|info| info.session_id == client_session_id && info.is_processing);
+                    let start = should_start_idle_soft_interrupt(
+                        client_is_processing,
+                        active_turn_registered,
+                        session_connection_busy,
+                    );
+                    if start {
+                        if let Some(info) = connections.get_mut(&client_connection_id) {
+                            info.is_processing = true;
+                        }
+                    }
+                    start
+                };
+                if start_idle_turn {
+                    start_processing_message(
+                        ProcessingMessage {
+                            id,
+                            content,
+                            images,
+                            system_reminder: None,
+                            active_skill: None,
+                        },
+                        &client_session_id,
+                        &mut ProcessingState {
+                            client_is_processing: &mut client_is_processing,
+                            message_id: &mut processing_message_id,
+                            session_id: &mut processing_session_id,
+                            task: &mut processing_task,
+                        },
+                        &agent,
+                        &client_event_tx,
+                        &processing_done_tx,
+                        active_terminal_env.clone(),
+                        &SwarmStatusRefs {
+                            members: &swarm_members,
+                            swarms_by_id: &swarms_by_id,
+                            event_history: &event_history,
+                            event_counter: &event_counter,
+                            event_tx: &swarm_event_tx,
+                        },
+                    )
+                    .await;
+                    if !client_is_processing {
+                        let mut connections = client_connections.write().await;
+                        if let Some(info) = connections.get_mut(&client_connection_id) {
+                            info.is_processing = false;
+                        }
+                    }
+                } else {
+                    queue_soft_interrupt(
+                        id,
+                        content,
+                        images,
+                        urgent,
+                        SoftInterruptSource::User,
+                        &session_control,
+                        &client_event_tx,
+                    );
+                }
             }
 
             Request::CancelSoftInterrupts { id } => {

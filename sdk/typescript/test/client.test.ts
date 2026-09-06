@@ -131,6 +131,31 @@ test("run() collects a full turn and auto-approves permissions", async () => {
   await server.close();
 });
 
+test("softInterrupt preserves images and the legacy text-only wire shape", async () => {
+  const received: any[] = [];
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      received.push(request);
+      send({ v: 1, reply_to: request.id, ev: "ok" });
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.softInterruptWithImages("s1", "look", [["image/png", "aW1hZ2U="]], true);
+    await client.softInterrupt("s1", "text only");
+    assert.deepEqual(received.map(({ v, id, ...request }) => request), [
+      {
+        req: "soft_interrupt", session_id: "s1", content: "look",
+        images: [["image/png", "aW1hZ2U="]], urgent: true,
+      },
+      { req: "soft_interrupt", session_id: "s1", content: "text only", urgent: false },
+    ]);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
+
 test("sendMessage supports context-only options and waits for request completion", async () => {
   let received: any;
   const server = await startMockHarness({

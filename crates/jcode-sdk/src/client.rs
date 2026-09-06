@@ -724,9 +724,21 @@ impl JcodeClient {
     }
 
     pub fn soft_interrupt(&self, session_id: &str, content: &str, urgent: bool) -> Result<()> {
+        self.soft_interrupt_with_images(session_id, content, Vec::new(), urgent)
+    }
+
+    /// Inject text and image attachments at the next safe point without cancelling.
+    pub fn soft_interrupt_with_images(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: Vec<(String, String)>,
+        urgent: bool,
+    ) -> Result<()> {
         self.request_ok(ApiRequest::SoftInterrupt {
             session_id: session_id.to_string(),
             content: content.to_string(),
+            images,
             urgent,
         })
         .map(drop)

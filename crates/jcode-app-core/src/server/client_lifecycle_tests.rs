@@ -1413,3 +1413,11 @@ async fn lightweight_comm_request_skips_full_session_initialization() {
 fn decode_request_or_event(line: &str) -> ServerEvent {
     serde_json::from_str(line.trim()).expect("decode server event")
 }
+
+#[test]
+fn soft_interrupt_dispatch_starts_idle_session_and_queues_busy_session() {
+    assert!(should_start_idle_soft_interrupt(false, false, false));
+    assert!(!should_start_idle_soft_interrupt(true, false, false));
+    assert!(!should_start_idle_soft_interrupt(false, true, false));
+    assert!(!should_start_idle_soft_interrupt(false, false, true));
+}

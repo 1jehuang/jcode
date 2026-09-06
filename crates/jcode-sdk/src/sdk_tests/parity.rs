@@ -40,6 +40,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("send_message", "sendMessage"),
     cap("cancel", "cancel"),
     cap("soft_interrupt", "softInterrupt"),
+    cap("soft_interrupt_with_images", "softInterruptWithImages"),
     cap("get_history", "getHistory"),
     cap("get_history_with_images", "getHistoryWithImages"),
     cap("peek_session", "peekSession"),

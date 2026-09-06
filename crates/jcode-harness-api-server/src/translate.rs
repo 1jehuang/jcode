@@ -110,6 +110,11 @@ pub struct BridgeState {
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
+    /// Soft interrupts normally join an active turn, but the daemon promotes
+    /// one received while idle into a new turn. Retain their ids so a matching
+    /// `done` can become `turn_done` without confusing queued interrupts with
+    /// the active ordinary message.
+    pending_soft_interrupt_ids: Vec<u64>,
     /// Legacy and API ids for a context-only message. Its daemon completion
     /// event is a request reply, not a model turn boundary.
     pending_no_reply_message_id: Option<(u64, u64)>,
@@ -465,12 +470,19 @@ impl BridgeState {
             "soft_interrupt" => {
                 let id = self.legacy_id();
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
-                vec![Outbound::Legacy(json!({
+                self.pending_soft_interrupt_ids.push(id);
+                let mut interrupt = json!({
                     "type": "soft_interrupt",
                     "id": id,
                     "content": request["content"].as_str().unwrap_or(""),
                     "urgent": request["urgent"].as_bool().unwrap_or(false),
-                }))]
+                });
+                if let Some(images) = request["images"].as_array()
+                    && !images.is_empty()
+                {
+                    interrupt["images"] = json!(images);
+                }
+                vec![Outbound::Legacy(interrupt)]
             }
             "clear" => {
                 let id = self.legacy_id();
@@ -1025,9 +1037,15 @@ impl BridgeState {
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // Subscribe and other requests also emit `done`; only a
-                // completed `message` is a turn boundary.
-                if self.pending_message_id == Some(id) {
+                // completed ordinary message or an idle soft interrupt promoted
+                // into a message is a turn boundary.
+                let completed_message = self.pending_message_id == Some(id);
+                let completed_idle_interrupt = self.pending_soft_interrupt_ids.contains(&id);
+                if completed_message || completed_idle_interrupt {
                     self.pending_message_id = None;
+                    // Any other retained soft interrupts were queued into the
+                    // turn which just ended. Their ids will not emit `done`.
+                    self.pending_soft_interrupt_ids.clear();
                     vec![ServerFrame::event(ApiEvent::TurnDone {
                         session_id: session(self),
                     })]
@@ -1331,6 +1349,8 @@ impl BridgeState {
             }
             "error" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                self.pending_soft_interrupt_ids
+                    .retain(|pending_id| *pending_id != id);
                 let message = event["message"].as_str().unwrap_or("").to_string();
                 // A turn that fails ends with `error` *instead of* `done`, so
                 // the turn is over: forget the pending message, or a later
