@@ -109,6 +109,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
             | "/split"
             | "/btw"
             | "/transfer"
+            | "/workspace"
     )
 }
 
@@ -299,6 +300,8 @@ mod tests {
             "/split",
             "/btw question",
             "/transfer",
+            "/workspace",
+            "/workspace split",
             "/todos",
             "/review",
             "/subagent investigate",
