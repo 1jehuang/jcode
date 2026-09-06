@@ -193,6 +193,7 @@ pub(super) async fn handle_get_model_catalog(
         available_model_routes,
         resolved_credential,
         service_tier,
+        reasoning_effort,
         source,
     ) = {
         match agent.try_lock() {
@@ -203,6 +204,7 @@ pub(super) async fn handle_get_model_catalog(
                 agent_guard.model_routes(),
                 agent_guard.active_resolved_credential(),
                 agent_guard.provider_handle().service_tier(),
+                agent_guard.provider_handle().reasoning_effort(),
                 "live",
             ),
             Err(_) => {
@@ -221,6 +223,7 @@ pub(super) async fn handle_get_model_catalog(
                     provider.model_routes(),
                     provider.active_resolved_credential(),
                     provider.service_tier(),
+                    provider.reasoning_effort(),
                     "fallback",
                 )
             }
@@ -255,7 +258,7 @@ pub(super) async fn handle_get_model_catalog(
         status_detail: None,
         upstream_provider: None,
         resolved_credential,
-        reasoning_effort: None,
+        reasoning_effort,
         // Catalog replies still use History, so the TUI applies this field as
         // authoritative. Omitting it falsely turns off /fast status and its badge.
         service_tier,

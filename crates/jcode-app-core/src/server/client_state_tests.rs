@@ -46,6 +46,10 @@ impl Provider for MockProvider {
     fn service_tier(&self) -> Option<String> {
         self.0.map(str::to_string)
     }
+
+    fn reasoning_effort(&self) -> Option<String> {
+        Some("high".to_string())
+    }
 }
 
 #[tokio::test]
@@ -298,6 +302,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
             provider_name,
             provider_model,
             service_tier,
+            reasoning_effort,
             ..
         } => {
             assert_eq!(id, 43);
@@ -312,6 +317,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
                 })
             );
             assert_eq!(service_tier.as_deref(), tier);
+            assert_eq!(reasoning_effort.as_deref(), Some("high"));
         }
         other => panic!("expected history event, got {:?}", other),
     }
