@@ -578,13 +578,18 @@ fn pinned_todo_card_shows_tasks_without_expanding() {
     ];
     app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
     app.push_display_message(DisplayMessage::assistant("ordinary transcript content"));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
-
-    let rendered = render_and_snap(&app, &mut terminal);
-    for label in ["Finished task", "Current task", "Queued task"] {
-        assert!(rendered.contains(label), "missing {label}:\n{rendered}");
+    for width in [40, 80, 120] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+        let rendered = render_and_snap(&app, &mut terminal);
+        for label in ["Finished task", "Current task", "Queued task"] {
+            assert!(rendered.contains(label), "missing {label}:\n{rendered}");
+        }
+        assert!(!rendered.contains("▸ todo"), "{rendered}");
+        assert!(!rendered.contains("▾ todo"), "{rendered}");
+        assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
+        println!(
+            "{width}x40: all 3 todo states visible on first render, no expansion required or summary toggle"
+        );
     }
-    assert!(!rendered.contains("▸ todo"), "{rendered}");
-    assert!(!rendered.contains("▾ todo"), "{rendered}");
-    assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
 }
