@@ -277,6 +277,19 @@ async fn handle_remote_key_internal(
     let mut modifiers = modifiers;
     ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
 
+    if app.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+        return Ok(());
+    }
+    // A local login picker preview must not capture native SSH /login.
+    if code == KeyCode::Enter && crate::tui::is_ssh_remote() {
+        let input = app.input.clone();
+        if app.handle_ssh_login_command(input.trim()) {
+            app.input.clear();
+            app.cursor_pos = 0;
+            return Ok(());
+        }
+    }
+
     // Alt+5 always resets the simulator before modal routing, including in the
     // remote/client mode used by self-dev sessions.
     if app.handle_onboarding_sim_reset_shortcut(code, modifiers) {

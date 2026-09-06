@@ -851,7 +851,7 @@ fn build_header_lines_with_auth(
         // credential inventory. Do not render the laptop's (or an empty)
         // inventory as if it described providers configured on the server.
         (
-            format!("On {host}: run jcode login, then reconnect"),
+            format!("/login to authenticate on {host}"),
             Vec::new(),
         )
     } else {

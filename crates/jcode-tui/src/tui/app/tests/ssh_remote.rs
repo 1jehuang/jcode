@@ -225,7 +225,7 @@ fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            text.contains("On test-remote: run jcode login, then reconnect"),
+            text.contains("/login to authenticate on test-remote"),
             "{text}"
         );
         assert!(!text.contains("/login to add provider"), "{text}");

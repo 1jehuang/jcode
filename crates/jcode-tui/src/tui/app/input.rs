@@ -654,6 +654,9 @@ pub(in crate::tui::app) use paste_guard::expire_for_test as paste_guard_expire_f
 use paste_guard::image_media_type;
 
 pub(super) fn handle_paste(app: &mut App, text: String) {
+    if app.append_ssh_login_input(&text) {
+        return;
+    }
     paste_guard::note_paste();
     if crate::tui::is_ssh_remote() {
         // Text paths refer to the remote machine. Do not stat/read laptop
@@ -1147,6 +1150,9 @@ pub(super) fn insert_input_text(app: &mut App, text: &str) {
 }
 
 pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
+    if app.append_ssh_login_input(text) {
+        return true;
+    }
     if text.is_empty() {
         return false;
     }
@@ -2924,6 +2930,12 @@ fn paste_placeholder(content: &str) -> String {
 
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        if self.remote_login.is_some() {
+            if matches!(event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat) {
+                let _ = self.handle_key_press_event(event);
+            }
+            return;
+        }
         // Record the event if recording is active
         use crate::tui::test_harness::{TestEvent, record_event};
         let modifiers: Vec<String> = {
@@ -2981,6 +2993,10 @@ impl App {
         let mut code = code;
         let mut modifiers = modifiers;
         ctrl_bracket_fallback_to_esc(&mut code, &mut modifiers);
+
+        if self.handle_ssh_login_key(code, modifiers, text_input.as_deref()) {
+            return Ok(());
+        }
 
         // Alt+5 always starts the onboarding simulator from a pristine first
         // screen, even when another modal or a previous sim screen is active.
@@ -3222,6 +3238,9 @@ impl App {
     }
 
     pub(super) fn update_copy_badge_key_event(&mut self, event: crossterm::event::KeyEvent) {
+        if self.remote_login.is_some() {
+            return;
+        }
         use crossterm::event::{KeyCode, KeyEventKind, ModifierKeyCode};
 
         self.prune_copy_badge_ui();

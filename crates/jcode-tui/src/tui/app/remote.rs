@@ -96,6 +96,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.poll_ssh_login(remote).await;
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
@@ -405,7 +406,11 @@ async fn apply_terminal_event(
             // Start the key-to-paint clock at the moment the key is read, which is
             // the only point that corresponds to the user's press.
             crate::tui::ui::note_key_event_read();
-            input_attribution.event = Some(format!("key:{:?}:{:?}", key.code, key.kind));
+            input_attribution.event = Some(if app.remote_login.is_some() {
+                "ssh_login_key".to_string()
+            } else {
+                format!("key:{:?}:{:?}", key.code, key.kind)
+            });
             input_attribution.scroll_delta = key_scroll_delta(&key);
             app.note_client_interaction();
             app.update_copy_badge_key_event(key);

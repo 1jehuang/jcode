@@ -23,8 +23,7 @@ pub(super) fn ssh_unsupported_command(input: &str) -> bool {
     }
     matches!(
         command,
-        "/login"
-            | "/logout"
+        "/logout"
             | "/auth"
             | "/account"
             | "/accounts"
@@ -131,6 +130,9 @@ pub(super) fn ssh_local_action_blocked(app: &mut App, action: &str) -> bool {
 
 /// Use before connected-remote dispatch as well as the disconnected fallback.
 pub(super) fn handle_ssh_unsupported_command(app: &mut App, input: &str) -> bool {
+    if app.handle_ssh_login_command(input) {
+        return true;
+    }
     ssh_unsupported_command(input)
         && ssh_local_action_blocked(
             app,
