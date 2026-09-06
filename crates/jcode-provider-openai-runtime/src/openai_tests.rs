@@ -225,6 +225,7 @@ async fn live_openai_smoke(model: &str, sentinel: &str) -> Result<Option<String>
 include!("openai_tests/models_state.rs");
 include!("openai_tests/responses_input.rs");
 include!("openai_tests/transport_runtime.rs");
+include!("openai_tests/websocket_prewarm.rs");
 include!("openai_tests/payloads.rs");
 include!("openai_tests/parsing_tools.rs");
 
