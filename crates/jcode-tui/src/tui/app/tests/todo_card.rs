@@ -539,7 +539,7 @@ fn completed_background_tasks_clear_after_they_stop_being_relevant() {
 }
 
 #[test]
-fn clicking_pinned_todo_more_row_toggles_the_band() {
+fn clicking_pinned_todo_more_row_expands_the_band() {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
     let _env_lock = crate::storage::lock_test_env();
@@ -561,77 +561,35 @@ fn clicking_pinned_todo_more_row_toggles_the_band() {
     });
 
     assert!(app.pinned_todos_expanded);
-    app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 8,
-        row: 4,
-        modifiers: KeyModifiers::NONE,
-    });
-    assert!(!app.pinned_todos_expanded);
     crate::tui::ui::viewport::set_pinned_todo_more_area_for_test(None);
 }
 
 #[test]
-fn pinned_todo_summary_uses_one_row_and_expands_without_hiding_transcript() {
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-
+fn pinned_todo_card_shows_tasks_without_expanding() {
     let _env_lock = crate::storage::lock_test_env();
     let _render_lock = crate::tui::ui::render_state_test_lock();
     let _pin = PinTodosEnvGuard::enable();
     let mut app = create_test_app();
     app.session.short_name = Some("test".to_string());
-    let mut todos = vec![pinned_band_todo("done", "Finished task", "completed")];
-    todos.extend(
-        (0..30).map(|i| pinned_band_todo(&format!("p{i}"), &format!("Queued task {i}"), "pending")),
-    );
-    todos.push(pinned_band_todo("active", "Current task", "in_progress"));
+    let todos = vec![
+        pinned_band_todo("done", "Finished task", "completed"),
+        pinned_band_todo("active", "Current task", "in_progress"),
+        pinned_band_todo("next", "Queued task", "pending"),
+    ];
     app.pinned_todos_payload = Some(serde_json::json!({"todos": todos}).to_string());
     app.push_display_message(DisplayMessage::user("TRANSCRIPT_VISIBLE"));
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
 
-    let collapsed = render_and_snap(&app, &mut terminal);
-    assert!(
-        collapsed.contains("▸ todo 1/32  ● Current task"),
-        "{collapsed}"
-    );
-    assert!(
-        !collapsed.contains("Finished task") && !collapsed.contains("Queued task"),
-        "{collapsed}"
-    );
-    let summary_row = collapsed
-        .lines()
-        .position(|row| row.contains("todo 1/32"))
-        .unwrap();
-    let transcript_row = collapsed
-        .lines()
-        .position(|row| row.contains("TRANSCRIPT_VISIBLE"))
-        .unwrap_or_else(|| panic!("transcript missing:\n{collapsed}"));
-    assert_eq!(transcript_row, summary_row + 1, "{collapsed}");
-
-    let area = crate::tui::ui::viewport::pinned_todo_more_area().unwrap();
-    app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.x,
-        row: area.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    let expanded = render_and_snap(&app, &mut terminal);
-    assert!(expanded.contains("▾ todo 1/32"), "{expanded}");
-    assert!(expanded.contains("Finished task"), "{expanded}");
-    assert!(expanded.contains("/todos for full list"), "{expanded}");
-    assert!(expanded.contains("TRANSCRIPT_VISIBLE"), "{expanded}");
-
-    let area = crate::tui::ui::viewport::pinned_todo_more_area().unwrap();
-    app.handle_mouse_event(MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: area.x,
-        row: area.y,
-        modifiers: KeyModifiers::NONE,
-    });
-    let recollapsed = render_and_snap(&app, &mut terminal);
-    assert!(
-        recollapsed.contains("▸ todo 1/32  ● Current task"),
-        "{recollapsed}"
-    );
-    assert!(!recollapsed.contains("Finished task"), "{recollapsed}");
+    let rendered = render_and_snap(&app, &mut terminal);
+    for label in [
+        "Finished task",
+        "Current task",
+        "Queued task",
+        "TRANSCRIPT_VISIBLE",
+    ] {
+        assert!(rendered.contains(label), "missing {label}:\n{rendered}");
+    }
+    assert!(!rendered.contains("▸ todo"), "{rendered}");
+    assert!(!rendered.contains("▾ todo"), "{rendered}");
+    assert!(crate::tui::ui::viewport::pinned_todo_more_area().is_none());
 }
