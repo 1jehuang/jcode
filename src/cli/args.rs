@@ -43,6 +43,18 @@ pub(crate) struct Args {
     #[arg(long, global = true)]
     pub(crate) remote_working_dir: Option<String>,
 
+    /// Run the UI locally and attach to the persistent Jcode server on this SSH host
+    #[arg(long, global = true, conflicts_with = "socket", value_name = "HOST")]
+    pub(crate) ssh: Option<String>,
+
+    /// Remote Jcode executable name or literal path (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_binary: Option<String>,
+
+    /// Remote daemon socket override, for isolated servers (requires --ssh)
+    #[arg(long, global = true, requires = "ssh", value_name = "PATH")]
+    pub(crate) ssh_server_socket: Option<String>,
+
     /// Skip the automatic update check
     #[arg(long, global = true)]
     pub(crate) no_update: bool,
@@ -608,6 +620,11 @@ pub(crate) enum AccountCommand {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ServerCommand {
+    /// Internal native client protocol bridge over stdin/stdout (for SSH attach)
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Stdio,
+
     /// Start the background server if it is not already running.
     Start {
         /// Emit JSON instead of human-readable text

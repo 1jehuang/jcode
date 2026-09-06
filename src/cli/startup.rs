@@ -160,6 +160,9 @@ fn is_telemetry_subcommand_invocation(
                     | "-C"
                     | "--cwd"
                     | "--remote-working-dir"
+                    | "--ssh"
+                    | "--ssh-binary"
+                    | "--ssh-server-socket"
                     | "--spawn-hotkey"
                     | "--socket"
                     | "-m"
@@ -448,11 +451,15 @@ fn should_spawn_background_update_check(args: &Args) -> bool {
 
 fn should_spawn_background_update_check_with_config(args: &Args, check_updates: bool) -> bool {
     check_updates
+        && args.ssh.is_none()
         && !args.quiet
         && !args.no_update
         && !matches!(
             args.command,
-            Some(Command::Update) | Some(Command::Serve { .. }) | Some(Command::Acp)
+            Some(Command::Update)
+                | Some(Command::Serve { .. })
+                | Some(Command::Server { .. })
+                | Some(Command::Acp)
         )
         && args.resume.is_none()
 }

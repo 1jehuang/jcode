@@ -73,6 +73,11 @@ fn arm_debug_client_parent_death_signal() {}
 
 pub(crate) async fn run_main(mut args: Args) -> Result<()> {
     arm_debug_client_parent_death_signal();
+    if args.ssh.is_some() {
+        // A remote session ID and working directory belong to the remote host.
+        // Do not run local resume lookup, provider bootstrap, or self-dev setup.
+        return super::ssh::run(args).await;
+    }
     resolve_resume_arg(&mut args)?;
 
     // One-time config migration: users whose config.toml still carries the old
@@ -215,6 +220,24 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             jcode_harness_api_server::run_bridge(api_socket, legacy_socket).await?;
         }
         Some(Command::Server { action }) => match action {
+            #[cfg(unix)]
+            ServerCommand::Stdio => {
+                crate::env::set_var("JCODE_NON_INTERACTIVE", "1");
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    spawn_server_with_executable(
+                        &args.provider,
+                        args.model.as_deref(),
+                        args.provider_profile.as_deref(),
+                        Some(std::env::current_exe()?),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("server stdio: timed out starting the remote daemon")
+                })??;
+                super::ssh_transport::run_stdio(server::socket_path()).await?;
+            }
             ServerCommand::Start { json } => {
                 spawn_server(
                     &args.provider,
@@ -1299,6 +1322,15 @@ pub(crate) async fn spawn_server(
     model: Option<&str>,
     provider_profile: Option<&str>,
 ) -> Result<()> {
+    spawn_server_with_executable(provider_choice, model, provider_profile, None).await
+}
+
+async fn spawn_server_with_executable(
+    provider_choice: &ProviderChoice,
+    model: Option<&str>,
+    provider_profile: Option<&str>,
+    executable: Option<std::path::PathBuf>,
+) -> Result<()> {
     let socket_path = server::socket_path();
     if server_is_running_at(&socket_path).await {
         startup_profile::mark("server_ready");
@@ -1326,8 +1358,10 @@ pub(crate) async fn spawn_server(
     startup_profile::mark("server_spawn_start");
     output::stderr_info("Starting server...");
     let client_requested_selfdev = selfdev::client_selfdev_requested();
-    let exe = build::shared_server_update_candidate(client_requested_selfdev)
-        .map(|(path, _)| path)
+    let exe = executable
+        .or_else(|| {
+            build::shared_server_update_candidate(client_requested_selfdev).map(|(path, _)| path)
+        })
         .or_else(|| std::env::current_exe().ok())
         .ok_or_else(|| anyhow::anyhow!("Could not determine executable path for server spawn"))?;
     let mut cmd = ProcessCommand::new(&exe);

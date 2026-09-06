@@ -2,6 +2,52 @@ use super::*;
 use crate::cli::provider_init::ProviderChoice;
 
 #[test]
+fn native_ssh_attach_arguments_parse_and_do_not_steal_local_socket() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "--ssh",
+        "dev",
+        "--ssh-binary",
+        "/opt/jcode",
+        "--ssh-server-socket",
+        "/run/native/jcode.sock",
+        "--remote-working-dir",
+        "/srv/project",
+        "self-dev",
+    ])
+    .unwrap();
+    assert_eq!(args.ssh.as_deref(), Some("dev"));
+    assert_eq!(args.ssh_binary.as_deref(), Some("/opt/jcode"));
+    assert_eq!(
+        args.ssh_server_socket.as_deref(),
+        Some("/run/native/jcode.sock")
+    );
+    assert_eq!(args.remote_working_dir.as_deref(), Some("/srv/project"));
+    assert!(args.socket.is_none());
+    for argv in [
+        vec!["jcode", "--ssh", "dev", "--socket", "/local.sock"],
+        vec!["jcode", "--ssh-binary", "/opt/jcode"],
+        vec!["jcode", "--ssh-server-socket", "/remote.sock"],
+    ] {
+        assert!(Args::try_parse_from(argv).is_err());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn native_server_stdio_preserves_socket_override() {
+    let args =
+        Args::try_parse_from(["jcode", "--socket", "/run/native.sock", "server", "stdio"]).unwrap();
+    assert_eq!(args.socket.as_deref(), Some("/run/native.sock"));
+    assert!(matches!(
+        args.command,
+        Some(Command::Server {
+            action: ServerCommand::Stdio
+        })
+    ));
+}
+
+#[test]
 fn server_start_and_internal_keepalive_parse() {
     let args = Args::try_parse_from(["jcode", "server", "start", "--json"])
         .expect("server start should parse");

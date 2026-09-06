@@ -13,6 +13,9 @@ pub mod proctitle;
 pub mod provider_doctor;
 pub mod provider_init;
 pub mod selfdev;
+pub mod ssh;
+#[cfg(unix)]
+pub mod ssh_transport;
 pub mod startup;
 pub mod telemetry;
 pub mod terminal;
