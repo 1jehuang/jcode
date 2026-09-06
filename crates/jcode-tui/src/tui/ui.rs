@@ -88,7 +88,6 @@ mod todo_changes;
 pub(crate) mod tools_ui;
 #[path = "ui_transitions.rs"]
 mod transitions;
-pub(crate) use transitions::take_first_prompt_preview_scroll;
 #[path = "ui_viewport.rs"]
 pub(crate) mod viewport;
 use crate::tui::mermaid;
@@ -1514,7 +1513,6 @@ pub(crate) fn render_state_test_lock() -> RenderStateTestGuard {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     RENDER_STATE_LOCK_HELD.with(|held| held.set(true));
-    transitions::reset_startup_composer();
     RenderStateTestGuard { _guard: guard }
 }
 
@@ -1574,7 +1572,6 @@ pub(crate) fn clear_test_render_state_for_tests() {
 /// The actual reset, run with the render-state lock held.
 #[cfg(test)]
 fn clear_test_render_state_locked() {
-    transitions::reset_startup_composer();
     set_last_max_scroll(0);
     set_pinned_pane_total_lines(0);
     set_last_diff_pane_effective_scroll(0);
@@ -3197,36 +3194,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // away. Scrolling up, new output, or streaming all end the state (see
     // `terminal_clear_collapsed`) and restore the normal layout.
     let terminal_clear_collapsed = !swarm_page_active && app.terminal_clear_collapsed();
-    if terminal_clear_collapsed {
-        transitions::reset_startup_composer();
-    }
     let content_height = if terminal_clear_collapsed {
         0
     } else {
         content_height
     };
 
-    let initial_screen = transitions::initial_screen(app);
-    let startup_floor = transitions::startup_messages_floor(
-        app,
-        chat_area,
-        fixed_height - input_height - overscroll_height - donut_height,
-    );
-    // Keep the composer where it was on the welcome screen. New transcript
-    // rows consume the blank viewport below the text before pushing it down.
-    let messages_height = if !initial_screen && !terminal_clear_collapsed && !swarm_page_active {
-        content_height.max(
-            startup_floor
-                .unwrap_or(0)
-                .min(available_height.saturating_sub(fixed_height)),
-        )
-    } else {
-        content_height
-    };
-
     // Use packed layout when content fits, scrolling layout otherwise
     let use_packed = terminal_clear_collapsed
-        || (!swarm_page_active && messages_height + fixed_height <= available_height);
+        || (!swarm_page_active && content_height + fixed_height <= available_height);
 
     // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
     // All vertical chunks are within the chat_area (left column).
@@ -3237,8 +3213,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(if terminal_clear_collapsed {
                     0
                 } else {
-                    messages_height.max(1)
-                }), // 0 Messages (content/startup floor; 0 when terminal-cleared)
+                    content_height.max(1)
+                }), // 0 Messages (exact height; 0 when terminal-cleared)
                 Constraint::Length(queued_height), // 1 Queued messages (above status)
                 Constraint::Length(swarm_strip_height), // 2 Swarm strip (above status)
                 Constraint::Length(1),             // 3 Status line
@@ -3265,9 +3241,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         })
         .split(chat_area);
     record_status_area(chunks[3]);
-    if initial_screen && !swarm_page_active && !terminal_clear_collapsed {
-        transitions::remember_startup_composer(app, chat_area, chunks[7].y);
-    }
 
     // Draw the inline swarm strip directly above the status line if present.
     if swarm_strip_height > 0 {
@@ -3409,7 +3382,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             messages_area,
             prepared.clone(),
             chat_scrollbar_visible,
-            startup_floor.is_some() && !initial_screen,
         )
     };
 

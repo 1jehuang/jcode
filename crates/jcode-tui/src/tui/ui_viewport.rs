@@ -342,7 +342,6 @@ pub(super) fn draw_messages(
     area: Rect,
     prepared: Arc<PreparedChatFrame>,
     show_native_scrollbar: bool,
-    started_here: bool,
 ) -> info_widget::Margins {
     let (render_area, scrollbar_area) =
         super::split_native_scrollbar_area(area, show_native_scrollbar);
@@ -392,33 +391,9 @@ pub(super) fn draw_messages(
         super::set_tail_catchup_active(false);
         anchored
     } else if app.auto_scroll_paused() {
-        super::transitions::finish_first_prompt_preview();
         super::set_tail_catchup_active(false);
         user_scroll.min(max_scroll)
-    } else if started_here
-        && app.compacted_hidden_user_prompts() == 0
-        && app.display_user_message_count() == 1
-        && app.streaming_text().is_empty()
-        && app.streaming_tool_calls().is_empty()
-        && app.batch_progress().is_none()
-        && app
-            .display_messages()
-            .iter()
-            .all(|msg| msg.role == "user" || msg.role == "system")
-        && super::transitions::first_prompt_preview()
-    {
-        // A tall first prompt should be readable from its beginning, not land
-        // on its final lines. Resume normal tail following when output arrives.
-        super::set_tail_catchup_active(false);
-        wrapped_user_prompt_starts
-            .first()
-            .copied()
-            .unwrap_or(0)
-            .min(max_scroll)
     } else {
-        if started_here && app.display_user_message_count() > 0 {
-            super::transitions::finish_first_prompt_preview();
-        }
         resolve_tail_follow_scroll(max_scroll, viewport_height)
     };
 

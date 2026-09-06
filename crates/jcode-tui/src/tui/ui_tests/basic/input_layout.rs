@@ -1,4 +1,44 @@
 #[test]
+fn first_prompt_preserves_welcome_header_spacing() {
+    let _lock = viewport_snapshot_test_lock();
+    for (width, height) in [(80, 40), (100, 60), (60, 80)] {
+        for centered in [false, true] {
+            crate::tui::ui::clear_test_render_state_for_tests();
+            let mut state = TestState {
+                input: "FIRST PROMPT".into(),
+                centered_mode: centered,
+                suppress_info_widgets: true,
+                ..Default::default()
+            };
+            let welcome = buffer_to_text(&render_full(&state, width, height));
+            let header_y = welcome
+                .lines()
+                .position(|line| !line.trim().is_empty())
+                .unwrap();
+            assert!(header_y > 0, "welcome header should have top padding at {width}x{height}: {welcome}");
+
+            state.input.clear();
+            state
+                .display_messages
+                .push(DisplayMessage::user("FIRST PROMPT"));
+            state.messages_version += 1;
+            let submitted = buffer_to_text(&render_full(&state, width, height));
+            assert_eq!(
+                submitted.lines().position(|line| !line.trim().is_empty()),
+                Some(header_y),
+                "submitting must not jump the transcript to the top: {submitted}"
+            );
+            let prompt_y = submitted
+                .lines()
+                .position(|line| line.contains("FIRST PROMPT"))
+                .unwrap();
+            assert!(prompt_y > header_y, "prompt should remain below the header");
+            assert_eq!(crate::tui::ui::last_resolved_chat_scroll(), 0);
+        }
+    }
+}
+
+#[test]
 fn test_file_diff_cache_reuses_entry_when_signature_matches() {
     let temp = tempfile::NamedTempFile::new().expect("temp file");
     std::fs::write(temp.path(), "fn main() {}\n").expect("write file");
