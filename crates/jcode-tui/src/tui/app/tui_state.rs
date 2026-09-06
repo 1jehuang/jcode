@@ -66,6 +66,9 @@ impl App {
     }
 
     fn configured_remote_provider_hint(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
         std::env::var("JCODE_PROVIDER")
             .ok()
             .or_else(|| crate::config::config().provider.default_provider.clone())
@@ -74,6 +77,9 @@ impl App {
     }
 
     fn configured_remote_model_hint(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return None;
+        }
         Self::sanitize_remote_model_hint(
             std::env::var("JCODE_MODEL")
                 .ok()
@@ -82,6 +88,9 @@ impl App {
     }
 
     pub(super) fn effective_remote_provider_model(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return Self::sanitize_remote_model_hint(self.remote_provider_model.clone());
+        }
         Self::sanitize_remote_model_hint(self.remote_provider_model.clone())
             .or_else(|| Self::sanitize_remote_model_hint(self.session.model.clone()))
             .or_else(|| self.configured_remote_model_hint())
@@ -110,6 +119,9 @@ impl App {
     /// reported one yet, so pre-settle effort cycling starts from the value the
     /// session will actually use instead of assuming the maximum.
     pub(super) fn remote_reasoning_effort_hint(&self) -> Option<String> {
+        if crate::tui::is_ssh_remote() {
+            return self.remote_reasoning_effort.clone();
+        }
         self.remote_reasoning_effort.clone().or_else(|| {
             let (provider, model) = self.remote_effort_identity();
             let provider = provider.unwrap_or_default().to_ascii_lowercase();

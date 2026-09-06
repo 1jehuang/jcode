@@ -205,6 +205,10 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
 fn ssh_remote_header_guides_remote_login_and_hides_local_scheduler() {
     with_ssh_remote_test_home(|| {
         let mut app = App::new_for_remote(None);
+        app.session.model = Some("laptop-only-model".into());
+        assert!(app.effective_remote_provider_model().is_none());
+        assert_eq!(app.remote_effort_identity(), (None, None));
+        assert!(app.remote_reasoning_effort_hint().is_none());
         app.remote_provider_name = Some("remote-provider".into());
         app.remote_provider_model = Some("remote-model".into());
         app.remote_skills = vec!["remote-only-skill".into()];
