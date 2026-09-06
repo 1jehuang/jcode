@@ -73,10 +73,47 @@ contention remain visible in the fixed samples. All 62 telemetry unit tests
 passed, including event order/identity, queued replacement delivery, and blocking
 shutdown regression checks.
 
+## Full isolated API verification
+
+The complete `cargo build --profile selfdev` subsequently passed. Both official
+Cargo test commands above also passed: 62 unit tests and the production HTTP
+integration test (5.029 ms for its measured replacement).
+
+A real daemon and the same standalone API bridge were run against private
+HOME, JCODE_HOME, JCODE_RUNTIME_DIR, and sockets. Both versions used the Jcode
+provider, a synthetic credential, and the loopback stalled HTTPS proxy. Selecting
+the current model through the API seeded meaningful telemetry without submitting
+any prompt or requesting model inference. Each following create_session then
+superseded the prior telemetry session. With no turn to finalize, this case
+exercises two 800 ms lifecycle sends rather than three.
+
+| API create_session | Samples (ms) | Median |
+| --- | --- | ---: |
+| Before, activity seeded | 1654.824, 1670.033, 1675.223 | 1670.033 ms |
+| After, activity seeded | 13.258, 17.427, 28.968 | 17.427 ms |
+
+This is a **98.96% median reduction in isolated full API creation latency**. The
+first unseeded create was 179.284 ms before and 117.357 ms after and is excluded
+from the activity-seeded comparison. The old Agent constructor took 1622-1625 ms.
+The new logs show telemetry below the 1 ms log resolution and Agent construction
+of 3-6 ms for those activity-seeded sessions.
+
 ## Deployment boundary
 
-A full baseline selfdev build was terminated by SIGTERM in app-core. The active
-shared daemon still runs the old binary. These measurements do not establish a
-post-change live API or desktop result. Rebuild, validate on a private socket and
-JCODE_RUNTIME_DIR, then coordinate a supported session-preserving reload before
-claiming the change is active. Do not kill or hard-restart the user's daemon.
+The first full baseline build was terminated by SIGTERM, but the retry succeeded.
+The verified new binary was copied to the immutable store and published to the
+current channel without touching the stable channel, shared-server channel, or
+running daemon:
+
+- Binary: `~/.jcode/builds/versions/82a93e6fb-dirty-e293f2a72492/jcode`
+- SHA-256: `e293f2a7249263a664aceb413d1df0d96ed53cf12f15119a4ca31ebd8fb5a330`
+- Version: `v0.82.5-dev (82a93e6fb, dirty)`
+- The build stamp predates commit `8e9f40498`, but the build includes the tested fix.
+- `~/.local/bin/jcode` resolves through current to that new binary.
+- Shared-server symlink and active daemon PID 20700 still resolve to the prior
+  `a495fb059-dirty-40e6123ec268` binary, verified unchanged after publication.
+
+The desktop's existing shared-daemon connection therefore still uses the old
+backend. Its live post-change latency has **not** been measured. A supported
+checkpoint reload signals active generations, so it was deliberately deferred
+until a safe idle window. No user daemon or compositor was restarted.
