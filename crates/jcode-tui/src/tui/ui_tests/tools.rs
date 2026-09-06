@@ -4,14 +4,14 @@ use super::*;
 fn test_summarize_apply_patch_input_ignores_begin_marker() {
     let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n";
     let summary = tools_ui::summarize_apply_patch_input(patch);
-    assert_eq!(summary, "src/lib.rs (6 lines)");
+    assert_eq!(summary, "src/lib.rs");
 }
 
 #[test]
 fn test_summarize_apply_patch_input_multiple_files() {
     let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-a\n+b\n*** Update File: b.txt\n@@\n-c\n+d\n*** End Patch\n";
     let summary = tools_ui::summarize_apply_patch_input(patch);
-    assert_eq!(summary, "2 files (10 lines)");
+    assert_eq!(summary, "2 files");
 }
 
 #[test]
@@ -19,6 +19,86 @@ fn test_extract_apply_patch_primary_file() {
     let patch = "*** Begin Patch\n*** Add File: new/file.rs\n+fn main() {}\n*** End Patch\n";
     let file = tools_ui::extract_apply_patch_primary_file(patch);
     assert_eq!(file.as_deref(), Some("new/file.rs"));
+}
+
+#[test]
+fn test_patch_summaries_omit_line_counts() {
+    let single = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(
+        tools_ui::summarize_unified_patch_input(single),
+        "src/lib.rs"
+    );
+    let multiple = format!("{single}--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+new\n");
+    assert_eq!(
+        tools_ui::summarize_unified_patch_input(&multiple),
+        "2 files"
+    );
+    for patch in ["", "@@\n-old\n+new\n"] {
+        assert!(tools_ui::summarize_unified_patch_input(patch).is_empty());
+        assert!(tools_ui::summarize_apply_patch_input(patch).is_empty());
+    }
+}
+
+#[test]
+fn test_patch_headers_use_colored_tokens_instead_of_line_counts() {
+    let _guard = viewport_snapshot_test_lock();
+    for (name, patch) in [
+        (
+            "patch",
+            "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        ),
+        (
+            "apply_patch",
+            "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n",
+        ),
+    ] {
+        let tool = crate::message::ToolCall {
+            id: "call_patch_badge".to_string(),
+            name: name.to_string(),
+            input: serde_json::json!({"patch_text": patch}),
+            intent: None,
+            thought_signature: None,
+        };
+        for (tokens, color) in [
+            (0, rgb(118, 184, 118)),
+            (3_999, rgb(118, 184, 118)),
+            (4_000, rgb(214, 184, 92)),
+            (11_999, rgb(214, 184, 92)),
+            (12_000, rgb(224, 118, 118)),
+        ] {
+            let output = "x".repeat(tokens * crate::util::APPROX_CHARS_PER_TOKEN);
+            let msg = DisplayMessage {
+                role: "tool".to_string(),
+                content: output.clone(),
+                tool_calls: Vec::new(),
+                duration_secs: None,
+                title: None,
+                tool_data: Some(tool.clone()),
+            };
+            let standalone =
+                messages::render_tool_message(&msg, 120, crate::config::DiffDisplayMode::Off);
+            let batch = tools_ui::render_batch_subcall_line(
+                &tool,
+                "✓",
+                color,
+                50,
+                Some(120),
+                Some(&output),
+            );
+            let label = crate::util::format_approx_token_count(tokens);
+            for line in [&standalone[0], &batch] {
+                let text = line_plain_text(line);
+                assert!(!text.contains("lines"), "{name}: {text}");
+                assert!(text.ends_with(&label), "{name}: {text}");
+                let badge = line
+                    .spans
+                    .iter()
+                    .find(|span| span.content == label)
+                    .expect("missing token badge");
+                assert_eq!(badge.style.fg, Some(color), "{name}: {tokens}");
+            }
+        }
+    }
 }
 
 #[test]
