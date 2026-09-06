@@ -92,7 +92,8 @@ pub(super) async fn handle_get_state(
             id,
             session_id: client_session_id.to_string(),
             message_count: session_count,
-            is_processing: client_is_processing,
+            is_processing: client_is_processing
+                || crate::turn_cancel_registry::has_active_turn(client_session_id),
         },
     )
     .await
@@ -834,10 +835,12 @@ pub(super) async fn session_activity_snapshot(
     };
 
     snapshot.or_else(|| {
-        fallback_processing.then_some(SessionActivitySnapshot {
-            is_processing: true,
-            current_tool_name: None,
-        })
+        (fallback_processing || crate::turn_cancel_registry::has_active_turn(session_id)).then_some(
+            SessionActivitySnapshot {
+                is_processing: true,
+                current_tool_name: None,
+            },
+        )
     })
 }
 

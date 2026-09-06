@@ -803,6 +803,7 @@ fn subscribe_request(working_dir: Option<&str>) -> Request {
         client_has_local_history: false,
         allow_session_takeover: false,
         crash_on_disconnect: false,
+        continue_on_disconnect: false,
         terminal_env: Vec::new(),
     }
 }
@@ -825,6 +826,39 @@ fn initial_subscribe_requires_an_absolute_client_working_dir() {
     let error = initial_subscribe_working_dir(&Request::GetState { id: 2 })
         .expect_err("stateful requests must not create an unbound session");
     assert!(error.contains("must Subscribe"));
+}
+
+#[test]
+fn remote_subscribe_requires_an_existing_server_directory() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let file = directory.path().join("not-a-directory");
+    std::fs::write(&file, "file")?;
+    let missing = directory.path().join("missing");
+    for path in [&file, &missing] {
+        let mut request = subscribe_request(path.to_str());
+        assert!(
+            initial_subscribe_working_dir(&request).is_ok(),
+            "local subscription behavior remains unchanged"
+        );
+        if let Request::Subscribe {
+            continue_on_disconnect,
+            ..
+        } = &mut request
+        {
+            *continue_on_disconnect = true;
+        }
+        assert!(
+            initial_subscribe_working_dir(&request)
+                .unwrap_err()
+                .contains("must exist and be a directory on the server")
+        );
+    }
+    assert_eq!(
+        validated_subscribe_working_dir(directory.path().to_str(), true)
+            .expect("existing directory"),
+        directory.path().to_str().unwrap()
+    );
+    Ok(())
 }
 
 #[tokio::test]

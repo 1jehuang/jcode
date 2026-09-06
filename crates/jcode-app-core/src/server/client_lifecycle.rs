@@ -10,7 +10,7 @@ use super::client_comm::{
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
     handle_comm_unsubscribe_channel,
 };
-use super::client_disconnect_cleanup::cleanup_client_connection;
+use super::client_disconnect_cleanup::{cleanup_client_connection, detach_client_attachment};
 use super::client_lifecycle_logging::{
     ServerRequestLifecycleFields, interrupt_request_log_fields, request_payload_summary,
     request_type_from_line, request_type_is_read_only, server_request_lifecycle_fields,
@@ -90,13 +90,29 @@ fn required_subscribe_working_dir(working_dir: Option<&str>) -> std::result::Res
 
 fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<String, String> {
     match request {
-        Request::Subscribe { working_dir, .. } => {
-            required_subscribe_working_dir(working_dir.as_deref()).map(str::to_string)
-        }
+        Request::Subscribe {
+            working_dir,
+            continue_on_disconnect,
+            ..
+        } => validated_subscribe_working_dir(working_dir.as_deref(), *continue_on_disconnect)
+            .map(str::to_string),
         _ => Err(
             "Client must Subscribe with a working_dir before sending stateful requests".to_string(),
         ),
     }
+}
+
+fn validated_subscribe_working_dir(
+    working_dir: Option<&str>,
+    remote_continuation: bool,
+) -> std::result::Result<&str, String> {
+    let working_dir = required_subscribe_working_dir(working_dir)?;
+    if remote_continuation && !Path::new(working_dir).is_dir() {
+        return Err(format!(
+            "Remote working directory must exist and be a directory on the server: {working_dir}"
+        ));
+    }
+    Ok(working_dir)
 }
 
 fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
@@ -494,6 +510,7 @@ pub(super) async fn handle_client(
     let mut processing_message_id: Option<u64> = None;
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
+    let mut continue_on_disconnect = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -680,9 +697,9 @@ pub(super) async fn handle_client(
         tokio::sync::mpsc::unbounded_channel::<crate::tool::StdinInputRequest>();
     {
         let mut agent_guard = agent.lock().await;
-        agent_guard.set_stdin_request_tx(stdin_req_tx);
+        agent_guard.set_stdin_request_tx(stdin_req_tx.clone());
     }
-    let _stdin_forwarder = {
+    let stdin_forwarder = {
         let client_event_tx = client_event_tx.clone();
         let stdin_responses = stdin_responses.clone();
         let tool_call_id = String::new();
@@ -710,6 +727,7 @@ pub(super) async fn handle_client(
     let mut provisional_session = true;
     let mut pending_request = Some(initial_request);
 
+    let connection_result: Result<()> = async {
     loop {
         let request = if let Some(request) = pending_request.take() {
             request
@@ -761,58 +779,16 @@ pub(super) async fn handle_client(
                     }
 
                     let done_session = processing_session_id.take();
-                    match result {
-                        Ok(()) => {
-                            if let Some(session_id) = done_session.as_deref() {
-                                update_member_status_with_report(
-                                    session_id,
-                                    "ready",
-                                    None,
-                                    completion_report,
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                    Some(&event_history),
-                                    Some(&event_counter),
-                                    Some(&swarm_event_tx),
-                                )
-                                .await;
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(session_id) = done_session.as_deref() {
-                                update_member_status(
-                                    session_id,
-                                    "failed",
-                                    Some(truncate_detail(&e.to_string(), 120)),
-                                    &swarm_members,
-                                    &swarms_by_id,
-                                    Some(&event_history),
-                                    Some(&event_counter),
-                                    Some(&swarm_event_tx),
-                                )
-                                .await;
-                            }
-                            let retry_after_secs = e.downcast_ref::<StreamError>().and_then(|se| se.retry_after_secs);
-                            if retry_after_secs.is_some() {
-                                crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
-                            } else {
-                                let msg = e.to_string();
-                                let lower = msg.to_lowercase();
-                                if lower.contains("timeout") {
-                                    crate::telemetry::record_error(crate::telemetry::ErrorCategory::ProviderTimeout);
-                                } else if crate::provider::error_looks_like_credential_failure(&msg)
-                                    || lower.contains("403 forbidden")
-                                {
-                                    // Use the shared credential-failure classifier instead of a
-                                    // bare `contains("auth")`: that substring also matched
-                                    // unrelated errors (e.g. any message mentioning "author" or
-                                    // OAuth flow noise) and inflated the auth_failed telemetry
-                                    // counter.
-                                    crate::telemetry::record_error(crate::telemetry::ErrorCategory::AuthFailed);
-                                }
-                            }
-                        }
-                    }
+                    record_processing_completion(
+                        done_session.as_deref(), result, completion_report,
+                        &SwarmStatusRefs {
+                            members: &swarm_members,
+                            swarms_by_id: &swarms_by_id,
+                            event_history: &event_history,
+                            event_counter: &event_counter,
+                            event_tx: &swarm_event_tx,
+                        },
+                    ).await;
                 } else {
                     break;
                 }
@@ -1150,6 +1126,12 @@ pub(super) async fn handle_client(
                     continue;
                 }
                 if !client_is_processing {
+                    // A live resume cannot replace stdin routing while the old
+                    // turn owns the agent. Restore it when this client starts a
+                    // later turn, without reviving any disconnected prompt.
+                    if continue_on_disconnect && let Ok(mut agent) = agent.try_lock() {
+                        agent.set_stdin_request_tx(stdin_req_tx.clone());
+                    }
                     let mut connections = client_connections.write().await;
                     if let Some(info) = connections.get_mut(&client_connection_id) {
                         info.is_processing = true;
@@ -1472,7 +1454,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id });
+                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1) });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1511,10 +1493,13 @@ pub(super) async fn handle_client(
                 client_has_local_history,
                 allow_session_takeover,
                 crash_on_disconnect: _,
+                continue_on_disconnect: requested_continuation,
                 terminal_env,
             } => {
                 if let Err(message) =
-                    required_subscribe_working_dir(subscribe_working_dir.as_deref())
+                    validated_subscribe_working_dir(
+                        subscribe_working_dir.as_deref(), requested_continuation,
+                    )
                 {
                     let _ = client_event_tx.send(ServerEvent::Error {
                         id,
@@ -1526,6 +1511,7 @@ pub(super) async fn handle_client(
                 // Every Subscribe carries an authoritative snapshot. An empty
                 // snapshot must clear terminal vars inherited by the daemon
                 // rather than retaining a prior pane's values.
+                continue_on_disconnect = requested_continuation;
                 active_terminal_env = terminal_env;
                 current_client_instance_id = client_instance_id.clone();
                 {
@@ -2896,6 +2882,68 @@ pub(super) async fn handle_client(
         }
     }
 
+    Ok(())
+    }.await;
+
+    if continue_on_disconnect {
+        // Retain the existing turn owner, not the socket. Its JoinHandle and
+        // completion receiver stay alive so normal finalization still runs and
+        // the daemon cannot idle-shutdown midway through remote work. New
+        // attachments receive future events through the existing session fanout.
+        detach_client_attachment(
+            &client_session_id,
+            &client_connection_id,
+            &client_debug_id,
+            &client_connections,
+            &client_debug_state,
+            &swarm_members,
+        )
+        .await;
+        event_handle.abort();
+        drop(reader);
+        drop(writer);
+        // Input prompts belong to this transport and cannot safely be replayed
+        // to a new client. Close response channels instead of waiting forever.
+        stdin_forwarder.abort();
+        let _ = stdin_forwarder.await;
+        stdin_responses.lock().await.clear();
+        if let Some(handle) = processing_task.take() {
+            crate::logging::info(&format!(
+                "Retaining disconnected remote turn for session {}",
+                client_session_id
+            ));
+            let _ = handle.await;
+            while let Ok((done_id, result, report)) = processing_done_rx.try_recv() {
+                if Some(done_id) == processing_message_id {
+                    record_processing_completion(
+                        processing_session_id.as_deref(),
+                        result,
+                        report,
+                        &SwarmStatusRefs {
+                            members: &swarm_members,
+                            swarms_by_id: &swarms_by_id,
+                            event_history: &event_history,
+                            event_counter: &event_counter,
+                            event_tx: &swarm_event_tx,
+                        },
+                    )
+                    .await;
+                }
+            }
+            client_is_processing = false;
+        } else {
+            // A reattached remote connection may disconnect again while the
+            // original lifecycle owns the task. Wait for its active-turn lease
+            // before attempting cleanup. Returning early here would leak the
+            // session if the original owner had just skipped cleanup for this
+            // successor. All finishers serialize cleanup against live attach.
+            while crate::turn_cancel_registry::has_active_turn(&client_session_id) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            client_is_processing = false;
+        }
+    }
+
     crate::hooks::with_client_terminal_env(
         active_terminal_env,
         cleanup_client_connection(
@@ -2923,7 +2971,71 @@ pub(super) async fn handle_client(
         ),
     )
     .await?;
-    Ok(())
+    connection_result
+}
+
+async fn record_processing_completion(
+    done_session: Option<&str>,
+    result: Result<()>,
+    completion_report: Option<String>,
+    swarm: &SwarmStatusRefs<'_>,
+) {
+    match result {
+        Ok(()) => {
+            if let Some(session_id) = done_session {
+                update_member_status_with_report(
+                    session_id,
+                    "ready",
+                    None,
+                    completion_report,
+                    swarm.members,
+                    swarm.swarms_by_id,
+                    Some(swarm.event_history),
+                    Some(swarm.event_counter),
+                    Some(swarm.event_tx),
+                )
+                .await;
+            }
+        }
+        Err(e) => {
+            if let Some(session_id) = done_session {
+                update_member_status(
+                    session_id,
+                    "failed",
+                    Some(truncate_detail(&e.to_string(), 120)),
+                    swarm.members,
+                    swarm.swarms_by_id,
+                    Some(swarm.event_history),
+                    Some(swarm.event_counter),
+                    Some(swarm.event_tx),
+                )
+                .await;
+            }
+            let retry_after_secs = e
+                .downcast_ref::<StreamError>()
+                .and_then(|se| se.retry_after_secs);
+            if retry_after_secs.is_some() {
+                crate::telemetry::record_error(crate::telemetry::ErrorCategory::RateLimited);
+            } else {
+                let msg = e.to_string();
+                let lower = msg.to_lowercase();
+                if lower.contains("timeout") {
+                    crate::telemetry::record_error(
+                        crate::telemetry::ErrorCategory::ProviderTimeout,
+                    );
+                } else if crate::provider::error_looks_like_credential_failure(&msg)
+                    || lower.contains("403 forbidden")
+                {
+                    // Use the shared credential-failure classifier instead of a
+                    // bare `contains("auth")`: that substring also matched
+                    // unrelated errors (e.g. any message mentioning "author" or
+                    // OAuth flow noise) and inflated the auth_failed telemetry
+                    // counter.
+                    crate::telemetry::record_error(crate::telemetry::ErrorCategory::AuthFailed);
+                }
+            }
+        }
+    }
 }
 
 async fn append_context_message(

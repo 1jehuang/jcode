@@ -1478,6 +1478,7 @@ impl RawClient {
             client_has_local_history: false,
             allow_session_takeover: false,
             crash_on_disconnect: false,
+            continue_on_disconnect: false,
             terminal_env: Vec::new(),
         })
         .await?;

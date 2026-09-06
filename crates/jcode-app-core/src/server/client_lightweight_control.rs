@@ -103,7 +103,14 @@ pub(super) async fn handle_lightweight_control_request(
         swarm_mutation_runtime,
     } = context;
     if let Request::Ping { id } = request {
-        write_direct_event(&writer, &ServerEvent::Pong { id }).await?;
+        write_direct_event(
+            &writer,
+            &ServerEvent::Pong {
+                id,
+                native_ssh_protocol: Some(1),
+            },
+        )
+        .await?;
         return Ok(());
     }
 

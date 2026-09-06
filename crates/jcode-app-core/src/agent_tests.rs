@@ -421,7 +421,7 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
     let keepalive_deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < keepalive_deadline {
         match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
-            Ok(Some(ServerEvent::Pong { id })) => {
+            Ok(Some(ServerEvent::Pong { id, .. })) => {
                 assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
                 saw_keepalive = true;
                 break;
@@ -450,7 +450,7 @@ async fn run_turn_streaming_mpsc_emits_keepalive_while_provider_is_quiet() {
                 saw_text = true;
                 break;
             }
-            Ok(Some(ServerEvent::Pong { id })) => {
+            Ok(Some(ServerEvent::Pong { id, .. })) => {
                 assert_eq!(id, STREAM_KEEPALIVE_PONG_ID);
             }
             Ok(Some(_)) => {}

@@ -49,15 +49,18 @@ fn disconnected_while_processing(
         .unwrap_or(client_is_processing)
 }
 
-async fn session_has_live_successor(
-    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+/// Release transport-owned state without changing the live session or turn.
+pub(super) async fn detach_client_attachment(
     session_id: &str,
-) -> bool {
-    client_connections
-        .read()
-        .await
-        .values()
-        .any(|info| info.session_id == session_id)
+    connection_id: &str,
+    debug_id: &str,
+    client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
+    client_debug_state: &Arc<RwLock<ClientDebugState>>,
+    swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) {
+    client_debug_state.write().await.unregister(debug_id);
+    client_connections.write().await.remove(connection_id);
+    unregister_session_event_sender(swarm_members, session_id, connection_id).await;
 }
 
 #[expect(
@@ -100,22 +103,27 @@ pub(super) async fn cleanup_client_connection(
         handle.abort();
     }
 
-    {
-        let mut debug_state = client_debug_state.write().await;
-        debug_state.unregister(client_debug_id);
-    }
-    {
-        let mut connections = client_connections.write().await;
-        connections.remove(client_connection_id);
-    }
-    unregister_session_event_sender(swarm_members, client_session_id, client_connection_id).await;
+    detach_client_attachment(
+        client_session_id,
+        client_connection_id,
+        client_debug_id,
+        client_connections,
+        client_debug_state,
+        swarm_members,
+    )
+    .await;
 
     // Release stale live ownership before slower cleanup so a reconnecting TUI can
     // reclaim the same session without tripping duplicate-attach guards.
     tokio::task::yield_now().await;
 
-    let successor_connected =
-        session_has_live_successor(client_connections, client_session_id).await;
+    // Resume claims use this same lock before accessing the sessions map.
+    // Keep it through destructive cleanup so a successor cannot be claimed
+    // between the check and session/status/control-handle removal.
+    let connections = client_connections.write().await;
+    let successor_connected = connections
+        .values()
+        .any(|info| info.session_id == client_session_id);
     if successor_connected {
         crate::logging::info(&format!(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
@@ -270,6 +278,7 @@ pub(super) async fn cleanup_client_connection(
     remove_background_tool_signal(client_session_id);
     remove_session_interrupt_queue(soft_interrupt_queues, client_session_id).await;
 
+    drop(connections);
     event_handle.abort();
     Ok(())
 }

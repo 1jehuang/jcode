@@ -766,6 +766,7 @@ impl AcpRuntime {
         session
             .send(&Request::Subscribe {
                 crash_on_disconnect: false,
+                continue_on_disconnect: false,
                 id: subscribe_id,
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
@@ -818,6 +819,7 @@ impl AcpRuntime {
         session
             .send(&Request::Subscribe {
                 crash_on_disconnect: false,
+                continue_on_disconnect: false,
                 id: resume_id,
                 working_dir: Some(cwd.display().to_string()),
                 selfdev: None,
