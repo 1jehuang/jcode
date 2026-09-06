@@ -174,6 +174,38 @@ fn create_session_maps_to_subscribe() {
 }
 
 #[test]
+fn create_session_preserves_explicit_working_dir() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session",
+        "id": 1,
+        "working_dir": "/workspace/explicit",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["working_dir"], "/workspace/explicit");
+}
+
+#[test]
+fn attach_session_omits_working_dir() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session",
+        "id": 1,
+        "session_id": "existing",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert_eq!(value["target_session_id"], "existing");
+    assert!(
+        value.get("working_dir").is_none(),
+        "attach must not overwrite the session cwd with the bridge cwd"
+    );
+}
+
+#[test]
 fn desktop_owned_session_requests_crash_on_disconnect() {
     let mut state = BridgeState::with_crash_on_disconnect(true);
     let out = state.api_request_to_legacy(&json!({"req": "create_session", "id": 1}));
