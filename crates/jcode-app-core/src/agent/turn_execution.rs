@@ -388,6 +388,9 @@ impl Agent {
     /// `tool_definitions`, this does not pin the tool snapshot or consume the
     /// one-shot late-MCP-discovery check before the first real turn.
     pub(crate) async fn prewarm_provider(&self) {
+        if self.session.is_canary {
+            self.registry.register_selfdev_tools().await;
+        }
         let tools = match &self.locked_tools {
             Some(tools) => tools.clone(),
             None => self.build_filtered_tool_definitions().await,

@@ -26,12 +26,15 @@ use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 struct MockProvider;
 
-struct IdlePrewarmProvider(Arc<tokio::sync::Notify>);
+struct IdlePrewarmProvider(Arc<tokio::sync::Notify>, bool);
 
 #[async_trait]
 impl Provider for IdlePrewarmProvider {
     async fn prewarm(&self, _tools: &[ToolDefinition], _system: &str) {
         self.0.notify_one();
+        if self.1 {
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn complete(
@@ -49,14 +52,15 @@ impl Provider for IdlePrewarmProvider {
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(Self(Arc::clone(&self.0)))
+        Arc::new(Self(Arc::clone(&self.0), self.1))
     }
 }
 
 #[tokio::test]
 async fn idle_prewarm_starts_before_user_input_and_skips_busy_sessions() {
     let notification = Arc::new(tokio::sync::Notify::new());
-    let provider: Arc<dyn Provider> = Arc::new(IdlePrewarmProvider(Arc::clone(&notification)));
+    let provider: Arc<dyn Provider> =
+        Arc::new(IdlePrewarmProvider(Arc::clone(&notification), false));
     let registry = Registry::new(Arc::clone(&provider)).await;
     let _env = crate::storage::lock_test_env();
     let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
@@ -70,6 +74,24 @@ async fn idle_prewarm_starts_before_user_input_and_skips_busy_sessions() {
     tokio::time::timeout(std::time::Duration::from_secs(5), notification.notified())
         .await
         .expect("idle subscription should prewarm before any user message");
+}
+
+#[tokio::test]
+async fn idle_prewarm_never_holds_agent_lock_across_pending_preparation() {
+    let notification = Arc::new(tokio::sync::Notify::new());
+    let provider: Arc<dyn Provider> =
+        Arc::new(IdlePrewarmProvider(Arc::clone(&notification), true));
+    let registry = Registry::new(Arc::clone(&provider)).await;
+    let _env = crate::storage::lock_test_env();
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    assert!(!prewarm_idle_agent(&agent));
+    assert!(
+        agent.try_lock().is_ok(),
+        "foreground must not wait for warmup"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), notification.notified())
+        .await
+        .expect("pending provider hook was polled once and cancelled");
 }
 
 fn test_swarm_member(session_id: &str, status: &str) -> SwarmMember {

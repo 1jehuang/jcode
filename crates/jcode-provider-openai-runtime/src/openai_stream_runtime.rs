@@ -768,9 +768,18 @@ pub(super) async fn try_persistent_ws_continuation(
     // Send the continuation request on the existing WebSocket
     let send_started_at = Instant::now();
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::SendingRequest).await;
+    // Health checks and event backpressure above can yield to a credential
+    // change in another fork. Revalidate at the send boundary and keep the
+    // read guard until the frame is flushed, not throughout generation.
+    let send_credentials = credentials.read().await;
+    if state.identity != openai_websocket_prewarm::prewarm_identity(&send_credentials) {
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
     if let Err(e) = state.ws_stream.send(WsMessage::Text(request_text)).await {
         return PersistentWsResult::Failed(format!("send error: {}", e));
     }
+    drop(send_credentials);
     emit_connection_phase(tx, jcode_message_types::ConnectionPhase::WaitingForResponse).await;
     state.last_activity_at = Instant::now();
     jcode_base::logging::info(&format!(

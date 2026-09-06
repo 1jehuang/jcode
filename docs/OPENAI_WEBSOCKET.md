@@ -17,7 +17,9 @@ Chat Completions providers are unaffected.
 
 When an idle client subscribes, Jcode snapshots its tools and static instructions
 and starts preparation while the user types. This snapshot does not pin tools or
-consume late MCP discovery. The agent also tries prewarming before local turn
+consume late MCP discovery. Idle preparation is polled once after acknowledging
+the subscription. If local preparation would yield, it is abandoned rather than
+holding the agent lock in front of user input. The agent also tries prewarming before local turn
 context preparation. Both hooks prepare the static prefix in the background
 using `response.create` with `generate: false`, `input: []`, and `store: false`.
 The server returns a completed response ID without model

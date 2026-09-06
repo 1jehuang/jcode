@@ -18,6 +18,7 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::transport::WriteHalf;
 use anyhow::Result;
+use futures::FutureExt;
 use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -897,23 +898,18 @@ pub(super) async fn handle_subscribe(
     let _ = client_event_tx.send(ServerEvent::SessionId {
         session_id: client_session_id.to_string(),
     });
-    prewarm_idle_agent(agent);
     let _ = client_event_tx.send(ServerEvent::Done { id });
+    prewarm_idle_agent(agent);
 }
 
 fn prewarm_idle_agent(agent: &Arc<Mutex<Agent>>) -> bool {
-    // Never wait behind an active turn on reconnect. Taking the guard before
-    // spawning also prevents a delayed warmup task from starting after a new
-    // foreground request has already consumed its preparation slot.
-    let Ok(guard) = Arc::clone(agent).try_lock_owned() else {
+    // Poll local preparation once, without holding the agent across a yield.
+    // If a registry/provider lock would wait, abandon this optional attempt.
+    // Only the provider's network task can outlive this call.
+    let Ok(guard) = agent.try_lock() else {
         return false;
     };
-    tokio::spawn(async move {
-        // Only local prefix preparation is awaited. Provider implementations
-        // start network warmup in the background and return immediately.
-        guard.prewarm_provider().await;
-    });
-    true
+    guard.prewarm_provider().now_or_never().is_some()
 }
 
 async fn subscribe_should_mark_ready(

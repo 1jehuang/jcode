@@ -593,3 +593,50 @@ async fn persistent_ws_rejects_identity_changed_by_another_fork() {
         .expect("stale authenticated socket should close")
         .expect("server task");
 }
+
+#[tokio::test]
+async fn persistent_ws_rechecks_identity_after_presend_backpressure() {
+    let (state, server) = test_persistent_ws_state().await;
+    let persistent_ws = Arc::new(Mutex::new(Some(state)));
+    let credentials = Arc::new(RwLock::new(prewarm_test_credentials()));
+    let (tx, mut rx) = mpsc::channel(1);
+    let socket = Arc::clone(&persistent_ws);
+    let shared_credentials = Arc::clone(&credentials);
+    let continuation = tokio::spawn(async move {
+        try_persistent_ws_continuation(
+            &socket,
+            &shared_credentials,
+            &serde_json::json!({"model":"gpt-5.6-sol"}),
+            &[
+                serde_json::json!({"role":"user", "content":"previous"}),
+                serde_json::json!({"role":"user", "content":"new account"}),
+            ],
+            2,
+            &tx,
+        )
+        .await
+    });
+    // The initial identity check has passed. The SendingRequest event is
+    // blocked behind ConnectionType in our one-slot channel on this runtime.
+    let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(event, StreamEvent::ConnectionType { .. }));
+    credentials.write().await.access_token = "changed-before-send".into();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("changed credentials must stop continuation without generation");
+    assert!(matches!(
+        continuation.await.unwrap(),
+        PersistentWsResult::NotAvailable
+    ));
+    assert!(persistent_ws.lock().await.is_none());
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("stale socket must close before generation")
+        .unwrap();
+}
