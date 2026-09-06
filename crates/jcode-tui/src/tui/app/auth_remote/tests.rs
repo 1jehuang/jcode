@@ -73,7 +73,7 @@ fn ssh_login_callback_never_enters_composer_history_debug_or_paste_storage() {
                 .unwrap()
                 .contains("secret-callback")
         );
-        assert!(app.pending_turn.is_none());
+        assert!(!app.pending_turn);
         assert!(app.queued_messages.is_empty());
         app.handle_ssh_login_key(KeyCode::Char('u'), KeyModifiers::CONTROL, None);
         assert!(app.remote_login.as_ref().unwrap().input.is_empty());
@@ -96,7 +96,7 @@ fn ssh_login_enter_preempts_local_preview_and_preserves_pending_command_privacy(
                 .await
                 .unwrap();
             assert!(app.remote_login.is_some());
-            assert!(app.pending_turn.is_none());
+            assert!(!app.pending_turn);
             app.handle_paste("/quit".into());
             app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
                 .await
@@ -130,7 +130,7 @@ fn ssh_login_disconnected_keys_stay_in_private_flow() {
             .unwrap();
         assert!(app.remote_login.is_none());
         assert!(app.queued_messages.is_empty());
-        assert!(app.pending_turn.is_none());
+        assert!(!app.pending_turn);
         assert!(app.input.is_empty());
     });
 }
