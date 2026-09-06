@@ -14,6 +14,9 @@
 //! updates. A no-replace atomic publication is the only supported operation.
 //! Other stores are never opened or modified. This is a copy, not a token move:
 //! providers may later invalidate either copy when rotating refresh tokens.
+//! OpenAI expiry prefers the stored timestamp, then the token's unverified JWT
+//! `exp` claim. This is an offline expiry check, not authentication validation.
+//! Opaque tokens without an explicit expiry remain supported.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -262,11 +265,10 @@ pub fn export_account_at(
                 None => store.openai_accounts.first(),
             }
             .ok_or(TransferError::Unavailable)?;
-            validate_tokens(
-                &account.access_token,
-                &account.refresh_token,
-                account.expires_at,
-            )?;
+            let expires_at = account
+                .expires_at
+                .or_else(|| super::codex::expires_at_from_access_token(&account.access_token));
+            validate_tokens(&account.access_token, &account.refresh_token, expires_at)?;
             serialize(
                 provider,
                 OpenAiCredential {
@@ -274,7 +276,7 @@ pub fn export_account_at(
                     refresh_token: account.refresh_token.clone(),
                     id_token: account.id_token.clone(),
                     account_id: account.account_id.clone(),
-                    expires_at: account.expires_at,
+                    expires_at,
                 },
             )
         }
@@ -403,8 +405,11 @@ pub fn import_at(
     }
     let store = match provider {
         TransferProvider::OpenAi => {
-            let credential: OpenAiCredential = serde_json::from_str(envelope.credential.get())
+            let mut credential: OpenAiCredential = serde_json::from_str(envelope.credential.get())
                 .map_err(|_| TransferError::InvalidPayload)?;
+            credential.expires_at = credential
+                .expires_at
+                .or_else(|| super::codex::expires_at_from_access_token(&credential.access_token));
             validate_tokens(
                 &credential.access_token,
                 &credential.refresh_token,
@@ -795,6 +800,70 @@ mod tests {
             } else {
                 assert_eq!(result, Err(TransferError::InvalidPayload));
             }
+        }
+    }
+
+    #[test]
+    fn openai_jwt_expiry_fallback_is_checked_and_persisted_without_source_mutation() {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+
+        let jwt = |seconds: i64| {
+            let claims = serde_json::to_vec(&json!({"exp": seconds})).unwrap();
+            format!("synthetic.{}.unsigned", URL_SAFE_NO_PAD.encode(claims))
+        };
+        let provider = TransferProvider::OpenAi;
+        for (token, explicit, expected) in [
+            (jwt(1), None, Some(1_000)),
+            (jwt(FUTURE / 1_000), None, Some(FUTURE)),
+            (jwt(1), Some(FUTURE), Some(FUTURE)),
+            ("synthetic-opaque-token".to_string(), None, None),
+        ] {
+            let local = tempfile::tempdir().unwrap();
+            let remote = tempfile::tempdir().unwrap();
+            let source = serde_json::to_vec(&json!({
+                "openai_accounts": [{
+                    "label": "active", "access_token": token,
+                    "refresh_token": "synthetic-refresh", "expires_at": explicit
+                }], "active_openai_account": "active"
+            }))
+            .unwrap();
+            let path = local.path().join("openai-auth.json");
+            fs::write(&path, &source).unwrap();
+            let incoming = serde_json::to_vec(&json!({
+                "version": 1, "provider": "openai", "credential": {
+                    "access_token": token, "refresh_token": "synthetic-refresh",
+                    "expires_at": explicit
+                }
+            }))
+            .unwrap();
+            if expected == Some(1_000) {
+                assert!(matches!(
+                    export_at(local.path(), provider),
+                    Err(TransferError::Expired)
+                ));
+                assert_eq!(
+                    import_at(remote.path(), provider, &incoming),
+                    Err(TransferError::Expired)
+                );
+                assert_eq!(fs::read_dir(remote.path()).unwrap().count(), 0);
+            } else {
+                let exported = export_at(local.path(), provider).unwrap();
+                let value: Value = serde_json::from_slice(exported.as_bytes()).unwrap();
+                assert_eq!(value["credential"]["expires_at"].as_i64(), expected);
+                // Exercise incoming envelopes without the export-side normalization.
+                import_at(remote.path(), provider, &incoming).unwrap();
+                let installed: Value = serde_json::from_slice(
+                    &fs::read(remote.path().join("openai-auth.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    installed["openai_accounts"][0]["expires_at"].as_i64(),
+                    expected
+                );
+                let reexported = export_at(remote.path(), provider).unwrap();
+                assert!(exported.as_bytes() == reexported.as_bytes());
+            }
+            assert!(fs::read(path).unwrap() == source);
         }
     }
 
