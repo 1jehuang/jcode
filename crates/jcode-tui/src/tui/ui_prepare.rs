@@ -735,9 +735,8 @@ pub(super) fn prepare_messages(
 }
 
 /// Top padding used to vertically center the header on the initial empty
-/// screen. Derived only from the persistent header height (not suggestions)
-/// so the same value can be re-applied above the header once messages exist,
-/// keeping the header from jumping when the first prompt is sent.
+/// screen. Conversation spacing belongs to the viewport, not the transcript,
+/// so this padding is only used before the first prompt.
 fn initial_header_pad_top(height: u16, header_lines: usize) -> usize {
     let input_reserve = 4;
     let available = (height as usize).saturating_sub(input_reserve);
@@ -831,10 +830,7 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     };
     let streaming_ms = streaming_start.elapsed().as_secs_f64() * 1000.0;
 
-    let is_initial_empty = app.onboarding_preview_mode()
-        || (app.display_messages().is_empty()
-            && !app.is_processing()
-            && app.streaming_text().is_empty());
+    let is_initial_empty = super::transitions::initial_screen(app);
 
     if is_initial_empty {
         let compose_start = Instant::now();
@@ -892,12 +888,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
             }
         }
 
-        // Vertically center the initial empty screen, but compute the padding
-        // from the header height alone so the exact same padding can be
-        // re-applied above the header once the conversation starts. That keeps
-        // the header at the same screen position when the first prompt
-        // arrives; the padding then simply scrolls away as the transcript
-        // grows instead of vanishing in one jump.
+        // Center the welcome screen. Once submitted, the layout retains the
+        // composer's measured position while the transcript fills from the top.
         let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
         let mut centered = build_top_pad_lines(width, pad_top);
         centered.reserve(wrapped_lines.len());
@@ -933,37 +925,8 @@ fn prepare_messages_inner(app: &dyn TuiState, width: u16, height: u16) -> Prepar
     }
 
     let compose_start = Instant::now();
-    // Re-apply the initial-screen centering pad above the header so the
-    // transition from the empty screen to the first message does not shift
-    // anything. The pad scrolls off naturally as the transcript grows.
-    let pad_top = initial_header_pad_top(height, header_prepared.wrapped_lines.len());
-    let padded_header = if pad_top > 0 {
-        let mut lines = build_top_pad_lines(width, pad_top);
-        lines.reserve(header_prepared.wrapped_lines.len());
-        lines.extend(header_prepared.wrapped_lines.iter().cloned());
-        let count = lines.len();
-        let plain = Arc::new(lines.iter().map(ui::line_plain_text).collect());
-        Arc::new(PreparedMessages {
-            wrapped_lines: lines,
-            wrapped_plain_lines: plain,
-            wrapped_copy_offsets: Arc::new(vec![0; count]),
-            raw_plain_lines: Arc::new(Vec::new()),
-            wrapped_line_map: Arc::new(Vec::new()),
-            wrapped_user_indices: Vec::new(),
-            wrapped_user_prompt_starts: Vec::new(),
-            wrapped_user_prompt_ends: Vec::new(),
-            user_prompt_texts: Vec::new(),
-            image_regions: Vec::new(),
-            edit_tool_ranges: Vec::new(),
-            copy_targets: Vec::new(),
-            message_boundaries: Vec::new(),
-            mermaid_pending_epoch: None,
-        })
-    } else {
-        header_prepared
-    };
     let frame = PreparedChatFrame::from_sections(vec![
-        (PreparedSectionKind::Header, padded_header),
+        (PreparedSectionKind::Header, header_prepared),
         (PreparedSectionKind::Body, body_prepared),
         (PreparedSectionKind::InlineImages, inline_images_prepared),
         (PreparedSectionKind::BatchProgress, batch_progress_prepared),

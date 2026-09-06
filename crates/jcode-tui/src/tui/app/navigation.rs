@@ -1752,6 +1752,7 @@ impl App {
     /// (e.g. the mouse-wheel queue) rely on this to avoid accumulating
     /// "phantom" scroll once the viewport is already pinned to the top.
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
+        self.adopt_first_prompt_preview_scroll();
         // Scrolling up cancels any pending overscroll rebound line immediately
         // Leaving the collapsed terminal-clear screen: drop the trailing Ctrl+L
         // spacer so scrolling up reveals the transcript immediately instead of
@@ -1816,6 +1817,7 @@ impl App {
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {
+        self.adopt_first_prompt_preview_scroll();
         if self.auto_scroll_paused {
             return;
         }
@@ -1833,6 +1835,7 @@ impl App {
     /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
     /// that would later have to be undone before scrolling up moves the view.
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
+        self.adopt_first_prompt_preview_scroll();
         // Segment downward motion into gestures: a pause longer than
         // `OVERSCROLL_GESTURE_GAP` starts a new gesture. Record whether this
         // gesture began while already pinned to the bottom; only such gestures
@@ -1903,6 +1906,16 @@ impl App {
             self.request_full_repaint();
         }
         changed
+    }
+
+    fn adopt_first_prompt_preview_scroll(&mut self) {
+        if !self.auto_scroll_paused
+            && self.pending_history_anchor.is_none()
+            && let Some(scroll) = super::super::ui::take_first_prompt_preview_scroll()
+        {
+            self.scroll_offset = scroll;
+            self.auto_scroll_paused = true;
+        }
     }
 
     /// Whether the chat viewport is currently pinned to (following) the

@@ -1801,3 +1801,5 @@ fn assert_clear_swarm_plan_reset(app: &App) {
     assert_eq!(app.swarm_plan_version, None);
     assert_eq!(app.swarm_plan_swarm_id, None);
 }
+
+include!("tests/first_prompt_transition.rs");
