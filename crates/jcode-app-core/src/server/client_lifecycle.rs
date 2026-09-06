@@ -514,6 +514,7 @@ pub(super) async fn handle_client(
     let agent_new_ms = t0.elapsed().as_millis();
 
     new_agent.set_memory_enabled(crate::config::config().features.memory);
+    new_agent.prewarm_provider_idle().await;
 
     crate::logging::info(&format!(
         "[TIMING] handle_client setup: registry={registry_ms}ms, agent_new={agent_new_ms}ms, total={}ms",
