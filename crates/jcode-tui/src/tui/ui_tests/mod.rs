@@ -129,6 +129,7 @@ struct TestState {
     active_skill: Option<String>,
     centered_mode: bool,
     anim_elapsed: f32,
+    now_ms: u64,
     time_since_activity: Option<Duration>,
     remote_startup_phase_active: bool,
     inline_view_state: Option<crate::tui::InlineViewState>,
@@ -475,7 +476,7 @@ impl crate::tui::TuiState for TestState {
         self.working_dir.clone()
     }
     fn now_millis(&self) -> u64 {
-        0
+        self.now_ms
     }
     fn copy_badge_ui(&self) -> crate::tui::CopyBadgeUiState {
         Default::default()
