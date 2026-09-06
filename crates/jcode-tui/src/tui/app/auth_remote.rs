@@ -1,4 +1,4 @@
-//! SSH-native login. No provider/credential APIs from the local machine belong here.
+//! SSH-native login. Local credentials are accessed only after explicit import consent.
 mod command;
 #[cfg(test)]
 mod tests;
@@ -18,6 +18,7 @@ const PROVIDERS: [&str; 6] = [
 #[derive(PartialEq, Eq)]
 enum Phase {
     Choosing,
+    ImportConsent,
     Starting,
     Input,
     Completing,
@@ -54,7 +55,11 @@ impl Drop for RemoteLogin {
     fn drop(&mut self) {
         // A waiting-for-paste flow has no Task to cancel. Graceful teardown still
         // invalidates its pending remote authorization, without touching credentials.
-        if self.task.is_none() && !self.provider.is_empty() && self.phase != Phase::Finished {
+        if self.task.is_none()
+            && !self.provider.is_empty()
+            && self.phase != Phase::Finished
+            && self.operation != Some(Operation::Import)
+        {
             command::cleanup_detached(
                 self.target.clone(),
                 self.provider.clone(),
@@ -76,9 +81,14 @@ impl App {
             return true;
         }
         let words: Vec<_> = input.split_whitespace().collect();
-        let provider = words.get(1).copied();
-        if words.len() > 2 || provider.is_some_and(|p| !PROVIDERS.contains(&p)) {
-            self.push_display_message(DisplayMessage::system("SSH login supports: openai, claude, gemini, antigravity, google, copilot. Use /login to choose. No local credentials were accessed."));
+        let importing = words.get(1) == Some(&"--import-local");
+        let provider = words.get(if importing { 2 } else { 1 }).copied();
+        if importing && (words.len() != 3 || !matches!(provider, Some("openai" | "claude"))) {
+            self.push_display_message(DisplayMessage::system("Use /login --import-local openai or /login --import-local claude for a one-time import of the selected local account. Confirmation is required before local credentials are read. No local credentials were accessed."));
+            return true;
+        }
+        if !importing && (words.len() > 2 || provider.is_some_and(|p| !PROVIDERS.contains(&p))) {
+            self.push_display_message(DisplayMessage::system("SSH login supports: openai, claude, gemini, antigravity, google, copilot. Use /login to choose. For an explicit one-time copy, use /login --import-local openai or /login --import-local claude. No local credentials were accessed."));
             return true;
         }
         let target = match Target::from_env() {
@@ -108,7 +118,20 @@ impl App {
             operation: None,
             quit_after_cancel: false,
         });
-        if let Some(provider) = provider {
+        if importing {
+            let provider = provider.unwrap();
+            let login = self.remote_login.as_mut().unwrap();
+            login.provider = provider.into();
+            login.phase = Phase::ImportConsent;
+            login.operation = Some(Operation::Import);
+            let host = login.target.host().to_string();
+            self.push_display_message(DisplayMessage::system(format!(
+                "SSH credential import: {provider} to {host}\n\nThis copies usable credentials for your selected active local account to {host}, giving that host access to the provider account. Only Jcode-managed OAuth credentials are copied, not environment keys, other tools' logins, or other accounts. Trust this destination before continuing.\n\nBoth machines may refresh the same tokens, causing token refresh conflicts or invalidating the other login. This is a one-time copy with no sync. Existing remote credentials will not be overwritten. No local credentials have been read or exported.\n\nType exactly confirm and press Enter to read and copy the credentials. Esc, Ctrl+C, or /cancel cancels without reading or copying credentials."
+            )));
+            self.set_status_notice(
+                "SSH credential import: type confirm to consent, or Esc to cancel.",
+            );
+        } else if let Some(provider) = provider {
             self.start_ssh_login(provider);
         } else {
             self.push_display_message(DisplayMessage::system(
@@ -155,13 +178,16 @@ impl App {
         let Some(login) = self.remote_login.as_mut() else {
             return;
         };
-        if login.phase == Phase::Choosing {
+        if matches!(login.phase, Phase::Choosing | Phase::ImportConsent) {
+            let importing = login.phase == Phase::ImportConsent;
             let quit = login.quit_after_cancel;
             self.finish_ssh_login_ui();
             self.should_quit |= quit;
-            self.push_display_message(DisplayMessage::system(
-                "SSH login cancelled. No authorization was started.",
-            ));
+            self.push_display_message(DisplayMessage::system(if importing {
+                "SSH credential import cancelled. No local credentials were read or copied."
+            } else {
+                "SSH login cancelled. No authorization was started."
+            }));
             self.set_status_notice("SSH login cancelled");
             return;
         }
@@ -170,14 +196,26 @@ impl App {
         }
         login.input.clear();
         login.phase = Phase::Cancelling;
+        let importing = login.operation == Some(Operation::Import);
         if let Some(task) = login.task.as_mut() {
             task.cancel();
+        } else if importing {
+            let quit = login.quit_after_cancel;
+            self.finish_ssh_login_ui();
+            self.should_quit |= quit;
+            self.push_display_message(DisplayMessage::system("SSH credential import stopped locally. No transfer is running. Check remote login state before trying again."));
+            self.set_status_notice("SSH credential import stopped");
+            return;
         } else {
             login.run(Operation::Cancel, None);
         }
         self.input.clear();
         self.cursor_pos = 0;
-        self.set_status_notice("SSH login cancelling on remote host...");
+        self.set_status_notice(if importing {
+            "SSH credential import: stopping transfer. Credentials already saved cannot be undone."
+        } else {
+            "SSH login cancelling on remote host..."
+        });
     }
 
     /// Secrets never enter App::input, paste placeholders, undo, history or debug snapshots.
@@ -281,6 +319,23 @@ impl App {
             self.cancel_ssh_login();
             return;
         }
+        if login.phase == Phase::ImportConsent {
+            if input != "confirm" {
+                self.set_status_notice("Type exactly confirm to copy credentials, or Esc to cancel. No local credentials were accessed.");
+                return;
+            }
+            if tokio::runtime::Handle::try_current().is_err() {
+                self.finish_ssh_login_ui();
+                self.push_display_message(DisplayMessage::error(
+                    "SSH credential import failed: async runtime unavailable. No local credentials were accessed.",
+                ));
+                return;
+            }
+            login.phase = Phase::Completing;
+            login.run(Operation::Import, None);
+            self.set_status_notice("SSH credential import: copying to remote host. Esc stops the transfer but cannot undo an import already saved.");
+            return;
+        }
         if login.phase == Phase::Choosing {
             let provider = input
                 .parse::<usize>()
@@ -345,6 +400,7 @@ impl App {
         login.task = None;
         let provider = login.provider.clone();
         let quit_after_cancel = login.quit_after_cancel;
+        let importing = login.operation == Some(Operation::Import);
         match reply {
             Ok(Reply::Pending {
                 auth_url,
@@ -375,7 +431,13 @@ impl App {
                     "SSH login: waiting for browser approval. Paste completion here. Esc cancels.",
                 );
             }
-            Ok(Reply::Authenticated { validation_warning }) => {
+            Ok(Reply::Authenticated { .. } | Reply::Imported) => {
+                let validation_warning = matches!(
+                    reply,
+                    Ok(Reply::Authenticated {
+                        validation_warning: true
+                    })
+                );
                 self.finish_ssh_login_ui();
                 self.should_quit |= quit_after_cancel;
                 self.recent_authenticated_provider =
@@ -390,14 +452,26 @@ impl App {
                     .is_ok();
                 let catalog_requested = remote.request_model_catalog().await.is_ok();
                 self.push_display_message(DisplayMessage::system(format!(
-                    "SSH login: {provider} authenticated on the remote host.{}",
+                    "SSH login: {provider} {} on the remote host.{}",
+                    if importing {
+                        "imported"
+                    } else {
+                        "authenticated"
+                    },
                     if refreshed && catalog_requested {
                         " Refreshing remote provider and model state."
                     } else {
                         " Reconnect to refresh remote provider and model state."
                     }
                 )));
-                self.set_status_notice(format!("SSH login: {provider} authenticated"));
+                self.set_status_notice(format!(
+                    "SSH login: {provider} {}",
+                    if importing {
+                        "imported"
+                    } else {
+                        "authenticated"
+                    }
+                ));
                 if validation_warning {
                     self.push_display_message(DisplayMessage::system("Remote credentials were saved, but post-login validation did not complete successfully. Use /model to choose a remote model and retry. Do not paste the authorization code again."));
                 }
@@ -411,6 +485,22 @@ impl App {
                 self.set_status_notice("SSH login cancelled");
             }
             Err(message) => {
+                if importing {
+                    let cancelled = login.phase == Phase::Cancelling;
+                    self.finish_ssh_login_ui();
+                    self.should_quit |= quit_after_cancel;
+                    self.push_display_message(DisplayMessage::error(if cancelled {
+                        "SSH credential import stopped locally. The remote host may already have saved the credentials. Cancellation does not remove imported credentials. Check remote login state before trying again.".to_string()
+                    } else {
+                        format!("SSH credential import failed: {message}\nThe remote outcome may be unconfirmed. Check remote login state before trying again. No automatic retry or sync is performed.")
+                    }));
+                    self.set_status_notice(if cancelled {
+                        "SSH credential import stopped"
+                    } else {
+                        "SSH credential import failed"
+                    });
+                    return true;
+                }
                 if login.phase == Phase::Cancelling {
                     // Esc can race a result already queued by a finished task. In
                     // that case the task never receives its cancellation signal.

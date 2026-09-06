@@ -1,4 +1,7 @@
-//! Scriptable SSH login transport. OAuth payloads only cross stdin, never argv.
+//! Scriptable SSH login transport. Secret payloads only cross stdin, never argv.
+use crate::auth::transfer::{
+    CredentialTransfer, MAX_TRANSFER_BYTES, TransferProvider, export_local,
+};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +19,10 @@ pub(super) struct Target {
 }
 
 impl Target {
+    pub(super) fn host(&self) -> &str {
+        &self.host
+    }
+
     pub(super) fn from_env() -> Result<Self, &'static str> {
         let host = crate::tui::ssh_remote_host().ok_or("SSH host is not configured")?;
         let target = Self {
@@ -81,9 +88,19 @@ impl Target {
             "-o",
             "ServerAliveCountMax=2",
         ]);
+        let action = if operation == Operation::Import {
+            format!("auth import --provider {} --stdin --json", quote(provider))
+        } else {
+            format!(
+                "login --provider {} --no-browser --json --flow-id {} {}",
+                quote(provider),
+                quote(flow),
+                operation.flag(),
+            )
+        };
         command.arg("--").arg(&self.host).arg(format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update --no-selfdev{socket}{cwd} login --provider {} --no-browser --json --flow-id {} {}",
-            quote(&self.binary), quote(provider), quote(flow), operation.flag(),
+            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update --no-selfdev{socket}{cwd} {action}",
+            quote(&self.binary),
         ));
         command
             .stdin(Stdio::piped())
@@ -101,6 +118,7 @@ pub(super) enum Operation {
     Code,
     Complete,
     Cancel,
+    Import,
 }
 impl Operation {
     fn flag(self) -> &'static str {
@@ -110,6 +128,7 @@ impl Operation {
             Self::Code => "--auth-code -",
             Self::Complete => "--complete",
             Self::Cancel => "--cancel",
+            Self::Import => unreachable!("credential import does not use OAuth flags"),
         }
     }
 }
@@ -124,6 +143,7 @@ pub(super) enum Reply {
         validation_warning: bool,
     },
     Cancelled,
+    Imported,
 }
 
 fn parse_reply(bytes: &[u8], operation: Operation, provider: &str) -> Result<Reply, &'static str> {
@@ -134,6 +154,7 @@ fn parse_reply(bytes: &[u8], operation: Operation, provider: &str) -> Result<Rep
         return Err("Remote login provider mismatch");
     }
     match (value["status"].as_str(), operation) {
+        (Some("imported"), Operation::Import) => Ok(Reply::Imported),
         (Some("authenticated"), Operation::Callback | Operation::Code | Operation::Complete) => {
             Ok(Reply::Authenticated {
                 validation_warning: false,
@@ -178,12 +199,27 @@ fn parse_reply(bytes: &[u8], operation: Operation, provider: &str) -> Result<Rep
     }
 }
 
+// Not Debug or Clone. Keep the base export's private buffer alive only for stdin.
+enum Payload {
+    Login(String),
+    Import(CredentialTransfer),
+}
+
+impl Payload {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Login(value) => value.as_bytes(),
+            Self::Import(value) => value.as_bytes(),
+        }
+    }
+}
+
 async fn execute(
     target: &Target,
     provider: &str,
     flow: &str,
     operation: Operation,
-    payload: Option<String>,
+    payload: Option<Payload>,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Result<Reply, &'static str> {
     let mut child = target
@@ -199,7 +235,12 @@ async fn execute(
     };
     let exchange = async {
         if let Some(payload) = payload {
-            if payload.len() > INPUT_LIMIT {
+            let limit = if operation == Operation::Import {
+                MAX_TRANSFER_BYTES
+            } else {
+                INPUT_LIMIT
+            };
+            if payload.as_bytes().len() > limit {
                 return Err("Login input is too long");
             }
             stdin
@@ -232,6 +273,11 @@ async fn execute(
                 return Ok(Reply::Authenticated {
                     validation_warning: true,
                 });
+            }
+            if operation == Operation::Import {
+                return Err(
+                    "Remote credential import was rejected or SSH failed. Existing remote credentials are never overwritten. Check remote Jcode version and SSH access.",
+                );
             }
             return Err(
                 "Remote login was rejected or SSH failed. Check the callback, remote Jcode version, and SSH access, then retry.",
@@ -291,6 +337,28 @@ impl Task {
         let (cancel_tx, mut cancel_rx) = oneshot::channel();
         let (reply_tx, reply) = oneshot::channel();
         tokio::spawn(async move {
+            // This operation is created only by the explicit private confirmation
+            // handler, never by startup, provider discovery, or the login picker.
+            let payload = if operation == Operation::Import {
+                if !matches!(
+                    cancel_rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ) {
+                    let _ = reply_tx.send(Err("cancelled"));
+                    return;
+                }
+                let exported = provider
+                    .parse::<TransferProvider>()
+                    .ok()
+                    .and_then(|provider| export_local(provider).ok());
+                let Some(exported) = exported else {
+                    let _ = reply_tx.send(Err("Could not export the selected local account. No credentials were sent. Check the local provider login and retry with explicit confirmation."));
+                    return;
+                };
+                Some(Payload::Import(exported))
+            } else {
+                payload.map(Payload::Login)
+            };
             let mut result = execute(
                 &target,
                 &provider,
@@ -300,7 +368,7 @@ impl Task {
                 &mut cancel_rx,
             )
             .await;
-            if matches!(result, Err("cancelled")) {
+            if matches!(result, Err("cancelled")) && operation != Operation::Import {
                 let (_keepalive, mut never_cancel) = oneshot::channel();
                 result = execute(
                     &target,
@@ -373,5 +441,68 @@ mod tests {
                 .unwrap()
                 .contains("secret-code")
         );
+    }
+
+    #[test]
+    fn ssh_import_reuses_target_and_hardening_without_oauth_or_secret_arguments() {
+        let target = Target {
+            host: "test-host".into(),
+            binary: "/srv/a'b/jcode".into(),
+            cwd: Some("/srv/a b".into()),
+            socket: Some("/run/remote.sock".into()),
+        };
+        for provider in ["openai", "claude"] {
+            let cmd = target.command(provider, "unused-flow", Operation::Import);
+            let args: Vec<_> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            let remote = args.last().unwrap();
+            assert!(remote.contains("'/srv/a'\\''b/jcode'"));
+            assert!(remote.contains("--cwd '/srv/a b'"));
+            assert!(remote.contains("--socket '/run/remote.sock'"));
+            assert!(remote.ends_with(&format!(
+                "auth import --provider '{provider}' --stdin --json"
+            )));
+            assert!(!remote.contains("--flow-id"));
+            assert!(!remote.contains("unused-flow"));
+            assert!(!remote.contains("--callback-url"));
+            for required in [
+                "-T",
+                "BatchMode=yes",
+                "StrictHostKeyChecking=yes",
+                "ForwardAgent=no",
+                "ClearAllForwardings=yes",
+                "PermitLocalCommand=no",
+                "StdinNull=no",
+                "RemoteCommand=none",
+                "ControlMaster=no",
+                "ConnectTimeout=20",
+            ] {
+                assert!(args.iter().any(|arg| arg == required), "{required}");
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_import_accepts_only_matching_import_success_and_ignores_remote_error_text() {
+        let imported = br#"{"status":"imported","provider":"openai","secret":"must-not-surface"}"#;
+        assert!(matches!(
+            parse_reply(imported, Operation::Import, "openai"),
+            Ok(Reply::Imported)
+        ));
+        assert!(parse_reply(imported, Operation::Import, "claude").is_err());
+        assert!(parse_reply(imported, Operation::Begin, "openai").is_err());
+        for response in [
+            br#"{"status":"authenticated","provider":"openai"}"#.as_slice(),
+            br#"{"status":"error","provider":"openai","message":"must-not-surface"}"#.as_slice(),
+            b"not-json must-not-surface".as_slice(),
+        ] {
+            let error = parse_reply(response, Operation::Import, "openai")
+                .err()
+                .unwrap();
+            assert!(!error.contains("must-not-surface"));
+        }
     }
 }
