@@ -32,6 +32,7 @@ fn ssh_remote_startup_ignores_colliding_local_session_and_onboarding() {
             crate::message::Role::User,
             vec![crate::message::ContentBlock::Text {
                 text: "local-only secret".into(),
+                cache_control: None,
             }],
         );
         local.save().expect("save local collision");
