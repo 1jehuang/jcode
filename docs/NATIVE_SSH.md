@@ -21,9 +21,26 @@ selects the remote executable. With no workspace argument, the bridge's remote
 working directory is used, never the local client's directory. An explicit resume
 ID is resolved on the remote server, not in local session storage.
 
-The remote host must have its own provider configuration. Run `jcode login` on
-that host when needed. Native attach does not copy or forward local provider
-credentials, AWS credentials, an SSH agent, or repository contents.
+Authenticate the remote host directly from the local TUI with `/login`, or choose
+a provider explicitly, for example `/login openai` or `/login claude`. The browser
+approval happens on your laptop, while OAuth state, token exchange, and saved
+credentials stay on the SSH host. Paste the returned callback URL or authorization
+code into the pending login prompt, not into an ordinary chat message. OpenAI
+requires the full callback URL, even if the browser reports that its localhost
+callback page cannot be reached. `/cancel` cancels the pending login.
+
+This remote login surface supports the scriptable OAuth providers OpenAI, Claude,
+Gemini, Antigravity, Google, and Copilot. Google additionally requires its OAuth
+client configuration to be set up on the VM first. Other credential routes still
+require `jcode login` on the host. Native attach never copies or forwards existing local
+provider credentials, AWS credentials, an SSH agent, or repository contents.
+
+Each native login attempt has its own remote flow ID, so two clients cannot
+replace each other's pending OAuth state. Callback input travels over SSH stdin,
+not command-line arguments or chat messages. Cancelling a pending attempt removes
+only that attempt's state, not another login or previously saved credentials.
+Cancellation is not logout and cannot revoke credentials already issued by a
+completed exchange. Closing the UI terminates its owned authentication subprocess.
 
 ## Protocol and compatibility
 
@@ -115,3 +132,27 @@ shortcut was separately exercised with the actual kernel key chord.
 a controlled provider. Those establish lifecycle behavior, not live external
 model inference. Provider-backed development still requires remote login and was
 not claimed as passed by the context-only SSH acceptance.
+
+### Remote login acceptance
+
+`tests/test_native_ssh_login.py` requires the separate explicit opt-in
+`JCODE_NATIVE_SSH_LOGIN=1`, plus the local binary, SSH host, workspace, and
+`JCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE` (the actual remote ELF, not a wrapper).
+It creates a private remote home/runtime and never uses the user's credentials.
+
+On 2026-09-06, the real local PTY and EC2 SSH workflow passed:
+
+| Requirement | Observed check |
+| --- | --- |
+| `/login` authenticates the remote host | Provider choice and `/login openai` generated an OAuth URL matching the VM's private PKCE/state record. |
+| Callback input stays private | Synthetic callback arrived through SSH stdin, failed real CLI state validation before exchange, and never appeared in local/remote logs, transcripts, or prompt history. |
+| Cancellation is scoped | Bare picker and pending-flow cancellation passed, with an unrelated legacy pending file unchanged. |
+| Failure cannot trigger local auth | Remote error output was redacted, unsupported providers were refused, and no local credentials were created. |
+| Login does not leak subprocesses | `/quit` reaped owned SSH processes and removed the private adapter socket. |
+
+78 focused Rust tests passed across CLI login (24), CLI arguments (34), and SSH
+TUI routing/authentication (20). Browserless login QR/JSON command-level tests
+also passed against the installed binary. Unit tests cover successful remote
+provider refresh, but **real OAuth approval, successful external token exchange,
+and provider-backed inference were not completed**. Those require the user's
+provider approval and are not implied by the safe invalid-state acceptance.
