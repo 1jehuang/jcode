@@ -2,14 +2,7 @@ use super::*;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-fn jcode_home_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+use std::sync::MutexGuard;
 
 struct ScopedJcodeHome {
     path: PathBuf,
@@ -188,7 +181,11 @@ fn create_session_preserves_explicit_working_dir() {
 }
 
 #[test]
-fn attach_session_omits_working_dir() {
+fn attach_session_uses_persisted_working_dir() {
+    let home = ScopedJcodeHome::new("attach-working-dir");
+    let original = home.path.join("original");
+    std::fs::create_dir_all(&original).unwrap();
+    write_session_record(&home.path, "existing", &original);
     let mut state = BridgeState::default();
     let out = state.api_request_to_legacy(&json!({
         "req": "attach_session",
@@ -199,10 +196,25 @@ fn attach_session_omits_working_dir() {
         panic!("expected legacy outbound");
     };
     assert_eq!(value["target_session_id"], "existing");
-    assert!(
-        value.get("working_dir").is_none(),
-        "attach must not overwrite the session cwd with the bridge cwd"
-    );
+    assert_eq!(value["working_dir"], original.display().to_string());
+}
+
+#[test]
+fn attach_session_without_persisted_working_dir_fails_locally() {
+    let home = ScopedJcodeHome::new("attach-missing-working-dir");
+    let mut state = BridgeState::default();
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "attach_session",
+        "id": 1,
+        "session_id": "missing",
+    })));
+    assert!(matches!(
+        event,
+        ApiEvent::Error {
+            code: ErrorCode::UnknownSession,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1153,6 +1165,8 @@ fn capability_requests_need_an_attached_session() {
 
 #[test]
 fn another_sessions_broadcast_does_not_replace_the_attachment() {
+    let home = ScopedJcodeHome::new("other-session-broadcast");
+    write_session_record(&home.path, "session_retriever_1_a", Path::new("/workspace"));
     let mut state = BridgeState::default();
     let attach = state.api_request_to_legacy(&json!({
         "id": 7,
@@ -1189,6 +1203,8 @@ fn another_sessions_broadcast_does_not_replace_the_attachment() {
 
 #[test]
 fn another_sessions_state_does_not_replace_the_attachment() {
+    let home = ScopedJcodeHome::new("other-session-state");
+    write_session_record(&home.path, "session_retriever_1_a", Path::new("/workspace"));
     let mut state = BridgeState::default();
     let attach = state.api_request_to_legacy(&json!({
         "id": 7,
@@ -1226,6 +1242,9 @@ fn another_sessions_state_does_not_replace_the_attachment() {
 
 #[test]
 fn legacy_request_ids_are_unique_across_bridge_connections() {
+    let home = ScopedJcodeHome::new("unique-legacy-request-ids");
+    write_session_record(&home.path, "session_first", Path::new("/workspace/first"));
+    write_session_record(&home.path, "session_second", Path::new("/workspace/second"));
     let mut first = BridgeState::default();
     let mut second = BridgeState::default();
     let first_attach = first.api_request_to_legacy(&json!({
@@ -1248,6 +1267,8 @@ fn legacy_request_ids_are_unique_across_bridge_connections() {
 
 #[test]
 fn colliding_state_id_for_another_target_does_not_complete_attach() {
+    let home = ScopedJcodeHome::new("colliding-state-id");
+    write_session_record(&home.path, "session_wanted", Path::new("/workspace"));
     let mut state = BridgeState::default();
     let attach = state.api_request_to_legacy(&json!({
         "id": 7,
