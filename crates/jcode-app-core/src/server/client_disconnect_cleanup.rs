@@ -10,12 +10,28 @@ use jcode_agent_runtime::InterruptSignal;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 
 type SessionAgents = Arc<RwLock<HashMap<String, Arc<Mutex<Agent>>>>>;
 type ChannelSubscriptions = Arc<RwLock<HashMap<String, HashMap<String, HashSet<String>>>>>;
 
 const RELOAD_DISCONNECT_MARKER_MAX_AGE: Duration = Duration::from_secs(30);
+pub(super) const IDLE_RECONNECT_GRACE: Duration = Duration::from_secs(30);
+
+// The last registered event sender remains on the member after it detaches.
+// It is therefore also an ownership witness: an old grace timer must not
+// remove a successor's session even if that successor has disconnected again.
+async fn attachment_was_replaced(
+    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+    session_id: &str,
+    original: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+) -> bool {
+    members
+        .read()
+        .await
+        .get(session_id)
+        .is_none_or(|member| !member.event_tx.same_channel(original))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DisconnectDisposition {
@@ -89,11 +105,25 @@ pub(super) async fn cleanup_client_connection(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
+    idle_reconnect_grace: Duration,
 ) -> Result<()> {
     let disposition = disconnect_disposition(disconnected_while_processing(
         client_is_processing,
         processing_task.as_ref(),
     ));
+    let allow_reconnect = if disposition == DisconnectDisposition::Closed
+        && !crate::session::session_exists(client_session_id)
+    {
+        let agent = sessions.read().await.get(client_session_id).cloned();
+        agent.is_some_and(|agent| {
+            agent
+                .try_lock()
+                .is_ok_and(|agent| agent.visible_conversation_message_count() == 0)
+        })
+    } else {
+        false
+    };
 
     // A live processing task owns the agent mutex. Abort it before trying to
     // persist the disconnect disposition; otherwise cleanup waits two seconds,
@@ -113,6 +143,39 @@ pub(super) async fn cleanup_client_connection(
     )
     .await;
 
+    if allow_reconnect {
+        // Empty roots intentionally have no snapshot. A replacement UI/SDK
+        // connection needs a bounded opportunity to reclaim the live Agent,
+        // without creating history entries for every briefly opened panel.
+        // No registry or agent lock is held across the wait. Processing/crash
+        // cleanup never enters this path.
+        event_handle.abort();
+        crate::logging::info(&format!(
+            "Retaining idle unsaved session {} for reconnect grace",
+            client_session_id
+        ));
+        let deadline = tokio::time::Instant::now() + idle_reconnect_grace;
+        loop {
+            if attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await
+                || client_connections
+                    .read()
+                    .await
+                    .values()
+                    .any(|info| info.session_id == client_session_id)
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + Duration::from_millis(25),
+            ))
+            .await;
+        }
+    }
+
     // Release stale live ownership before slower cleanup so a reconnecting TUI can
     // reclaim the same session without tripping duplicate-attach guards.
     tokio::task::yield_now().await;
@@ -124,7 +187,10 @@ pub(super) async fn cleanup_client_connection(
     let successor_connected = connections
         .values()
         .any(|info| info.session_id == client_session_id);
-    if successor_connected {
+    if successor_connected
+        || (allow_reconnect
+            && attachment_was_replaced(swarm_members, client_session_id, client_event_tx).await)
+    {
         crate::logging::info(&format!(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
             client_session_id
@@ -282,6 +348,10 @@ pub(super) async fn cleanup_client_connection(
     event_handle.abort();
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "client_disconnect_grace_tests.rs"]
+mod grace_tests;
 
 #[cfg(test)]
 mod tests {

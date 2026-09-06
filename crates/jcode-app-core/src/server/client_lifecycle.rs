@@ -2975,6 +2975,8 @@ pub(super) async fn handle_client(
             &event_history,
             &event_counter,
             &swarm_event_tx,
+            &client_event_tx,
+            super::client_disconnect_cleanup::IDLE_RECONNECT_GRACE,
         ),
     )
     .await?;
