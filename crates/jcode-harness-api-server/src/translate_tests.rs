@@ -181,7 +181,7 @@ fn create_session_preserves_explicit_working_dir() {
 }
 
 #[test]
-fn attach_session_uses_persisted_working_dir() {
+fn attach_session_defers_to_daemon_even_with_persisted_working_dir() {
     let home = ScopedJcodeHome::new("attach-working-dir");
     let original = home.path.join("original");
     std::fs::create_dir_all(&original).unwrap();
@@ -196,25 +196,73 @@ fn attach_session_uses_persisted_working_dir() {
         panic!("expected legacy outbound");
     };
     assert_eq!(value["target_session_id"], "existing");
-    assert_eq!(value["working_dir"], original.display().to_string());
+    assert!(
+        value.get("working_dir").is_none(),
+        "disk cwd must not override a newer live root"
+    );
 }
 
 #[test]
-fn attach_session_without_persisted_working_dir_fails_locally() {
-    let home = ScopedJcodeHome::new("attach-missing-working-dir");
+fn attach_session_without_persisted_working_dir_reclaims_live_target() {
+    let _home = ScopedJcodeHome::new("attach-missing-working-dir");
     let mut state = BridgeState::default();
-    let event = only_reply_event(state.api_request_to_legacy(&json!({
-        "req": "attach_session",
-        "id": 1,
-        "session_id": "missing",
-    })));
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session", "id": 41, "session_id": "live-empty",
+    }));
+    assert_eq!(out.len(), 3);
+    let Outbound::Legacy(subscribe) = &out[0] else {
+        panic!("expected subscribe")
+    };
+    assert_eq!(subscribe["type"], "subscribe");
+    assert_eq!(subscribe["target_session_id"], "live-empty");
+    assert!(subscribe.get("working_dir").is_none());
+    let Outbound::Legacy(probe) = &out[1] else {
+        panic!("expected state")
+    };
+    let reply = state.legacy_event_to_api(&json!({
+        "type": "state", "id": probe["id"], "session_id": "live-empty",
+        "message_count": 0, "is_processing": false,
+    }));
+    assert_eq!(reply.len(), 1);
+    assert_eq!(reply[0].reply_to, Some(41));
+    assert!(
+        matches!(&reply[0].event, ApiEvent::Attached { session } if session.session_id == "live-empty")
+    );
+    assert_eq!(state.session_id.as_deref(), Some("live-empty"));
+    assert!(state.pending_attach_id.is_none());
+    assert!(state.pending_attach_subscribe_id.is_none());
+}
+
+#[test]
+fn attach_session_unknown_target_error_is_correlated_and_clears_pending_attach() {
+    let _home = ScopedJcodeHome::new("attach-unknown-target");
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session", "id": 43, "session_id": "missing",
+    }));
+    let Outbound::Legacy(subscribe) = &out[0] else {
+        panic!("expected subscribe")
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "error", "id": subscribe["id"],
+        "message": "Unknown session 'missing' or session has no working directory",
+    }));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].reply_to, Some(43));
     assert!(matches!(
-        event,
+        frames[0].event,
         ApiEvent::Error {
             code: ErrorCode::UnknownSession,
             ..
         }
     ));
+    assert!(state.pending_attach_id.is_none());
+    assert!(state.pending_model_probe.is_none());
+    assert!(state.session_id.is_none());
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "clear_session", "id": 44, "session_id": "missing",
+    })));
+    assert!(matches!(event, ApiEvent::Error { .. }));
 }
 
 #[test]

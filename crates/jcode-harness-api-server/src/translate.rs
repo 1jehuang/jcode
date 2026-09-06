@@ -120,6 +120,8 @@ pub struct BridgeState {
     pending_no_reply_message_id: Option<(u64, u64)>,
     /// Legacy id of an in-flight `create/attach` subscribe.
     pending_attach_id: Option<(u64, u64, Option<String>)>,
+    /// Subscribe errors can arrive before the correlated state response.
+    pending_attach_subscribe_id: Option<u64>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
@@ -383,6 +385,7 @@ impl BridgeState {
                     .then(|| request["session_id"].as_str().map(str::to_string))
                     .flatten();
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
+                self.pending_attach_subscribe_id = Some(id);
                 self.pending_model_probe = Some(catalog_id);
                 let mut subscribe = json!({
                     "type": "subscribe",
@@ -414,14 +417,10 @@ impl BridgeState {
                         subscribe["selfdev"] = json!(true);
                     }
                 } else if let Some(target) = request["session_id"].as_str() {
-                    let Some(working_dir) = Self::resolve_working_dir(target) else {
-                        return Self::error_reply(
-                            api_id,
-                            ErrorCode::UnknownSession,
-                            "session has no persisted working directory",
-                        );
-                    };
-                    subscribe["working_dir"] = json!(working_dir);
+                    // The daemon owns both live and persisted session roots.
+                    // Empty panels have no file yet, and a cached disk cwd may
+                    // be older than the live Agent. Never override either with
+                    // the bridge's process cwd just to bootstrap attachment.
                     subscribe["target_session_id"] = json!(target);
                 }
                 // The daemon assigns the session during subscribe but reports
@@ -938,6 +937,7 @@ impl BridgeState {
                 {
                     let api_id = *api_id;
                     self.pending_attach_id = None;
+                    self.pending_attach_subscribe_id = None;
                     // `state` snapshots can also be broadcast for other live
                     // sessions. Only the reply correlated with this connection's
                     // attach request establishes its identity. Otherwise opening
@@ -1349,6 +1349,26 @@ impl BridgeState {
             }
             "error" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if let Some((state_id, api_id, target)) = self.pending_attach_id.as_ref()
+                    && (self.pending_attach_subscribe_id == Some(id) || *state_id == id)
+                {
+                    let api_id = *api_id;
+                    let code = if target.is_some() {
+                        ErrorCode::UnknownSession
+                    } else {
+                        ErrorCode::Internal
+                    };
+                    self.pending_attach_id = None;
+                    self.pending_attach_subscribe_id = None;
+                    self.pending_model_probe = None;
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code,
+                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                        },
+                    )];
+                }
                 self.pending_soft_interrupt_ids
                     .retain(|pending_id| *pending_id != id);
                 let message = event["message"].as_str().unwrap_or("").to_string();

@@ -102,6 +102,54 @@ fn initial_subscribe_working_dir(request: &Request) -> std::result::Result<Strin
     }
 }
 
+/// A reattachment names an existing session, not a new client working directory.
+/// Resolve an omitted cwd before provisional initialization, never from the
+/// daemon/bridge process cwd. Idle empty sessions may exist only in memory.
+async fn resolve_target_subscribe_working_dir(
+    request: &mut Request,
+    sessions: &SessionAgents,
+    members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
+) -> std::result::Result<(), String> {
+    let Request::Subscribe {
+        working_dir,
+        target_session_id: Some(target),
+        ..
+    } = request
+    else {
+        return Ok(());
+    };
+    if working_dir.is_some() {
+        return Ok(());
+    }
+    let live = sessions.read().await.get(target).cloned();
+    let resolved = if let Some(live) = live {
+        let idle_cwd = live
+            .try_lock()
+            .ok()
+            .and_then(|agent| agent.working_dir().map(str::to_string));
+        if idle_cwd.is_some() {
+            idle_cwd
+        } else {
+            // A generating Agent owns its mutex. The member records the same
+            // session root, so attaching must not wait for the model turn.
+            members
+                .read()
+                .await
+                .get(target)
+                .and_then(|member| member.working_dir.as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+        }
+    } else {
+        crate::session::Session::load_startup_stub(target)
+            .ok()
+            .and_then(|session| session.working_dir)
+    };
+    *working_dir = Some(resolved.ok_or_else(|| {
+        format!("Unknown session '{target}' or session has no working directory")
+    })?);
+    Ok(())
+}
+
 fn validated_subscribe_working_dir(
     working_dir: Option<&str>,
     remote_continuation: bool,
@@ -419,7 +467,7 @@ pub(super) async fn handle_client(
     let writer = Arc::new(Mutex::new(writer));
     let mut line = String::new();
 
-    let initial_request = loop {
+    let mut initial_request = loop {
         line.clear();
         let n = match reader.read_line(&mut line).await {
             Ok(n) => n,
@@ -492,21 +540,25 @@ pub(super) async fn handle_client(
         }
     };
 
-    let initial_working_dir = match initial_subscribe_working_dir(&initial_request) {
-        Ok(working_dir) => working_dir,
-        Err(message) => {
-            write_direct_event(
-                &writer,
-                &ServerEvent::Error {
-                    id: initial_request.id(),
-                    message,
-                    retry_after_secs: None,
-                },
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let initial_working_dir =
+        match resolve_target_subscribe_working_dir(&mut initial_request, &sessions, &swarm_members)
+            .await
+            .and_then(|()| initial_subscribe_working_dir(&initial_request))
+        {
+            Ok(working_dir) => working_dir,
+            Err(message) => {
+                write_direct_event(
+                    &writer,
+                    &ServerEvent::Error {
+                        id: initial_request.id(),
+                        message,
+                        retry_after_secs: None,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        };
     let mut active_terminal_env = initial_subscribe_terminal_env(&initial_request);
 
     // Per-client state
@@ -736,7 +788,7 @@ pub(super) async fn handle_client(
 
     let connection_result: Result<()> = async {
     loop {
-        let request = if let Some(request) = pending_request.take() {
+        let mut request = if let Some(request) = pending_request.take() {
             request
         } else {
             line.clear();
@@ -1110,6 +1162,14 @@ pub(super) async fn handle_client(
             provisional_session = false;
         }
 
+        if let Err(message) = resolve_target_subscribe_working_dir(
+            &mut request, &sessions, &swarm_members,
+        ).await {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id: request.id(), message, retry_after_secs: None,
+            });
+            continue;
+        }
         match request {
             Request::Message {
                 id,
@@ -3553,3 +3613,7 @@ pub(super) async fn process_locked_message_streaming_mpsc(
 #[cfg(test)]
 #[path = "client_lifecycle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "client_target_attach_tests.rs"]
+mod target_attach_tests;
