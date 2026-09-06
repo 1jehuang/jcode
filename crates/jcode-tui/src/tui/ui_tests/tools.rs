@@ -102,6 +102,96 @@ fn test_patch_headers_use_colored_tokens_instead_of_line_counts() {
 }
 
 #[test]
+fn test_token_badges_survive_full_terminal_draw() {
+    let _guard = viewport_snapshot_test_lock();
+    let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n";
+    let mut version = 100;
+    for centered_mode in [false, true] {
+        for width in [60, 120] {
+            for (tokens, color) in [
+                (1_900, rgb(118, 184, 118)),
+                (4_000, rgb(214, 184, 92)),
+                (12_000, rgb(224, 118, 118)),
+            ] {
+                for batch in [false, true] {
+                    let output = "x".repeat(tokens * crate::util::APPROX_CHARS_PER_TOKEN);
+                    let (name, input, content) = if batch {
+                        (
+                            "batch",
+                            serde_json::json!({"tool_calls": [{
+                                "tool": "apply_patch", "patch_text": patch
+                            }]}),
+                            format!(
+                                "--- [1] apply_patch ---\n{output}\n\nCompleted: 1 succeeded, 0 failed"
+                            ),
+                        )
+                    } else {
+                        (
+                            "apply_patch",
+                            serde_json::json!({"patch_text": patch}),
+                            output,
+                        )
+                    };
+                    version += 1;
+                    let state = TestState {
+                        display_messages: vec![DisplayMessage {
+                            role: "tool".to_string(),
+                            content,
+                            tool_calls: Vec::new(),
+                            duration_secs: None,
+                            title: None,
+                            tool_data: Some(crate::message::ToolCall {
+                                id: format!("badge_{version}"),
+                                name: name.to_string(),
+                                input,
+                                intent: None,
+                                thought_signature: None,
+                            }),
+                        }],
+                        messages_version: version,
+                        centered_mode,
+                        suppress_info_widgets: true,
+                        ..Default::default()
+                    };
+                    clear_test_render_state_for_tests();
+                    let backend = ratatui::backend::TestBackend::new(width, 24);
+                    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+                    terminal.draw(|frame| draw(frame, &state)).expect("draw");
+                    let buffer = terminal.backend().buffer();
+                    let label = crate::util::format_approx_token_count(tokens);
+                    let rows: Vec<String> = (0..24)
+                        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                        .collect();
+                    let y = rows
+                        .iter()
+                        .position(|row| row.contains("apply_patch"))
+                        .unwrap_or_else(|| panic!("missing tool row: {rows:#?}"))
+                        as u16;
+                    let row = &rows[y as usize];
+                    assert!(!row.contains("lines"), "{row}");
+                    assert!(row.trim_end().ends_with(&label), "{row}");
+                    let x = (0..width)
+                        .find(|&x| {
+                            (x..width)
+                                .map(|x| buffer[(x, y)].symbol())
+                                .collect::<String>()
+                                .starts_with(&label)
+                        })
+                        .expect("visible token label");
+                    for column in x..x + label.len() as u16 {
+                        assert_eq!(buffer[(column, y)].fg, color, "{row}");
+                    }
+                    println!(
+                        "width={width} centered={centered_mode} batch={batch} fg={color:?}: {}",
+                        row.trim()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_batch_subcall_params_supports_flat_and_nested_shapes() {
     let flat = serde_json::json!({
         "tool": "read",
