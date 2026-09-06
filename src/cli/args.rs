@@ -231,6 +231,14 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with_all = ["print_auth_url", "callback_url", "auth_code"])]
         complete: bool,
 
+        /// Isolate temporary login state using 1-64 ASCII letters, digits, underscores or hyphens.
+        #[arg(long, value_parser = super::login::parse_login_flow_id)]
+        flow_id: Option<String>,
+
+        /// Cancel only this provider's pending flow. Does not remove saved credentials.
+        #[arg(long, requires = "flow_id", conflicts_with_all = ["print_auth_url", "callback_url", "auth_code", "complete", "account", "api_base", "api_key", "api_key_env"])]
+        cancel: bool,
+
         /// Save credentials without running the post-login live provider validation.
         /// Useful for offline setup, CI, or when entering credentials before network access is available.
         #[arg(long)]

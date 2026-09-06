@@ -447,6 +447,8 @@ fn login_no_browser_flag_parses() {
             api_key,
             api_key_env,
             no_validate,
+            flow_id,
+            cancel,
         }) => {
             assert!(provider.is_none());
             assert!(account.is_none());
@@ -461,6 +463,8 @@ fn login_no_browser_flag_parses() {
             assert!(api_key.is_none());
             assert!(api_key_env.is_none());
             assert!(!no_validate);
+            assert!(flow_id.is_none());
+            assert!(!cancel);
         }
         other => panic!("unexpected command: {:?}", other),
     }
@@ -480,6 +484,70 @@ fn login_accepts_provider_positional() {
             assert_eq!(provider, Some(ProviderChoice::Google));
         }
         other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
+fn login_scoped_flow_flags_parse_and_reject_unsafe_ids() {
+    for action in ["--print-auth-url", "--complete", "--cancel"] {
+        let args = Args::try_parse_from([
+            "jcode",
+            "login",
+            "--provider",
+            "openai",
+            "--flow-id",
+            "aB_09-safe",
+            action,
+            "--json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(args.command, Some(Command::Login { flow_id: Some(id), .. }) if id == "aB_09-safe")
+        );
+    }
+    for id in [
+        "", ".", "..", "../other", "a/b", "a\\b", "a b", "a\n", "é", "a.json", "%2f", "x;touch",
+    ] {
+        assert!(
+            Args::try_parse_from(["jcode", "login", "--flow-id", id, "--print-auth-url"]).is_err(),
+            "accepted {id:?}"
+        );
+    }
+    assert!(Args::try_parse_from(["jcode", "login", "--flow-id", &"a".repeat(65)]).is_err());
+    assert!(Args::try_parse_from(["jcode", "login", "--flow-id", &"a".repeat(64)]).is_ok());
+    assert!(Args::try_parse_from(["jcode", "login", "openai", "--cancel"]).is_err());
+    for action in ["--print-auth-url", "--complete"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "openai",
+                "--flow-id",
+                "safe",
+                "--cancel",
+                action
+            ])
+            .is_err()
+        );
+    }
+    for input in ["--callback-url", "--auth-code"] {
+        assert!(
+            Args::try_parse_from([
+                "jcode",
+                "login",
+                "openai",
+                "--flow-id",
+                "safe",
+                "--cancel",
+                input,
+                "-"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["jcode", "login", "openai", "--flow-id", "safe", input, "-"])
+                .is_ok()
+        );
     }
 }
 

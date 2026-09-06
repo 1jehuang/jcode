@@ -298,6 +298,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             auth_code,
             json,
             complete,
+            flow_id,
+            cancel,
             no_validate,
             google_access_tier,
             api_base,
@@ -314,6 +316,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     auth_code,
                     json,
                     complete,
+                    flow_id,
+                    cancel,
                     no_validate,
                     google_access_tier: google_access_tier.map(|tier| match tier {
                         super::args::GoogleAccessTierArg::Full => {

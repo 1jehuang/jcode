@@ -36,7 +36,9 @@ pub(super) async fn run_scriptable_login_provider(
     account_label: Option<&str>,
     options: &LoginOptions,
 ) -> Result<LoginFlowOutcome> {
-    if options.print_auth_url {
+    if options.print_auth_url
+        || (options.flow_id.is_some() && !options.complete && !options.has_provided_input())
+    {
         return start_scriptable_login(provider, account_label, options).await;
     }
 
@@ -240,13 +242,13 @@ pub(super) async fn start_scriptable_login(
         }
     };
 
-    let pending_path = pending.pending_path()?;
+    let pending_path = pending.pending_path(options.flow_id.as_deref())?;
     cleanup_stale_pending_login_files()?;
     let record = PendingScriptableLoginRecord {
         expires_at_ms,
         login: pending,
     };
-    crate::storage::write_json_secret(&pending_path, &record)?;
+    persist_pending_login(&pending_path, &record, options.flow_id.is_some())?;
     emit_scriptable_auth_prompt(
         provider.id,
         &auth_url,
@@ -255,6 +257,7 @@ pub(super) async fn start_scriptable_login(
         user_code.as_deref(),
         expires_at_ms,
         options.json,
+        options.flow_id.as_deref(),
     )?;
     // Browserless CLI login routes here rather than through the interactive
     // provider functions. Keep stdout machine-readable and never add a QR to
@@ -331,7 +334,7 @@ pub(super) async fn complete_scriptable_claude_login(
     options: &LoginOptions,
     input: ProvidedAuthInput,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("claude")?;
+    let pending_path = pending_login_path("claude", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Claude {
         account_label,
         verifier,
@@ -384,7 +387,7 @@ pub(super) async fn complete_scriptable_openai_login(
     options: &LoginOptions,
     input: ProvidedAuthInput,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("openai")?;
+    let pending_path = pending_login_path("openai", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Openai {
         account_label,
         verifier,
@@ -439,7 +442,7 @@ pub(super) async fn complete_scriptable_gemini_login(
     options: &LoginOptions,
     input: ProvidedAuthInput,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("gemini")?;
+    let pending_path = pending_login_path("gemini", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Gemini {
         verifier,
         redirect_uri,
@@ -482,7 +485,7 @@ pub(super) async fn complete_scriptable_antigravity_login(
     options: &LoginOptions,
     input: ProvidedAuthInput,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("antigravity")?;
+    let pending_path = pending_login_path("antigravity", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Antigravity {
         verifier,
         state,
@@ -538,7 +541,7 @@ pub(super) async fn complete_scriptable_google_login(
     options: &LoginOptions,
     input: ProvidedAuthInput,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("google")?;
+    let pending_path = pending_login_path("google", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Google {
         verifier,
         state,
@@ -594,7 +597,7 @@ pub(super) async fn complete_scriptable_copilot_login(
     provider_id: &str,
     options: &LoginOptions,
 ) -> Result<LoginFlowOutcome> {
-    let pending_path = pending_login_path("copilot")?;
+    let pending_path = pending_login_path("copilot", options.flow_id.as_deref())?;
     let PendingScriptableLogin::Copilot {
         device_code,
         interval,
@@ -629,10 +632,134 @@ pub(super) async fn complete_scriptable_copilot_login(
     Ok(LoginFlowOutcome::Completed)
 }
 
-pub(super) fn pending_login_path(key: &str) -> Result<PathBuf> {
-    Ok(crate::storage::jcode_dir()?
-        .join("pending-login")
-        .join(format!("{key}.json")))
+pub(super) fn pending_login_path(key: &str, flow_id: Option<&str>) -> Result<PathBuf> {
+    pending_login_path_in(&pending_login_dir()?, key, flow_id)
+}
+
+pub(super) fn pending_login_path_in(
+    dir: &Path,
+    key: &str,
+    flow_id: Option<&str>,
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        matches!(
+            key,
+            "claude" | "openai" | "gemini" | "antigravity" | "google" | "copilot"
+        ),
+        "Unsupported scriptable login provider."
+    );
+    let dir = match flow_id {
+        Some(flow_id) => {
+            parse_login_flow_id(flow_id).map_err(anyhow::Error::msg)?;
+            dir.join("flows").join(flow_id)
+        }
+        None => dir.to_path_buf(),
+    };
+    Ok(dir.join(format!("{key}.json")))
+}
+
+pub(super) fn cancel_scriptable_login(
+    provider: LoginProviderDescriptor,
+    options: &LoginOptions,
+) -> Result<()> {
+    let flow_id = options
+        .flow_id
+        .as_deref()
+        .context("--cancel requires --flow-id.")?;
+    let key = match provider.target {
+        LoginProviderTarget::Claude => "claude",
+        LoginProviderTarget::OpenAi => "openai",
+        LoginProviderTarget::Gemini => "gemini",
+        LoginProviderTarget::Antigravity => "antigravity",
+        LoginProviderTarget::Google => "google",
+        LoginProviderTarget::Copilot => "copilot",
+        _ => anyhow::bail!("This provider does not support scriptable login cancellation."),
+    };
+    let path = pending_login_path(key, Some(flow_id))?;
+    cancel_scoped_pending_login(&path)?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "cancelled", "provider": provider.id, "flow_id": flow_id
+            })
+        );
+    } else {
+        eprintln!("Cancelled pending {} login flow {}.", provider.id, flow_id);
+    }
+    Ok(())
+}
+
+pub(super) fn cancel_pending_login(path: &Path) -> Result<()> {
+    // Do not sweep expired files or touch credential stores during cancellation.
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("Failed to cancel pending login flow"),
+    }
+}
+
+const CANCELLED_FLOW_TTL_MS: i64 = 30 * 60 * 1000;
+
+fn lock_pending_login(path: &Path) -> Result<std::fs::File> {
+    let parent = path.parent().context("Pending login path has no parent")?;
+    crate::storage::ensure_dir(parent)?;
+    let lock_path = path.with_extension("lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .context("Failed to open pending login lock")?;
+    crate::storage::harden_secret_file_permissions(&lock_path);
+    file.lock().context("Failed to lock pending login flow")?;
+    // Keep the lock inode stable. Removing it could split simultaneous waiters.
+    Ok(file)
+}
+
+pub(super) fn persist_pending_login(
+    path: &Path,
+    record: &PendingScriptableLoginRecord,
+    scoped: bool,
+) -> Result<()> {
+    if !scoped {
+        return crate::storage::write_json_secret(path, record);
+    }
+    let _lock = lock_pending_login(path)?;
+    let marker = path.with_extension("cancelled");
+    match std::fs::read_to_string(&marker) {
+        Ok(data) => {
+            let expires_at_ms: i64 =
+                serde_json::from_str(&data).context("Invalid pending login cancellation marker")?;
+            anyhow::ensure!(
+                expires_at_ms <= current_time_ms(),
+                "This login flow was cancelled. Start again with a fresh --flow-id."
+            );
+            std::fs::remove_file(&marker).context("Failed to expire login cancellation marker")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("Failed to read login cancellation marker"),
+    }
+    anyhow::ensure!(
+        record.expires_at_ms > current_time_ms(),
+        "Pending login flow expired before it could be saved."
+    );
+    crate::storage::write_json_secret(path, record)
+}
+
+pub(super) fn cancel_scoped_pending_login(path: &Path) -> Result<()> {
+    let _lock = lock_pending_login(path)?;
+    // No secret data: the marker only fences late begin writers for the flow TTL.
+    // Cancellation intentionally does not roll back credentials already exchanged.
+    crate::storage::write_json_secret(
+        &path.with_extension("cancelled"),
+        &(current_time_ms() + CANCELLED_FLOW_TTL_MS),
+    )?;
+    cancel_pending_login(path)
 }
 
 pub(super) fn pending_login_dir() -> Result<PathBuf> {
@@ -743,8 +870,9 @@ pub(super) fn emit_scriptable_auth_prompt(
     user_code: Option<&str>,
     expires_at_ms: i64,
     json: bool,
+    flow_id: Option<&str>,
 ) -> Result<()> {
-    let resume_command = scriptable_resume_command(provider, input_kind);
+    let resume_command = scriptable_resume_command(provider, input_kind, flow_id);
     let prompt = ScriptableAuthPrompt {
         status: "pending",
         provider: provider.to_string(),
@@ -773,7 +901,15 @@ pub(super) fn emit_scriptable_auth_prompt(
     Ok(())
 }
 
-pub(super) fn scriptable_resume_command(provider: &str, input_kind: &str) -> String {
+pub(super) fn scriptable_resume_command(
+    provider: &str,
+    input_kind: &str,
+    flow_id: Option<&str>,
+) -> String {
+    let provider = match flow_id {
+        Some(flow_id) => format!("{provider} --flow-id {flow_id}"),
+        None => provider.to_string(),
+    };
     match input_kind {
         "callback_url" => {
             format!(
