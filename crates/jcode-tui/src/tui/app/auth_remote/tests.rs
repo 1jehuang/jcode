@@ -108,6 +108,41 @@ fn ssh_login_enter_preempts_local_preview_and_preserves_pending_command_privacy(
 }
 
 #[test]
+fn ssh_login_bare_picker_cancel_keys_show_persistent_feedback() {
+    with_app(|app| {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let mut remote = crate::tui::backend::RemoteConnection::dummy();
+            for command in ["/login", "/cancel"] {
+                for ch in command.chars() {
+                    app.handle_remote_key(KeyCode::Char(ch), KeyModifiers::NONE, &mut remote)
+                        .await
+                        .unwrap();
+                }
+                app.handle_remote_key(KeyCode::Enter, KeyModifiers::NONE, &mut remote)
+                    .await
+                    .unwrap();
+                if command == "/login" {
+                    assert!(app.remote_login.is_some());
+                }
+            }
+            assert!(app.remote_login.is_none());
+            assert!(app.pending_login.is_none());
+            assert!(!app.should_quit);
+            assert!(!app.pending_turn);
+            assert!(app.queued_messages.is_empty());
+            assert!(app.input.is_empty());
+            let message = app.display_messages().last().unwrap();
+            assert_eq!(message.role, "system");
+            assert_eq!(
+                message.content,
+                "SSH login cancelled. No authorization was started."
+            );
+        });
+    });
+}
+
+#[test]
 fn ssh_login_unsupported_provider_never_starts_local_auth() {
     with_app(|app| {
         assert!(app.handle_ssh_login_command("/login openrouter"));

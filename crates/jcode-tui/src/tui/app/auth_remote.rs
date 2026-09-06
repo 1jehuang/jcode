@@ -159,6 +159,9 @@ impl App {
             let quit = login.quit_after_cancel;
             self.finish_ssh_login_ui();
             self.should_quit |= quit;
+            self.push_display_message(DisplayMessage::system(
+                "SSH login cancelled. No authorization was started.",
+            ));
             self.set_status_notice("SSH login cancelled");
             return;
         }
