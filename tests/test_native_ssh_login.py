@@ -140,6 +140,9 @@ if record["operation"] == "start" and flag.exists():
     # errors. This is not an OAuth exchange or an application event mock.
     message = flag.read_bytes()
     flag.unlink()
+    with (root / "login-audit.jsonl").open("a") as out:
+        out.write(json.dumps({"operation": "injected_start_failure", "flow_id": flow,
+                              "provider": "openai", "exit_code": 72}) + "\n")
     sys.stderr.buffer.write(message)
     sys.exit(72)
 result = subprocess.run([EXECUTABLE, *args], input=payload if payload is not None else b"",
@@ -292,6 +295,22 @@ def inspect_remote(config, needles=()):
     require(not result["credentials"], "Unexpected remote credentials: " + str(result["credentials"]))
     require(result["legacy_sha256"] == config["LEGACY_SHA256"], "Login changed another invocation's pending state")
     return result
+
+
+def wait_remote_call(config, tui, operation, timeout=TIMEOUT):
+    """Do not mistake a repaint of an old error for a new subprocess result.
+
+    This polls the real remote wrapper audit, not a replacement protocol event.
+    Keep pumping the real PTY while waiting so a blocked render cannot stall SSH.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tui.pump(0.2)
+        snapshot = remote_control(config, "inspect", needles=[], credential_names=sorted(CREDENTIAL_NAMES))
+        if any(call["operation"] == operation for call in snapshot["calls"]):
+            return snapshot
+        require(tui.process.poll() is None, "Login PTY exited before remote subprocess result")
+    raise AssertionError("Remote login subprocess did not record " + operation)
 
 
 def assert_local_clean(root, needles=()):
@@ -510,13 +529,14 @@ def run_acceptance(config):
                 print("PASS sensitive stdin callback refused at state check, no local auth/files, /cancel clears only owned flow")
 
                 mark = tui.command("/login not-a-provider")
-                tui.wait("SSH login", mark)
+                tui.wait("SSH login supports:", mark)
                 require(not inspect_remote(config, needles)["pending"], "Unsupported provider created pending state")
                 # Make the next actual SSH login subprocess fail. Do not replace
                 # SSH, the local CLI, or the TUI with a mocked event source.
                 error_marker = "DO_NOT_ECHO_REMOTE_AUTH_ERROR_" + uuid.uuid4().hex
                 remote_control(config, "inject_failure", error_marker=error_marker)
                 mark = tui.command("/login openai")
+                wait_remote_call(config, tui, "injected_start_failure")
                 tui.wait("SSH login failed", mark)
                 require(error_marker not in native.visible(tui.output), "TUI exposed sensitive remote stderr")
                 needles.append(error_marker)
@@ -623,6 +643,29 @@ class HarnessSelfTests(unittest.TestCase):
                     self.assertEqual(status, 93)
                     run.assert_not_called()
             self.assertFalse((root / "login-audit.jsonl").exists())
+
+    def test_injected_failure_records_completion_without_persisting_stderr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "fail-next-login").write_text("sensitive-stderr-marker")
+            status, run, _ = self.exercise_wrapper(root, ["--print-auth-url"])
+            self.assertEqual(status, 72)
+            run.assert_not_called()
+            self.assertFalse((root / "fail-next-login").exists())
+            audit = (root / "login-audit.jsonl").read_text()
+            self.assertNotIn("sensitive-stderr-marker", audit)
+            self.assertEqual(json.loads(audit)["operation"], "injected_start_failure")
+
+    def test_remote_error_wait_ignores_previous_callback_failure(self):
+        tui = mock.Mock()
+        tui.process.poll.return_value = None
+        old = {"calls": [{"operation": "callback_stdin", "exit_code": 1}]}
+        new = {"calls": old["calls"] + [{"operation": "injected_start_failure", "exit_code": 72}]}
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch(__name__ + ".remote_control", side_effect=[old, new]) as control:
+            self.assertEqual(wait_remote_call({}, tui, "injected_start_failure"), new)
+        self.assertEqual(control.call_count, 2)
+        self.assertEqual(tui.pump.call_count, 2)
 
     def test_remote_metadata_never_returns_verifier_and_detects_file_leaks(self):
         with tempfile.TemporaryDirectory() as directory:
