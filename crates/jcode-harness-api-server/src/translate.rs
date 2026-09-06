@@ -15,6 +15,14 @@ use std::sync::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+pub(crate) fn jcode_home_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Default number of messages a `peek_session` returns. A preview is a glance,
 /// so this is a tail rather than a transcript: enough to recognise which
 /// conversation it is, few enough that peeking a dozen sessions stays cheap.
@@ -401,6 +409,14 @@ impl BridgeState {
                         subscribe["selfdev"] = json!(true);
                     }
                 } else if let Some(target) = request["session_id"].as_str() {
+                    let Some(working_dir) = Self::resolve_working_dir(target) else {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::UnknownSession,
+                            "session has no persisted working directory",
+                        );
+                    };
+                    subscribe["working_dir"] = json!(working_dir);
                     subscribe["target_session_id"] = json!(target);
                 }
                 // The daemon assigns the session during subscribe but reports

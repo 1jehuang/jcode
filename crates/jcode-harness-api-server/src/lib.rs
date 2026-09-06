@@ -364,11 +364,24 @@ where
 mod public_acceptance_tests {
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
 
+    struct JcodeHomeGuard(Option<OsString>);
+
+    impl Drop for JcodeHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("JCODE_HOME", value) },
+                None => unsafe { std::env::remove_var("JCODE_HOME") },
+            }
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn public_socket_keeps_its_attachment_after_another_sessions_state() {
+        let _home_lock = translate::jcode_home_test_lock();
         let root = std::env::temp_dir().join(format!(
             "jcode-api-attachment-{}-{}",
             std::process::id(),
@@ -378,6 +391,16 @@ mod public_acceptance_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        unsafe { std::env::set_var("JCODE_HOME", &root) };
+        let _home_guard = JcodeHomeGuard(previous_home);
+        let sessions = root.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("session_alpha.json"),
+            json!({"working_dir": "/workspace/alpha", "messages": []}).to_string(),
+        )
+        .unwrap();
         let api_path = root.join("api.sock");
         let legacy_path = root.join("legacy.sock");
         let legacy_listener = UnixListener::bind(&legacy_path).unwrap();
