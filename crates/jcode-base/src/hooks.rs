@@ -36,6 +36,10 @@ const PAYLOAD_ENV_LIMIT: usize = 16 * 1024;
 const TOOL_INPUT_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum chars of hook stderr used as a block reason.
 const BLOCK_REASON_LIMIT: usize = 2000;
+/// Maximum bytes of pre_request stdout accepted as a rewritten request.
+/// Full histories serialize to several MB; anything beyond this is treated
+/// as a runaway script and fails open.
+const TRANSFORM_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +111,7 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "session_end" => hooks.session_end.as_ref(),
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
+        "pre_request" => hooks.pre_request.as_ref(),
         _ => None,
     };
     raw.into_iter()
@@ -375,6 +380,186 @@ async fn run_pre_tool_command(
     }
 }
 
+/// A rewritten provider-bound request returned by the `pre_request` hook.
+#[derive(Debug, Clone)]
+pub struct TransformedRequest {
+    /// Wire-equivalent of the request the provider will receive.
+    /// Kept as JSON so hooks written in any language only need JSON, and so
+    /// a hook may return a subset: absent keys keep the original value.
+    pub messages: serde_json::Value,
+    pub tools: serde_json::Value,
+    pub system_static: String,
+    pub system_dynamic: String,
+    /// True when stdout carried a usable rewrite. False means "send the
+    /// original request" (no hook, empty stdout, or any fail-open path).
+    pub changed: bool,
+}
+
+/// Run the `pre_request` transform hook before a provider call, if configured.
+///
+/// The hook receives the full request as JSON on stdin:
+/// `{event, session_id, messages, tools, system_static, system_dynamic}`.
+/// Contract:
+///
+/// - exit 0 with a JSON object on stdout: applied as the new request.
+///   Absent keys keep their original value; `messages` should be an array.
+/// - exit 0 with empty stdout: request unchanged.
+/// - anything else (non-zero exit, invalid JSON, oversize stdout, timeout,
+///   spawn failure): fail open with the original request.
+///
+/// Like every other hook, the transform runs with `JCODE_HOOKS_DISABLED=1`,
+/// so a transform that itself invokes jcode cannot recurse.
+pub async fn run_pre_request_transform(
+    session_id: &str,
+    working_dir: Option<&str>,
+    request_json: &str,
+) -> TransformedRequest {
+    let unchanged = || TransformedRequest {
+        messages: serde_json::Value::Null,
+        tools: serde_json::Value::Null,
+        system_static: String::new(),
+        system_dynamic: String::new(),
+        changed: false,
+    };
+    let command_lines = hook_commands("pre_request");
+    if command_lines.is_empty() {
+        return unchanged();
+    }
+
+    let mut event = HookEvent::new("pre_request").session_id(session_id);
+    if let Some(cwd) = working_dir {
+        event = event.cwd(cwd);
+    }
+
+    // Chain commands in order: each sees the previous command's output, so
+    // composable transforms (tag, then drop, then watermark) just work.
+    let mut current_json = request_json.to_string();
+    let mut changed = false;
+    for command_line in command_lines {
+        // None keeps the input: empty stdout means "unchanged", and any
+        // fail-open outcome preserves the previous command's output.
+        if let Some(rewritten) = run_pre_request_command(&command_line, &event, &current_json).await
+        {
+            current_json = rewritten;
+            changed = true;
+        }
+    }
+    if !changed {
+        return unchanged();
+    }
+    match serde_json::from_str::<serde_json::Value>(&current_json) {
+        Ok(value) => TransformedRequest {
+            messages: value
+                .get("messages")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            tools: value
+                .get("tools")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            system_static: value
+                .get("system_static")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            system_dynamic: value
+                .get("system_dynamic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            changed: true,
+        },
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' produced invalid JSON after chaining ({error}); sending original request"
+            ));
+            unchanged()
+        }
+    }
+}
+
+/// Run one pre_request command. Returns the rewritten request JSON when the
+/// command exits 0 with non-empty stdout, or None to keep the input.
+async fn run_pre_request_command(
+    command_line: &str,
+    event: &HookEvent,
+    request_json: &str,
+) -> Option<String> {
+    let std_cmd = match build_hook_process(command_line, event) {
+        Ok(cmd) => cmd,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' is invalid: {error} (sending original request)"
+            ));
+            return None;
+        }
+    };
+
+    let mut cmd = tokio::process::Command::from(std_cmd);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' failed to start: {error} (sending original request)"
+            ));
+            return None;
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(request_json.as_bytes()).await;
+        // Closing stdin signals EOF to hooks that read the whole input.
+        drop(stdin);
+    }
+
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config().hooks.pre_request_timeout_ms.max(1),
+    );
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' failed: {error} (sending original request)"
+            ));
+            return None;
+        }
+        Err(_elapsed) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    };
+
+    if !output.status.success() {
+        crate::logging::warn(&format!(
+            "Hook 'pre_request' command '{command_line}' exited with {:?} (sending original request)",
+            output.status.code()
+        ));
+        return None;
+    }
+    if output.stdout.len() > TRANSFORM_STDOUT_LIMIT {
+        crate::logging::warn(&format!(
+            "Hook 'pre_request' command '{command_line}' emitted {} bytes (limit {}); sending original request",
+            output.stdout.len(),
+            TRANSFORM_STDOUT_LIMIT
+        ));
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    Some(stdout.into_owned())
+}
+
 #[cfg(test)]
 #[allow(clippy::await_holding_lock)]
 mod tests {
@@ -473,6 +658,145 @@ mod tests {
             let decision = run_pre_tool_gate("ses_g", None, "read", "{}").await;
             assert_eq!(decision, GateDecision::Allow);
         }
+    }
+
+    #[cfg(unix)]
+    fn transform_test_config(hook: &str, timeout_ms: u64) -> impl Drop + use<> {
+        struct EnvReset(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => crate::env::set_var(key, value),
+                        None => crate::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let reset = EnvReset(vec![
+            (
+                "JCODE_HOOK_PRE_REQUEST",
+                std::env::var_os("JCODE_HOOK_PRE_REQUEST"),
+            ),
+            (
+                "JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS",
+                std::env::var_os("JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS"),
+            ),
+        ]);
+        crate::env::set_var("JCODE_HOOK_PRE_REQUEST", hook);
+        crate::env::set_var("JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS", timeout_ms.to_string());
+        reset
+    }
+
+    fn sample_request_json() -> String {
+        serde_json::json!({
+            "event": "pre_request",
+            "session_id": "ses_t",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "tools": [],
+            "system_static": "static",
+            "system_dynamic": "dynamic",
+        })
+        .to_string()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_applies_stdout_rewrite() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Reads the request, appends a message, echoes the rewritten request.
+        let script = write_executable_script(
+            temp.path(),
+            "append.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'tagged'}]})\njson.dump(req,sys.stdout)\n",
+        );
+        let _env = transform_test_config(&script.to_string_lossy(), 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(out.changed);
+        let messages = out.messages.as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        // Untouched keys pass through: tools was echoed back by the script.
+        assert!(out.tools.is_array());
+        assert_eq!(out.system_static, "static");
+        assert_eq!(out.system_dynamic, "dynamic");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_partial_stdout_keeps_original_keys() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Returns only messages: tools/system fall back to the originals.
+        let script = write_executable_script(
+            temp.path(),
+            "partial.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\njson.dump({'messages': req['messages']},sys.stdout)\n",
+        );
+        let _env = transform_test_config(&script.to_string_lossy(), 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(out.changed);
+        assert!(out.tools.is_null());
+        assert_eq!(out.system_static, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_empty_stdout_is_passthrough() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let script = write_executable_script(temp.path(), "noop.sh", "#!/bin/sh\nexit 0\n");
+        let _env = transform_test_config(&script.to_string_lossy(), 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(!out.changed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_fail_open_paths() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Invalid JSON on stdout.
+        let garbage = write_executable_script(
+            temp.path(),
+            "garbage.sh",
+            "#!/bin/sh\necho 'not json'\nexit 0\n",
+        );
+        // Non-zero exit.
+        let failing = write_executable_script(temp.path(), "failing.sh", "#!/bin/sh\nexit 3\n");
+        // Exceeds the timeout.
+        let slow = write_executable_script(temp.path(), "slow.sh", "#!/bin/sh\nsleep 30\nexit 0\n");
+        for script in [garbage, failing, slow] {
+            let _env = transform_test_config(&script.to_string_lossy(), 50);
+            let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+            assert!(!out.changed, "fail open for {}", script.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_chains_commands_in_order() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let first = write_executable_script(
+            temp.path(),
+            "first.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'one'}]})\njson.dump(req,sys.stdout)\n",
+        );
+        let second = write_executable_script(
+            temp.path(),
+            "second.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'two'}]})\njson.dump(req,sys.stdout)\n",
+        );
+        let commands = serde_json::to_string(&vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize hook command array");
+        let _env = transform_test_config(&commands, 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(out.changed);
+        assert_eq!(out.messages.as_array().expect("array").len(), 3);
     }
 
     #[cfg(unix)]
