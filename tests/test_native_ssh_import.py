@@ -348,9 +348,9 @@ class ImportPTY(login.LoginPTY):
         for label in ("Import local OpenAI login", "Import local Claude login"):
             self.wait(label, mark)
         if imports_only:
-            # The import-only picker has no OAuth actions. Filter to exactly the
-            # desired static row before selecting it with the real Enter key.
-            os.write(self.master, provider.encode())
+            # Bracketed paste must filter the import-only picker, not bypass it
+            # through the old private-input provider route into remote OAuth.
+            os.write(self.master, b"\x1b[200~" + provider.encode() + b"\x1b[201~")
             self.pump(0.2)
         elif provider == "claude":
             # Bare picker begins with OpenAI import, then Claude import.
@@ -627,7 +627,7 @@ class HarnessSelfTests(unittest.TestCase):
                     tui.choose_import(provider, imports_only)
                 expected = [b"/login --import-local\r" if imports_only else b"/login\r"]
                 if imports_only:
-                    expected.append(provider.encode())
+                    expected.append(b"\x1b[200~" + provider.encode() + b"\x1b[201~")
                 elif provider == "claude":
                     expected.append(b"\x1b[B")
                 expected.append(b"\r")
