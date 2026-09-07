@@ -1,6 +1,8 @@
 //! Lifecycle and all-session event behavior which cannot be exercised by the
 //! protocol-only socket-pair tests.
 
+#![cfg(unix)]
+
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ServerFrame, SessionInfo, read_frame,
     write_frame,
