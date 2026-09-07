@@ -23,13 +23,25 @@ ID is resolved on the remote server, not in local session storage.
 
 Authenticate the remote host directly from the local TUI with `/login`. It uses
 the same inline Login picker as local mode: arrow keys move, typing filters,
-Enter selects, and Esc cancels. The remote picker offers six supported OAuth
-providers plus **Import local OpenAI login** and **Import local Claude login**.
+Enter selects, and Esc cancels. The remote picker uses the same provider catalog,
+labels, ordering, and authentication-method labels as local `/login`, followed by
+**Import local OpenAI login** and **Import local Claude login**.
+The six supported OAuth routes authenticate through the SSH bridge. Other rows
+explain how to set up that method directly on the remote host, never starting
+laptop-local authentication or pretending the bridge supports those methods.
 Its destination notice names the SSH host. Provider status is fetched from that
 host with `jcode auth status --json`, never from the laptop's credential stores.
 Unknown or unavailable status is shown as unknown, not as signed out. Only
 provider state and fixed method labels are displayed, not remote account labels,
 credential paths, or raw remote errors.
+
+On first attach, an idle client checks the remote host's login status. If every
+expected provider is explicitly unconfigured, it asks **Import a local login
+first?** with **Yes / No** choices. Yes opens the OpenAI/Claude import picker.
+No opens the normal login picker. Neither choice reads or copies credentials.
+Missing, failed, or expired status does not count as an empty host. The offer is
+shown at most once per client launch and does not replace drafts, active turns,
+or an explicit login flow. This check never inspects the laptop's login stores.
 
 You can also choose a provider explicitly, for example `/login openai` or
 `/login claude`. The browser
@@ -67,7 +79,10 @@ the picker is open. Direct commands remain available:
 /login --import-local claude
 ```
 
-Read the destination-host warning, then type exactly `confirm` and press Enter.
+Read the destination-host warning, choose **Yes**, and press Enter. Arrow keys
+select Yes/No, or type `yes`/`no` and press Enter. **No is selected by default**,
+so Enter alone never approves a copy. The legacy `confirm` input remains accepted.
+You do not need to find or paste any credentials.
 Before confirmation, no credential export is performed. Esc or `/cancel` at the
 confirmation prompt reads and copies nothing. After confirmation, the selected
 active account is read from the laptop's Jcode-managed OAuth store and sent over

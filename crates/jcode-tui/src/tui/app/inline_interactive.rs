@@ -3498,6 +3498,7 @@ impl App {
                         PickerAction::Model
                             | PickerAction::Usage { .. }
                             | PickerAction::RemoteLogin { .. }
+                            | PickerAction::RemoteImportDecision { .. }
                     )
                 {
                     self.inline_interactive_state = None;
@@ -3544,6 +3545,9 @@ impl App {
                     PickerAction::RemoteLogin { provider, import } => {
                         self.inline_interactive_state = None;
                         self.select_ssh_login_action(provider, import);
+                    }
+                    PickerAction::RemoteImportDecision { accept } => {
+                        self.select_ssh_import_decision(accept);
                     }
                     PickerAction::Logout(provider) => {
                         self.inline_interactive_state = None;

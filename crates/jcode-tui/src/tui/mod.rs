@@ -1302,6 +1302,10 @@ pub enum PickerAction {
         provider: &'static str,
         import: bool,
     },
+    /// Explicit remote import offer/consent, never a local authentication action.
+    RemoteImportDecision {
+        accept: bool,
+    },
     Logout(crate::provider_catalog::LoginProviderDescriptor),
     LogoutAll,
     Usage {
@@ -1360,6 +1364,7 @@ fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
         | PickerAction::RemoteLogin { .. }
+        | PickerAction::RemoteImportDecision { .. }
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }
