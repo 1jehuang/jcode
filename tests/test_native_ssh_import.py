@@ -348,21 +348,13 @@ class ImportPTY(login.LoginPTY):
         require(provider in FILES, "Only synthetic import provider selection permitted")
         mark = self.command("/login --import-local" if imports_only else "/login")
         self.wait(f"Login on {self.config['HOST']}:", mark)
-        if not imports_only:
-            # Catalog rows precede the explicit imports and may fill the viewport.
-            os.write(self.master, b"\x1b[200~import local\x1b[201~")
-            self.pump(0.2)
-        for label in ("Import local OpenAI login", "Import local Claude login"):
-            self.wait(label, mark)
-        if imports_only:
-            # Bracketed paste must filter the import-only picker, not bypass it
-            # through the old private-input provider route into remote OAuth.
-            os.write(self.master, b"\x1b[200~" + provider.encode() + b"\x1b[201~")
-            self.pump(0.2)
-        elif provider == "claude":
-            # Filtered explicit-import rows retain OpenAI then Claude ordering.
-            os.write(self.master, b"\x1b[B")
-            self.pump(0.2)
+        # Exact-name match ranks first. Fuzzy filters can reorder the catalog,
+        # so fixed arrow counts after filtering would select the wrong account.
+        label = "Import local " + ("OpenAI" if provider == "openai" else "Claude") + " login"
+        os.write(self.master, b"\x1b[200~" + label.encode() + b"\x1b[201~")
+        self.pump(0.3)
+        self.repaint()
+        self.wait(label, mark)
         mark = len(self.output)
         os.write(self.master, b"\r")
         return mark
@@ -643,20 +635,17 @@ class HarnessSelfTests(unittest.TestCase):
                 tui = object.__new__(ImportPTY)
                 tui.master, tui.output = 123, bytearray()
                 tui.config = {"HOST": "test-remote"}
-                tui.pump, tui.wait = mock.Mock(), mock.Mock()
+                tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
                 with mock.patch("os.write") as write:
                     tui.choose_import(provider, imports_only)
                 expected = [b"/login --import-local\r" if imports_only else b"/login\r"]
-                if imports_only:
-                    expected.append(b"\x1b[200~" + provider.encode() + b"\x1b[201~")
-                else:
-                    expected.append(b"\x1b[200~import local\x1b[201~")
-                    if provider == "claude":
-                        expected.append(b"\x1b[B")
+                label = "Import local " + ("OpenAI" if provider == "openai" else "Claude") + " login"
+                expected.append(b"\x1b[200~" + label.encode() + b"\x1b[201~")
                 expected.append(b"\r")
                 self.assertEqual([call.args for call in write.call_args_list],
                                  [(123, value) for value in expected])
-                self.assertEqual(tui.wait.call_count, 3)
+                self.assertEqual(tui.wait.call_count, 2)
+                tui.repaint.assert_called_once_with()
                 self.assertNotIn(b"confirm", b"".join(expected))
         tui = object.__new__(ImportPTY)
         with mock.patch("os.write") as write, self.assertRaises(AssertionError):

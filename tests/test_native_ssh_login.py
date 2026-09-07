@@ -472,6 +472,18 @@ class LoginPTY:
         os.write(self.master, command.encode() + b"\r")
         return mark
 
+    def repaint(self):
+        """Request a real full frame before asserting labels after navigation.
+
+        ANSI stripping is not terminal emulation: differential draws can omit
+        unchanged cells and split visible labels in the captured byte stream.
+        A kernel-delivered resize redraws the actual TUI without injecting any
+        application state or exposing private terminal output.
+        """
+        for width in (599, 600):
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 60, width, 0, 0))
+            self.pump(0.3)
+
     def choose_startup_import(self, accept=False):
         """Respond only to the real empty-host offer, never to credential consent."""
         host = self.config["HOST"]
@@ -481,6 +493,7 @@ class LoginPTY:
         # Enter alone exercises default No. Yes opens a chooser, not a transfer.
         os.write(self.master, b"yes\r" if accept else b"\r")
         self.wait(f"Login on {host}:", mark)
+        self.repaint()
         if accept:
             self.wait("Import local OpenAI login", mark)
             self.wait("Import local Claude login", mark)
@@ -503,6 +516,8 @@ class LoginPTY:
         ):
             mark = len(self.output)
             os.write(self.master, b"\x1b[200~" + query.encode() + b"\x1b[201~")
+            self.pump(0.3)
+            self.repaint()
             for label in labels:
                 self.wait(label, mark)
             os.write(self.master, b"\x1b")  # Clear nonempty filter, keep picker open.
@@ -761,7 +776,7 @@ class HarnessSelfTests(unittest.TestCase):
             tui = object.__new__(LoginPTY)
             tui.master, tui.output = 123, bytearray()
             tui.config = {"HOST": "test-remote"}
-            tui.pump, tui.wait = mock.Mock(), mock.Mock()
+            tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
             with mock.patch("os.write") as write:
                 tui.choose_startup_import(accept)
             write.assert_called_once_with(123, b"yes\r" if accept else b"\r")
@@ -776,7 +791,7 @@ class HarnessSelfTests(unittest.TestCase):
     def test_catalog_checks_filter_without_selecting_authentication(self):
         tui = object.__new__(LoginPTY)
         tui.master, tui.output = 123, bytearray()
-        tui.pump, tui.wait = mock.Mock(), mock.Mock()
+        tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
         with mock.patch("os.write") as write:
             tui.check_catalog_choices()
         payloads = [call.args[1] for call in write.call_args_list]
@@ -786,6 +801,18 @@ class HarnessSelfTests(unittest.TestCase):
             b"\x1b[200~import local\x1b[201~", b"\x1b",
         ])
         self.assertNotIn(b"\r", b"".join(payloads))
+
+    def test_repaint_uses_kernel_resize_without_terminal_input(self):
+        tui = object.__new__(LoginPTY)
+        tui.master, tui.pump = 123, mock.Mock()
+        with mock.patch("fcntl.ioctl") as resize, mock.patch("os.write") as write:
+            tui.repaint()
+        self.assertEqual([call.args for call in resize.call_args_list], [
+            (123, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 599, 0, 0)),
+            (123, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 600, 0, 0)),
+        ])
+        self.assertEqual(tui.pump.call_count, 2)
+        write.assert_not_called()
 
     def exercise_wrapper(self, root, flags, payload=b"", result=None, provider="openai"):
         argv = ["remote-jcode", "login", "--provider", provider, "--flow-id", "test-flow", *flags]
