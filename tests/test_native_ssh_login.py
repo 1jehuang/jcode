@@ -20,7 +20,8 @@ callback whose state demonstrably differs from the remote pending state. It also
 sets a closed loopback HTTP proxy as defense in depth, not as packet-capture proof.
 
 Acceptance contract agreed with the TUI/CLI implementers:
-* /login shows 'SSH login: choose a provider' and remote provider choices.
+* /login shows the shared inline Login picker with remote provider status and
+  explicit local-import choices. Arrow keys/filter/Enter navigate, Esc cancels.
 * /login openai shows the exact real VM-generated URL. Its state/PKCE challenge
   match the VM pending file, whose verifier is never returned to this machine.
 * /login claude begins and cancels only. Legacy Claude puts its verifier in URL
@@ -538,10 +539,10 @@ def run_acceptance(config):
                 tui.wait(f"SSH {config['HOST']}")
                 tui.wait(sentinel)
                 mark = tui.command("/login")
-                text = tui.wait("SSH login: choose a provider", mark)
-                for provider in ("openai", "claude", "gemini", "antigravity", "google", "copilot"):
-                    if provider not in text.lower():
-                        tui.wait(provider, mark)
+                tui.wait(f"Login on {config['HOST']}:", mark)
+                for label in ("Import local OpenAI login", "Import local Claude login",
+                              "OpenAI", "Claude", "Gemini", "Antigravity", "Google", "GitHub Copilot"):
+                    tui.wait(label, mark)
                 require(not inspect_remote(config)["pending"], "Bare /login started OAuth before provider choice")
                 mark = tui.command("/cancel")
                 tui.wait("No authorization was started.", mark)

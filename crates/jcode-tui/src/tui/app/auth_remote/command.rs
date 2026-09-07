@@ -88,7 +88,9 @@ impl Target {
             "-o",
             "ServerAliveCountMax=2",
         ]);
-        let action = if operation == Operation::Import {
+        let action = if operation == Operation::Status {
+            "auth status --json".to_string()
+        } else if operation == Operation::Import {
             format!("auth import --provider {} --stdin --json", quote(provider))
         } else {
             format!(
@@ -119,6 +121,7 @@ pub(super) enum Operation {
     Complete,
     Cancel,
     Import,
+    Status,
 }
 impl Operation {
     fn flag(self) -> &'static str {
@@ -129,11 +132,15 @@ impl Operation {
             Self::Complete => "--complete",
             Self::Cancel => "--cancel",
             Self::Import => unreachable!("credential import does not use OAuth flags"),
+            Self::Status => unreachable!("auth status does not use OAuth flags"),
         }
     }
 }
 
 pub(super) enum Reply {
+    Status {
+        providers: Vec<ProviderStatus>,
+    },
     Pending {
         auth_url: String,
         input_kind: String,
@@ -146,10 +153,53 @@ pub(super) enum Reply {
     Imported,
 }
 
+/// Only fixed provider IDs, credential states and locally synthesized labels.
+/// Remote method details may contain account labels, so never forward them.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ProviderStatus {
+    pub(super) id: String,
+    pub(super) state: crate::auth::AuthState,
+    pub(super) method_detail: String,
+}
+
+fn parse_status(value: &serde_json::Value) -> Result<Reply, &'static str> {
+    let rows = value["providers"]
+        .as_array()
+        .ok_or("Invalid remote auth status. Update Jcode on the remote host.")?;
+    let mut providers = Vec::new();
+    for row in rows {
+        let Some(id) = row["id"]
+            .as_str()
+            .filter(|id| super::PROVIDERS.contains(id))
+        else {
+            continue;
+        };
+        if providers.iter().any(|p: &ProviderStatus| p.id == id) {
+            return Err("Duplicate remote auth provider status");
+        }
+        let (state, method_detail) = match row["status"].as_str() {
+            Some("available") => (crate::auth::AuthState::Available, "OAuth"),
+            Some("expired") => (crate::auth::AuthState::Expired, "OAuth (expired)"),
+            Some("not_configured") => (crate::auth::AuthState::NotConfigured, "not configured"),
+            _ => return Err("Unsupported remote auth provider status"),
+        };
+        providers.push(ProviderStatus {
+            id: id.to_string(),
+            state,
+            method_detail: method_detail.to_string(),
+        });
+    }
+    // Missing providers remain unknown to the caller, never falsely signed out.
+    Ok(Reply::Status { providers })
+}
+
 fn parse_reply(bytes: &[u8], operation: Operation, provider: &str) -> Result<Reply, &'static str> {
     // Deliberately do not deserialize/format remote error messages or arbitrary JSON.
     let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|_| "Invalid remote login response. Update Jcode on the remote host.")?;
+    if operation == Operation::Status {
+        return parse_status(&value);
+    }
     if value["provider"].as_str() != Some(provider) {
         return Err("Remote login provider mismatch");
     }
@@ -274,6 +324,11 @@ async fn execute(
                     validation_warning: true,
                 });
             }
+            if operation == Operation::Status {
+                return Err(
+                    "Could not read remote auth status. Check remote Jcode version and SSH access.",
+                );
+            }
             if operation == Operation::Import {
                 return Err(
                     "Remote credential import was rejected or SSH failed. Existing remote credentials are never overwritten. Check remote Jcode version and SSH access.",
@@ -356,6 +411,9 @@ impl Task {
                     return;
                 };
                 Some(Payload::Import(exported))
+            } else if operation == Operation::Status {
+                // A status lookup can never send caller input or export local auth.
+                None
             } else {
                 payload.map(Payload::Login)
             };
@@ -368,7 +426,9 @@ impl Task {
                 &mut cancel_rx,
             )
             .await;
-            if matches!(result, Err("cancelled")) && operation != Operation::Import {
+            if matches!(result, Err("cancelled"))
+                && !matches!(operation, Operation::Import | Operation::Status)
+            {
                 let (_keepalive, mut never_cancel) = oneshot::channel();
                 result = execute(
                     &target,
@@ -402,6 +462,140 @@ impl Drop for Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ssh_status_reuses_hardened_target_without_login_or_import_arguments() {
+        let target = Target {
+            host: "test-host".into(),
+            binary: "/srv/a'b/jcode".into(),
+            cwd: Some("/srv/a b".into()),
+            socket: Some("/run/remote.sock".into()),
+        };
+        let cmd = target.command("unused-provider", "unused-flow", Operation::Status);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let remote = args.last().unwrap();
+        assert!(remote.contains("'/srv/a'\\''b/jcode'"));
+        assert!(remote.contains("--cwd '/srv/a b'"));
+        assert!(remote.contains("--socket '/run/remote.sock'"));
+        assert!(remote.ends_with("auth status --json"));
+        for forbidden in [
+            "unused-provider",
+            "unused-flow",
+            "--flow-id",
+            "login ",
+            "import ",
+        ] {
+            assert!(!remote.contains(forbidden), "{forbidden}");
+        }
+        for required in [
+            "-T",
+            "BatchMode=yes",
+            "StrictHostKeyChecking=yes",
+            "ForwardAgent=no",
+            "ClearAllForwardings=yes",
+            "PermitLocalCommand=no",
+            "StdinNull=no",
+            "RemoteCommand=none",
+            "ControlMaster=no",
+            "ConnectTimeout=20",
+        ] {
+            assert!(args.iter().any(|arg| arg == required), "{required}");
+        }
+    }
+
+    #[test]
+    fn ssh_status_only_returns_known_provider_states_and_fixed_method_labels() {
+        let states = [
+            ("available", crate::auth::AuthState::Available, "OAuth"),
+            (
+                "expired",
+                crate::auth::AuthState::Expired,
+                "OAuth (expired)",
+            ),
+            (
+                "not_configured",
+                crate::auth::AuthState::NotConfigured,
+                "not configured",
+            ),
+        ];
+        let mut rows: Vec<_> = super::super::PROVIDERS
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                serde_json::json!({
+                    "id": id,
+                    "status": states[index % states.len()].0,
+                    "method": "OAuth (account: `must-not-surface@example.test`)\u{1b}[2J",
+                    "credential_source": "/home/private/account.json",
+                    "access_token": "must-not-surface",
+                })
+            })
+            .collect();
+        rows.push(serde_json::json!({"id": "openai-api", "status": "available"}));
+        rows.push(serde_json::json!({"id": "unknown\u{1b}[2J", "status": "available"}));
+        let bytes = serde_json::to_vec(&serde_json::json!({"providers": rows})).unwrap();
+        let Ok(Reply::Status { providers }) = parse_reply(&bytes, Operation::Status, "") else {
+            panic!("Expected provider status");
+        };
+        assert_eq!(providers.len(), super::super::PROVIDERS.len());
+        for (index, provider) in providers.iter().enumerate() {
+            assert_eq!(provider.id, super::super::PROVIDERS[index]);
+            assert_eq!(provider.state, states[index % states.len()].1);
+            assert_eq!(provider.method_detail, states[index % states.len()].2);
+        }
+        let debug = format!("{providers:?}");
+        for forbidden in ["must-not-surface", "private", "access_token", "\u{1b}"] {
+            assert!(!debug.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn ssh_status_missing_providers_are_not_invented_as_signed_out() {
+        let response = br#"{"providers":[{"id":"openai","status":"available"}]}"#;
+        let Ok(Reply::Status { providers }) = parse_reply(response, Operation::Status, "") else {
+            panic!("Expected provider status");
+        };
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "openai");
+        assert!(matches!(
+            parse_reply(br#"{"providers":[]}"#, Operation::Status, ""),
+            Ok(Reply::Status { providers }) if providers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn ssh_status_rejects_invalid_duplicate_or_unknown_states_without_echoing_input() {
+        for response in [
+            br#"{"providers":[{"id":"openai","status":"must-not-surface"}]}"#.as_slice(),
+            br#"{"providers":[{"id":"openai","status":"available"},{"id":"openai","status":"expired"}]}"#.as_slice(),
+            br#"{"providers":[{"id":"openai"}]}"#.as_slice(),
+            br#"{"providers":"must-not-surface"}"#.as_slice(),
+            br#"{"status":"error","message":"must-not-surface"}"#.as_slice(),
+            b"must-not-surface".as_slice(),
+        ] {
+            let error = parse_reply(response, Operation::Status, "").err().unwrap();
+            assert!(!error.contains("must-not-surface"));
+        }
+    }
+
+    #[test]
+    fn ssh_status_cannot_be_mistaken_for_login_or_import_success() {
+        let response = br#"{"providers":[{"id":"openai","status":"available"}]}"#;
+        for operation in [
+            Operation::Begin,
+            Operation::Callback,
+            Operation::Import,
+            Operation::Cancel,
+        ] {
+            assert!(parse_reply(response, operation, "openai").is_err());
+        }
+        let response = br#"{"provider":"openai","status":"authenticated"}"#;
+        assert!(parse_reply(response, Operation::Status, "openai").is_err());
+    }
+
     #[test]
     fn ssh_login_command_quotes_paths_and_never_carries_payload() {
         let target = Target {

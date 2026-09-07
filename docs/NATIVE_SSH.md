@@ -21,8 +21,18 @@ selects the remote executable. With no workspace argument, the bridge's remote
 working directory is used, never the local client's directory. An explicit resume
 ID is resolved on the remote server, not in local session storage.
 
-Authenticate the remote host directly from the local TUI with `/login`, or choose
-a provider explicitly, for example `/login openai` or `/login claude`. The browser
+Authenticate the remote host directly from the local TUI with `/login`. It uses
+the same inline Login picker as local mode: arrow keys move, typing filters,
+Enter selects, and Esc cancels. The remote picker offers six supported OAuth
+providers plus **Import local OpenAI login** and **Import local Claude login**.
+Its destination notice names the SSH host. Provider status is fetched from that
+host with `jcode auth status --json`, never from the laptop's credential stores.
+Unknown or unavailable status is shown as unknown, not as signed out. Only
+provider state and fixed method labels are displayed, not remote account labels,
+credential paths, or raw remote errors.
+
+You can also choose a provider explicitly, for example `/login openai` or
+`/login claude`. The browser
 approval happens on your laptop, while pending login records, token exchange, and
 saved credentials stay on the SSH host. Treat authorization URLs as sensitive and
 do not share them. Paste the returned callback URL or authorization
@@ -46,8 +56,11 @@ completed exchange. Closing the UI terminates its owned authentication subproces
 
 ### One-time import of a local login
 
-To avoid another browser login on a trusted SSH host, run one of these commands
-**inside the native SSH TUI**:
+To avoid another browser login on a trusted SSH host, open `/login` **inside the
+native SSH TUI** and choose an **Import local … login** row. `/login --import-local`
+opens a smaller picker containing just those two import choices. Both routes lead
+to the same explicit confirmation, and neither reads local credentials while
+the picker is open. Direct commands remain available:
 
 ```text
 /login --import-local openai
@@ -185,6 +198,9 @@ not claimed as passed by the context-only SSH acceptance.
 `JCODE_NATIVE_SSH_LOGIN=1`, plus the local binary, SSH host, workspace, and
 `JCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE` (the actual remote ELF, not a wrapper).
 It creates a private remote home/runtime and never uses the user's credentials.
+The current harness checks the shared inline picker and its six OAuth/two import
+choices before the isolated login scenarios. Updating this harness does not by
+itself establish that the new picker has passed real SSH acceptance.
 
 On 2026-09-06, the real local PTY and EC2 SSH workflow passed:
 
@@ -223,6 +239,13 @@ offline harness checks and the expanded live acceptance passed.
 fresh local and remote homes with unmistakably synthetic credentials. Its safety
 wrapper refuses anything except the selected synthetic payload before invoking
 the real receiver CLI. No personal credentials are imported by the test.
+The current harness adds bare-picker arrow selection and import-only filtered
+selection, each followed by cancellation at the destination warning, for both
+providers. It checks that no import subprocess started, no account labels were
+displayed, and the synthetic local/remote stores remained unchanged. It retains
+the direct-command cancel, confirmed import, and repeat/refusal scenarios. Run
+`python3 tests/test_native_ssh_import.py --self-test` for offline harness safety
+checks. Real PTY/SSH acceptance still requires the explicit opt-in above.
 
 On 2026-09-06 at 11:07 UTC, the real local TUI, OpenSSH, remote CLI and daemon
 passed all six scenarios: cancel, confirm/import, and repeat/refuse for each of
