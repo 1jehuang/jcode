@@ -398,6 +398,8 @@ pub(super) fn is_ws_upgrade_required(err: &WsError) -> bool {
 /// Result of trying to continue on a persistent WebSocket connection
 pub(super) enum PersistentWsResult {
     Success,
+    /// A terminal API error was forwarded to the consumer. Do not replay it.
+    TerminalError,
     NotAvailable,
     Failed(String),
 }
@@ -412,8 +414,45 @@ pub(super) async fn try_persistent_ws_continuation(
     input_item_count: usize,
     tx: &mpsc::Sender<Result<StreamEvent>>,
 ) -> PersistentWsResult {
-    let request_model = openai_request_model(request);
     let mut guard = persistent_ws.lock().await;
+    let result = continue_persistent_ws_locked(
+        &mut guard,
+        credentials,
+        request,
+        input,
+        input_item_count,
+        tx,
+    )
+    .await;
+    // Invalidate under the same lock that protected the attempt. Clearing in
+    // the caller after unlocking lets a queued request reuse the failed chain
+    // and can later erase a replacement connection belonging to another turn.
+    if matches!(
+        result,
+        PersistentWsResult::Failed(_) | PersistentWsResult::TerminalError
+    ) {
+        *guard = None;
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Warn,
+            "persistent_state_reset",
+            vec![
+                ("model", openai_request_model(request)),
+                ("reason", "persistent_reuse_failed".to_string()),
+            ],
+        );
+    }
+    result
+}
+
+async fn continue_persistent_ws_locked(
+    guard: &mut Option<PersistentWsState>,
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    request: &Value,
+    input: &[Value],
+    input_item_count: usize,
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+) -> PersistentWsResult {
+    let request_model = openai_request_model(request);
     let state = match guard.as_mut() {
         Some(s) => s,
         None => {
@@ -927,10 +966,21 @@ pub(super) async fn try_persistent_ws_continuation(
                     if matches!(event, StreamEvent::MessageEnd { .. }) {
                         saw_response_completed = true;
                     }
-                    if let StreamEvent::Error { ref message, .. } = event
-                        && is_retryable_error(&message.to_lowercase())
-                    {
-                        return PersistentWsResult::Failed(format!("stream error: {}", message));
+                    if let StreamEvent::Error { ref message, .. } = event {
+                        let lower = message.to_lowercase();
+                        if is_retryable_error(&lower)
+                            || lower.contains("previous_response_not_found")
+                        {
+                            return PersistentWsResult::Failed(format!(
+                                "stream error: {}",
+                                message
+                            ));
+                        }
+                        // A failed response will not send response.completed.
+                        // Forward once and stop, even if the server keeps the
+                        // socket open or the consumer retains its stream.
+                        let _ = tx.send(Ok(event)).await;
+                        return PersistentWsResult::TerminalError;
                     }
                     usage_recorder.observe(&event).await;
                     if tx.send(Ok(event)).await.is_err() {
@@ -939,6 +989,19 @@ pub(super) async fn try_persistent_ws_continuation(
                     }
                 }
                 while let Some(event) = pending.pop_front() {
+                    if let StreamEvent::Error { ref message, .. } = event {
+                        let lower = message.to_lowercase();
+                        if is_retryable_error(&lower)
+                            || lower.contains("previous_response_not_found")
+                        {
+                            return PersistentWsResult::Failed(format!(
+                                "stream error: {}",
+                                message
+                            ));
+                        }
+                        let _ = tx.send(Ok(event)).await;
+                        return PersistentWsResult::TerminalError;
+                    }
                     if is_stream_activity_event(&event) {
                         made_api_activity = true;
                     }
