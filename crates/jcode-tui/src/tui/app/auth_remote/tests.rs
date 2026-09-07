@@ -1,6 +1,15 @@
 use super::*;
 
-fn with_app(f: impl FnOnce(&mut App)) {
+fn picker_provider<'a>(
+    picker: &'a crate::tui::InlineInteractiveState,
+    provider: &str,
+) -> &'a crate::tui::PickerEntry {
+    picker.entries.iter().find(|entry| matches!(entry.action,
+        crate::tui::PickerAction::RemoteLogin { provider: id, import: false } if id == provider
+    )).unwrap()
+}
+
+pub(super) fn with_app(f: impl FnOnce(&mut App)) {
     let _guard = crate::storage::lock_test_env();
     let home = tempfile::tempdir().unwrap();
     struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
@@ -44,13 +53,32 @@ fn ssh_login_picker_uses_shared_inline_ui_without_local_auth() {
         assert!(app.login_picker_overlay.is_none());
         let picker = app.inline_interactive_state.as_ref().unwrap();
         assert_eq!(picker.kind, crate::tui::PickerKind::Login);
-        assert_eq!(picker.entries.len(), 8);
-        for provider in PROVIDERS {
-            assert!(picker.entries.iter().any(|entry| matches!(entry.action,
-                crate::tui::PickerAction::RemoteLogin { provider: id, import: false } if id == provider)));
+        let catalog = crate::provider_catalog::tui_login_providers();
+        assert_eq!(picker.entries.len(), catalog.len() + 2);
+        for (entry, provider) in picker.entries.iter().zip(&catalog) {
+            assert_eq!(entry.name, provider.display_name);
+            assert_eq!(entry.options[0].provider, provider.auth_kind.label());
+            assert_eq!(entry.recommended, provider.recommended);
+            assert!(entry.options[0].detail.contains(provider.menu_detail));
+            assert!(matches!(entry.action,
+                crate::tui::PickerAction::RemoteLogin { provider: id, import: false } if id == provider.id));
+            if !PROVIDERS.contains(&provider.id) {
+                assert!(
+                    entry.options[0]
+                        .detail
+                        .contains("Remote-host setup required")
+                );
+                assert!(!entry.options[0].detail.contains("Browser approval opens"));
+            }
         }
-        assert_eq!(picker.entries[0].name, "Import local OpenAI login");
-        assert_eq!(picker.entries[1].name, "Import local Claude login");
+        assert_eq!(
+            picker.entries[catalog.len()].name,
+            "Import local OpenAI login"
+        );
+        assert_eq!(
+            picker.entries[catalog.len() + 1].name,
+            "Import local Claude login"
+        );
         assert!(
             picker
                 .entries
@@ -88,17 +116,11 @@ fn ssh_import_requires_explicit_consent_before_any_task_and_masks_private_input(
                 "no sync",
                 "will not be overwritten",
                 "No local credentials have been read or exported",
-                "Type exactly confirm",
+                "Choose Yes and press Enter",
             ] {
                 assert!(warning.contains(required), "{required}");
             }
-            for rejected in [
-                "",
-                "yes",
-                "CONFIRM",
-                "confirm extra",
-                "private-not-a-confirmation",
-            ] {
+            for rejected in ["CONFIRM", "confirm extra", "private-not-a-confirmation"] {
                 app.handle_paste(rejected.into());
                 if !rejected.is_empty() {
                     assert_eq!(app.input, "[hidden login input]");
@@ -355,8 +377,38 @@ fn ssh_login_unsupported_provider_never_starts_local_auth() {
         assert!(
             app.display_messages()
                 .iter()
-                .any(|m| m.content.contains("SSH login supports:"))
+                .any(|m| m.content.contains("setup on test-remote"))
         );
+    });
+}
+
+#[test]
+fn ssh_picker_unsupported_catalog_actions_never_start_local_auth() {
+    with_app(|app| {
+        for provider in crate::provider_catalog::tui_login_providers()
+            .into_iter()
+            .filter(|provider| !PROVIDERS.contains(&provider.id))
+        {
+            app.handle_ssh_login_command("/login");
+            let picker = app.inline_interactive_state.as_mut().unwrap();
+            picker.selected = picker.entries.iter().position(|entry| matches!(entry.action,
+                crate::tui::PickerAction::RemoteLogin { provider: id, import: false } if id == provider.id
+            )).unwrap();
+            app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+            assert!(app.remote_login.is_none(), "{}", provider.id);
+            assert!(app.pending_login.is_none(), "{}", provider.id);
+            assert!(app.login_picker_overlay.is_none());
+            assert!(app.inline_interactive_state.is_none());
+            let message = &app.display_messages().last().unwrap().content;
+            assert!(message.contains("setup on test-remote"), "{message}");
+            assert!(message.contains("not yet supported"), "{message}");
+            assert!(
+                message.contains("no local credentials were accessed"),
+                "{message}"
+            );
+            assert!(!app.pending_turn);
+            assert!(app.queued_messages.is_empty());
+        }
     });
 }
 
@@ -479,7 +531,7 @@ fn ssh_inline_import_selection_requires_consent_and_cancel_reads_nothing() {
     with_app(|app| {
         for (row, provider) in [(0, "openai"), (1, "claude")] {
             app.handle_ssh_login_command("/login");
-            for _ in 0..row {
+            for _ in 0..crate::provider_catalog::tui_login_providers().len() + row {
                 app.handle_ssh_login_key(KeyCode::Down, KeyModifiers::NONE, None);
             }
             app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
@@ -487,13 +539,18 @@ fn ssh_inline_import_selection_requires_consent_and_cancel_reads_nothing() {
             assert_eq!(login.provider, provider);
             assert!(login.phase == Phase::ImportConsent);
             assert!(login.task.is_none());
-            assert!(app.inline_interactive_state.is_none());
+            let decision = app.inline_interactive_state.as_ref().unwrap();
+            assert_eq!(decision.entries.len(), 2);
+            assert!(matches!(
+                decision.entries[decision.selected].action,
+                crate::tui::PickerAction::RemoteImportDecision { accept: false }
+            ));
             assert!(
                 app.display_messages()
                     .last()
                     .unwrap()
                     .content
-                    .contains("Type exactly confirm")
+                    .contains("Choose Yes and press Enter")
             );
             app.handle_ssh_login_key(KeyCode::Esc, KeyModifiers::NONE, None);
             assert!(app.remote_login.is_none());
@@ -561,21 +618,52 @@ fn ssh_inline_picker_status_is_remote_only_and_failure_stays_unknown() {
                         state: crate::auth::AuthState::Expired,
                         method_detail: "OAuth (expired)".into(),
                     },
+                    command::ProviderStatus {
+                        id: "openai-api".into(),
+                        state: crate::auth::AuthState::Available,
+                        method_detail: "API key".into(),
+                    },
                 ],
             })));
             assert!(app.poll_ssh_login(&mut remote).await);
             let picker = app.inline_interactive_state.as_ref().unwrap();
             assert_eq!(picker.selected, 3);
-            assert!(picker.entries[2].is_current);
-            assert_eq!(picker.entries[2].options[0].api_method, "configured");
-            assert_eq!(picker.entries[3].options[0].api_method, "attention");
-            assert_eq!(picker.entries[4].options[0].api_method, "status unknown");
-            assert!(!picker.entries[0].is_current);
+            assert!(picker_provider(picker, "openai").is_current);
+            assert_eq!(
+                picker_provider(picker, "openai").options[0].api_method,
+                "configured"
+            );
+            assert_eq!(
+                picker_provider(picker, "claude").options[0].api_method,
+                "attention"
+            );
+            assert_eq!(
+                picker_provider(picker, "gemini").options[0].api_method,
+                "status unknown"
+            );
+            let api = picker_provider(picker, "openai-api");
+            assert!(api.is_current);
+            assert_eq!(api.options[0].provider, "API key");
+            assert!(api.options[0].detail.contains("Remote-host setup required"));
+            assert!(!api.options[0].detail.contains("Browser approval opens"));
+            assert!(
+                picker
+                    .entries
+                    .iter()
+                    .filter(|entry| matches!(
+                        entry.action,
+                        crate::tui::PickerAction::RemoteLogin { import: true, .. }
+                    ))
+                    .all(|entry| !entry.is_current)
+            );
             app.remote_login.as_mut().unwrap().task = Some(Task::ready(Err("status unavailable")));
             assert!(app.poll_ssh_login(&mut remote).await);
             let picker = app.inline_interactive_state.as_ref().unwrap();
-            assert_eq!(picker.entries[2].options[0].api_method, "status unknown");
-            assert!(!picker.entries[2].is_current);
+            assert_eq!(
+                picker_provider(picker, "openai").options[0].api_method,
+                "status unknown"
+            );
+            assert!(!picker_provider(picker, "openai").is_current);
             assert!(app.remote_login.as_ref().unwrap().phase == Phase::Choosing);
             app.cancel_ssh_login();
             assert!(app.remote_login.is_none());
@@ -598,10 +686,7 @@ fn ssh_picker_paste_selects_visible_import_action_not_browser_login() {
                 assert!(app.remote_login.as_ref().unwrap().input.is_empty());
                 assert!(app.input.is_empty());
                 assert!(app.pasted_contents.is_empty());
-                assert_eq!(
-                    app.inline_interactive_state.as_ref().unwrap().filter,
-                    query
-                );
+                assert_eq!(app.inline_interactive_state.as_ref().unwrap().filter, query);
                 app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
                 let login = app.remote_login.as_ref().unwrap();
                 assert!(login.phase == Phase::ImportConsent);

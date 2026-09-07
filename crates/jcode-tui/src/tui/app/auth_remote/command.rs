@@ -168,25 +168,36 @@ fn parse_status(value: &serde_json::Value) -> Result<Reply, &'static str> {
         .ok_or("Invalid remote auth status. Update Jcode on the remote host.")?;
     let mut providers = Vec::new();
     for row in rows {
-        let Some(id) = row["id"]
-            .as_str()
-            .filter(|id| super::PROVIDERS.contains(id))
-        else {
+        let Some(descriptor) = row["id"].as_str().and_then(|id| {
+            crate::provider_catalog::login_providers()
+                .iter()
+                .find(|provider| provider.id == id)
+        }) else {
             continue;
         };
+        let id = descriptor.id;
         if providers.iter().any(|p: &ProviderStatus| p.id == id) {
             return Err("Duplicate remote auth provider status");
         }
         let (state, method_detail) = match row["status"].as_str() {
-            Some("available") => (crate::auth::AuthState::Available, "OAuth"),
-            Some("expired") => (crate::auth::AuthState::Expired, "OAuth (expired)"),
-            Some("not_configured") => (crate::auth::AuthState::NotConfigured, "not configured"),
+            Some("available") => (
+                crate::auth::AuthState::Available,
+                descriptor.auth_status_method.to_string(),
+            ),
+            Some("expired") => (
+                crate::auth::AuthState::Expired,
+                format!("{} (expired)", descriptor.auth_status_method),
+            ),
+            Some("not_configured") => (
+                crate::auth::AuthState::NotConfigured,
+                "not configured".to_string(),
+            ),
             _ => return Err("Unsupported remote auth provider status"),
         };
         providers.push(ProviderStatus {
             id: id.to_string(),
             state,
-            method_detail: method_detail.to_string(),
+            method_detail,
         });
     }
     // Missing providers remain unknown to the caller, never falsely signed out.
@@ -509,24 +520,17 @@ mod tests {
     #[test]
     fn ssh_status_only_returns_known_provider_states_and_fixed_method_labels() {
         let states = [
-            ("available", crate::auth::AuthState::Available, "OAuth"),
-            (
-                "expired",
-                crate::auth::AuthState::Expired,
-                "OAuth (expired)",
-            ),
-            (
-                "not_configured",
-                crate::auth::AuthState::NotConfigured,
-                "not configured",
-            ),
+            ("available", crate::auth::AuthState::Available),
+            ("expired", crate::auth::AuthState::Expired),
+            ("not_configured", crate::auth::AuthState::NotConfigured),
         ];
-        let mut rows: Vec<_> = super::super::PROVIDERS
+        let catalog = crate::provider_catalog::login_providers();
+        let mut rows: Vec<_> = catalog
             .iter()
             .enumerate()
-            .map(|(index, id)| {
+            .map(|(index, descriptor)| {
                 serde_json::json!({
-                    "id": id,
+                    "id": descriptor.id,
                     "status": states[index % states.len()].0,
                     "method": "OAuth (account: `must-not-surface@example.test`)\u{1b}[2J",
                     "credential_source": "/home/private/account.json",
@@ -534,17 +538,24 @@ mod tests {
                 })
             })
             .collect();
-        rows.push(serde_json::json!({"id": "openai-api", "status": "available"}));
         rows.push(serde_json::json!({"id": "unknown\u{1b}[2J", "status": "available"}));
+        rows.push(serde_json::json!({"id": "claude-api", "status": "available"}));
         let bytes = serde_json::to_vec(&serde_json::json!({"providers": rows})).unwrap();
         let Ok(Reply::Status { providers }) = parse_reply(&bytes, Operation::Status, "") else {
             panic!("Expected provider status");
         };
-        assert_eq!(providers.len(), super::super::PROVIDERS.len());
+        assert_eq!(providers.len(), catalog.len());
         for (index, provider) in providers.iter().enumerate() {
-            assert_eq!(provider.id, super::super::PROVIDERS[index]);
+            assert_eq!(provider.id, catalog[index].id);
             assert_eq!(provider.state, states[index % states.len()].1);
-            assert_eq!(provider.method_detail, states[index % states.len()].2);
+            let expected_method = match provider.state {
+                crate::auth::AuthState::Available => catalog[index].auth_status_method.to_string(),
+                crate::auth::AuthState::Expired => {
+                    format!("{} (expired)", catalog[index].auth_status_method)
+                }
+                crate::auth::AuthState::NotConfigured => "not configured".to_string(),
+            };
+            assert_eq!(provider.method_detail, expected_method);
         }
         let debug = format!("{providers:?}");
         for forbidden in ["must-not-surface", "private", "access_token", "\u{1b}"] {
@@ -571,6 +582,8 @@ mod tests {
         for response in [
             br#"{"providers":[{"id":"openai","status":"must-not-surface"}]}"#.as_slice(),
             br#"{"providers":[{"id":"openai","status":"available"},{"id":"openai","status":"expired"}]}"#.as_slice(),
+            br#"{"providers":[{"id":"openai-api","status":"available"},{"id":"openai-api","status":"not_configured"}]}"#.as_slice(),
+            br#"{"providers":[{"id":"openai-api","status":"must-not-surface"}]}"#.as_slice(),
             br#"{"providers":[{"id":"openai"}]}"#.as_slice(),
             br#"{"providers":"must-not-surface"}"#.as_slice(),
             br#"{"status":"error","message":"must-not-surface"}"#.as_slice(),
