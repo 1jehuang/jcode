@@ -45,6 +45,9 @@ pub struct AccountPickerItem {
     pub provider_label: String,
     pub title: String,
     pub subtitle: String,
+    /// Full, wrapping detail rows, separate from the compact list subtitle.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub details: Vec<(String, String)>,
     pub command: AccountPickerCommand,
 }
 
@@ -61,8 +64,14 @@ impl AccountPickerItem {
             provider_label: provider_label.into(),
             title: title.into(),
             subtitle: subtitle.into(),
+            details: Vec::new(),
             command,
         }
+    }
+
+    pub fn with_details(mut self, details: Vec<(String, String)>) -> Self {
+        self.details = details;
+        self
     }
 }
 

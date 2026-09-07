@@ -600,6 +600,30 @@ impl AccountPicker {
             return;
         };
 
+        // Usage belongs ahead of the provider's quick-switch/control inventory,
+        // which can otherwise push the selected account's totals off-screen.
+        if !item.details.is_empty() {
+            let mut lines = vec![
+                Line::styled(item.title.clone(), Style::default().fg(Color::White).bold()),
+                Line::from("Enter: run action."),
+                Line::from(""),
+            ];
+            for (label, value) in &item.details {
+                lines.push(Line::styled(
+                    label.clone(),
+                    Style::default().fg(Color::White).bold(),
+                ));
+                lines.extend(
+                    value
+                        .lines()
+                        .map(|line| Line::styled(line.to_string(), Style::default().fg(MUTED))),
+                );
+                lines.push(Line::from(""));
+            }
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            return;
+        }
+
         let provider_items: Vec<&AccountPickerItem> = self
             .items
             .iter()
@@ -840,6 +864,12 @@ fn estimate_item_bytes(item: &AccountPickerItem) -> usize {
         + item.provider_label.capacity()
         + item.title.capacity()
         + item.subtitle.capacity()
+        + item.details.capacity() * std::mem::size_of::<(String, String)>()
+        + item
+            .details
+            .iter()
+            .map(|(label, value)| label.capacity() + value.capacity())
+            .sum::<usize>()
         + estimate_command_bytes(&item.command)
 }
 
@@ -852,6 +882,89 @@ fn estimate_summary_bytes(summary: &AccountPickerSummary) -> usize {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+
+    #[test]
+    fn account_usage_details_wrap_without_changing_switch_action() {
+        let mut picker = AccountPicker::new(
+            "Accounts",
+            vec![
+                AccountPickerItem::action(
+                    "openai",
+                    "OpenAI",
+                    "Switch OpenAI Otter",
+                    "saved",
+                    AccountPickerCommand::SubmitInput("/account openai switch openai-otter".into()),
+                )
+                .with_details(vec![
+                    (
+                        "Full usage details".into(),
+                        "/account openai settings".into(),
+                    ),
+                    (
+                        "Today (local midnight)".into(),
+                        "123456789 input / 450000 output tokens (60000 cached input), $1.2500 known + unknown cost (2 unpriced responses) API-equivalent estimate, not a bill; recorded only; partial token counts; since local midnight"
+                            .into(),
+                    ),
+                    (
+                        "Lifetime".into(),
+                        "1234567890 input / 4500000 output tokens (600000 cached input), $12.5000 API-equivalent estimate, not a bill; recorded only; since 2026-09-06 12:34 -07:00"
+                            .into(),
+                    ),
+                    (
+                        "Estimate".into(),
+                        "Not your subscription bill. Recorded Jcode usage only.".into(),
+                    ),
+                ]),
+            ],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(42, 38)).unwrap();
+        terminal
+            .draw(|frame| picker.render_detail_pane(frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered = (1..37)
+            .map(|y| {
+                (1..41)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        for expected in [
+            "Today",
+            "Lifetime",
+            "$1.25",
+            "$12.50",
+            "1234567890 input",
+            "600000 cached input",
+            "Not your subscription bill.",
+            "/account openai settings",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected}: {rendered}"
+            );
+        }
+        assert!(!rendered.contains('…'));
+        let mut compact = Terminal::new(TestBackend::new(42, 10)).unwrap();
+        compact
+            .draw(|frame| picker.render_detail_pane(frame, frame.area()))
+            .unwrap();
+        let compact_buffer = compact.backend().buffer();
+        let compact_text = (0..10)
+            .flat_map(|y| (0..42).map(move |x| compact_buffer[(x, y)].symbol()))
+            .collect::<String>();
+        assert!(
+            compact_text.contains("/account openai settings"),
+            "short panes retain the full-detail route"
+        );
+        assert!(
+            matches!(picker.handle_overlay_key(KeyCode::Enter, KeyModifiers::empty()).unwrap(),
+            OverlayAction::Execute(AccountPickerCommand::SubmitInput(command)) if command == "/account openai switch openai-otter")
+        );
+    }
 
     #[test]
     fn test_account_picker_preserves_underlying_background_outside_panels() {

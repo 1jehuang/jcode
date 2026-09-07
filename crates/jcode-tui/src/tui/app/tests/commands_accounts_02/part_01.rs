@@ -337,8 +337,18 @@ fn test_account_picker_supports_arrow_and_vim_navigation() {
             .expect("inline account picker should open")
             .selected;
         let picker = app.inline_interactive_state.as_ref().unwrap();
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Otter"));
-        assert!(picker.entries.iter().any(|entry| entry.name == "OpenAI Fox"));
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI Otter")
+        );
+        assert!(
+            picker
+                .entries
+                .iter()
+                .any(|entry| entry.name == "OpenAI Fox")
+        );
 
         app.handle_key(KeyCode::Down, KeyModifiers::empty())
             .unwrap();
@@ -825,5 +835,101 @@ fn test_improve_resume_uses_saved_mode_and_current_todos() {
                 if text.contains("Resume improvement mode")
                     && text.contains("Refactor command parsing")
         ));
+    });
+}
+
+#[test]
+fn test_openai_account_usage_details_are_discoverable_and_keep_switching() {
+    with_temp_jcode_home(|| {
+        for label in ["openai-otter", "openai-fox"] {
+            crate::auth::codex::upsert_account(crate::auth::codex::OpenAiAccount {
+                label: label.to_string(),
+                access_token: "acc".into(),
+                refresh_token: "ref".into(),
+                id_token: None,
+                account_id: Some(format!("acct_{label}")),
+                expires_at: None,
+                email: None,
+            })
+            .unwrap();
+        }
+        crate::provider_activity::record_openai_oauth_usage(
+            "openai-otter",
+            "gpt-5.4",
+            None,
+            Some(12345),
+            Some(678),
+            Some(123),
+        );
+        let mut app = create_test_app();
+        let settings = app.render_openai_accounts_markdown();
+        assert!(settings.contains("12345 input"));
+        assert!(settings.contains("No recorded usage"));
+        assert!(settings.contains("local midnight"));
+        assert!(settings.contains("not your subscription bill"));
+        for label in ["openai-otter", "openai-fox"] {
+            assert!(settings.contains(&format!("(`{label}`)")));
+            for (key, value) in crate::provider_activity::openai_oauth_usage_summary(label) {
+                assert!(settings.contains(&format!("- **{key}:** {value}")));
+            }
+        }
+        for filter in [None, Some("openai")] {
+            app.open_account_picker(filter);
+            let state = app.inline_interactive_state.as_ref().unwrap();
+            for label in ["openai-otter", "openai-fox"] {
+                assert!(state.entries.iter().any(|entry| matches!(&entry.action,
+                    crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch { provider_id, label: actual })
+                        if provider_id == "openai" && actual == label)));
+            }
+            let usage = state
+                .entries
+                .iter()
+                .find(|entry| entry.name == "OpenAI usage details")
+                .expect("visible usage action");
+            assert!(
+                matches!(&usage.action, crate::tui::PickerAction::Usage { detail_lines, .. }
+                if detail_lines.join("\n") == settings)
+            );
+        }
+        let state = app.inline_interactive_state.as_mut().unwrap();
+        state.selected = state
+            .entries
+            .iter()
+            .position(|entry| entry.name == "OpenAI usage details")
+            .unwrap();
+        app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+            .unwrap();
+        assert!(app.inline_interactive_state.is_none());
+        let displayed = &app
+            .display_messages()
+            .last()
+            .expect("full usage report")
+            .content;
+        assert!(displayed.contains(&settings));
+
+        let provider = crate::provider_catalog::login_providers()
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .copied()
+            .unwrap();
+        let mut items = Vec::new();
+        app.append_openai_account_picker_items(&mut items, provider);
+        for label in ["openai-otter", "openai-fox"] {
+            let command = format!("/account openai switch {label}");
+            let item = items.iter().find(|item| matches!(&item.command,
+                crate::tui::account_picker::AccountPickerCommand::SubmitInput(input) if input == &command)).unwrap();
+            assert!(
+                item.details
+                    .iter()
+                    .any(|(_, value)| value == "/account openai settings")
+            );
+            for row in crate::provider_activity::openai_oauth_usage_summary(label) {
+                assert!(item.details.contains(&row));
+            }
+            assert!(
+                !item.subtitle.contains("Lifetime"),
+                "full usage is not a truncated subtitle"
+            );
+        }
     });
 }
