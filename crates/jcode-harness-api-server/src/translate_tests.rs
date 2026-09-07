@@ -223,7 +223,7 @@ fn attach_session_without_persisted_working_dir_reclaims_live_target() {
         "type": "state", "id": probe["id"], "session_id": "live-empty",
         "message_count": 0, "is_processing": false,
     }));
-    assert_eq!(reply.len(), 1);
+    assert_eq!(reply.len(), 2);
     assert_eq!(reply[0].reply_to, Some(41));
     assert!(
         matches!(&reply[0].event, ApiEvent::Attached { session } if session.session_id == "live-empty")
@@ -322,7 +322,7 @@ fn state_event_answers_pending_attach() {
         "type": "state", "id": state_id, "session_id": "abc",
         "message_count": 0, "is_processing": false,
     }));
-    assert_eq!(frames.len(), 1);
+    assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].reply_to, Some(5));
     match &frames[0].event {
         ApiEvent::Attached { session } => {
@@ -2028,4 +2028,113 @@ fn model_change_without_provider_preserves_known_provider() {
         matches!(&frames[0].event, ApiEvent::ModelInfo { provider, reasoning_effort, .. }
         if provider.as_deref() == Some("known") && reasoning_effort.as_deref() == Some("high"))
     );
+}
+
+#[test]
+fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
+    for id in [0, 999_999] {
+        let mut state = state_with_session();
+        state.legacy_event_to_api(&json!({"type":"text_delta", "text":"finished"}));
+        let frames = state.legacy_event_to_api(&json!({"type":"done", "id":id}));
+        assert!(
+            matches!(&frames[0].event, ApiEvent::TurnDone { session_id } if session_id == "s1")
+        );
+        assert!(
+            state
+                .legacy_event_to_api(&json!({"type":"done", "id":id}))
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn observer_turn_ignores_control_done_even_after_the_control_reply() {
+    let mut state = state_with_session();
+    let actions = state.api_request_to_legacy(&json!({"req":"clear", "id":22, "session_id":"s1"}));
+    let Outbound::Legacy(control) = &actions[0] else {
+        panic!()
+    };
+    state.legacy_event_to_api(&json!({"type":"ack", "id":control["id"]}));
+    state.legacy_event_to_api(&json!({"type":"text_delta", "text":"still working"}));
+    assert!(
+        state
+            .legacy_event_to_api(&json!({"type":"done", "id":control["id"]}))
+            .is_empty()
+    );
+    assert!(state.observed_turn_active);
+    assert!(matches!(
+        state.legacy_event_to_api(&json!({"type":"done", "id":0}))[0].event,
+        ApiEvent::TurnDone { .. }
+    ));
+}
+
+#[test]
+fn reconnect_activity_is_forwarded_and_busy_attach_can_finish_without_more_text() {
+    for active in [false, true] {
+        let mut state = BridgeState::default();
+        let actions = state
+            .api_request_to_legacy(&json!({"req":"attach_session", "id":22, "session_id":"s1"}));
+        let Outbound::Legacy(probe) = &actions[1] else {
+            panic!()
+        };
+        let frames = state.legacy_event_to_api(
+            &json!({"type":"state", "id":probe["id"], "session_id":"s1", "is_processing":active}),
+        );
+        assert!(
+            matches!(&frames[1].event, ApiEvent::SessionStatus { status, .. } if status == if active { "running" } else { "idle" })
+        );
+        let Outbound::Legacy(subscribe) = &actions[0] else {
+            panic!()
+        };
+        assert!(
+            state
+                .legacy_event_to_api(&json!({"type":"done", "id":subscribe["id"]}))
+                .is_empty()
+        );
+        let done = state.legacy_event_to_api(&json!({"type":"done", "id":0}));
+        assert_eq!(!done.is_empty(), active);
+    }
+}
+
+#[test]
+fn history_activity_is_forwarded_but_catalog_history_is_not_a_turn_boundary() {
+    let mut state = state_with_session();
+    for active in [true, false] {
+        let actions =
+            state.api_request_to_legacy(&json!({"req":"get_history", "id":22, "session_id":"s1"}));
+        let Outbound::Legacy(probe) = &actions[0] else {
+            panic!()
+        };
+        let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "session_id":"s1", "messages":[], "activity":{"is_processing":active}}));
+        assert!(
+            matches!(&frames[1].event, ApiEvent::SessionStatus { status, .. } if status == if active { "running" } else { "idle" })
+        );
+    }
+    assert!(
+        state
+            .legacy_event_to_api(
+                &json!({"type":"history", "id":999999, "activity":{"is_processing":false}})
+            )
+            .is_empty()
+    );
+}
+
+#[test]
+fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
+    for active in [true, false] {
+        let mut state = state_with_session();
+        state.legacy_event_to_api(&json!({"type":"text_delta", "text":"first"}));
+        let actions =
+            state.api_request_to_legacy(&json!({"req":"get_history", "id":22, "session_id":"s1"}));
+        let Outbound::Legacy(probe) = &actions[0] else {
+            panic!()
+        };
+        state.legacy_event_to_api(&json!({"type":"done", "id":0}));
+        if !active {
+            state.legacy_event_to_api(&json!({"type":"text_delta", "text":"next"}));
+        }
+        let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "messages":[], "activity":{"is_processing":active}}));
+        assert_eq!(frames.len(), 1, "stale activity must not be forwarded");
+        assert_eq!(state.observed_turn_active, !active);
+    }
 }
