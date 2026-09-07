@@ -213,7 +213,7 @@ not claimed as passed by the context-only SSH acceptance.
 `JCODE_NATIVE_SSH_LOGIN=1`, plus the local binary, SSH host, workspace, and
 `JCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE` (the actual remote ELF, not a wrapper).
 It creates a private remote home/runtime and never uses the user's credentials.
-The current harness checks the shared inline picker and its six OAuth/two import
+The current harness checks the shared provider catalog and two import
 choices before the isolated login scenarios. Updating this harness does not by
 itself establish that the new picker has passed real SSH acceptance.
 
@@ -310,3 +310,26 @@ Terminal acceptance requests complete kernel-resize redraws when necessary:
 stripping ANSI escape sequences alone does not reconstruct differential terminal
 frames. A status response missing a newly added provider remains unknown, so an
 older remote CLI must be updated before the empty-host offer can be verified.
+
+### Deployed workflow and personal import follow-up (2026-09-07)
+
+The following observations distinguish the requested outcome from supporting
+synthetic tests. The real SSH onboarding run completed at 03:29 UTC. A personal
+Claude import subsequently completed through the deployed native SSH TUI, and a
+fresh independent public-CLI check at 03:49 UTC confirmed persistent storage.
+
+| Requested behavior or changed output | Concrete acceptance observation | Boundary or remaining constraint |
+| --- | --- | --- |
+| The existing SSH shortcut opens the VM workspace | The existing launcher selects the native SSH client, remote wrapper and VM workspace. The shortcut's actual kernel chord was exercised in the earlier real CLI acceptance above. The updated wrapper independently reports `v0.83.12-dev (1ce0f6e56)`. | The physical chord was not repeated after this deployment. Existing user sessions were not restarted. |
+| An empty VM first asks whether to import local credentials | The real local PTY and OpenSSH run displayed the startup offer against a fresh isolated remote home. Selecting Yes opened the import-only picker. Default No opened the normal catalog. Neither branch copied credentials or began OAuth. | This is the real binary/UI/SSH path with an isolated empty home, not the user's now-configured home. |
+| Remote `/login` has familiar local choices | The same run navigated and filtered the shared provider catalog and explicit OpenAI/Claude imports. OpenAI and Claude initiation generated actual remote pending OAuth state and cancelled cleanly. | Catalog parity is delivered, not full functional parity for every method. Unsupported bridge methods give setup-on-remote guidance. Provider approval/token exchange was not completed. |
+| Import asks Yes/No rather than requiring a magic word or pasted secret | The actual personal Claude import was invoked through `/login --import-local claude`. Its destination warning appeared before consent. Selecting Yes returned `claude imported on the remote host`. | No token was pasted into chat, prompt history or process arguments. Legacy `confirm` remains supported. |
+| Copy usable personal credentials to the trusted VM | After the real Claude transfer, a separate invocation of the deployed remote `auth status --json` reported Claude `available`. The 03:49 UTC recheck again reported `available`, and `stat` showed directory mode 0700 and credential-file mode 0600. | This verifies successful import and persisted configuration, not successful external inference or long-term refresh coexistence. |
+| Import the OpenAI login too | Native import refused the unusable source. A token-private exact comparison confirmed the selected refresh token matches the native permanent-rejection record. Remote public status remains `not_configured`. | **Blocked:** new provider authorization is required. No retry-guard bypass, credential overwrite or token reset was attempted. |
+| No unintended copy, overwrite or private-data exposure | The real personal flow transferred only the selected provider after consent. Twelve additional real-transport scenarios exercised cancellation, typed Yes, repeat refusal, private storage and process cleanup using synthetic credentials and a safety wrapper. | Synthetic edge-case coverage does not establish personal-token validity or successful provider refresh. |
+
+The initial observation that both local sources were expired became stale during
+the task: the managed Claude source became current before the successful retry.
+The final result is therefore **Claude imported, OpenAI authorization blocked**,
+not “neither account copied.” The broader unit-suite failures recorded above
+remain unresolved and are not counted as passing acceptance evidence.
