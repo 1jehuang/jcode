@@ -353,6 +353,115 @@ fn fuzzy_match_positions(pattern: &str, text: &str) -> Vec<usize> {
     jcode_fuzzy::fuzzy_match_token_positions(pattern, text)
 }
 
+/// Compact, borderless model choices for the command-suggestion surface.
+/// Uses the existing picker state so filtering, routes and hotkeys are unchanged.
+pub(super) fn model_suggestion_lines(
+    picker: &crate::tui::InlineInteractiveState,
+    available_rows: usize,
+) -> Vec<Line<'static>> {
+    if available_rows == 0 {
+        return Vec::new();
+    }
+    let dim = Style::default().fg(dim_color());
+    if picker.filtered.is_empty() {
+        let message = if picker.filter.is_empty() {
+            "No matching models".to_string()
+        } else {
+            format!("No matching models for {}", picker.filter)
+        };
+        return vec![Line::from(Span::styled(message, dim))];
+    }
+    let selected = picker.selected.min(picker.filtered.len() - 1);
+    let selected_entry = &picker.entries[picker.filtered[selected]];
+    let notice = selected_route_notice_text(picker, selected_entry.active_option());
+    let hint = model_picker_top_hint(picker);
+    let hint_rows = usize::from(available_rows > 1);
+    let notice_rows = usize::from(notice.is_some() && available_rows > hint_rows + 1);
+    let visible = crate::tui::app::COMMAND_SUGGESTION_VISIBLE_LIMIT
+        .min(available_rows - hint_rows - notice_rows)
+        .min(picker.filtered.len());
+    let start = selected.saturating_sub(visible - 1);
+    let mut lines = Vec::new();
+    for row in start..start + visible {
+        let entry = &picker.entries[picker.filtered[row]];
+        let route = entry.active_option();
+        let unavailable = route.is_some_and(|r| !r.available);
+        let limited = route.is_some_and(|r| route_detail_is_limited(&r.detail));
+        let style = if row == selected {
+            Style::default().fg(rgb(255, 213, 128))
+        } else {
+            Style::default().fg(rgb(128, 203, 196))
+        };
+        let mut spans = vec![Span::styled(
+            format!(
+                "{} {}",
+                picker_row_marker(row == selected, unavailable, limited),
+                picker_entry_display_name(entry)
+            ),
+            style,
+        )];
+        if entry.is_current {
+            spans.push(Span::styled(" current", dim));
+        }
+        if let Some(route) = route {
+            let route_style = if row == selected { style } else { dim };
+            spans.push(Span::styled(
+                format!(
+                    "  {}",
+                    route_provider_display(&route.provider, &route.api_method)
+                ),
+                if row == selected && !picker.preview && picker.column == 1 {
+                    route_style.bold().underlined()
+                } else {
+                    route_style
+                },
+            ));
+            spans.push(Span::styled(" · ", dim));
+            spans.push(Span::styled(
+                api_method_display(&route.api_method),
+                if row == selected && !picker.preview && picker.column == 2 {
+                    route_style.bold().underlined()
+                } else {
+                    route_style
+                },
+            ));
+        }
+        if row == start && start > 0 {
+            spans.push(Span::styled(format!("  ↑{start}"), dim));
+        }
+        if row + 1 == start + visible && row + 1 < picker.filtered.len() {
+            spans.push(Span::styled(
+                format!("  +{} more", picker.filtered.len() - row - 1),
+                dim,
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    if notice_rows > 0 {
+        lines.push(Line::from(Span::styled(notice.unwrap().0, dim)));
+    }
+    if hint_rows > 0 {
+        let filter = if !picker.preview && !picker.filter.is_empty() {
+            format!("Filter: {} · ", picker.filter)
+        } else {
+            String::new()
+        };
+        let navigation = if !picker.preview && picker.column > 0 {
+            "↑↓ route · ←→ column · Enter select · Esc cancel"
+        } else {
+            "↑↓ choose · Enter select · Esc cancel"
+        };
+        let shortcuts = hint
+            .map(|hint| format!(" ·{}", hint.trim_start_matches(" keys:")))
+            .unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            format!("{filter}{navigation}{shortcuts}"),
+            dim,
+        )));
+    }
+    lines
+}
+
 pub(super) fn draw_inline_interactive(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     let picker = match app.inline_interactive_state() {
         Some(p) => p,
