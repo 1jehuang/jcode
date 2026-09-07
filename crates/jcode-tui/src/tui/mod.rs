@@ -1297,6 +1297,11 @@ pub enum PickerAction {
     Model,
     Account(AccountPickerAction),
     Login(crate::provider_catalog::LoginProviderDescriptor),
+    /// Native SSH actions never dispatch through laptop-local authentication.
+    RemoteLogin {
+        provider: &'static str,
+        import: bool,
+    },
     Logout(crate::provider_catalog::LoginProviderDescriptor),
     LogoutAll,
     Usage {
@@ -1354,6 +1359,7 @@ impl InlineInteractiveState {
 fn estimate_picker_action_bytes(action: &PickerAction) -> usize {
     match action {
         PickerAction::Model
+        | PickerAction::RemoteLogin { .. }
         | PickerAction::AgentTarget(_)
         | PickerAction::AgentModelChoice { .. }
         | PickerAction::SubagentModelChoice { .. }

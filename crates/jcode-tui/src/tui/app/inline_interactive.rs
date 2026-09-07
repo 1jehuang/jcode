@@ -3495,7 +3495,9 @@ impl App {
                 if crate::tui::is_ssh_remote()
                     && !matches!(
                         entry.action,
-                        PickerAction::Model | PickerAction::Usage { .. }
+                        PickerAction::Model
+                            | PickerAction::Usage { .. }
+                            | PickerAction::RemoteLogin { .. }
                     )
                 {
                     self.inline_interactive_state = None;
@@ -3538,6 +3540,10 @@ impl App {
                     PickerAction::Login(provider) => {
                         self.inline_interactive_state = None;
                         self.start_login_provider(provider);
+                    }
+                    PickerAction::RemoteLogin { provider, import } => {
+                        self.inline_interactive_state = None;
+                        self.select_ssh_login_action(provider, import);
                     }
                     PickerAction::Logout(provider) => {
                         self.inline_interactive_state = None;

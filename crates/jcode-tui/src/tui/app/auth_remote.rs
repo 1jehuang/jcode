@@ -1,5 +1,6 @@
 //! SSH-native login. Local credentials are accessed only after explicit import consent.
 mod command;
+mod picker;
 #[cfg(test)]
 mod tests;
 use super::{App, DisplayMessage, PendingLogin};
@@ -58,7 +59,7 @@ impl Drop for RemoteLogin {
         if self.task.is_none()
             && !self.provider.is_empty()
             && self.phase != Phase::Finished
-            && self.operation != Some(Operation::Import)
+            && !matches!(self.operation, Some(Operation::Import | Operation::Status))
         {
             command::cleanup_detached(
                 self.target.clone(),
@@ -83,7 +84,9 @@ impl App {
         let words: Vec<_> = input.split_whitespace().collect();
         let importing = words.get(1) == Some(&"--import-local");
         let provider = words.get(if importing { 2 } else { 1 }).copied();
-        if importing && (words.len() != 3 || !matches!(provider, Some("openai" | "claude"))) {
+        if importing
+            && (words.len() > 3 || provider.is_some_and(|p| !matches!(p, "openai" | "claude")))
+        {
             self.push_display_message(DisplayMessage::system("Use /login --import-local openai or /login --import-local claude for a one-time import of the selected local account. Confirmation is required before local credentials are read. No local credentials were accessed."));
             return true;
         }
@@ -118,8 +121,30 @@ impl App {
             operation: None,
             quit_after_cancel: false,
         });
+        if let Some(provider) = provider {
+            self.select_ssh_login_action(provider, importing);
+        } else {
+            self.open_ssh_login_picker(importing);
+        }
+        true
+    }
+
+    pub(super) fn select_ssh_login_action(&mut self, provider: &str, importing: bool) {
+        // This action is never a route to local authentication, even if injected
+        // into a local picker or invoked after cancellation.
+        if !crate::tui::is_ssh_remote()
+            || self.remote_login.is_none()
+            || !PROVIDERS.contains(&provider)
+            || (importing && !matches!(provider, "openai" | "claude"))
+        {
+            return;
+        }
+        self.inline_interactive_state = None;
+        if let Some(task) = self.remote_login.as_mut().unwrap().task.as_mut() {
+            task.cancel();
+        }
+        self.remote_login.as_mut().unwrap().task = None;
         if importing {
-            let provider = provider.unwrap();
             let login = self.remote_login.as_mut().unwrap();
             login.provider = provider.into();
             login.phase = Phase::ImportConsent;
@@ -131,15 +156,9 @@ impl App {
             self.set_status_notice(
                 "SSH credential import: type confirm to consent, or Esc to cancel.",
             );
-        } else if let Some(provider) = provider {
-            self.start_ssh_login(provider);
         } else {
-            self.push_display_message(DisplayMessage::system(
-                "SSH login: choose a provider\n\n1. openai\n2. claude\n3. gemini\n4. antigravity\n5. google\n6. copilot\n\nEnter a number or provider name. Esc or /cancel cancels. Credentials are saved only on the remote host."
-            ));
-            self.set_status_notice("SSH login: choose a provider");
+            self.start_ssh_login(provider);
         }
-        true
     }
 
     fn start_ssh_login(&mut self, provider: &str) {
@@ -167,6 +186,7 @@ impl App {
             login.phase = Phase::Finished;
         }
         self.remote_login = None;
+        self.inline_interactive_state = None;
         self.pending_login = None;
         self.input.clear();
         self.cursor_pos = 0;
@@ -265,6 +285,34 @@ impl App {
         if self.remote_login.is_none() {
             return false;
         }
+        if self
+            .remote_login
+            .as_ref()
+            .is_some_and(|login| login.phase == Phase::Choosing)
+            && self.inline_interactive_state.is_some()
+            && self.remote_login.as_ref().unwrap().input.is_empty()
+        {
+            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                self.cancel_ssh_login();
+                return true;
+            }
+            if code == KeyCode::Char('/') && modifiers.is_empty() {
+                self.append_ssh_login_input("/");
+                return true;
+            }
+            if self.handle_inline_interactive_key(code, modifiers).is_err() {
+                self.set_status_notice("Remote login picker could not handle that key.");
+            }
+            if self.inline_interactive_state.is_none()
+                && self
+                    .remote_login
+                    .as_ref()
+                    .is_some_and(|login| login.phase == Phase::Choosing)
+            {
+                self.cancel_ssh_login();
+            }
+            return true;
+        }
         match code {
             KeyCode::Esc => self.cancel_ssh_login(),
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -350,7 +398,7 @@ impl App {
                         .find(|p| *p == input.strip_prefix("/login ").unwrap_or(input))
                 });
             if let Some(provider) = provider {
-                self.start_ssh_login(provider);
+                self.select_ssh_login_action(provider, false);
             } else {
                 self.set_status_notice("Choose 1-6 or a provider name. Esc cancels.");
             }
@@ -401,7 +449,22 @@ impl App {
         let provider = login.provider.clone();
         let quit_after_cancel = login.quit_after_cancel;
         let importing = login.operation == Some(Operation::Import);
+        if login.operation == Some(Operation::Status) {
+            match reply {
+                Ok(Reply::Status { providers }) => {
+                    self.update_ssh_login_picker_status(Some(&providers))
+                }
+                _ => self.update_ssh_login_picker_status(None),
+            }
+            return true;
+        }
         match reply {
+            // A status reply cannot complete an OAuth flow or an import.
+            Ok(Reply::Status { .. }) => {
+                self.set_status_notice(
+                    "Unexpected remote login response. Cancel and retry /login.",
+                );
+            }
             Ok(Reply::Pending {
                 auth_url,
                 input_kind,
