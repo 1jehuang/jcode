@@ -16,6 +16,8 @@ The tracker uses Jcode's curated OpenAI API price table for the response's model
 
 Unknown model prices and incomplete usage reports are shown explicitly, not silently priced as free. A mixed total reports the known estimate plus unknown cost. No recorded usage is distinct from a measured zero-dollar result.
 
+GPT-6 Astra rates were verified against [OpenAI's model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra) on 2026-09-07: $10 input, $1 cached input, and $50 output per million tokens, with Flex at half and Fast at twice the standard rates. Requests exceeding 272,000 input tokens apply twice the input/cache rates and 1.5 times the output rates to the full request. The estimate covers reported input, cached-input, and output tokens, not separately unreported cache-write fees or hosted-tool charges.
+
 ## Surfaces
 
 The account details in the terminal and desktop expose the same today and lifetime summaries. The CLI's `jcode usage --json` includes these details in the matching provider report's `extra_info`, so clients do not need to read the ledger directly or compute subscription billing.

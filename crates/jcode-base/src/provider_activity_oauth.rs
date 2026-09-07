@@ -135,11 +135,23 @@ fn priced_usage(
             } else {
                 0
             };
+            // Published >272K-input surcharges cover the full request, including
+            // cached input. GPT-5.5 documents this for standard/batch/flex only.
+            // https://developers.openai.com/api/docs/models/gpt-6-astra
+            // https://developers.openai.com/api/docs/models/gpt-5.5 (2026-09-07)
+            let base_model = model.strip_suffix("[1m]").unwrap_or(model);
+            let has_context_surcharge = base_model == "gpt-6-astra"
+                || (base_model == "gpt-5.5"
+                    && !tier.is_some_and(|tier| tier.trim().eq_ignore_ascii_case("priority")));
+            let long_context = has_context_surcharge && input.unwrap() > 272_000;
+            let input_multiplier = if long_context { 2.0 } else { 1.0 };
+            let output_multiplier = if long_context { 1.5 } else { 1.0 };
             // OpenAI input_tokens INCLUDES cached input, output includes reasoning.
             Some(
-                ((input.unwrap() - cached) as f64 * input_price as f64
-                    + cached as f64 * cache_price as f64
-                    + output.unwrap() as f64 * output_price as f64)
+                (((input.unwrap() - cached) as f64 * input_price as f64
+                    + cached as f64 * cache_price as f64)
+                    * input_multiplier
+                    + output.unwrap() as f64 * output_price as f64 * output_multiplier)
                     / 1_000_000_000_000.0,
             )
         });
@@ -240,7 +252,7 @@ mod tests {
             Some(100_000),
             Some(400_000),
         );
-        assert!((usage.known_usd - 6.2).abs() < 1e-9);
+        assert!((usage.known_usd - 10.9).abs() < 1e-9);
         assert_eq!(usage.input, 1_000_000);
         assert_eq!(usage.output, 100_000);
         let priority = priced_usage(
@@ -251,6 +263,37 @@ mod tests {
             Some(0),
         );
         assert!((priority.known_usd - 12.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn astra_equivalent_cost_uses_actual_context_length_and_tier() {
+        let at_limit = priced_usage(
+            "gpt-6-astra",
+            None,
+            Some(272_000),
+            Some(1_000),
+            Some(100_000),
+        );
+        assert!((at_limit.known_usd - 1.87).abs() < 1e-9);
+        assert_eq!(at_limit.unpriced_requests, 0);
+        let above = priced_usage(
+            "gpt-6-astra[1m]",
+            None,
+            Some(272_001),
+            Some(1_000),
+            Some(100_000),
+        );
+        assert!((above.known_usd - 3.71502).abs() < 1e-9);
+        for (tier, multiplier) in [("flex", 0.5), ("priority", 2.0)] {
+            let usage = priced_usage(
+                "gpt-6-astra",
+                Some(tier),
+                Some(272_001),
+                Some(1_000),
+                Some(100_000),
+            );
+            assert!((usage.known_usd - 3.71502 * multiplier).abs() < 1e-9);
+        }
     }
 
     #[test]
