@@ -286,3 +286,27 @@ These checks establish the import workflow with synthetic credentials. They do
 not establish successful provider-backed inference, personal token validity, or
 long-term refresh-token coexistence. Closed loopback HTTP proxies were used as
 defense in depth, not as proof of zero network packets.
+
+### Yes/No onboarding and shared catalog follow-up (2026-09-07)
+
+The client-side implementation passed 37 focused `auth_remote` tests. Real
+OpenSSH/PTY acceptance with an Arch client and Ubuntu VM also observed:
+
+| Requirement | Observed result |
+| --- | --- |
+| Empty-host startup | Yes opened only the import choices. Default No opened the normal provider catalog. Neither action started OAuth or copied credentials. |
+| Shared provider choices | The catalog showed local-equivalent provider labels and methods, remote-only setup guidance, and explicit OpenAI/Claude import entries. |
+| Explicit copy consent | Twelve real import scenarios passed: picker/filter cancellation, arrow-key No, command cancellation, typed Yes transfer, and legacy-confirm overwrite refusal, for each supported provider. |
+| Privacy and lifecycle | Synthetic selected-provider data crossed SSH stdin only after consent. Source and other-provider stores remained unchanged, receiver files were private, and every test PTY reaped owned SSH children and adapter sockets. |
+| OAuth regression | The remote-generated OpenAI URL matched private pending state. A synthetic callback failed real state validation before token exchange, and scoped cancellation preserved unrelated pending state. |
+
+The full TUI unit suite was not green: 2,272 passed, 11 failed, and 18 were
+ignored. The failures were in untouched areas, including account-label and
+clipboard-copy expectations, empty-session persistence, and todo final-response
+scheduling. No baseline runtime comparison was performed. These results do not
+establish real provider approval, successful token exchange, or live inference.
+
+Terminal acceptance requests complete kernel-resize redraws when necessary:
+stripping ANSI escape sequences alone does not reconstruct differential terminal
+frames. A status response missing a newly added provider remains unknown, so an
+older remote CLI must be updated before the empty-host offer can be verified.
