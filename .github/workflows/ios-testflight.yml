@@ -1,8 +1,5 @@
 name: iOS TestFlight
 
-env:
-  JCODE_CI: "1"
-
 on:
   workflow_dispatch:
   push:
@@ -16,6 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  JCODE_CI: "1"
   BUNDLE_ID: com.jcode.mobile
   SCHEME: JCodeMobile
   TEAM_ID: TAS6ARKDN7
