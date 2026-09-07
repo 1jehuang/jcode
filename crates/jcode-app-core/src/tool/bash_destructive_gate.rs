@@ -15,7 +15,12 @@ pub(super) fn destructive_command_refusal(
     justification: Option<&str>,
     working_dir: Option<std::path::PathBuf>,
 ) -> Option<String> {
-    let risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir);
+    let mut risk_ctx = jcode_command_risk::RiskContext::from_env(working_dir);
+    // Assess the same scratch path that the child shell actually receives.
+    #[cfg(not(windows))]
+    {
+        risk_ctx.scratch_dir = super::tool_scratch_dir();
+    }
     let assessment = jcode_command_risk::assess(command, &risk_ctx);
     if assessment.level.runs_immediately() {
         return None;
@@ -85,4 +90,42 @@ pub(super) fn bash_parameters_schema() -> serde_json::Value {
             }
         }
     })
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::destructive_command_refusal;
+
+    #[test]
+    fn scratch_log_and_backup_commands_do_not_require_justification() {
+        let cwd = std::env::current_dir().ok();
+        for command in [
+            "cargo test --lib > \"$JCODE_SCRATCH_DIR/tests.log\" 2>&1",
+            "git diff > \"${JCODE_SCRATCH_DIR}/before.patch\"",
+            "env | grep JCODE",
+            "command -v sudo && sudo -n true",
+            "find /sys -type l -exec readlink {} \\;",
+            "find /etc -type f -exec sed -n '1,10p' {} \\;",
+        ] {
+            assert!(
+                destructive_command_refusal(command, None, cwd.clone()).is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn protected_writes_and_unknown_variables_remain_blocked() {
+        for command in [
+            "rm -rf /etc",
+            "echo bad > /etc/passwd",
+            "find /etc -type f -exec rm {} \\;",
+            "echo test > \"$UNKNOWN/tests.log\"",
+        ] {
+            assert!(
+                destructive_command_refusal(command, None, std::env::current_dir().ok()).is_some(),
+                "{command}"
+            );
+        }
+    }
 }
