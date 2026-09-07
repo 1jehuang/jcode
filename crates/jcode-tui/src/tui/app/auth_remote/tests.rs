@@ -582,3 +582,34 @@ fn ssh_inline_picker_status_is_remote_only_and_failure_stays_unknown() {
         });
     });
 }
+
+#[test]
+fn ssh_picker_paste_selects_visible_import_action_not_browser_login() {
+    with_app(|app| {
+        for command in ["/login", "/login --import-local"] {
+            for provider in ["openai", "claude"] {
+                app.handle_ssh_login_command(command);
+                let query = if command == "/login" {
+                    format!("import local {provider}")
+                } else {
+                    provider.to_string()
+                };
+                app.handle_paste(query.clone());
+                assert!(app.remote_login.as_ref().unwrap().input.is_empty());
+                assert!(app.input.is_empty());
+                assert!(app.pasted_contents.is_empty());
+                assert_eq!(
+                    app.inline_interactive_state.as_ref().unwrap().filter,
+                    query
+                );
+                app.handle_ssh_login_key(KeyCode::Enter, KeyModifiers::NONE, None);
+                let login = app.remote_login.as_ref().unwrap();
+                assert!(login.phase == Phase::ImportConsent);
+                assert!(login.operation == Some(Operation::Import));
+                assert_eq!(login.provider, provider);
+                assert!(login.task.is_none());
+                app.cancel_ssh_login();
+            }
+        }
+    });
+}

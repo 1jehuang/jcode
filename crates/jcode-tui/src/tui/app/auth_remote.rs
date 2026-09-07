@@ -246,6 +246,24 @@ impl App {
         if login.phase == Phase::Cancelling {
             return true;
         }
+        // Pasting a provider in the picker must behave like typing its filter,
+        // not like submitting a different authentication action. Slash commands
+        // stay in the private buffer so /cancel and /quit retain their behavior.
+        if login.phase == Phase::Choosing
+            && login.input.is_empty()
+            && !text.trim_start().starts_with('/')
+            && let Some(picker) = self.inline_interactive_state.as_mut()
+        {
+            if picker.filter.len().saturating_add(text.len()) <= command::INPUT_LIMIT {
+                picker
+                    .filter
+                    .extend(text.chars().filter(|c| !c.is_control()));
+                Self::apply_inline_interactive_filter(picker);
+            } else {
+                self.set_status_notice("Remote login filter too long. Esc clears the filter.");
+            }
+            return true;
+        }
         if login.input.len().saturating_add(text.len()) > command::INPUT_LIMIT {
             self.set_status_notice(
                 "SSH login input too long. Press Ctrl+U to clear or Esc to cancel.",
@@ -294,6 +312,16 @@ impl App {
         {
             if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
                 self.cancel_ssh_login();
+                return true;
+            }
+            if code == KeyCode::Char('v')
+                && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+            {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() {
+                        self.append_ssh_login_input(&text);
+                    }
+                }
                 return true;
             }
             if code == KeyCode::Char('/') && modifiers.is_empty() {
@@ -385,23 +413,9 @@ impl App {
             return;
         }
         if login.phase == Phase::Choosing {
-            let provider = input
-                .parse::<usize>()
-                .ok()
-                .and_then(|n| n.checked_sub(1))
-                .and_then(|n| PROVIDERS.get(n))
-                .copied()
-                .or_else(|| {
-                    PROVIDERS
-                        .iter()
-                        .copied()
-                        .find(|p| *p == input.strip_prefix("/login ").unwrap_or(input))
-                });
-            if let Some(provider) = provider {
-                self.select_ssh_login_action(provider, false);
-            } else {
-                self.set_status_notice("Choose 1-6 or a provider name. Esc cancels.");
-            }
+            self.set_status_notice(
+                "Choose a login or import row with arrows/filter and Enter. Esc cancels.",
+            );
             return;
         }
         if login.phase != Phase::Input {
