@@ -11,6 +11,7 @@ fn ctx() -> RiskContext {
     RiskContext {
         working_dir: Some(PathBuf::from("/home/u/proj")),
         home_dir: Some(PathBuf::from("/home/u")),
+        scratch_dir: None,
     }
 }
 
@@ -501,5 +502,166 @@ fn wrapper_value_flags_and_unbounded_globs_remain_guarded() {
             level(command) >= RiskLevel::Confirm,
             "{command:?} must remain guarded"
         );
+    }
+}
+
+#[test]
+fn environment_printing_and_command_lookup_are_read_only() {
+    for command in [
+        "env",
+        "env -i",
+        "env FOO=bar",
+        "sudo env",
+        "command -v sudo",
+        "command -V rm",
+        "command -pv sudo env rm",
+        "command -p -V sudo",
+        "env command -v sudo",
+        "command -v rm -rf /",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
+    }
+    for command in ["command -p rm -rf ~", "env rm -rf ~", "command -- rm -rf ~"] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+}
+
+#[test]
+fn read_only_find_actions_do_not_delete_search_roots() {
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in [
+            "cat {}",
+            "/bin/cat -- {}",
+            "readlink -f {}",
+            "sed -n '1,200p' {}",
+            "sed 'p' {}",
+        ] {
+            for root in ["/", "~", "~/.ssh", "/etc"] {
+                for terminator in [r"\;", "+"] {
+                    let command = format!("find {root} -type f {action} {payload} {terminator}");
+                    assert_eq!(level(&command), RiskLevel::Safe, "{command}");
+                }
+            }
+        }
+    }
+    assert_eq!(
+        level(r"find / -exec cat {} \; -exec readlink {} \;"),
+        RiskLevel::Safe
+    );
+}
+
+#[test]
+fn find_mutating_and_unknown_actions_remain_protected() {
+    for action in ["-exec", "-execdir", "-ok", "-okdir"] {
+        for payload in ["rm -rf {}", "sudo rm -rf {}", "shred {}"] {
+            let command = format!(r"find ~ {action} {payload} \;");
+            assert_eq!(level(&command), RiskLevel::Catastrophic, "{command}");
+        }
+        for payload in [
+            "mystery {}",
+            "$PROGRAM {}",
+            "sed -i 's/a/b/' {}",
+            "sed 'w /etc/passwd' {}",
+            "sed 'e rm -rf ~' {}",
+            "sed -n -f script {}",
+            "sh -c '$PAYLOAD' {}",
+        ] {
+            let command = format!(r"find / {action} {payload} \;");
+            assert!(level(&command) >= RiskLevel::Confirm, "{command}");
+        }
+    }
+    for command in [
+        "find ~ -delete",
+        r"find ~ -exec cat {} \; -delete",
+        r"find / -exec cat {} \; -exec rm -rf {} +",
+        r"find . -exec rm -rf /etc \;",
+        "find -L ~ -delete",
+    ] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    for command in [
+        "find / -exec",
+        "find / -exec cat {}",
+        "find / -execdir mystery {} +",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+}
+
+#[test]
+fn read_only_early_returns_preserve_redirect_checks() {
+    for prefix in [
+        "env",
+        "command -v sudo",
+        r"find / -exec cat {} \;",
+        r"find / -exec sed -n '1p' {} \;",
+        "sh -c 'echo hello'",
+    ] {
+        assert_eq!(
+            level(&format!("{prefix} > /etc/passwd")),
+            RiskLevel::Catastrophic,
+            "{prefix}"
+        );
+        assert_eq!(
+            level(&format!("{prefix} > $UNKNOWN")),
+            RiskLevel::Confirm,
+            "{prefix}"
+        );
+        assert_eq!(
+            level(&format!("{prefix} 2>/dev/null")),
+            RiskLevel::Safe,
+            "{prefix}"
+        );
+    }
+}
+
+#[test]
+fn reassignment_does_not_override_trusted_protection() {
+    for command in ["HOME=/tmp; rm -rf /home/u", "env HOME=/tmp rm -rf ~/.ssh"] {
+        assert_eq!(level(command), RiskLevel::Catastrophic, "{command}");
+    }
+    for command in [
+        "HOME=/etc; rm -rf $HOME/cache",
+        "JCODE_SCRATCH_DIR=/etc; rm -rf $JCODE_SCRATCH_DIR/passwd",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+    assert_eq!(level("env -u UNUSED rm -rf ~"), RiskLevel::Catastrophic);
+    assert_eq!(level("env -u UNUSED"), RiskLevel::Safe);
+    assert!(level("env -S 'rm -rf ~'") >= RiskLevel::Confirm);
+}
+
+#[test]
+fn env_split_strings_cannot_be_mistaken_for_printing() {
+    for command in [
+        "env -S='rm -rf /'",
+        "env --split-string='rm -rf /'",
+        "env -u FOO -S 'rm -rf /'",
+        "env -iS 'rm -rf /'",
+    ] {
+        assert!(level(command) >= RiskLevel::Confirm, "{command}");
+    }
+}
+
+#[test]
+fn find_output_actions_write_only_their_destinations() {
+    for action in ["-fprint", "-fprint0", "-fls", "-fprintf"] {
+        let suffix = if action == "-fprintf" { " '%p'" } else { "" };
+        for (target, expected) in [
+            ("/etc/passwd", RiskLevel::Catastrophic),
+            ("$UNKNOWN", RiskLevel::Confirm),
+            ("/tmp/find-output", RiskLevel::Safe),
+            ("/dev/null", RiskLevel::Safe),
+        ] {
+            let command = format!("find / {action} {target}{suffix}");
+            assert_eq!(level(&command), expected, "{command}");
+        }
+    }
+    for command in [
+        "find / -name '-delete'",
+        "find / -printf '-delete'",
+        "find / -name '-exec'",
+    ] {
+        assert_eq!(level(command), RiskLevel::Safe, "{command}");
     }
 }
