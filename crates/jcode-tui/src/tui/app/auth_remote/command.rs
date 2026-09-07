@@ -173,6 +173,14 @@ fn parse_status(value: &serde_json::Value) -> Result<Reply, &'static str> {
                 .iter()
                 .find(|provider| provider.id == id)
         }) else {
+            // Newer hosts can know providers this client cannot label. Do not
+            // discard configured or ambiguous rows and infer an empty host.
+            // Fixed errors must not echo remote IDs or private method details.
+            if row["status"].as_str() != Some("not_configured") {
+                return Err(
+                    "Unrecognized remote auth provider status. Update Jcode on this computer.",
+                );
+            }
             continue;
         };
         let id = descriptor.id;
@@ -538,8 +546,8 @@ mod tests {
                 })
             })
             .collect();
-        rows.push(serde_json::json!({"id": "unknown\u{1b}[2J", "status": "available"}));
-        rows.push(serde_json::json!({"id": "claude-api", "status": "available"}));
+        rows.push(serde_json::json!({"id": "unknown\u{1b}[2J", "status": "not_configured"}));
+        rows.push(serde_json::json!({"id": "claude-api", "status": "not_configured"}));
         let bytes = serde_json::to_vec(&serde_json::json!({"providers": rows})).unwrap();
         let Ok(Reply::Status { providers }) = parse_reply(&bytes, Operation::Status, "") else {
             panic!("Expected provider status");
@@ -575,6 +583,30 @@ mod tests {
             parse_reply(br#"{"providers":[]}"#, Operation::Status, ""),
             Ok(Reply::Status { providers }) if providers.is_empty()
         ));
+    }
+
+    #[test]
+    fn ssh_status_unknown_credentials_cannot_make_a_newer_host_look_empty() {
+        for state in ["available", "expired", "unknown"] {
+            let mut rows: Vec<_> = crate::provider_catalog::auth_status_login_providers()
+                .into_iter()
+                .map(|provider| serde_json::json!({"id": provider.id, "status": "not_configured"}))
+                .collect();
+            rows.push(serde_json::json!({
+                "id": "must-not-surface\u{1b}[2J",
+                "status": state,
+                "method": "private account label",
+            }));
+            let error = parse_status(&serde_json::json!({"providers": rows}))
+                .err()
+                .unwrap();
+            assert_eq!(
+                error,
+                "Unrecognized remote auth provider status. Update Jcode on this computer."
+            );
+            assert!(!error.contains("must-not-surface"));
+            assert!(!error.contains("private"));
+        }
     }
 
     #[test]
