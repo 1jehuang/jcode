@@ -11,12 +11,20 @@
 //! both), so queries re-read the file with a short TTL instead of trusting a
 //! process-local cache.
 //!
+//! ChatGPT OAuth token counts and API-equivalent estimates use a separate
+//! `openai_oauth_usage.json` ledger, written only by provider completion hooks.
+//! See [`openai_oauth_usage_summary`]. These estimates never enter API-key spend.
+//!
 //! Source key conventions:
 //!   - `claude:oauth:<label>` / `claude:api-key`
 //!   - `openai:oauth:<label>` / `openai:api-key`
 //!   - `openai-compatible:<profile-id>` (DeepSeek, Moonshot, NVIDIA NIM, ...)
 //!   - `openrouter`, `jcode`, `copilot`, `gemini`, `cursor`, `bedrock`,
 //!     `antigravity`, `azure-openai`
+
+#[path = "provider_activity_oauth.rs"]
+mod oauth_usage;
+pub use oauth_usage::{openai_oauth_usage_summary, record_openai_oauth_usage};
 
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};

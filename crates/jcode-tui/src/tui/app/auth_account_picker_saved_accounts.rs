@@ -68,6 +68,23 @@ impl App {
         let mut lines = vec!["OpenAI Accounts:".to_string(), String::new()];
         lines.extend(format_account_table(&headers, &rows));
         lines.push(String::new());
+        lines.push("## ChatGPT OAuth API-equivalent usage".to_string());
+        lines.push("Today is since local midnight. Lifetime is recorded Jcode usage, not your subscription bill or all ChatGPT activity.".to_string());
+        for account in &accounts {
+            lines.push(String::new());
+            lines.push(format!(
+                "### {} (`{}`)",
+                account_display_name("OpenAI", &account.label, accounts.len()),
+                account.label
+            ));
+            for (label, value) in
+                crate::provider_activity::openai_oauth_usage_summary(&account.label)
+            {
+                lines.push(format!("- **{label}:** {value}"));
+            }
+        }
+
+        lines.push(String::new());
         lines.push(
             "Commands: /account openai switch <label>, /account openai add, /account openai remove <label>"
                 .to_string(),
@@ -216,16 +233,19 @@ impl App {
             } else {
                 ""
             };
-            items.push(crate::tui::account_picker::AccountPickerItem::action(
-                provider.id,
-                provider.display_name,
-                format!("Switch {display_name}"),
-                format!("{email} - {status} - acct {account_id}{active_suffix}"),
-                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
-                    "/account {} switch {}",
-                    provider.id, label
-                )),
-            ));
+            items.push(
+                crate::tui::account_picker::AccountPickerItem::action(
+                    provider.id,
+                    provider.display_name,
+                    format!("Switch {display_name}"),
+                    format!("{email} - {status} - acct {account_id}{active_suffix}"),
+                    crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
+                        "/account {} switch {}",
+                        provider.id, label
+                    )),
+                )
+                .with_details(openai_account_usage_details(&label)),
+            );
             items.push(crate::tui::account_picker::AccountPickerItem::action(
                 provider.id,
                 provider.display_name,
@@ -248,6 +268,16 @@ impl App {
             ));
         }
     }
+}
+
+/// Keep full usage out of compact list subtitles, which are intentionally truncated.
+fn openai_account_usage_details(label: &str) -> Vec<(String, String)> {
+    let mut details = vec![(
+        "Full usage details".to_string(),
+        "/account openai settings".to_string(),
+    )];
+    details.extend(crate::provider_activity::openai_oauth_usage_summary(label));
+    details
 }
 
 /// A provider name is enough when there is only one login. Animal names are
