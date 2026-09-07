@@ -110,6 +110,13 @@ pub struct BridgeState {
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
+    /// A turn can belong to another attachment or a server-initiated wake.
+    observed_turn_active: bool,
+    activity_version: u64,
+    pending_activity_snapshots: std::collections::HashMap<u64, u64>,
+    /// Control requests also emit done, sometimes after their richer reply.
+    /// Retain those ids until done so they never terminate an observed turn.
+    pending_control_done_ids: std::collections::HashSet<u64>,
     /// Soft interrupts normally join an active turn, but the daemon promotes
     /// one received while idle into a new turn. Retain their ids so a matching
     /// `done` can become `turn_done` without confusing queued interrupts with
@@ -264,6 +271,29 @@ impl BridgeState {
 
     /// Translate one API request (raw JSON) into outbound actions.
     pub fn api_request_to_legacy(&mut self, request: &Value) -> Vec<Outbound> {
+        let outbound = self.translate_request(request);
+        for action in &outbound {
+            if let Outbound::Legacy(value) = action
+                && matches!(value["type"].as_str(), Some("state" | "get_history"))
+                && let Some(id) = value["id"].as_u64()
+            {
+                self.pending_activity_snapshots
+                    .insert(id, self.activity_version);
+            }
+            if let Outbound::Legacy(value) = action
+                && matches!(
+                    value["type"].as_str(),
+                    Some("subscribe" | "clear" | "prepare_disconnect" | "notify_auth_changed")
+                )
+                && let Some(id) = value["id"].as_u64()
+            {
+                self.pending_control_done_ids.insert(id);
+            }
+        }
+        outbound
+    }
+
+    fn translate_request(&mut self, request: &Value) -> Vec<Outbound> {
         let api_id = request["id"].as_u64().unwrap_or(0);
         let req = request["req"].as_str().unwrap_or("");
 
@@ -918,6 +948,14 @@ impl BridgeState {
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
         let session = |state: &Self| state.session_id.clone().unwrap_or_default();
+        if matches!(
+            kind,
+            "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec"
+        ) || (kind == "connection_phase" && event["phase"] == "streaming")
+        {
+            self.observed_turn_active = true;
+            self.activity_version += 1;
+        }
         match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
@@ -965,8 +1003,14 @@ impl BridgeState {
                         }
                         self.session_id = Some(session_id.clone());
                     }
+                    let fresh_activity =
+                        self.pending_activity_snapshots.remove(&id) == Some(self.activity_version);
+                    if fresh_activity {
+                        self.observed_turn_active =
+                            event["is_processing"].as_bool().unwrap_or(false);
+                    }
                     let metadata = Self::resolve_session_metadata(&session_id);
-                    return vec![ServerFrame::reply(
+                    let mut frames = vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
@@ -982,7 +1026,7 @@ impl BridgeState {
                                 last_active_at_ms: metadata
                                     .as_ref()
                                     .and_then(|value| value.last_active_at_ms),
-                                session_id,
+                                session_id: session_id.clone(),
                                 working_dir: metadata
                                     .as_ref()
                                     .and_then(|metadata| metadata.working_dir.clone()),
@@ -999,6 +1043,18 @@ impl BridgeState {
                             },
                         },
                     )];
+                    if fresh_activity {
+                        frames.push(ServerFrame::event(ApiEvent::SessionStatus {
+                            session_id,
+                            status: if self.observed_turn_active {
+                                "running"
+                            } else {
+                                "idle"
+                            }
+                            .into(),
+                        }));
+                    }
+                    return frames;
                 }
                 vec![]
             }
@@ -1055,12 +1111,17 @@ impl BridgeState {
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
-                // Subscribe and other requests also emit `done`; only a
-                // completed ordinary message or an idle soft interrupt promoted
-                // into a message is a turn boundary.
+                // Subscribe and controls also emit `done`. Exclude their ids,
+                // but retain session-scoped completions fanned out by another
+                // attachment or a server-initiated turn (whose id is zero).
                 let completed_message = self.pending_message_id == Some(id);
                 let completed_idle_interrupt = self.pending_soft_interrupt_ids.contains(&id);
-                if completed_message || completed_idle_interrupt {
+                let control_done = self.pending_control_done_ids.remove(&id);
+                let observed_done =
+                    self.observed_turn_active && !control_done && self.session_id.is_some();
+                if completed_message || completed_idle_interrupt || observed_done {
+                    self.observed_turn_active = false;
+                    self.activity_version += 1;
                     self.pending_message_id = None;
                     // Any other retained soft interrupts were queued into the
                     // turn which just ended. Their ids will not emit `done`.
@@ -1071,6 +1132,14 @@ impl BridgeState {
                 } else {
                     vec![]
                 }
+            }
+            "interrupted" => {
+                self.activity_version += 1;
+                self.observed_turn_active = false;
+                vec![ServerFrame::event(ApiEvent::SessionStatus {
+                    session_id: session(self),
+                    status: "cancelled".into(),
+                })]
             }
             "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
                 session_id: event["session_id"]
@@ -1189,14 +1258,27 @@ impl BridgeState {
                     })
                     .unwrap_or_default();
                 let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
-                vec![ServerFrame::reply(
+                let mut frames = vec![ServerFrame::reply(
                     api_id,
                     ApiEvent::History {
                         session_id: session(self),
                         messages,
                         images,
                     },
-                )]
+                )];
+                // A snapshot requested before newer stream/terminal events must
+                // not resurrect a completed turn or stop a newly started one.
+                let fresh_activity =
+                    self.pending_activity_snapshots.remove(&id) == Some(self.activity_version);
+                if fresh_activity && let Some(active) = event["activity"]["is_processing"].as_bool()
+                {
+                    self.observed_turn_active = active;
+                    frames.push(ServerFrame::event(ApiEvent::SessionStatus {
+                        session_id: session(self),
+                        status: if active { "running" } else { "idle" }.into(),
+                    }));
+                }
+                frames
             }
             // The model can change mid-session (`/model`, a cycle, or an auth
             // change re-resolving the route), so both pushes are forwarded.
@@ -1377,7 +1459,11 @@ impl BridgeState {
                 }
             }
             "error" => {
+                self.activity_version += 1;
+                self.observed_turn_active = false;
                 let id = event["id"].as_u64().unwrap_or(0);
+                self.pending_control_done_ids.remove(&id);
+                self.pending_activity_snapshots.remove(&id);
                 if let Some((state_id, api_id, target)) = self.pending_attach_id.as_ref()
                     && (self.pending_attach_subscribe_id == Some(id) || *state_id == id)
                 {
