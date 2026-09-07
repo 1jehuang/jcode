@@ -282,6 +282,7 @@ impl Provider for OpenAIProvider {
                     let saw_output = attempt_guard.finish().await;
 
                     match continuation_result {
+                        PersistentWsResult::TerminalError => return,
                         PersistentWsResult::Success => {
                             log_openai_stream_lifecycle(
                                 jcode_base::logging::LogLevel::Info,
@@ -338,16 +339,6 @@ impl Provider for OpenAIProvider {
                                     }))
                                     .await;
                             }
-                            let mut guard = persistent_ws.lock().await;
-                            *guard = None;
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Warn,
-                                "persistent_state_reset",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("reason", "persistent_reuse_failed".to_string()),
-                                ],
-                            );
                         }
                     }
                 }
