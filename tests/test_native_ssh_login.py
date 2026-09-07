@@ -492,8 +492,8 @@ class LoginPTY:
         mark = len(self.output)
         # Enter alone exercises default No. Yes opens a chooser, not a transfer.
         os.write(self.master, b"yes\r" if accept else b"\r")
-        self.wait(f"Login on {host}:", mark)
         self.repaint()
+        self.wait(f"Login on {host}:", mark)
         if accept:
             self.wait("Import local OpenAI login", mark)
             self.wait("Import local Claude login", mark)
