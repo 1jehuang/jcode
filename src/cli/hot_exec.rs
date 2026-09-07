@@ -381,77 +381,45 @@ pub fn run_auto_update() -> Result<()> {
     ))
 }
 
+/// Explicit updates follow the configured channel for release and dev builds alike.
+/// Source rebuilds belong to self-dev and /rebuild, not the stable update path.
 pub fn run_update() -> Result<()> {
-    if update::is_release_build() {
-        update::print_centered("Checking GitHub for latest release...");
-        match update::check_for_update_blocking() {
-            Ok(Some(release)) => {
-                update::print_centered(&format!(
-                    "Downloading {} \u{2192} {}...",
-                    jcode_build_meta::version(),
-                    release.tag_name
-                ));
-                let _path =
-                    update::download_and_install_blocking_with_progress(&release, |progress| {
-                        update::print_centered(&format!(
-                            "{} {}",
-                            release.tag_name,
-                            update::format_download_progress_bar(progress)
-                        ));
-                    })?;
-                update::print_centered(&format!("✅ Updated to {}", release.tag_name));
-                reload_server_after_update("installed update");
-                update::print_centered("Restart jcode to use the new version.");
-            }
-            Ok(None) => {
-                if repair_stale_shared_server_after_update_check() {
-                    reload_server_after_update("repaired stale server target");
-                }
-                update::print_centered(&format!(
-                    "Already up to date ({})",
-                    jcode_build_meta::version()
-                ));
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "Update check failed: {}",
-                    update::summarize_update_error(&format!("{:#}", e))
-                );
-            }
+    update::print_centered("Checking GitHub for latest release...");
+    match update::check_for_update_blocking() {
+        Ok(Some(release)) => {
+            update::print_centered(&format!(
+                "Downloading {} \u{2192} {}...",
+                jcode_build_meta::version(),
+                release.tag_name
+            ));
+            let _path =
+                update::download_and_install_blocking_with_progress(&release, |progress| {
+                    update::print_centered(&format!(
+                        "{} {}",
+                        release.tag_name,
+                        update::format_download_progress_bar(progress)
+                    ));
+                })?;
+            update::print_centered(&format!("✅ Updated to {}", release.tag_name));
+            reload_server_after_update("installed update");
+            update::print_centered("Restart jcode to use the new version.");
         }
-        return Ok(());
+        Ok(None) => {
+            if repair_stale_shared_server_after_update_check() {
+                reload_server_after_update("repaired stale server target");
+            }
+            update::print_centered(&format!(
+                "Already up to date ({})",
+                jcode_build_meta::version()
+            ));
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "Update check failed: {}",
+                update::summarize_update_error(&format!("{:#}", e))
+            );
+        }
     }
-
-    let repo_dir =
-        get_repo_dir().ok_or_else(|| anyhow::anyhow!("Could not find jcode repository"))?;
-
-    update::print_centered(&format!("Updating jcode from {}...", repo_dir.display()));
-
-    update::print_centered("Pulling latest changes (fast-forward only)...");
-    update::run_git_pull_ff_only(&repo_dir, true)?;
-
-    update::print_centered("Building...");
-    let build_status = ProcessCommand::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(&repo_dir)
-        .status()?;
-
-    if !build_status.success() {
-        anyhow::bail!("cargo build failed");
-    }
-
-    if let Err(e) = build::install_local_release(&repo_dir) {
-        update::print_centered(&format!("Warning: install failed: {}", e));
-    }
-
-    let hash = ProcessCommand::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()?;
-
-    let hash = String::from_utf8_lossy(&hash.stdout);
-    update::print_centered(&format!("Successfully updated to {}", hash.trim()));
-
     Ok(())
 }
 
