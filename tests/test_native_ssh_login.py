@@ -456,12 +456,19 @@ class LoginPTY:
 
     def wait(self, marker, since=0, timeout=TIMEOUT):
         deadline = time.monotonic() + timeout
+        next_repaint = time.monotonic() + 1
         while time.monotonic() < deadline:
             self.pump()
             text = native.visible(self.output[since:])
             if marker in text:
                 return text
             require(self.process.poll() is None, "Login PTY exited before expected marker; raw output withheld")
+            if time.monotonic() >= next_repaint:
+                # The asynchronous action may finish after the first resize.
+                # Request another complete terminal frame rather than treating
+                # missing unchanged ANSI cells as a missing UI acknowledgement.
+                self.repaint()
+                next_repaint = time.monotonic() + 1
         raise AssertionError("Login PTY timed out waiting for " + marker.split("https://")[0] + "; raw output withheld")
 
     def command(self, command):
@@ -756,6 +763,24 @@ def run_acceptance(config):
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_wait_repaints_until_an_async_marker_is_visible(self):
+        tui = object.__new__(LoginPTY)
+        tui.output, tui.pump = bytearray(), mock.Mock()
+        tui.process = mock.Mock()
+        tui.process.poll.return_value = None
+        repaints = []
+
+        def repaint():
+            repaints.append(True)
+            if len(repaints) == 2:
+                tui.output.extend(b"delayed picker ready")
+
+        tui.repaint = repaint
+        clock = iter(value / 4 for value in range(100))
+        with mock.patch.object(time, "monotonic", side_effect=lambda: next(clock)):
+            self.assertIn("delayed picker ready", tui.wait("delayed picker ready", timeout=10))
+        self.assertEqual(len(repaints), 2)
+
     def test_cancel_waits_are_unique_and_scenarios_use_fresh_ptys(self):
         import ast
         import inspect
