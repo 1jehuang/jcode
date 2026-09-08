@@ -40,9 +40,9 @@ Env overrides (always win; empty value disables a config hook):
 
 ## Observer hooks
 
-`turn_end`, `session_start`, `session_end`, and `post_tool` are
-**observers**: spawned detached, fire-and-forget. They can never block or slow
-the agent; failures are only logged.
+`turn_end`, `session_start`, `session_end`, `post_tool`, and the three
+compaction hooks are **observers**: spawned detached, fire-and-forget. They
+can never block or slow the agent; failures are only logged.
 
 ### `turn_end`
 
@@ -65,6 +65,21 @@ attached), or `resume` (restored by id). `session_end` fires on normal close
 Fires after every tool call. Extra fields: `JCODE_HOOK_TOOL_NAME`,
 `JCODE_HOOK_STATUS`, `JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_OUTPUT_BYTES` (on
 success), `JCODE_HOOK_ERROR` (on failure).
+
+### `compaction_started` / `compaction_completed` / `compaction_emergency`
+
+Lifecycle events for background compaction. `compaction_started` fires when a
+background summarization begins (fields: `JCODE_HOOK_TRIGGER`,
+`JCODE_HOOK_MODE`, `JCODE_HOOK_ACTIVE_MESSAGES`,
+`JCODE_HOOK_ESTIMATED_TOKENS`). `compaction_completed` fires when its result
+is applied (adds `JCODE_HOOK_SUMMARIZER` = `custom`/`native`/`builtin`,
+`JCODE_HOOK_PRE_TOKENS`, `JCODE_HOOK_POST_TOKENS`, `JCODE_HOOK_TOKENS_SAVED`,
+`JCODE_HOOK_DURATION_MS`, `JCODE_HOOK_MESSAGES_COMPACTED`,
+`JCODE_HOOK_SUMMARY_CHARS`). `compaction_emergency` fires when context is
+dropped without a summary: hard compact at the critical threshold or
+context-limit auto-recovery (fields: `JCODE_HOOK_TRIGGER`
+(`critical`/`context_limit`), `JCODE_HOOK_MODE`,
+`JCODE_HOOK_MESSAGES_DROPPED`, `JCODE_HOOK_USAGE_PCT`).
 
 ## Gate hook: `pre_tool`
 

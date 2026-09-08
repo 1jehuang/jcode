@@ -43,6 +43,11 @@ pub use jcode_compaction_core::{
 const HARD_THRESHOLD_PENDING_WAIT_MS: u64 = 15_000;
 const HARD_THRESHOLD_PENDING_POLL_MS: u64 = 50;
 
+/// Cap on summary-command stdout: summaries are meant to be small, and a
+/// runaway command must not balloon the session file. Oversize output is
+/// truncated at a char boundary (with a warning), never a hard failure.
+const SUMMARY_COMMAND_STDOUT_LIMIT: usize = 1024 * 1024;
+
 /// Result from background compaction task
 struct CompactionResult {
     summary_text: String,
@@ -50,6 +55,8 @@ struct CompactionResult {
     covers_up_to_turn: usize,
     duration_ms: u64,
     summarized_messages: usize,
+    /// Which summarizer produced the text: custom, native, or builtin.
+    summarizer: &'static str,
 }
 
 struct CompactionOutcomeLog<'a> {
@@ -177,6 +184,14 @@ pub struct CompactionManager {
     /// Last compaction event (if any)
     last_compaction: Option<CompactionEvent>,
 
+    /// Which summarizer produced the active summary (custom/native/builtin).
+    /// Set when a background result is applied; carried into persisted state
+    /// so external tools can audit or rebuild it.
+    applied_summarizer: Option<String>,
+
+    /// Trigger label of the compaction that produced the active summary.
+    applied_trigger: Option<String>,
+
     // ── Mode & strategy ────────────────────────────────────────────────────
     /// Active compaction mode (set from config at construction)
     mode: crate::config::CompactionMode,
@@ -225,6 +240,8 @@ impl CompactionManager {
             model_token_budget: DEFAULT_TOKEN_BUDGET,
             observed_input_tokens: None,
             last_compaction: None,
+            applied_summarizer: None,
+            applied_trigger: None,
             mode,
             compaction_config: cfg,
             token_history: VecDeque::with_capacity(TOKEN_HISTORY_WINDOW + 1),
@@ -363,6 +380,8 @@ impl CompactionManager {
             covers_up_to_turn: state.covers_up_to_turn,
             original_turn_count: state.original_turn_count,
         });
+        self.applied_trigger = state.trigger.clone();
+        self.applied_summarizer = state.summarizer.clone();
         self.suppress_compaction_until_new_message = total_messages > 0;
     }
 
@@ -407,6 +426,9 @@ impl CompactionManager {
                 covers_up_to_turn: summary.covers_up_to_turn,
                 original_turn_count: summary.original_turn_count,
                 compacted_count: self.compacted_count,
+                trigger: self.applied_trigger.clone(),
+                summarizer: self.applied_summarizer.clone(),
+                mode: Some(self.mode_trigger_label().to_string()),
             })
     }
 
@@ -927,9 +949,13 @@ impl CompactionManager {
         // Spawn background task that notifies via Bus when done
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
-            let result =
-                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
-                    .await;
+            let result = generate_compaction_artifact(
+                provider,
+                messages_to_summarize,
+                existing_summary,
+                &mode_label,
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction ({}) finished in {:.2}s ({} messages summarized)",
@@ -1138,12 +1164,18 @@ impl CompactionManager {
 
         self.pending_cutoff = cutoff;
         self.pending_trigger = Some("manual".to_string());
+        // Hoisted: the spawned task is 'static and cannot borrow self.
+        let mode_label: &'static str = self.mode_trigger_label();
 
         self.pending_task = Some(tokio::spawn(async move {
             let start = std::time::Instant::now();
-            let result =
-                generate_compaction_artifact(provider, messages_to_summarize, existing_summary)
-                    .await;
+            let result = generate_compaction_artifact(
+                provider,
+                messages_to_summarize,
+                existing_summary,
+                mode_label,
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
             crate::logging::info(&format!(
                 "Compaction finished in {:.2}s ({} messages summarized)",
@@ -1236,6 +1268,8 @@ impl CompactionManager {
 
                 // Store summary
                 self.active_summary = Some(summary);
+                self.applied_summarizer = Some(result.summarizer.to_string());
+                self.applied_trigger = Some(trigger.clone());
                 self.discard_oversized_openai_native_compaction();
                 self.observed_input_tokens = None;
                 let post_tokens = self.effective_token_count_with(all_messages) as u64;
@@ -1298,6 +1332,39 @@ impl CompactionManager {
                 self.pending_cutoff = 0;
             }
         }
+    }
+
+    /// Test-only: install a pre-completed background result so tests can drive
+    /// the apply path without a live provider. Blocks until the task finishes
+    /// before returning.
+    #[cfg(test)]
+    pub(crate) fn inject_completed_result_for_test(
+        &mut self,
+        cutoff: usize,
+        trigger: &str,
+        summary_text: &str,
+        summarizer: &'static str,
+    ) {
+        let summary_text = summary_text.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        self.pending_cutoff = cutoff;
+        self.pending_trigger = Some(trigger.to_string());
+        runtime.block_on(async {
+            self.pending_task = Some(tokio::spawn(async move {
+                Ok(CompactionResult {
+                    summary_text,
+                    openai_encrypted_content: None,
+                    covers_up_to_turn: cutoff,
+                    duration_ms: 1,
+                    summarized_messages: cutoff,
+                    summarizer,
+                })
+            }));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
     }
 
     /// Backward-compatible completion check without caller history.
@@ -1699,6 +1766,7 @@ async fn generate_compaction_artifact(
     provider: Arc<dyn Provider>,
     messages: Vec<Message>,
     mut existing_summary: Option<Summary>,
+    mode_label: &str,
 ) -> Result<CompactionResult> {
     let start = Instant::now();
     if let Some(summary) = existing_summary.as_mut()
@@ -1749,8 +1817,22 @@ async fn generate_compaction_artifact(
                 covers_up_to_turn: messages.len(),
                 duration_ms: start.elapsed().as_millis() as u64,
                 summarized_messages: messages.len(),
+                summarizer: "native",
             });
         }
+    }
+
+    if let Some(summary_text) =
+        run_summary_command(&messages, existing_summary.as_ref(), mode_label).await
+    {
+        return Ok(CompactionResult {
+            summary_text,
+            openai_encrypted_content: None,
+            covers_up_to_turn: messages.len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            summarized_messages: messages.len(),
+            summarizer: "custom",
+        });
     }
 
     let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
@@ -1770,7 +1852,118 @@ async fn generate_compaction_artifact(
         covers_up_to_turn: messages.len(),
         duration_ms: start.elapsed().as_millis() as u64,
         summarized_messages: messages.len(),
+        summarizer: "builtin",
     })
+}
+
+/// Attempt the configured external summary command, if any.
+///
+/// Returns the summary text on success, or None to fall through to the
+/// built-in summarizer. Every failure mode fails open: unconfigured, invalid
+/// command line, spawn failure, non-zero exit, empty output, timeout.
+/// Oversize output is truncated at a char boundary instead of failing.
+///
+/// Like every other hook, the command runs with `JCODE_HOOKS_DISABLED=1`, so
+/// a command that itself invokes jcode cannot recurse into another summary.
+async fn run_summary_command(
+    messages: &[Message],
+    existing_summary: Option<&Summary>,
+    mode_label: &str,
+) -> Option<String> {
+    let command_line = crate::config::config()
+        .compaction
+        .summary_command
+        .clone()
+        .map(|command| command.trim().to_string())
+        .filter(|command| !command.is_empty())?;
+    let request_json = serde_json::json!({
+        "event": "summarize",
+        "mode": mode_label,
+        "message_count": messages.len(),
+        "existing_summary": existing_summary.map(|summary| summary.text.as_str()),
+        "messages": messages,
+    })
+    .to_string();
+
+    let parts = match crate::terminal_launch::parse_hook_command(&command_line) {
+        Ok(parts) => parts,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Summary command '{command_line}' is invalid: {error} (using built-in summarizer)"
+            ));
+            return None;
+        }
+    };
+    let (program, args) = parts.split_first().expect("parser guarantees a program");
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    cmd.env("JCODE_HOOKS_DISABLED", "1");
+    cmd.env("JCODE_HOOK_EVENT", "summarize");
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Summary command '{command_line}' failed to start: {error} (using built-in summarizer)"
+            ));
+            return None;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = stdin.write_all(request_json.as_bytes()).await;
+        drop(stdin);
+    }
+    let timeout = std::time::Duration::from_millis(
+        crate::config::config()
+            .compaction
+            .summary_command_timeout_ms
+            .max(1),
+    );
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            crate::logging::warn(&format!(
+                "Summary command '{command_line}' failed: {error} (using built-in summarizer)"
+            ));
+            return None;
+        }
+        Err(_elapsed) => {
+            crate::logging::warn(&format!(
+                "Summary command '{command_line}' timed out after {}ms (using built-in summarizer)",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    };
+    if !output.status.success() {
+        crate::logging::warn(&format!(
+            "Summary command '{command_line}' exited with {:?} (using built-in summarizer)",
+            output.status.code()
+        ));
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let summary = stdout.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    if summary.len() > SUMMARY_COMMAND_STDOUT_LIMIT {
+        crate::logging::warn(&format!(
+            "Summary command output ({} bytes) exceeds {} bytes; truncating",
+            summary.len(),
+            SUMMARY_COMMAND_STDOUT_LIMIT
+        ));
+        let mut end = SUMMARY_COMMAND_STDOUT_LIMIT;
+        while end > 0 && !summary.is_char_boundary(end) {
+            end -= 1;
+        }
+        return Some(summary[..end].to_string());
+    }
+    Some(summary.to_string())
 }
 
 pub async fn build_transfer_compaction_state(
@@ -1796,7 +1989,9 @@ pub async fn build_transfer_compaction_state(
         .as_ref()
         .map(|state| state.original_turn_count.max(state.covers_up_to_turn))
         .unwrap_or(0);
-    let result = generate_compaction_artifact(provider, messages.clone(), existing_summary).await?;
+    let result =
+        generate_compaction_artifact(provider, messages.clone(), existing_summary, "transfer")
+            .await?;
     let total_turns = prior_turns + messages.len();
 
     Ok(Some(crate::session::StoredCompactionState {
@@ -1805,6 +2000,9 @@ pub async fn build_transfer_compaction_state(
         covers_up_to_turn: total_turns,
         original_turn_count: total_turns,
         compacted_count: 0,
+        trigger: Some("transfer".to_string()),
+        summarizer: Some(result.summarizer.to_string()),
+        mode: None,
     }))
 }
 

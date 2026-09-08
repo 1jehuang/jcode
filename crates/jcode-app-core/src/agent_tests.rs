@@ -212,6 +212,59 @@ fn message_text(message: &Message) -> &str {
     content_text(&message.content)
 }
 
+#[cfg(unix)]
+#[test]
+fn compaction_completed_hook_fires_when_result_applies() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let prev_hook = std::env::var_os("JCODE_HOOK_COMPACTION_COMPLETED");
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let marker = temp_home.path().join("completed.json");
+    let script = temp_home.path().join("hook.sh");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\necho \"$JCODE_HOOK_PAYLOAD\" > '{}'\n", marker.display()),
+    )
+    .expect("write hook script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+    crate::env::set_var("JCODE_HOOK_COMPACTION_COMPLETED", script.to_str().unwrap());
+    crate::config::Config::invalidate_cache();
+
+    Agent::fire_compaction_hook(
+        "ses_test".to_string(),
+        "test-model".to_string(),
+        None,
+        "compaction_completed",
+        &[
+            ("TRIGGER", "reactive".to_string()),
+            ("SUMMARIZER", "custom".to_string()),
+        ],
+    );
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let payload = std::fs::read_to_string(&marker).expect("hook must record payload");
+    assert!(payload.contains("\"event\":\"compaction_completed\""), "got: {payload}");
+    assert!(payload.contains("\"summarizer\":\"custom\""), "got: {payload}");
+    assert!(payload.contains("\"trigger\":\"reactive\""), "got: {payload}");
+
+    match prev_home {
+        Some(value) => crate::env::set_var("JCODE_HOME", value),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    match prev_hook {
+        Some(value) => crate::env::set_var("JCODE_HOOK_COMPACTION_COMPLETED", value),
+        None => crate::env::remove_var("JCODE_HOOK_COMPACTION_COMPLETED"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
 #[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

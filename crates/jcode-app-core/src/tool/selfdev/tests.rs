@@ -578,6 +578,9 @@ async fn enter_creates_selfdev_session_in_test_mode() {
         covers_up_to_turn: 1,
         original_turn_count: 1,
         compacted_count: 1,
+        trigger: None,
+        summarizer: None,
+        mode: None,
     });
     parent.record_replay_display_message("system", None, "remember this context");
     parent.save().expect("save parent session");

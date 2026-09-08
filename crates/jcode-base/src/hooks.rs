@@ -107,6 +107,9 @@ pub fn hook_commands(event: &str) -> Vec<String> {
         "session_end" => hooks.session_end.as_ref(),
         "pre_tool" => hooks.pre_tool.as_ref(),
         "post_tool" => hooks.post_tool.as_ref(),
+        "compaction_started" => hooks.compaction_started.as_ref(),
+        "compaction_completed" => hooks.compaction_completed.as_ref(),
+        "compaction_emergency" => hooks.compaction_emergency.as_ref(),
         _ => None,
     };
     raw.into_iter()
