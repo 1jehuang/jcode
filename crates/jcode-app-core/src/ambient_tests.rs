@@ -671,6 +671,37 @@ fn test_schedule_rejects_zero_interval() {
 }
 
 #[test]
+fn test_schedule_rejects_zero_max_iterations() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: Some(0),
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("zero max_iterations must be rejected");
+    assert!(err.to_string().contains(">= 1"), "got: {err}");
+}
+
+#[test]
 fn test_schedule_stamps_series_and_manager_cancels_it() {
     let _guard = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");

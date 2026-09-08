@@ -3,7 +3,8 @@ use chrono::Utc;
 
 use super::paths::{ambient_dir, queue_path, transcripts_dir};
 use super::{
-    AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem, ScheduledQueue,
+    ActiveRun, AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem,
+    ScheduledQueue,
 };
 use crate::config::config;
 
@@ -78,6 +79,11 @@ impl AmbientManager {
             if repeat.every_minutes < 1 {
                 anyhow::bail!("repeat.every_minutes must be >= 1");
             }
+            if repeat.max_iterations == Some(0) {
+                anyhow::bail!(
+                    "repeat.max_iterations must be >= 1; omit it to repeat forever"
+                );
+            }
             if !request.target.is_direct_delivery() {
                 anyhow::bail!(
                     "repeat requires a direct target (session or spawn); ambient cycles already re-read queued items"
@@ -131,7 +137,6 @@ impl AmbientManager {
     /// Returns false when no queued item of the series exists (e.g. the
     /// series was cancelled mid-delivery).
     pub fn stamp_spawn_lease(&mut self, recurrence_id: &str, owner_session: &str) -> Result<bool> {
-        use super::ActiveRun;
         let mut stamped = false;
         for item in self.queue.items_mut() {
             let is_series = item
