@@ -23,6 +23,11 @@ pub(super) struct OutgoingRequest<'a> {
 /// nothing, so the hot path is a single branch. A hook that echoes its input
 /// (e.g. `cat`) counts as unmodified: `rewritten` compares canonical JSON,
 /// not hook exit status.
+///
+/// The static system prefix is core-owned and never rewritten: it anchors
+/// the provider cache prefix (memory and context work belong in messages,
+/// tools, and the dynamic part). A hook-returned `system_static` is ignored
+/// with a warning.
 pub(super) async fn apply_pre_request_transform<'a>(
     session_id: &str,
     working_dir: Option<&str>,
@@ -66,11 +71,11 @@ pub(super) async fn apply_pre_request_transform<'a>(
     } else {
         out.tools
     };
-    let new_static = if out.system_static.is_empty() {
-        system_static.to_string()
-    } else {
-        out.system_static
-    };
+    if !out.system_static.is_empty() && out.system_static != system_static {
+        crate::logging::warn(
+            "Hook 'pre_request' returned system_static: the static prefix is core-owned, ignoring",
+        );
+    }
     let new_dynamic = if out.system_dynamic.is_empty() {
         system_dynamic.to_string()
     } else {
@@ -102,12 +107,11 @@ pub(super) async fn apply_pre_request_transform<'a>(
     // when the wire bytes actually differ.
     let rewritten = messages_value != request_json["messages"]
         || tools_value != request_json["tools"]
-        || new_static != system_static
         || new_dynamic != system_dynamic;
     OutgoingRequest {
         messages: Cow::Owned(messages),
         tools: Cow::Owned(tools),
-        system_static: Cow::Owned(new_static),
+        system_static: Cow::Borrowed(system_static),
         system_dynamic: Cow::Owned(new_dynamic),
         rewritten,
     }
@@ -202,6 +206,23 @@ mod tests {
         assert!(out.tools.is_empty());
         assert_eq!(out.system_static, "s");
         assert_eq!(out.system_dynamic, "d");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn static_prefix_rewrite_is_ignored() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Rewrites only the static prefix: core-owned, must not apply.
+        let script = write_script(
+            temp.path(),
+            "static.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\njson.dump({'system_static': 'hijacked'},sys.stdout)\n",
+        );
+        let _env = HookEnv::set(Some(&script.to_string_lossy()));
+        let messages = vec![Message::user("hi")];
+        let out = apply_pre_request_transform("ses_x", None, &messages, &[], "s", "d").await;
+        assert!(!out.rewritten);
+        assert_eq!(out.system_static, "s");
     }
 
     #[cfg(unix)]

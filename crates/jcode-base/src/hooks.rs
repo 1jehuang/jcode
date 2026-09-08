@@ -403,6 +403,8 @@ pub struct TransformedRequest {
 ///
 /// - exit 0 with a JSON object on stdout: applied as the new request.
 ///   Absent keys keep their original value; `messages` should be an array.
+///   `system_static` is read-only context for the hook: a returned value is
+///   ignored, because the static prefix anchors the provider cache prefix.
 /// - exit 0 with empty stdout: request unchanged.
 /// - anything else (non-zero exit, invalid JSON, oversize stdout, timeout,
 ///   spawn failure): fail open with the original request.
