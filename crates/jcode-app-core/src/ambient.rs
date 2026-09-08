@@ -130,6 +130,45 @@ pub struct ScheduledItem {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
+    /// Recurrence state. Absent for one-shot items. Old queue files without
+    /// this field keep working: they simply never repeat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<RepeatState>,
+}
+
+/// Interval recurrence requested at schedule time.
+///
+/// Deliberately interval-based, not cron: no new dependency, and garden
+/// maintenance runs on cadences (nightly, hourly), not wall-clock times.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepeatSpec {
+    /// Minutes between occurrences. Must be >= 1.
+    pub every_minutes: u32,
+    /// Total occurrences including the first. None repeats forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+/// A worker run currently holding this series' lease. Spawn-target only:
+/// session reminders are harmless on overlap and ambient cycles are
+/// single-instanced by AmbientLock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveRun {
+    pub owner_session: String,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Per-item recurrence bookkeeping. The `recurrence_id` is stable across all
+/// occurrences of one series, so a whole series can be cancelled at once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepeatState {
+    pub every_minutes: u32,
+    /// Occurrences left including the queued one. None repeats forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<u32>,
+    pub recurrence_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_run: Option<ActiveRun>,
 }
 
 /// Persistent ambient state
@@ -170,6 +209,11 @@ pub enum CycleStatus {
 pub struct ScheduleRequest {
     pub wake_in_minutes: Option<u32>,
     pub wake_at: Option<DateTime<Utc>>,
+    /// Repeat on an interval. Direct targets (Session/Spawn) only: ambient
+    /// cycles already re-read queued items every run, so recurrence there
+    /// would double-fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<RepeatSpec>,
     pub context: String,
     pub priority: Priority,
     #[serde(default)]

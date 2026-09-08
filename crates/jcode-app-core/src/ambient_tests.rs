@@ -1,6 +1,30 @@
 use super::*;
 use chrono::Duration;
 
+/// Restores an env var on drop. Mirrors the helper in runner_tests.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::env::set_var(self.key, prev);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 #[test]
 fn test_ambient_status_default() {
     let status = AmbientStatus::default();
@@ -37,6 +61,7 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -52,6 +77,7 @@ fn test_scheduled_queue_push_and_pop() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     assert_eq!(queue.len(), 2);
@@ -86,6 +112,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
     queue.push(ScheduledItem {
         id: "cancel".into(),
@@ -100,6 +127,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     let removed = queue.remove_by_id("cancel").unwrap().unwrap();
@@ -133,6 +161,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -148,6 +177,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     let ready = queue.pop_ready();
@@ -180,6 +210,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -197,6 +228,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     queue.push(ScheduledItem {
@@ -212,6 +244,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     let ready_direct = queue.take_ready_direct_items();
@@ -268,6 +301,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            repeat: None,
         }),
         started_at: Utc::now() - Duration::seconds(10),
         ended_at: Utc::now(),
@@ -371,6 +405,7 @@ fn test_build_ambient_system_prompt_with_data() {
         relevant_files: vec!["src/main.rs".into()],
         git_branch: Some("main".into()),
         additional_context: Some("Background: Tests were flaky yesterday".into()),
+        repeat: None,
     }];
 
     let health = MemoryGraphHealth {
@@ -449,9 +484,350 @@ fn test_scheduled_queue_items_accessor() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        repeat: None,
     });
 
     let items = queue.items();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "s1");
+}
+
+// ---------------------------------------------------------------------------
+// Recurrence + spawn lease
+// ---------------------------------------------------------------------------
+
+fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
+    ScheduledItem {
+        id: id.into(),
+        scheduled_for: Utc::now() - Duration::minutes(5),
+        context: "garden".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        },
+        created_by_session: "test".into(),
+        created_at: Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        repeat: Some(RepeatState {
+            every_minutes: 60,
+            remaining,
+            recurrence_id: "recur_test".into(),
+            active_run: None,
+        }),
+    }
+}
+
+#[test]
+fn test_recurring_pop_requeues_next_occurrence() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue.push(recurring_item("first", Some(3)));
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, "first");
+
+    // Chain survives the pop: next occurrence already queued.
+    assert_eq!(queue.len(), 1);
+    let next = &queue.items()[0];
+    assert_ne!(next.id, "first");
+    let repeat = next.repeat.as_ref().expect("next keeps series");
+    assert_eq!(repeat.recurrence_id, "recur_test");
+    assert_eq!(repeat.remaining, Some(2));
+    assert!(repeat.active_run.is_none(), "lease never rides along");
+    let gap = next.scheduled_for - Utc::now();
+    assert!(
+        gap >= Duration::minutes(55),
+        "next due about one interval out, got {:?}",
+        gap
+    );
+}
+
+#[test]
+fn test_recurrence_exhausts_at_last_iteration() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue.push(recurring_item("last", Some(1)));
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    assert!(
+        queue.is_empty(),
+        "remaining=1 means this pop was the final run"
+    );
+}
+
+#[test]
+fn test_recurrence_without_limit_repeats_forever() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue.push(recurring_item("forever", None));
+
+    for _ in 0..3 {
+        let ready = queue.pop_ready();
+        assert_eq!(ready.len(), 1);
+        // Force each requeued occurrence due again.
+        for item in queue.items_mut() {
+            item.scheduled_for = Utc::now() - Duration::minutes(5);
+        }
+    }
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].repeat.as_ref().unwrap().remaining, None);
+}
+
+#[test]
+fn test_recurring_direct_items_requeue_on_take_ready_direct() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue.push(recurring_item("direct", Some(2)));
+
+    let ready = queue.take_ready_direct_items();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(queue.len(), 1, "direct path requeues too");
+    assert_eq!(queue.items()[0].repeat.as_ref().unwrap().remaining, Some(1));
+}
+
+#[test]
+fn test_cancel_recurrence_removes_whole_series() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue.push(recurring_item("a", Some(5)));
+    queue.push(recurring_item("b", None));
+    // One-shot bystander from another series must survive.
+    let mut solo = recurring_item("solo", Some(2));
+    solo.id = "solo".into();
+    solo.repeat.as_mut().unwrap().recurrence_id = "recur_other".into();
+    queue.push(solo);
+
+    let removed = queue.remove_by_recurrence("recur_test").unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "solo");
+    assert_eq!(queue.remove_by_recurrence("recur_missing").unwrap(), 0);
+}
+
+#[test]
+fn test_schedule_rejects_repeat_for_ambient_target() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: None,
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("ambient+repeat must be rejected");
+    assert!(err.to_string().contains("direct target"), "got: {err}");
+}
+
+#[test]
+fn test_schedule_rejects_zero_interval() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 0,
+                max_iterations: None,
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("zero interval must be rejected");
+    assert!(err.to_string().contains(">= 1"), "got: {err}");
+}
+
+#[test]
+fn test_schedule_stamps_series_and_manager_cancels_it() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: Some(4),
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule");
+    let repeat = manager.queue().items()[0]
+        .repeat
+        .clone()
+        .expect("series stamped");
+    assert_eq!(repeat.remaining, Some(4));
+    assert!(repeat.recurrence_id.starts_with("recur_"));
+    assert_eq!(manager.cancel_recurrence(&repeat.recurrence_id).unwrap(), 1);
+    assert!(manager.queue().is_empty());
+}
+
+#[test]
+fn test_lease_missing_owner_session_reads_as_free() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("leased", Some(3));
+    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
+        owner_session: "session_that_never_existed".into(),
+        started_at: Utc::now(),
+    });
+    queue.push(item);
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1, "gone owner cannot hold a lease");
+}
+
+#[test]
+fn test_lease_stale_run_reads_as_free() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("stale", Some(3));
+    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
+        owner_session: "session_whatever".into(),
+        started_at: Utc::now() - Duration::hours(10),
+    });
+    queue.push(item);
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1, "10h-old lease on a 60m series is stale");
+}
+
+#[test]
+fn test_lease_live_run_defers_without_consuming_iteration() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut owner = crate::session::Session::create_with_id(
+        "session_lease_owner".to_string(),
+        None,
+        Some("Owner".to_string()),
+    );
+    owner.save().expect("save owner session");
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("held", Some(3));
+    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
+        owner_session: "session_lease_owner".into(),
+        started_at: Utc::now(),
+    });
+    queue.push(item);
+
+    let ready = queue.pop_ready();
+    assert!(ready.is_empty(), "live run must defer delivery");
+    assert_eq!(queue.len(), 1, "deferred item stays queued");
+    let held = &queue.items()[0];
+    assert_eq!(
+        held.repeat.as_ref().unwrap().remaining,
+        Some(3),
+        "deferral consumes no iteration"
+    );
+    assert!(
+        held.scheduled_for > Utc::now(),
+        "deferred due time moves into the future"
+    );
+
+    // Owner finishes: the next poll delivers.
+    owner.mark_closed();
+    owner.save().expect("save closed owner");
+    for queued in queue.items_mut() {
+        queued.scheduled_for = Utc::now() - Duration::minutes(5);
+    }
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1, "closed owner releases the lease");
+}
+
+#[test]
+fn test_stamp_spawn_lease_targets_series_only() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: None,
+            wake_at: Some(Utc::now() - Duration::minutes(5)),
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: None,
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule");
+    // Due immediately: negative offset schedules in the past.
+    let ready = manager.take_ready_direct_items();
+    assert_eq!(ready.len(), 1);
+    let recurrence = ready[0]
+        .repeat
+        .as_ref()
+        .expect("repeat")
+        .recurrence_id
+        .clone();
+    assert!(manager.stamp_spawn_lease(&recurrence, "child_1").unwrap());
+    let next = &manager.queue().items()[0];
+    let run = next.repeat.as_ref().unwrap().active_run.as_ref();
+    assert_eq!(run.expect("lease stamped").owner_session, "child_1");
+    assert!(
+        !manager
+            .stamp_spawn_lease("recur_missing", "child_2")
+            .unwrap()
+    );
 }

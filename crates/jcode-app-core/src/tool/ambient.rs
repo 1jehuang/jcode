@@ -206,6 +206,9 @@ impl Tool for EndAmbientCycleTool {
         let next_schedule = params.next_schedule.map(|ns| ScheduleRequest {
             wake_in_minutes: ns.wake_in_minutes,
             wake_at: None,
+            // End-of-cycle scheduling stays one-shot; recurrence is a
+            // deliberate `schedule`-tool choice, not a cycle side effect.
+            repeat: None,
             context: ns.context.unwrap_or_default(),
             priority: parse_priority(ns.priority.as_deref()),
             target: ScheduleTarget::Ambient,
@@ -349,6 +352,7 @@ impl Tool for ScheduleAmbientTool {
         let request = ScheduleRequest {
             wake_in_minutes: params.wake_in_minutes,
             wake_at,
+            repeat: None,
             context: params.context.clone(),
             priority: parse_priority(params.priority.as_deref()),
             target: ScheduleTarget::Ambient,
@@ -750,6 +754,12 @@ struct ScheduleToolInput {
     success_criteria: Option<String>,
     #[serde(default)]
     target: Option<String>,
+    /// Repeat every N minutes (direct targets resume/spawn only).
+    #[serde(default)]
+    repeat_every_minutes: Option<u32>,
+    /// Total occurrences including the first. Omit to repeat forever.
+    #[serde(default)]
+    repeat_max_iterations: Option<u32>,
 }
 
 #[async_trait]
@@ -799,6 +809,14 @@ impl Tool for ScheduleTool {
                     "type": "string",
                     "enum": ["resume", "spawn", "ambient"],
                     "description": "Delivery target. Defaults to resuming this session; 'spawn' runs one new child session."
+                },
+                "repeat_every_minutes": {
+                    "type": "integer",
+                    "description": "Repeat on this interval in minutes. Direct targets (resume/spawn) only; rejected for ambient."
+                },
+                "repeat_max_iterations": {
+                    "type": "integer",
+                    "description": "Total occurrences including the first. Omit to repeat forever."
                 }
             }
         })
@@ -871,9 +889,20 @@ impl ScheduleTool {
         let target = parse_schedule_target(params.target.as_deref(), &ctx.session_id)?;
         let target_summary = format_schedule_target(&target);
 
+        let repeat = match (params.repeat_every_minutes, params.repeat_max_iterations) {
+            (None, None) => None,
+            (None, Some(_)) => {
+                anyhow::bail!("repeat_max_iterations needs repeat_every_minutes")
+            }
+            (Some(every), max) => Some(crate::ambient::RepeatSpec {
+                every_minutes: every,
+                max_iterations: max,
+            }),
+        };
         let request = ScheduleRequest {
             wake_in_minutes: params.wake_in_minutes,
             wake_at,
+            repeat,
             context: task.clone(),
             priority: parse_priority(params.priority.as_deref()),
             target,
@@ -918,6 +947,16 @@ impl ScheduleTool {
             ));
         }
         summary.push_str(&format!("\nTarget: {}", target_summary));
+        if let Some(every) = params.repeat_every_minutes {
+            summary.push_str(&format!(
+                "\nRepeats every {} minute(s){}",
+                every,
+                params
+                    .repeat_max_iterations
+                    .map(|n| format!(", {} occurrence(s) total", n))
+                    .unwrap_or_default()
+            ));
+        }
 
         Ok(ToolOutput::new(summary).with_title(format!("scheduled: {}", task)))
     }
@@ -947,6 +986,18 @@ impl ScheduleTool {
             .ok_or_else(|| anyhow::anyhow!("schedule_id is required for action=cancel"))?;
 
         let mut manager = AmbientManager::new()?;
+        if id.starts_with("recur_") {
+            let removed = manager.cancel_recurrence(id)?;
+            if removed == 0 {
+                anyhow::bail!("No scheduled series found with id '{}'", id);
+            }
+            nudge_schedule_runner();
+            return Ok(ToolOutput::new(format!(
+                "Cancelled recurrence series '{}' ({} queued occurrence(s) removed)",
+                id, removed
+            ))
+            .with_title(format!("cancelled series: {}", id)));
+        }
         let Some(item) = manager.cancel_schedule(id)? else {
             anyhow::bail!("No scheduled task found with id '{}'", id);
         };
@@ -1001,13 +1052,29 @@ fn format_schedule_target(target: &ScheduleTarget) -> String {
 }
 
 fn format_scheduled_item(item: &ScheduledItem) -> String {
+    let repeat = item
+        .repeat
+        .as_ref()
+        .map(|repeat| {
+            format!(
+                " | repeats every {}m{} {}",
+                repeat.every_minutes,
+                repeat
+                    .remaining
+                    .map(|n| format!(", {} left", n))
+                    .unwrap_or_default(),
+                repeat.recurrence_id
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "- {} | {} | {:?} | {} | {}",
+        "- {} | {} | {:?} | {} | {}{}",
         item.id,
         item.scheduled_for,
         item.priority,
         format_schedule_target(&item.target),
-        item.task_description.as_deref().unwrap_or(&item.context)
+        item.task_description.as_deref().unwrap_or(&item.context),
+        repeat
     )
 }
 

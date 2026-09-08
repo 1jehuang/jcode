@@ -70,15 +70,35 @@ impl AmbientManager {
     }
 
     /// Add a schedule request to the queue. Returns the item ID.
+    ///
+    /// Recurrence is direct-target only: ambient cycles re-read queued items
+    /// every run, so a repeating ambient-target item would double-fire.
     pub fn schedule(&mut self, request: ScheduleRequest) -> Result<String> {
+        if let Some(repeat) = request.repeat.as_ref() {
+            if repeat.every_minutes < 1 {
+                anyhow::bail!("repeat.every_minutes must be >= 1");
+            }
+            if !request.target.is_direct_delivery() {
+                anyhow::bail!(
+                    "repeat requires a direct target (session or spawn); ambient cycles already re-read queued items"
+                );
+            }
+        }
         let id = format!("sched_{:08x}", rand::random::<u32>());
         let scheduled_for = request.wake_at.unwrap_or_else(|| {
             Utc::now() + chrono::Duration::minutes(request.wake_in_minutes.unwrap_or(30) as i64)
         });
 
+        let repeat = request.repeat.map(|repeat| super::RepeatState {
+            every_minutes: repeat.every_minutes,
+            remaining: repeat.max_iterations,
+            recurrence_id: format!("recur_{:08x}", rand::random::<u32>()),
+            active_run: None,
+        });
         let item = ScheduledItem {
             id: id.clone(),
             scheduled_for,
+            repeat,
             context: request.context,
             priority: request.priority,
             target: request.target,
@@ -98,6 +118,41 @@ impl AmbientManager {
     /// Cancel a queued scheduled item by ID.
     pub fn cancel_schedule(&mut self, id: &str) -> Result<Option<ScheduledItem>> {
         self.queue.remove_by_id(id)
+    }
+
+    /// Cancel every queued item of one recurrence series by its `recur_*`
+    /// ID. To cancel a single occurrence, pass its item ID to
+    /// `cancel_schedule` instead.
+    pub fn cancel_recurrence(&mut self, recurrence_id: &str) -> Result<usize> {
+        self.queue.remove_by_recurrence(recurrence_id)
+    }
+
+    /// Stamp the spawn lease onto the queued next occurrence of a series.
+    /// Returns false when no queued item of the series exists (e.g. the
+    /// series was cancelled mid-delivery).
+    pub fn stamp_spawn_lease(&mut self, recurrence_id: &str, owner_session: &str) -> Result<bool> {
+        use super::ActiveRun;
+        let mut stamped = false;
+        for item in self.queue.items_mut() {
+            let is_series = item
+                .repeat
+                .as_ref()
+                .map(|repeat| repeat.recurrence_id == recurrence_id)
+                .unwrap_or(false);
+            if is_series && !stamped {
+                if let Some(repeat) = item.repeat.as_mut() {
+                    repeat.active_run = Some(ActiveRun {
+                        owner_session: owner_session.to_string(),
+                        started_at: chrono::Utc::now(),
+                    });
+                }
+                stamped = true;
+            }
+        }
+        if stamped {
+            self.queue.save()?;
+        }
+        Ok(stamped)
     }
 
     pub fn state(&self) -> &AmbientState {
