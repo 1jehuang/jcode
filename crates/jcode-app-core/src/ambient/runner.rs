@@ -301,7 +301,6 @@ impl AmbientRunnerHandle {
                             "recurrence_id": item.repeat.as_ref().map(|r| r.recurrence_id.clone()),
                             "repeat_every_minutes": item.repeat.as_ref().map(|r| r.every_minutes),
                             "repeat_remaining": item.repeat.as_ref().and_then(|r| r.remaining),
-                            "lease_owner": item.repeat.as_ref().and_then(|r| r.active_run.as_ref().map(|a| a.owner_session.clone())),
                             "context": item.context,
                             "task_description": item.task_description,
                             "priority": format!("{:?}", item.priority),
@@ -524,25 +523,6 @@ impl AmbientRunnerHandle {
                     "Ambient runner: spawned scheduled task {} into child session {} from {}",
                     item.id, spawned_session_id, parent_session_id
                 ));
-                // Lease the series to this run: the next occurrence defers
-                // while the child is alive instead of overlapping it.
-                if let Some(repeat) = item.repeat.as_ref() {
-                    match AmbientManager::new() {
-                        Ok(mut mgr) => {
-                            if let Err(error) =
-                                mgr.stamp_spawn_lease(&repeat.recurrence_id, &spawned_session_id)
-                            {
-                                logging::warn(&format!(
-                                    "Ambient runner: failed to stamp spawn lease for series {}: {error}",
-                                    repeat.recurrence_id
-                                ));
-                            }
-                        }
-                        Err(error) => logging::warn(&format!(
-                            "Ambient runner: failed to load manager for spawn lease: {error}"
-                        )),
-                    }
-                }
                 Ok(())
             }
         }

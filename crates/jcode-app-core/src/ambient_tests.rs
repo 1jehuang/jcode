@@ -493,7 +493,7 @@ fn test_scheduled_queue_items_accessor() {
 }
 
 // ---------------------------------------------------------------------------
-// Recurrence + spawn lease
+// Recurrence
 // ---------------------------------------------------------------------------
 
 fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
@@ -516,7 +516,6 @@ fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
             every_minutes: 60,
             remaining,
             recurrence_id: "recur_test".into(),
-            active_run: None,
         }),
     }
 }
@@ -538,7 +537,6 @@ fn test_recurring_pop_requeues_next_occurrence() {
     let repeat = next.repeat.as_ref().expect("next keeps series");
     assert_eq!(repeat.recurrence_id, "recur_test");
     assert_eq!(repeat.remaining, Some(2));
-    assert!(repeat.active_run.is_none(), "lease never rides along");
     let gap = next.scheduled_for - Utc::now();
     assert!(
         gap >= Duration::minutes(55),
@@ -739,126 +737,3 @@ fn test_schedule_stamps_series_and_manager_cancels_it() {
     assert!(manager.queue().is_empty());
 }
 
-#[test]
-fn test_lease_missing_owner_session_reads_as_free() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    let mut item = recurring_item("leased", Some(3));
-    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
-        owner_session: "session_that_never_existed".into(),
-        started_at: Utc::now(),
-    });
-    queue.push(item);
-
-    let ready = queue.pop_ready();
-    assert_eq!(ready.len(), 1, "gone owner cannot hold a lease");
-}
-
-#[test]
-fn test_lease_stale_run_reads_as_free() {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    let mut item = recurring_item("stale", Some(3));
-    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
-        owner_session: "session_whatever".into(),
-        started_at: Utc::now() - Duration::hours(10),
-    });
-    queue.push(item);
-
-    let ready = queue.pop_ready();
-    assert_eq!(ready.len(), 1, "10h-old lease on a 60m series is stale");
-}
-
-#[test]
-fn test_lease_live_run_defers_without_consuming_iteration() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-
-    let mut owner = crate::session::Session::create_with_id(
-        "session_lease_owner".to_string(),
-        None,
-        Some("Owner".to_string()),
-    );
-    owner.save().expect("save owner session");
-
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    let mut item = recurring_item("held", Some(3));
-    item.repeat.as_mut().unwrap().active_run = Some(ActiveRun {
-        owner_session: "session_lease_owner".into(),
-        started_at: Utc::now(),
-    });
-    queue.push(item);
-
-    let ready = queue.pop_ready();
-    assert!(ready.is_empty(), "live run must defer delivery");
-    assert_eq!(queue.len(), 1, "deferred item stays queued");
-    let held = &queue.items()[0];
-    assert_eq!(
-        held.repeat.as_ref().unwrap().remaining,
-        Some(3),
-        "deferral consumes no iteration"
-    );
-    assert!(
-        held.scheduled_for > Utc::now(),
-        "deferred due time moves into the future"
-    );
-
-    // Owner finishes: the next poll delivers.
-    owner.mark_closed();
-    owner.save().expect("save closed owner");
-    for queued in queue.items_mut() {
-        queued.scheduled_for = Utc::now() - Duration::minutes(5);
-    }
-    let ready = queue.pop_ready();
-    assert_eq!(ready.len(), 1, "closed owner releases the lease");
-}
-
-#[test]
-fn test_stamp_spawn_lease_targets_series_only() {
-    let _guard = crate::storage::lock_test_env();
-    let temp = tempfile::tempdir().expect("tempdir");
-    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
-
-    let mut manager = AmbientManager::new().expect("manager");
-    manager
-        .schedule(ScheduleRequest {
-            wake_in_minutes: None,
-            wake_at: Some(Utc::now() - Duration::minutes(5)),
-            repeat: Some(RepeatSpec {
-                every_minutes: 60,
-                max_iterations: None,
-            }),
-            context: "garden".into(),
-            priority: Priority::Normal,
-            target: ScheduleTarget::Spawn {
-                parent_session_id: "parent".into(),
-            },
-            created_by_session: "test".into(),
-            working_dir: None,
-            task_description: None,
-            relevant_files: Vec::new(),
-            git_branch: None,
-            additional_context: None,
-        })
-        .expect("schedule");
-    // Due immediately: negative offset schedules in the past.
-    let ready = manager.take_ready_direct_items();
-    assert_eq!(ready.len(), 1);
-    let recurrence = ready[0]
-        .repeat
-        .as_ref()
-        .expect("repeat")
-        .recurrence_id
-        .clone();
-    assert!(manager.stamp_spawn_lease(&recurrence, "child_1").unwrap());
-    let next = &manager.queue().items()[0];
-    let run = next.repeat.as_ref().unwrap().active_run.as_ref();
-    assert_eq!(run.expect("lease stamped").owner_session, "child_1");
-    assert!(
-        !manager
-            .stamp_spawn_lease("recur_missing", "child_2")
-            .unwrap()
-    );
-}

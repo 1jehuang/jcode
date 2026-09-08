@@ -117,9 +117,6 @@ impl ScheduledQueue {
                 every_minutes: repeat.every_minutes,
                 remaining,
                 recurrence_id: repeat.recurrence_id.clone(),
-                // The lease belongs to the run being delivered now, never to
-                // the queued next occurrence.
-                active_run: None,
             }),
             ..item.clone()
         };
@@ -143,60 +140,19 @@ impl ScheduledQueue {
         Ok(removed)
     }
 
-    /// True when a previous occurrence of this item's series is still running.
-    ///
-    /// Dead owners (session file gone, terminal status) and stale leases
-    /// (older than three intervals — a hung run must not block its series
-    /// forever) read as free. Only consulted for recurring items; one-shots
-    /// never carry a lease.
-    fn spawn_lease_held(item: &ScheduledItem) -> bool {
-        let Some(repeat) = item.repeat.as_ref() else {
-            return false;
-        };
-        let Some(run) = repeat.active_run.as_ref() else {
-            return false;
-        };
-        let stale_after =
-            run.started_at + chrono::Duration::minutes(repeat.every_minutes.max(1) as i64 * 3);
-        if Utc::now() >= stale_after {
-            return false;
-        }
-        match crate::session::Session::load(&run.owner_session) {
-            Ok(session) => !matches!(
-                session.status,
-                crate::session::SessionStatus::Closed
-                    | crate::session::SessionStatus::Crashed { .. }
-                    | crate::session::SessionStatus::Error { .. }
-            ),
-            // Owner session file gone: the run cannot still be working.
-            Err(_) => false,
-        }
-    }
-
-    /// Split due items into deliverable ones, deferring lease-held recurring
-    /// items in place (due time pushed out one interval, iteration count
-    /// untouched). Returns the deliverable set.
+    /// Split due items into deliverable ones. Delivery through the ambient
+    /// runner is serial — each spawn is awaited before the next item pops —
+    /// so occurrences of one series can never overlap and no lease is needed.
+    /// Returns the deliverable set.
     fn partition_ready(&mut self, direct_only: bool) -> Vec<ScheduledItem> {
         let now = Utc::now();
         let mut ready = Vec::new();
         let mut remaining = Vec::with_capacity(self.items.len());
         let mut touched = false;
-        for mut item in self.items.drain(..) {
+        for item in self.items.drain(..) {
             let due = item.scheduled_for <= now;
             let wanted = !direct_only || item.target.is_direct_delivery();
             if due && wanted {
-                if item.repeat.is_some() && Self::spawn_lease_held(&item) {
-                    let every = item
-                        .repeat
-                        .as_ref()
-                        .map(|repeat| repeat.every_minutes)
-                        .unwrap_or(30)
-                        .max(1);
-                    item.scheduled_for = now + chrono::Duration::minutes(every as i64);
-                    remaining.push(item);
-                    touched = true;
-                    continue;
-                }
                 ready.push(item);
             } else {
                 remaining.push(item);

@@ -3,8 +3,7 @@ use chrono::Utc;
 
 use super::paths::{ambient_dir, queue_path, transcripts_dir};
 use super::{
-    ActiveRun, AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem,
-    ScheduledQueue,
+    AmbientCycleResult, AmbientState, AmbientStatus, ScheduleRequest, ScheduledItem, ScheduledQueue,
 };
 use crate::config::config;
 
@@ -99,7 +98,6 @@ impl AmbientManager {
             every_minutes: repeat.every_minutes,
             remaining: repeat.max_iterations,
             recurrence_id: format!("recur_{:08x}", rand::random::<u32>()),
-            active_run: None,
         });
         let item = ScheduledItem {
             id: id.clone(),
@@ -131,33 +129,6 @@ impl AmbientManager {
     /// `cancel_schedule` instead.
     pub fn cancel_recurrence(&mut self, recurrence_id: &str) -> Result<usize> {
         self.queue.remove_by_recurrence(recurrence_id)
-    }
-
-    /// Stamp the spawn lease onto the queued next occurrence of a series.
-    /// Returns false when no queued item of the series exists (e.g. the
-    /// series was cancelled mid-delivery).
-    pub fn stamp_spawn_lease(&mut self, recurrence_id: &str, owner_session: &str) -> Result<bool> {
-        let mut stamped = false;
-        for item in self.queue.items_mut() {
-            let is_series = item
-                .repeat
-                .as_ref()
-                .map(|repeat| repeat.recurrence_id == recurrence_id)
-                .unwrap_or(false);
-            if is_series && !stamped {
-                if let Some(repeat) = item.repeat.as_mut() {
-                    repeat.active_run = Some(ActiveRun {
-                        owner_session: owner_session.to_string(),
-                        started_at: chrono::Utc::now(),
-                    });
-                }
-                stamped = true;
-            }
-        }
-        if stamped {
-            self.queue.save()?;
-        }
-        Ok(stamped)
     }
 
     pub fn state(&self) -> &AmbientState {

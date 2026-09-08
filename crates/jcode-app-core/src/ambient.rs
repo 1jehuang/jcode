@@ -149,17 +149,10 @@ pub struct RepeatSpec {
     pub max_iterations: Option<u32>,
 }
 
-/// A worker run currently holding this series' lease. Spawn-target only:
-/// session reminders are harmless on overlap and ambient cycles are
-/// single-instanced by AmbientLock.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveRun {
-    pub owner_session: String,
-    pub started_at: DateTime<Utc>,
-}
-
 /// Per-item recurrence bookkeeping. The `recurrence_id` is stable across all
 /// occurrences of one series, so a whole series can be cancelled at once.
+/// No overlap guard is needed: the ambient runner delivers serially, awaiting
+/// each spawn before the next item pops.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepeatState {
     pub every_minutes: u32,
@@ -167,8 +160,6 @@ pub struct RepeatState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u32>,
     pub recurrence_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_run: Option<ActiveRun>,
 }
 
 /// Persistent ambient state
