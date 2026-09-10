@@ -836,7 +836,7 @@ fn sponsors_is_default(sponsors: &SponsorsConfig) -> bool {
     sponsors.enabled && is_default_discovery_endpoint(&sponsors.endpoint)
 }
 
-/// Endpoints that only ever came from a shipped default, never a user choice.
+/// Endpoints used by shipped defaults. These may also be explicit user choices.
 fn is_default_discovery_endpoint(endpoint: &str) -> bool {
     matches!(
         endpoint.trim_end_matches('/'),

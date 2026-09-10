@@ -61,47 +61,9 @@ impl Config {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
         })?;
         config.display.apply_legacy_compat();
-        config.repair_frozen_sponsors_optout(&content);
+        // An explicit discovery opt-out is authoritative. Older saves wrote the
+        // default endpoint too, so table shape cannot establish user intent.
         Ok(Some(config))
-    }
-
-    /// Undo a machine-frozen partner-discovery opt-out.
-    ///
-    /// Discovery shipped opt-in (`enabled = false`), and because [`Self::save`]
-    /// serializes the whole struct, any config write during that window baked
-    /// the old default into the user's file. Those users keep discovery
-    /// permanently disabled even after the default flipped to opt-out, and
-    /// telemetry shows this is the single largest discovery blocker.
-    ///
-    /// A machine-written section is exactly `enabled` plus `endpoint` with a
-    /// known default endpoint. A hand-written opt-out (`enabled = false` alone,
-    /// or paired with a custom endpoint) is always respected. Repair happens in
-    /// memory only; the section then disappears on the next save because it
-    /// serializes back to the default.
-    pub(crate) fn repair_frozen_sponsors_optout(&mut self, raw: &str) {
-        if self.sponsors.enabled {
-            return;
-        }
-        let Ok(doc) = raw.parse::<toml::Value>() else {
-            return;
-        };
-        let Some(table) = doc.get("sponsors").and_then(toml::Value::as_table) else {
-            return;
-        };
-        let machine_written = table.len() == 2
-            && table.get("enabled").and_then(toml::Value::as_bool) == Some(false)
-            && table
-                .get("endpoint")
-                .and_then(toml::Value::as_str)
-                .is_some_and(super::is_default_discovery_endpoint);
-        if !machine_written {
-            return;
-        }
-        self.sponsors = SponsorsConfig::default();
-        crate::logging::info(
-            "config: restored integration discovery default (legacy opt-in value was frozen by an \
-             earlier config save)",
-        );
     }
 
     /// Save config to file

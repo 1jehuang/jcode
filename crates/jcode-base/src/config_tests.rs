@@ -1363,23 +1363,10 @@ fn migrate_idle_animation_off_noops_without_enabled_value() {
     restore_env_var("JCODE_HOME", prev_home);
 }
 
+/// Explicit opt-outs, including the shape written by older versions, must
+/// survive real config loads, saves, and unrelated preference updates.
 #[test]
-fn frozen_machine_written_sponsors_optout_is_repaired() {
-    let raw = "[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n";
-    let mut config: Config = toml::from_str(raw).expect("parse");
-    assert!(!config.sponsors.enabled);
-    config.repair_frozen_sponsors_optout(raw);
-    assert!(
-        config.sponsors.enabled,
-        "a whole-struct config save must not permanently disable discovery"
-    );
-}
-
-/// End-to-end: a real config file frozen by an old save must load with
-/// discovery enabled, and the next save must drop the section entirely so the
-/// freeze cannot recur.
-#[test]
-fn frozen_sponsors_optout_recovers_through_a_real_config_file() {
+fn sponsors_optout_survives_config_save_and_reload() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1387,60 +1374,49 @@ fn frozen_sponsors_optout_recovers_through_a_real_config_file() {
     Config::invalidate_cache();
 
     let path = Config::path().expect("config path");
-    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
-    std::fs::write(
-        &path,
-        "[display]\ncentered = false\n\n[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n",
-    )
-    .expect("write frozen config");
-
-    let loaded = Config::load();
-    assert!(
-        loaded.sponsors.enabled,
-        "loading a machine-frozen opt-out must restore the shipped default"
-    );
-
-    loaded.save().expect("save config");
-    let rewritten = std::fs::read_to_string(&path).expect("read config");
-    assert!(
-        !rewritten.contains("[sponsors]"),
-        "saving must not write the discovery section back: {rewritten}"
-    );
-    assert!(
-        Config::load().sponsors.enabled,
-        "discovery must stay enabled after a save/load round trip"
-    );
-
-    if let Some(prev) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-    Config::invalidate_cache();
-}
-
-#[test]
-fn legacy_endpoint_optout_is_also_repaired() {
-    let raw =
-        "[sponsors]\nenabled = false\nendpoint = \"https://api.solosystems.dev/v1/discovery\"\n";
-    let mut config: Config = toml::from_str(raw).expect("parse");
-    config.repair_frozen_sponsors_optout(raw);
-    assert!(config.sponsors.enabled);
-}
-
-#[test]
-fn hand_written_sponsors_optout_is_respected() {
-    for raw in [
-        "[sponsors]\nenabled = false\n",
-        "[sponsors]\nenabled = false\nendpoint = \"https://discovery.internal/v1\"\n",
+    for endpoint in [
+        None,
+        Some("https://api.jcode.sh/v1/discovery"),
+        Some("https://api.solosystems.dev/v1/discovery"),
+        Some("https://api.jcode.sh/v1/discovery/"),
+        Some("https://discovery.internal/v1"),
     ] {
-        let mut config: Config = toml::from_str(raw).expect("parse");
-        config.repair_frozen_sponsors_optout(raw);
-        assert!(
-            !config.sponsors.enabled,
-            "explicit user opt-out must survive: {raw}"
-        );
+        let mut raw = String::from("[sponsors]\nenabled = false\n");
+        if let Some(endpoint) = endpoint {
+            raw.push_str(&format!("endpoint = {endpoint:?}\n"));
+        }
+        std::fs::write(&path, &raw).expect("write opt-out");
+        let expected_endpoint = endpoint.unwrap_or("https://api.jcode.sh/v1/discovery");
+
+        for round in 0..3 {
+            let loaded = Config::load();
+            assert!(
+                !loaded.sponsors.enabled,
+                "explicit opt-out must survive load {round}: {raw}"
+            );
+            assert_eq!(loaded.sponsors.endpoint, expected_endpoint);
+            loaded.save().expect("save config");
+
+            // Exercise the strict read-modify-write path used by preferences too.
+            Config::set_default_model_only(Some("test-model")).expect("update preference");
+            let reloaded = Config::load_strict().expect("reload config");
+            assert!(
+                !reloaded.sponsors.enabled,
+                "opt-out lost on round {round}: {raw}"
+            );
+            assert_eq!(reloaded.sponsors.endpoint, expected_endpoint);
+            assert_eq!(
+                reloaded.provider.default_model.as_deref(),
+                Some("test-model")
+            );
+            let saved = std::fs::read_to_string(&path).expect("read saved config");
+            let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
+            assert_eq!(saved["sponsors"]["enabled"].as_bool(), Some(false));
+        }
     }
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }
 
 #[test]
