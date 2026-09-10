@@ -206,7 +206,13 @@ pub struct Agent {
     pending_alerts: Vec<String>,
     /// Transient reminder injected into provider requests for the current turn only.
     /// Not persisted to session history.
-    current_turn_system_reminder: Option<String>,
+    pub(crate) current_turn_system_reminder: Option<String>,
+    /// Highest context-pressure band already notified this session cycle (0 =
+    /// none, 1 = advisory, 2 = urgent). Resets when usage drops back below
+    /// the re-arm level (e.g. after compaction) so notices can fire again on
+    /// regrowth. Backs the deterministic budget notices: the session model
+    /// pages its own memory instead of needing a manager model.
+    last_pressure_band: u8,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -322,6 +328,7 @@ impl Agent {
             last_status_detail: None,
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
+            last_pressure_band: 0,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -728,7 +735,48 @@ impl Agent {
         Ok(())
     }
 
-    fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
+    /// Usage fraction at which the advisory pressure notice fires.
+    const PRESSURE_ADVISORY: f64 = 0.75;
+    /// Usage fraction at which the urgent pressure notice fires.
+    const PRESSURE_URGENT: f64 = 0.90;
+    /// Usage fraction below which notification bands re-arm (hysteresis, so a
+    /// turn hovering at a threshold notifies once, not every turn).
+    const PRESSURE_REARM: f64 = 0.70;
+
+    /// Decide whether a context-pressure notice fires this turn. Pure function
+    /// of current usage and the highest band already notified: returns the
+    /// band to notify (1 = advisory, 2 = urgent) or None. Bands only move
+    /// upward until usage drops below the re-arm level.
+    pub(crate) fn pressure_band_for_usage(usage: f64, last_band: u8) -> Option<u8> {
+        if usage >= Self::PRESSURE_URGENT && last_band < 2 {
+            Some(2)
+        } else if usage >= Self::PRESSURE_ADVISORY && last_band < 1 {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    /// Render the pressure notice for a band. Names only tools that exist
+    /// (`memory` with remember/recall/search), so the session model can act
+    /// immediately: bank durable facts now, recall on demand later.
+    fn pressure_notice(band: u8, usage_pct: f64, tokens: u64) -> String {
+        match band {
+            2 => format!(
+                "Context is {usage_pct:.0}% full (~{tokens} tokens) and compaction is near. \
+                 Bank anything the next session must know with the memory tool (remember) NOW — \
+                 after compaction only the summary survives. Recall (recall/search) on demand instead of keeping everything live.",
+            ),
+            _ => format!(
+                "Context is {usage_pct:.0}% full (~{tokens} tokens). Before continuing, consider \
+                 banking durable facts and decisions with the memory tool (remember) and recalling \
+                 (recall/search) only what is needed, so the coming compaction has less to summarize. \
+                 No action needed if the remaining work is short.",
+            ),
+        }
+    }
+
+    pub(crate) fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
             match compaction.try_write() {
@@ -761,6 +809,27 @@ impl Agent {
                         manager.messages_for_api_with(all_messages)
                     };
                     let event = manager.take_compaction_event();
+                    // Deterministic budget notice: when usage crosses a band
+                    // without compaction firing, tell the session model its
+                    // budget state so it pages its own memory via tools
+                    // (remember/recall) instead of needing a manager model.
+                    let usage = manager.context_usage_with(&messages) as f64;
+                    if usage < Self::PRESSURE_REARM {
+                        self.last_pressure_band = 0;
+                    } else if event.is_none() {
+                        if let Some(band) =
+                            Self::pressure_band_for_usage(usage, self.last_pressure_band)
+                        {
+                            self.last_pressure_band = band;
+                            let tokens = manager.effective_token_count_with(&messages) as u64;
+                            self.current_turn_system_reminder =
+                                Some(Self::pressure_notice(band, usage * 100.0, tokens));
+                            logging::info(&format!(
+                                "Context pressure band {band} notified ({:.0}% full)",
+                                usage * 100.0
+                            ));
+                        }
+                    }
                     if event.is_some() || discarded_oversized_native {
                         self.sync_session_compaction_state_from_manager(&manager);
                     }

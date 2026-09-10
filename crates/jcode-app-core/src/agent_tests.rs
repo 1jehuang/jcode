@@ -213,6 +213,78 @@ fn message_text(message: &Message) -> &str {
 }
 
 #[test]
+fn pressure_band_edges_fire_once_and_rearm() {
+    use crate::agent::Agent;
+    assert_eq!(Agent::pressure_band_for_usage(0.74, 0), None);
+    assert_eq!(Agent::pressure_band_for_usage(0.75, 0), Some(1));
+    assert_eq!(Agent::pressure_band_for_usage(0.89, 0), Some(1));
+    assert_eq!(Agent::pressure_band_for_usage(0.90, 0), Some(2));
+    assert_eq!(Agent::pressure_band_for_usage(0.80, 1), None);
+    assert_eq!(Agent::pressure_band_for_usage(0.95, 1), Some(2));
+    assert_eq!(Agent::pressure_band_for_usage(0.99, 2), None);
+    assert_eq!(Agent::pressure_band_for_usage(0.50, 0), None);
+}
+
+#[test]
+fn pressure_notice_fires_once_then_rearms_after_relief() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    // ~790 tokens against a 1000-token budget: advisory band.
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2600),
+            cache_control: None,
+        }],
+    );
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1000);
+    }
+    agent.messages_for_provider();
+    let first = agent
+        .current_turn_system_reminder
+        .clone()
+        .expect("advisory notice must fire");
+    assert!(first.contains("memory tool"), "got: {first}");
+    assert!(
+        first.contains("% full"),
+        "advisory band expected, got: {first}"
+    );
+    assert!(
+        !first.contains("NOW"),
+        "urgent band not expected, got: {first}"
+    );
+
+    // Same pressure, no duplicate: clear the consumed reminder and re-run.
+    agent.current_turn_system_reminder = None;
+    agent.messages_for_provider();
+    assert!(
+        agent.current_turn_system_reminder.is_none(),
+        "band must not re-fire while pressure holds"
+    );
+
+    // Relief re-arms: drop the budget pressure, then restore it.
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1_000_000);
+    }
+    agent.messages_for_provider();
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1000);
+    }
+    agent.messages_for_provider();
+    assert!(
+        agent.current_turn_system_reminder.is_some(),
+        "notice must fire again after relief and regrowth"
+    );
+}
+
+#[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);
