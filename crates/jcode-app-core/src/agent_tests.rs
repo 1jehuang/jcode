@@ -213,6 +213,137 @@ fn message_text(message: &Message) -> &str {
 }
 
 #[test]
+fn tool_result_clearing_is_off_by_default() {
+    let _guard = crate::storage::lock_test_env();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: "x".repeat(5000),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let out = Agent::apply_tool_result_clearing(messages.clone());
+    assert_eq!(format!("{out:?}"), format!("{messages:?}"));
+}
+
+#[test]
+fn tool_result_clearing_stubs_old_keeps_recent_and_pairing() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "2");
+    crate::config::Config::invalidate_cache();
+
+    let big_old = "o".repeat(5000);
+    let big_recent = "r".repeat(5000);
+    let tool_use = ContentBlock::ToolUse {
+        id: "call_old".to_string(),
+        name: "read".to_string(),
+        input: serde_json::json!({"path": "/x"}),
+        thought_signature: None,
+    };
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![tool_use],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_old".to_string(),
+                content: big_old,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "keep going".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_new".to_string(),
+                content: big_recent.clone(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let out = Agent::apply_tool_result_clearing(messages);
+    // Index 1 is older than the last 2: stubbed, but the id survives.
+    match &out[1].content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            assert_eq!(tool_use_id, "call_old");
+            assert!(
+                content.starts_with("[cleared by retention: was 5000 chars]"),
+                "got: {content}"
+            );
+        }
+        other => panic!("result block must survive, got: {other:?}"),
+    }
+    // ToolUse intent untouched.
+    assert!(matches!(out[0].content[0], ContentBlock::ToolUse { .. }));
+    // Recent result untouched.
+    match &out[3].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &big_recent),
+        other => panic!("recent result must survive, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn tool_result_clearing_keeps_small_results() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "0");
+    crate::config::Config::invalidate_cache();
+
+    let small = "ok".to_string();
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: small.clone(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let out = Agent::apply_tool_result_clearing(messages);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &small),
+        other => panic!("small result must survive, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);

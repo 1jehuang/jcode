@@ -728,6 +728,43 @@ impl Agent {
         Ok(())
     }
 
+    /// Results shorter than this are never stubbed: clearing them saves
+    /// nothing and only adds noise.
+    const TOOL_RESULT_CLEAR_MIN_CHARS: usize = 200;
+
+    /// Proactive tool-result clearing (Anthropic `clear_tool_uses` primitive,
+    /// deterministic edition). Stubs the content of tool results older than
+    /// the configured window, keeping ToolUse blocks and result IDs intact
+    /// so provider tool-pairing never breaks. Operates on the send view
+    /// only — the session file keeps the full history for later compaction.
+    /// Off when unconfigured: input returns unchanged.
+    pub(crate) fn apply_tool_result_clearing(messages: Vec<Message>) -> Vec<Message> {
+        let keep = match crate::config::config()
+            .compaction
+            .clear_tool_results_older_than
+        {
+            Some(keep) => keep,
+            None => return messages,
+        };
+        if messages.len() <= keep {
+            return messages;
+        }
+        let mut messages = messages;
+        let cutoff = messages.len() - keep;
+        for message in messages.iter_mut().take(cutoff) {
+            for block in message.content.iter_mut() {
+                if let ContentBlock::ToolResult { content, .. } = block
+                    && content.len() > Self::TOOL_RESULT_CLEAR_MIN_CHARS
+                    && !content.starts_with("[cleared by retention")
+                {
+                    let was = content.len();
+                    *content = format!("[cleared by retention: was {was} chars]");
+                }
+            }
+        }
+        messages
+    }
+
     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
         if self.provider.supports_compaction() || self.session.compaction.is_some() {
             let compaction = self.registry.compaction();
@@ -779,7 +816,7 @@ impl Agent {
                         user_count,
                         assistant_count,
                     ));
-                    return (messages, event);
+                    return (Self::apply_tool_result_clearing(messages), event);
                 }
                 Err(_) => {
                     logging::info("messages_for_provider: compaction lock failed, using session");
@@ -800,7 +837,7 @@ impl Agent {
             user_count,
             assistant_count,
         ));
-        (messages, None)
+        (Self::apply_tool_result_clearing(messages), None)
     }
 
     fn record_client_cache_request(&mut self, messages: &[Message]) {

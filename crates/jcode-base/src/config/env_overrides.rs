@@ -138,6 +138,13 @@ impl Config {
             self.tools.mcp_tools_token_threshold = parsed;
         }
 
+        // Compaction / retention
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN")
+            && let Ok(parsed) = v.trim().parse::<usize>()
+        {
+            self.compaction.clear_tool_results_older_than = Some(parsed);
+        }
+
         // ACP adapter
         if let Ok(v) = std::env::var("JCODE_ACP_PROFILE") {
             let trimmed = v.trim().to_ascii_lowercase();
