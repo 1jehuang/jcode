@@ -1,3 +1,4 @@
+use super::client_actions::{NotifySessionContext, handle_notify_session};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
@@ -134,6 +135,31 @@ pub(super) async fn handle_lightweight_control_request(
     });
 
     match request {
+        // Scheduled delivery opens a one-shot connection and names the target
+        // session explicitly. Reuse its live agent, not a new subscribed agent.
+        Request::NotifySession {
+            id,
+            session_id,
+            message,
+        } => {
+            handle_notify_session(
+                id,
+                session_id,
+                message,
+                NotifySessionContext {
+                    sessions,
+                    soft_interrupt_queues,
+                    client_connections,
+                    swarm_members,
+                    swarms_by_id,
+                    event_history,
+                    event_counter,
+                    swarm_event_tx,
+                    client_event_tx: &client_event_tx,
+                },
+            )
+            .await;
+        }
         Request::CommShare {
             id,
             session_id: req_session_id,
