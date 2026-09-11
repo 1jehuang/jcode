@@ -2776,6 +2776,7 @@ impl OpenRouterProvider {
 
 mod models_catalog_parse;
 mod ollama_context;
+mod opencode_go_responses;
 #[path = "openrouter_provider_impl.rs"]
 mod openrouter_provider_impl;
 #[path = "openrouter_sse_stream.rs"]
