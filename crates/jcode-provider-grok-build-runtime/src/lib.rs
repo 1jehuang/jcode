@@ -225,6 +225,7 @@ impl Provider for GrokBuildProvider {
                 api_method: "grok-build-acp".to_string(),
                 available: true,
                 detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
+                usage: None,
                 cheapness: None,
             })
             .collect()

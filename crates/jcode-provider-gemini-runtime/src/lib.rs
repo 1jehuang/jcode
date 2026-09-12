@@ -1060,6 +1060,7 @@ impl Provider for GeminiProvider {
                 api_method: "code-assist-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()

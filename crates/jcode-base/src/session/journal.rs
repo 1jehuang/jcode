@@ -15,6 +15,8 @@ pub(super) struct SessionJournalMeta {
     pub(super) updated_at: DateTime<Utc>,
     pub(super) compaction: Option<StoredCompactionState>,
     pub(super) provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) model_usage_turn_id: Option<String>,
     pub(super) provider_key: Option<String>,
     pub(super) model: Option<String>,
     #[serde(default)]

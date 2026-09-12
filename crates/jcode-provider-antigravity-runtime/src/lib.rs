@@ -822,6 +822,7 @@ impl Provider for AntigravityProvider {
                     api_method: "https".to_string(),
                     available: model.available,
                     detail: catalog_model_detail(&model),
+                    usage: None,
                     cheapness: None,
                 })
                 .collect();
@@ -835,6 +836,7 @@ impl Provider for AntigravityProvider {
                 api_method: "https".to_string(),
                 available: true,
                 detail: "fallback catalog".to_string(),
+                usage: None,
                 cheapness: None,
             })
             .collect()

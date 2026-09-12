@@ -23,6 +23,7 @@ mod swarm_metadata;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
+pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
 pub use swarm_metadata::{

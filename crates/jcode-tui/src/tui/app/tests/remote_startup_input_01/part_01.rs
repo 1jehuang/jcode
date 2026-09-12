@@ -692,6 +692,7 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
             api_method: "cursor".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         })
         .collect();
@@ -763,6 +764,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
@@ -771,6 +773,7 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 },
             ],
@@ -824,6 +827,7 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
                 api_method: "copilot".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             }],
         };
@@ -864,6 +868,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
         api_method: "openai-oauth".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     }];
     app.auth_catalog_refresh_pending = true;
@@ -887,6 +892,7 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
                 api_method: "anthropic-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             }],
         },
@@ -1141,6 +1147,7 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
                     api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 }],
             },

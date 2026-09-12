@@ -653,6 +653,7 @@ impl Provider for OpenRouterProvider {
                     api_method: api_method.clone(),
                     available: true,
                     detail: route_detail,
+                    usage: None,
                     cheapness: None,
                 }
             })

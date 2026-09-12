@@ -163,6 +163,7 @@ pub(super) fn picker_route_selection(
         api_method: route.api_method.clone(),
         available: route.available,
         detail: route.detail.clone(),
+        usage: None,
         cheapness: None,
     })
 }

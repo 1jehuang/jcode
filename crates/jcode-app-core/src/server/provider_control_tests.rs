@@ -196,6 +196,7 @@ impl Provider for AuthChangeMockProvider {
                 api_method: api_method.clone(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()
@@ -876,6 +877,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             api_method: "claude-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         ModelRoute {
@@ -884,6 +886,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             api_method: "openai-api-key".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         ModelRoute {
@@ -892,6 +895,7 @@ async fn onboarding_auth_refresh_prefers_global_gpt_5_6_route_over_fable() {
             api_method: "openai-api-key".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
     ]);

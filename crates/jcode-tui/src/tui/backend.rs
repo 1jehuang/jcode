@@ -396,6 +396,7 @@ impl RemoteConnection {
         // request fresh catalog data when needed.
         if std::env::var_os("JCODE_REMOTE_BOOTSTRAP_MODEL_CATALOG").is_some() {
             conn.send_request(Request::GetModelCatalog {
+                subscribe_usage_updates: true,
                 id: conn.next_request_id,
             })
             .await?;
@@ -459,7 +460,7 @@ impl RemoteConnection {
             Request::Subscribe { id, .. }
             | Request::GetHistory { id }
             | Request::ResumeSession { id, .. }
-            | Request::GetModelCatalog { id }
+            | Request::GetModelCatalog { id, .. }
             | Request::GetState { id } => Some(*id),
             _ => None,
         };
@@ -659,7 +660,7 @@ impl RemoteConnection {
     pub async fn request_model_catalog(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::GetModelCatalog { id }).await?;
+        self.send_request(Request::GetModelCatalog { id, subscribe_usage_updates: true }).await?;
         Ok(id)
     }
 

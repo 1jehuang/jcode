@@ -613,6 +613,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 5m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
         vec![ModelRoute {
@@ -621,6 +622,7 @@ fn test_summarize_model_catalog_refresh_ignores_display_only_age_suffix_changes(
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 6m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
     );
@@ -642,6 +644,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             api_method: "openrouter".to_string(),
             available: true,
             detail: "fast, 5m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
         vec![ModelRoute {
@@ -650,6 +653,7 @@ fn test_summarize_model_catalog_refresh_still_counts_meaningful_detail_changes()
             api_method: "openrouter".to_string(),
             available: true,
             detail: "cached, 6m ago".to_string(),
+            usage: None,
             cheapness: None,
         }],
     );

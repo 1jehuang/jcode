@@ -488,6 +488,7 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
         api_method: "openai-oauth".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     }
 }
@@ -499,6 +500,7 @@ fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
         api_method: "claude-oauth".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     }
 }
@@ -789,6 +791,7 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         claude_oauth_route("claude-opus-4-8"),

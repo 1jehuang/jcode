@@ -30,7 +30,57 @@ impl Agent {
     }
 
     pub fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
-        self.provider.model_routes()
+        let mut routes = self.provider.model_routes();
+        crate::model_usage::enrich_routes(&mut routes);
+        routes
+    }
+
+    pub(super) fn begin_model_usage_turn(&mut self, message_id: &str) {
+        self.session.model_usage_turn_id = Some(format!("{}:{}", self.session.id, message_id));
+    }
+
+    pub(super) fn model_usage_turn_id(&mut self) -> String {
+        if let Some(id) = &self.session.model_usage_turn_id {
+            return id.clone();
+        }
+        // Old sessions and direct loop callers have no durable anchor yet.
+        // Internal reminders and tool-result rows do not start a logical turn.
+        let message_id = self
+            .session
+            .visible_conversation_messages()
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.role == Role::User
+                    && message.content.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text, .. }
+                    if !text.trim().is_empty() && !text.starts_with("[System reminder:"))
+                            || matches!(block, ContentBlock::Image { .. })
+                    })
+            })
+            .map(|message| message.id.clone())
+            .unwrap_or_else(|| "initial".to_string());
+        self.begin_model_usage_turn(&message_id);
+        self.session.model_usage_turn_id.clone().unwrap()
+    }
+
+    pub(super) fn record_model_turn_usage(&self, turn_id: &str) {
+        if self.session.is_debug {
+            return;
+        }
+        let Some(mut route) = crate::model_usage::serving_route(
+            self.provider.as_ref(),
+            self.session.route_api_method.as_deref(),
+        ) else {
+            return;
+        };
+        match crate::model_usage::record_turn(turn_id, &route) {
+            Ok(usage) => {
+                route.usage = Some(usage);
+                Bus::global().publish(BusEvent::ModelUsageUpdated(route));
+            }
+            Err(error) => logging::warn(&format!("Could not record model turn usage: {error}")),
+        }
     }
 
     pub fn model_catalog_snapshot(&self) -> jcode_provider_core::ModelCatalogSnapshot {

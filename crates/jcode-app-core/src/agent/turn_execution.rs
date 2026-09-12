@@ -4,13 +4,16 @@ use crate::{terminal_eprintln as eprintln, terminal_println as println};
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.add_message(
+        let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -29,7 +32,7 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
-        self.add_message_with_display_role(
+        let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -37,6 +40,9 @@ impl Agent {
             }],
             display_role,
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -132,7 +138,11 @@ impl Agent {
             ));
         }
 
-        self.add_message_with_display_role(Role::User, blocks, display_role);
+        let starts_turn = blocks.len() > 1 || !user_message.trim().is_empty();
+        let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if starts_turn {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()
     }
 
