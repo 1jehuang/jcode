@@ -487,6 +487,139 @@ fn test_account_command_combines_claude_and_openai_accounts() {
     });
 }
 
+#[test]
+fn test_cursor_account_center_shows_pool_quota_and_active_state() {
+    with_temp_jcode_home(|| {
+        crate::auth::provider_pool::upsert_account(
+            "cursor",
+            crate::auth::provider_pool::ManagedProviderAccount {
+                id: "cursor-ui-id".to_string(),
+                label: "cursor-ui".to_string(),
+                access_token: "access".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + 60_000,
+                email: Some("cursor@example.com".to_string()),
+                project_id: None,
+            },
+        )
+        .unwrap();
+        crate::auth::provider_pool::record_account_quotas(
+            "cursor",
+            "cursor-ui",
+            &[
+                ("monthly".to_string(), Some(760), None),
+                ("auto".to_string(), Some(900), None),
+                ("api".to_string(), Some(980), None),
+            ],
+        );
+
+        let mut app = create_test_app();
+        app.input = "/account cursor".to_string();
+        app.submit_input();
+
+        let backend = ratatui::backend::TestBackend::new(160, 50);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .expect("account center draw should succeed");
+        let buffer = terminal.backend().buffer();
+        let mut rendered = String::new();
+        for y in buffer.area.y..buffer.area.y + buffer.area.height {
+            for x in buffer.area.x..buffer.area.x + buffer.area.width {
+                rendered.push_str(buffer[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            rendered.contains("Cursor"),
+            "missing Cursor account UI:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("active"),
+            "missing active Cursor state:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("monthly 24% used"),
+            "missing monthly quota:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("auto 10% used"),
+            "missing Auto quota:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("api 2% used"),
+            "missing API quota:\n{rendered}"
+        );
+    });
+}
+
+#[test]
+fn test_antigravity_account_center_shows_pool_quota_and_switches_accounts() {
+    with_temp_jcode_home(|| {
+        for (label, email) in [
+            ("antigravity-one", "one@example.com"),
+            ("antigravity-two", "two@example.com"),
+        ] {
+            crate::auth::provider_pool::upsert_account(
+                "antigravity",
+                crate::auth::provider_pool::ManagedProviderAccount {
+                    id: format!("{label}-id"),
+                    label: label.to_string(),
+                    access_token: "access".to_string(),
+                    refresh_token: "refresh".to_string(),
+                    expires_at: chrono::Utc::now().timestamp() + 60_000,
+                    email: Some(email.to_string()),
+                    project_id: Some("project".to_string()),
+                },
+            )
+            .unwrap();
+        }
+        crate::auth::provider_pool::set_active_account("antigravity", "antigravity-one").unwrap();
+        crate::auth::provider_pool::record_account_quotas(
+            "antigravity",
+            "antigravity-two",
+            &[("gemini-2.5-pro".to_string(), Some(425), None)],
+        );
+
+        let mut app = create_test_app();
+        app.input = "/account antigravity".to_string();
+        app.submit_input();
+
+        let backend = ratatui::backend::TestBackend::new(160, 50);
+        let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &app))
+            .expect("account center draw should succeed");
+        let text = buffer_to_text(&terminal);
+        assert!(
+            text.contains("Antigravity"),
+            "missing Antigravity UI:\n{text}"
+        );
+        assert!(
+            text.contains("gemini-2.5-pro 58% used"),
+            "missing quota:\n{text}"
+        );
+        assert!(
+            text.contains("Antigravity One"),
+            "missing first account:\n{text}"
+        );
+        assert!(
+            text.contains("Antigravity Two"),
+            "missing second account:\n{text}"
+        );
+
+        app.input = "/account antigravity switch antigravity-two".to_string();
+        app.submit_input();
+        assert_eq!(
+            crate::auth::provider_pool::active_account("antigravity")
+                .unwrap()
+                .map(|account| account.label),
+            Some("antigravity-two".to_string())
+        );
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn test_account_command_uses_fast_auth_snapshot_without_running_cursor_status() {

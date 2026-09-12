@@ -307,7 +307,7 @@ fn parse_account_command(trimmed: &str) -> Option<Result<AccountCommand, String>
                 AccountCommand::SetOpenAiCompatDefaultModel(normalize_clearish_value(value))
             }
             other => {
-                if matches!(provider.id, "claude" | "openai") {
+                if matches!(provider.id, "claude" | "openai" | "antigravity" | "cursor") {
                     return Some(Ok(AccountCommand::Switch {
                         provider_id: provider.id.to_string(),
                         label: other.to_string(),
@@ -401,6 +401,25 @@ pub(crate) fn execute_account_command_local(app: &mut App, command: AccountComma
         AccountCommand::Switch { provider_id, label } => match provider_id.as_str() {
             "claude" => app.switch_account(&label),
             "openai" => app.switch_openai_account(&label),
+            "antigravity" | "cursor" => {
+                match crate::auth::provider_pool::set_active_account(&provider_id, &label) {
+                    Ok(()) => {
+                        crate::auth::AuthStatus::invalidate_cache();
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "Switched to {} account {}.",
+                            provider_id, label
+                        )));
+                        app.set_status_notice(format!(
+                            "{} account: switched to {}",
+                            provider_id, label
+                        ));
+                    }
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Failed to switch {} account: {}",
+                        provider_id, error
+                    ))),
+                }
+            }
             _ => app.push_display_message(DisplayMessage::error(format!(
                 "Provider {} does not support account switching.",
                 provider_id

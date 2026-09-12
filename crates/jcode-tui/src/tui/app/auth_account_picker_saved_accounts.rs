@@ -268,6 +268,71 @@ impl App {
             ));
         }
     }
+
+    pub(super) fn append_managed_pool_account_picker_items(
+        &self,
+        items: &mut Vec<crate::tui::account_picker::AccountPickerItem>,
+        provider: crate::provider_catalog::LoginProviderDescriptor,
+    ) {
+        let accounts = crate::auth::provider_pool::list_accounts(provider.id).unwrap_or_default();
+        let active_label = crate::auth::provider_pool::active_account(provider.id)
+            .ok()
+            .flatten()
+            .map(|account| account.label);
+        let now = chrono::Utc::now().timestamp();
+
+        for account in &accounts {
+            let is_active = active_label.as_deref() == Some(account.label.as_str());
+            let status =
+                if crate::auth::provider_pool::account_on_cooldown(provider.id, &account.label) {
+                    "cooldown"
+                } else if account.expires_at > 0 && account.expires_at <= now {
+                    "expired"
+                } else {
+                    "ready"
+                };
+            let email = account
+                .email
+                .as_deref()
+                .map(mask_email)
+                .unwrap_or_else(|| "unknown".to_string());
+            let quota = managed_quota_summary(provider.id, &account.label);
+            let active_suffix = if is_active { " - active" } else { "" };
+            let label = account.label.clone();
+            let display_name = account_display_name(provider.display_name, &label, accounts.len());
+
+            items.push(crate::tui::account_picker::AccountPickerItem::action(
+                provider.id,
+                provider.display_name,
+                format!("Switch {display_name}"),
+                format!("{status} - {quota}{active_suffix} - {email}"),
+                crate::tui::account_picker::AccountPickerCommand::SubmitInput(format!(
+                    "/account {} switch {}",
+                    provider.id, label
+                )),
+            ));
+        }
+    }
+}
+
+fn managed_quota_summary(provider: &str, label: &str) -> String {
+    let snapshots = crate::auth::provider_pool::account_quota_snapshots(provider, label);
+    let mut parts = Vec::new();
+    for (name, snapshot) in snapshots.iter().take(3) {
+        let Some(remaining) = snapshot.remaining_fraction_milli else {
+            continue;
+        };
+        parts.push(format!(
+            "{} {:.0}% used",
+            name,
+            (1000_u16.saturating_sub(remaining) as f32) / 10.0
+        ));
+    }
+    if parts.is_empty() {
+        "quota unknown".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// Keep full usage out of compact list subtitles, which are intentionally truncated.
