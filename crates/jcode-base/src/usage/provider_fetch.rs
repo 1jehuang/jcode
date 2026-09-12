@@ -412,6 +412,24 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         }
     };
 
+    if let Some(account) = crate::auth::provider_pool::active_account("antigravity")
+        .ok()
+        .flatten()
+    {
+        let quotas = snapshot
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.clone(),
+                    model.remaining_fraction_milli,
+                    model.reset_time.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::auth::provider_pool::record_account_quotas("antigravity", &account.label, &quotas);
+    }
+
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
 
