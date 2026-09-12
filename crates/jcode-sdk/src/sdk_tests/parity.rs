@@ -38,6 +38,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("fork_session", "forkSession"),
     cap("detach_session", "detachSession"),
     cap("send_message", "sendMessage"),
+    cap("send_system_reminder", "sendSystemReminder"),
     cap("cancel", "cancel"),
     cap("soft_interrupt", "softInterrupt"),
     cap("soft_interrupt_with_images", "softInterruptWithImages"),

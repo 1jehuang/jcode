@@ -636,3 +636,21 @@ test("session recovery events are typed, buffered, and filtered by session", asy
     await server.close();
   }
 });
+
+test("sendSystemReminder writes hidden content without waiting for acceptance", async () => {
+  const requests: any[] = [];
+  const server = await startMockHarness({ onRequest(request) { requests.push(request); } });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    await client.sendSystemReminder("mine", "continue task");
+    await waitFor(() => requests.length === 1);
+    assert.equal(requests[0].req, "send_message");
+    assert.equal(requests[0].session_id, "mine");
+    assert.equal(requests[0].content, "");
+    assert.equal(requests[0].system_reminder, "continue task");
+    assert.notEqual(requests[0].no_reply, true);
+  } finally {
+    client.close();
+    await server.close();
+  }
+});
