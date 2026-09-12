@@ -2262,3 +2262,37 @@ fn list_and_attach_expose_swarm_ownership_without_nesting_forks() {
             .all(|s| s.parent_session_id.is_none() && s.swarm_status.is_none())
     );
 }
+
+#[test]
+fn history_image_boundaries_survive_loss_of_tool_data() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req": "get_history", "id": 4}));
+    let Outbound::Legacy(get) = &out[0] else {
+        panic!("expected legacy request")
+    };
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "history", "id": get["id"], "session_id": "s1",
+        "messages": [
+            {"role": "assistant", "content": "before"},
+            {"role": "tool", "content": "read image", "tool_data": {"id": "read-1", "name": "read"}},
+            {"role": "assistant", "content": "after"}
+        ],
+        "images": [{"media_type": "image/png", "data": "bytes", "label": null,
+            "source": {"kind": "tool_result", "tool_name": "read"},
+            "anchor": {"kind": "tool_call", "id": "read-1"}, "history_message_index": 2}]
+    }));
+    let ApiEvent::History {
+        messages, images, ..
+    } = &frames[0].event
+    else {
+        panic!("expected history")
+    };
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1].role, "tool");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0].history_message_index, Some(2));
+    assert_eq!(
+        messages[images[0].history_message_index.unwrap()].content,
+        "after"
+    );
+}

@@ -412,6 +412,7 @@ mod history_dedup_tests {
 
     fn image(data: &str) -> RenderedImage {
         RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: data.to_string(),
             label: None,

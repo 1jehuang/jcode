@@ -372,4 +372,34 @@ pub struct RenderedImage {
     pub source: RenderedImageSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<RenderedImageAnchor>,
+    /// Insert before this zero-based entry in the accompanying History.messages
+    /// array (including hidden/system/tool rows). Its length means append.
+    /// Set for restored tool images, whose tool-call row may not be exposed by
+    /// a client. Absent on live events and older servers. Preserve vector order
+    /// for multiple images at the same boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_message_index: Option<usize>,
+}
+
+#[cfg(test)]
+mod image_history_tests {
+    use super::*;
+
+    #[test]
+    fn image_history_boundary_is_optional_and_round_trips() {
+        let legacy = serde_json::json!({"media_type": "image/png", "data": "bytes", "label": null,
+            "source": {"kind": "tool_result", "tool_name": "read"}, "anchor": {"kind": "tool_call", "id": "read-1"}});
+        let mut image: RenderedImage = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(image.history_message_index, None);
+        assert_eq!(serde_json::to_value(&image).unwrap(), legacy);
+        for boundary in [0, 3] {
+            image.history_message_index = Some(boundary);
+            let encoded = serde_json::to_value(&image).unwrap();
+            assert_eq!(encoded["history_message_index"], boundary);
+            assert_eq!(
+                serde_json::from_value::<RenderedImage>(encoded).unwrap(),
+                image
+            );
+        }
+    }
 }

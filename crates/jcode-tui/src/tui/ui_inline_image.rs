@@ -1629,6 +1629,7 @@ mod tests {
         anchor: Option<crate::session::RenderedImageAnchor>,
     ) -> crate::session::RenderedImage {
         crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: TINY_PNG_B64.to_string(),
             label: Some("tiny.png".to_string()),
@@ -1670,6 +1671,7 @@ mod tests {
             .expect("encode fixture");
         let data = base64::engine::general_purpose::STANDARD.encode(png);
         let image = crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data,
             label: Some("hidden-fixture.png".to_string()),

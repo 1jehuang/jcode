@@ -56,6 +56,7 @@ pub(super) fn tool_output_side_pane_images(
         .images
         .iter()
         .map(|img| jcode_session_types::RenderedImage {
+            history_message_index: None,
             media_type: img.media_type.clone(),
             data: img.data.clone(),
             label: img
@@ -164,5 +165,32 @@ mod tests {
         );
         assert!(capped.contains("Tool output truncated by jcode"));
         assert!(capped.contains("tool `custom` produced"));
+    }
+}
+
+#[cfg(test)]
+mod image_anchor_tests {
+    use super::*;
+
+    #[test]
+    fn live_batch_images_anchor_to_parent_and_have_no_history_boundary() {
+        let output = ToolOutput::new("batch results")
+            .with_labeled_image("image/png", "one", "first.png")
+            .with_labeled_image("image/png", "two", "second.png");
+        let images =
+            tool_output_side_pane_images("parent-batch", "batch", &serde_json::json!({}), &output);
+        assert_eq!(images.len(), 2);
+        for image in &images {
+            assert_eq!(
+                image.anchor,
+                Some(jcode_session_types::RenderedImageAnchor::ToolCall {
+                    id: "parent-batch".into()
+                })
+            );
+            assert_eq!(image.history_message_index, None);
+        }
+        assert_eq!(images[0].data, "one");
+        assert_eq!(images[1].data, "two");
+        assert_eq!(images[0].label.as_deref(), Some("first.png"));
     }
 }

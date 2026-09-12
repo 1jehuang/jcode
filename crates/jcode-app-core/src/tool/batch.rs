@@ -324,6 +324,7 @@ impl Tool for BatchTool {
 
         // Format results
         let mut output = String::new();
+        let mut images = Vec::new();
         let mut success_count = 0;
         let mut error_count = 0;
         let mut failed_tools = Vec::new();
@@ -333,6 +334,10 @@ impl Tool for BatchTool {
             match result {
                 Ok(out) => {
                     success_count += 1;
+                    // Preserve attachments in subcall order, just like the text.
+                    // The agent emits them against the visible parent batch call
+                    // and persists them with its aggregate tool result.
+                    images.extend(out.images);
                     let max_per_tool = 50_000 / num_tools.max(1);
                     if out.output.len() > max_per_tool {
                         output.push_str(crate::util::truncate_str(&out.output, max_per_tool));
@@ -366,7 +371,9 @@ impl Tool for BatchTool {
             success_count, error_count
         ));
 
-        Ok(ToolOutput::new(output))
+        let mut result = ToolOutput::new(output);
+        result.images = images;
+        Ok(result)
     }
 }
 
