@@ -382,7 +382,13 @@ impl Provider for CursorCliProvider {
     }
 
     fn supports_compaction(&self) -> bool {
-        false
+        // No native server-side compaction exists for this provider, so jcode's
+        // own summary compaction is the only thing standing between a long
+        // session and a hard context-limit rejection. Returning `false` here
+        // disabled the entire compaction block in `Agent::messages_for_provider`
+        // — including the emergency hard-compact and payload truncation at the
+        // critical threshold — leaving these sessions with no safety net at all.
+        true
     }
 
     fn fork(&self) -> Arc<dyn Provider> {

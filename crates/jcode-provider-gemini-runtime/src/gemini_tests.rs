@@ -907,3 +907,22 @@ fn build_tools_keeps_required_when_the_object_declares_no_properties() {
     let parameters = &built[0].function_declarations[0].parameters;
     assert_eq!(parameters["required"], json!(["anything"]));
 }
+
+#[test]
+fn gemini_uses_jcode_compaction_so_long_sessions_have_a_safety_net() {
+    // Regression guard: `supports_compaction()` gates the ENTIRE compaction
+    // block in `Agent::messages_for_provider`, including the emergency
+    // hard-compact and payload truncation at the 95% critical threshold.
+    // Gemini has no native server-side compaction, so returning `false` here
+    // left long sessions to grow until the provider rejected the prompt.
+    let provider = GeminiProvider::new();
+    assert!(
+        provider.supports_compaction(),
+        "Gemini must opt into jcode compaction; it has no native fallback"
+    );
+    assert!(
+        provider.uses_jcode_compaction(),
+        "uses_jcode_compaction() inherits supports_compaction(); both must be true \
+         or the proactive/semantic modes and emergency recovery never run"
+    );
+}
