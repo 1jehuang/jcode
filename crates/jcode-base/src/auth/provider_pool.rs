@@ -337,6 +337,16 @@ pub fn clear_account_cooldown(provider: &str, label: &str) {
     persist_cooldown(provider, label, None);
 }
 
+/// Choose a durable account cooldown from an upstream error. Provider retry
+/// loops already honor bounded Retry-After hints; using the same hint here
+/// prevents failover from immediately retrying an account the server asked us
+/// to park. A short floor avoids hot-looping on a zero or near-zero hint.
+pub fn cooldown_for_error(error: &anyhow::Error, default: Duration) -> Duration {
+    jcode_provider_core::retry_after::retry_after_from_error(error)
+        .map(|hint| hint.max(Duration::from_secs(30)))
+        .unwrap_or(default)
+}
+
 pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result<String> {
     let mut file = read(provider)?;
     let id = account.id.clone();

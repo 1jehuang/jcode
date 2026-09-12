@@ -107,7 +107,7 @@ impl MultiProvider {
                         provider,
                         ActiveProvider::Antigravity | ActiveProvider::Cursor
                     ) {
-                        let cooldown = if summary.to_ascii_lowercase().contains("429")
+                        let default_cooldown = if summary.to_ascii_lowercase().contains("429")
                             || summary.to_ascii_lowercase().contains("rate limit")
                             || summary.to_ascii_lowercase().contains("quota")
                         {
@@ -115,6 +115,8 @@ impl MultiProvider {
                         } else {
                             std::time::Duration::from_secs(30)
                         };
+                        let cooldown =
+                            crate::auth::provider_pool::cooldown_for_error(&err, default_cooldown);
                         crate::auth::provider_pool::mark_account_cooldown(
                             Self::provider_key(provider),
                             alternative_label,

@@ -94,6 +94,10 @@ impl AntigravityProvider {
         let Some(original) = original else {
             return Err(first_error);
         };
+        let cooldown = jcode_base::auth::provider_pool::cooldown_for_error(
+            &first_error,
+            std::time::Duration::from_secs(300),
+        );
         let alternatives = jcode_base::auth::provider_pool::list_accounts("antigravity")
             .unwrap_or_default()
             .into_iter()
@@ -106,7 +110,7 @@ impl AntigravityProvider {
             jcode_base::auth::provider_pool::mark_account_cooldown(
                 "antigravity",
                 &original,
-                std::time::Duration::from_secs(300),
+                cooldown,
             );
             jcode_base::auth::provider_pool::set_runtime_active_override(
                 "antigravity",
@@ -144,7 +148,10 @@ impl AntigravityProvider {
                     jcode_base::auth::provider_pool::mark_account_cooldown(
                         "antigravity",
                         &account.label,
-                        std::time::Duration::from_secs(300),
+                        jcode_base::auth::provider_pool::cooldown_for_error(
+                            &error,
+                            std::time::Duration::from_secs(300),
+                        ),
                     );
                 }
             }
