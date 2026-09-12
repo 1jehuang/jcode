@@ -21,6 +21,14 @@ pub fn wrap_line(
         }
     });
 
+    // A gutter-only source line is intentional spacing inside a quote/code
+    // block, not an empty continuation produced by wrapping.
+    if let Some((_, prefix_width)) = &repeated_prefix
+        && line.width() <= *prefix_width
+    {
+        return vec![line];
+    }
+
     let seed_repeated_prefix =
         |current_spans: &mut Vec<Span<'static>>, current_width: &mut usize, pending: &mut bool| {
             if *pending {
