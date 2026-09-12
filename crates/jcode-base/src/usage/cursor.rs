@@ -76,6 +76,14 @@ impl Endpoint {
     }
 }
 
+fn endpoint_host_is_trusted(endpoint: Endpoint, url: &reqwest::Url) -> bool {
+    let trusted_host = match endpoint {
+        Endpoint::WebSummary => "cursor.com",
+        Endpoint::Dashboard | Endpoint::Summary | Endpoint::AuthUsage => "api2.cursor.sh",
+    };
+    url.scheme() == "https" && url.host_str() == Some(trusted_host)
+}
+
 fn finite_number(value: &Value) -> Option<f64> {
     let number = match value {
         Value::Number(number) => number.as_f64()?,
@@ -408,12 +416,7 @@ async fn endpoint_response(
 ) -> Result<(StatusCode, Vec<u8>), &'static str> {
     let url = endpoint.url();
     let parsed = reqwest::Url::parse(url).map_err(|_| "invalid Cursor endpoint")?;
-    if parsed.scheme() != "https"
-        || !matches!(parsed.host_str(), Some("api2.cursor.sh") if endpoint != Endpoint::WebSummary || parsed.host_str() == Some("api2.cursor.sh"))
-    {
-        return Err("invalid Cursor endpoint");
-    }
-    if endpoint == Endpoint::WebSummary && parsed.host_str() != Some("cursor.com") {
+    if !endpoint_host_is_trusted(endpoint, &parsed) {
         return Err("invalid Cursor endpoint");
     }
     let request = if endpoint.is_post() {
@@ -741,6 +744,15 @@ mod tests {
         assert_eq!(Endpoint::Dashboard.url(), DASHBOARD_URL);
         assert!(Endpoint::Dashboard.is_post());
         assert_eq!(Endpoint::WebSummary.url(), WEB_USAGE_URL);
+    }
+
+    #[test]
+    fn web_summary_endpoint_is_allowlisted_without_trusting_api2_as_web_host() {
+        let web = reqwest::Url::parse(Endpoint::WebSummary.url()).expect("web URL");
+        let api2 = reqwest::Url::parse(Endpoint::Dashboard.url()).expect("api2 URL");
+        assert!(endpoint_host_is_trusted(Endpoint::WebSummary, &web));
+        assert!(!endpoint_host_is_trusted(Endpoint::WebSummary, &api2));
+        assert!(endpoint_host_is_trusted(Endpoint::Dashboard, &api2));
     }
 
     #[test]
