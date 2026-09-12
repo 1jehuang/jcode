@@ -837,6 +837,32 @@ fn auth_doctor_subcommand_parses() {
 }
 
 #[test]
+fn auth_accounts_subcommand_parses_without_global_provider_collision() {
+    let args = Args::try_parse_from([
+        "jcode",
+        "auth",
+        "accounts",
+        "cursor",
+        "--switch",
+        "cursor-PV",
+        "--json",
+    ])
+    .unwrap();
+    match args.command {
+        Some(Command::Auth(AuthCommand::Accounts {
+            pool_provider,
+            switch,
+            json,
+        })) => {
+            assert_eq!(pool_provider, "cursor");
+            assert_eq!(switch.as_deref(), Some("cursor-PV"));
+            assert!(json);
+        }
+        other => panic!("unexpected command: {:?}", other),
+    }
+}
+
+#[test]
 fn provider_list_subcommand_parses() {
     let args = Args::try_parse_from(["jcode", "provider", "list", "--json"]).unwrap();
     match args.command {

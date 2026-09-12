@@ -1064,6 +1064,20 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List pooled provider accounts or persistently select one account
+    Accounts {
+        /// Provider to inspect: openai, cursor, antigravity, or all
+        #[arg(id = "pool_provider", default_value = "all", value_name = "PROVIDER")]
+        pool_provider: String,
+
+        /// Persistently select an account by its displayed label
+        #[arg(long, value_name = "LABEL")]
+        switch: Option<String>,
+
+        /// Emit JSON instead of plain text
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text

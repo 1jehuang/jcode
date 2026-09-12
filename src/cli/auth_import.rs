@@ -143,6 +143,106 @@ pub(crate) fn run_opencodex(json: bool) -> Result<()> {
     }
 }
 
+#[derive(serde::Serialize)]
+struct AccountView {
+    provider: &'static str,
+    id: String,
+    label: String,
+    active: bool,
+    on_cooldown: bool,
+    expires_at: i64,
+}
+
+pub(crate) fn run_accounts(provider: &str, switch: Option<&str>, json: bool) -> Result<()> {
+    let provider = provider.trim().to_ascii_lowercase();
+    let providers: Vec<&'static str> = match provider.as_str() {
+        "all" => vec!["openai", "cursor", "antigravity"],
+        "openai" | "cursor" | "antigravity" => vec![match provider.as_str() {
+            "openai" => "openai",
+            "cursor" => "cursor",
+            _ => "antigravity",
+        }],
+        _ => anyhow::bail!(
+            "Unsupported account-pool provider '{provider}'. Use openai, cursor, antigravity, or all."
+        ),
+    };
+    if switch.is_some() && providers.len() != 1 {
+        anyhow::bail!("--switch requires an explicit provider, not 'all'");
+    }
+
+    if let Some(label) = switch.map(str::trim).filter(|label| !label.is_empty()) {
+        match providers[0] {
+            "openai" => crate::auth::codex::set_active_account(label)?,
+            "cursor" | "antigravity" => {
+                crate::auth::provider_pool::set_active_account(providers[0], label)?
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let mut views = Vec::new();
+    for provider in providers {
+        match provider {
+            "openai" => {
+                let active = crate::auth::codex::active_account_label();
+                for account in crate::auth::codex::list_accounts().unwrap_or_default() {
+                    views.push(AccountView {
+                        provider,
+                        id: account
+                            .account_id
+                            .clone()
+                            .unwrap_or_else(|| account.label.clone()),
+                        label: account.label.clone(),
+                        active: active.as_deref() == Some(account.label.as_str()),
+                        on_cooldown: false,
+                        expires_at: account.expires_at.unwrap_or_default(),
+                    });
+                }
+            }
+            "cursor" | "antigravity" => {
+                let active = crate::auth::provider_pool::active_account(provider)?
+                    .map(|account| account.label);
+                for account in crate::auth::provider_pool::list_accounts(provider)? {
+                    views.push(AccountView {
+                        provider,
+                        id: account.id,
+                        label: account.label.clone(),
+                        active: active.as_deref() == Some(account.label.as_str()),
+                        on_cooldown: crate::auth::provider_pool::account_on_cooldown(
+                            provider,
+                            &account.label,
+                        ),
+                        expires_at: account.expires_at,
+                    });
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&views)?);
+    } else {
+        for account in &views {
+            println!(
+                "{}\t{}\t{}{}",
+                account.provider,
+                account.label,
+                if account.active {
+                    "active"
+                } else {
+                    "available"
+                },
+                if account.on_cooldown {
+                    " (cooldown)"
+                } else {
+                    ""
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

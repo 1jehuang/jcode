@@ -88,6 +88,13 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             Command::Auth(AuthCommand::ImportOpencodex { json }) => {
                 return super::auth_import::run_opencodex(*json);
             }
+            Command::Auth(AuthCommand::Accounts {
+                pool_provider,
+                switch,
+                json,
+            }) => {
+                return super::auth_import::run_accounts(pool_provider, switch.as_deref(), *json);
+            }
             _ => {}
         }
     }
@@ -386,7 +393,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             debug::run_debug_command(&command, &arg, session, socket, wait).await?;
         }
         Some(Command::Auth(subcmd)) => match subcmd {
-            AuthCommand::Import { .. } | AuthCommand::ImportOpencodex { .. } => {
+            AuthCommand::Import { .. }
+            | AuthCommand::ImportOpencodex { .. }
+            | AuthCommand::Accounts { .. } => {
                 unreachable!("auth import handled before bootstrap")
             }
             AuthCommand::Status { json } => commands::run_auth_status_command(json)?,
