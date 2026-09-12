@@ -332,14 +332,10 @@ impl RemoteConnection {
             _dummy_peer: None,
             session_id: None,
             client_instance_id: client_instance_id.map(str::to_string),
-            next_request_id: if super::is_ssh_remote() {
-                // A reattached turn carries the old connection's request id.
-                // Use a fresh namespace so its Done cannot collide with this
-                // connection's Subscribe/GetHistory acknowledgments.
-                (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62)
-            } else {
-                1
-            },
+            // A reattached turn carries the old connection's request id on
+            // local sockets as well as SSH. Keep its Done distinct from this
+            // connection's Subscribe/GetHistory acknowledgments.
+            next_request_id: (rand::random::<u64>() & ((1_u64 << 62) - 1)) | (1_u64 << 62),
             control_done_ids: Default::default(),
             tool_diff: RemoteDiffTracker::default(),
             read_buffer: Vec::new(),
@@ -459,25 +455,23 @@ impl RemoteConnection {
         request: Request,
         interrupt_trigger: Option<&str>,
     ) -> Result<()> {
-        if super::is_ssh_remote() {
-            let control_id = match &request {
-                Request::Subscribe { id, .. }
-                | Request::GetHistory { id }
-                | Request::ResumeSession { id, .. }
-                | Request::GetModelCatalog { id }
-                | Request::GetState { id } => Some(*id),
-                _ => None,
-            };
-            if let Some(id) = control_id {
-                let mut ids = self
-                    .control_done_ids
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if ids.len() >= 256 {
-                    ids.pop_front();
-                }
-                ids.push_back(id);
+        let control_id = match &request {
+            Request::Subscribe { id, .. }
+            | Request::GetHistory { id }
+            | Request::ResumeSession { id, .. }
+            | Request::GetModelCatalog { id }
+            | Request::GetState { id } => Some(*id),
+            _ => None,
+        };
+        if let Some(id) = control_id {
+            let mut ids = self
+                .control_done_ids
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if ids.len() >= 256 {
+                ids.pop_front();
             }
+            ids.push_back(id);
         }
         let json = serde_json::to_string(&request)? + "\n";
         let interrupt_log = self.interrupt_request_log_fields(&request, interrupt_trigger);
@@ -1520,6 +1514,39 @@ mod tests {
             elapsed
         );
         assert_eq!(remote.next_request_id, 2);
+    }
+
+    #[tokio::test]
+    async fn native_resume_filters_duplicate_control_done_but_preserves_turn_done() {
+        let mut remote = RemoteConnection::dummy();
+        let peer = remote.take_dummy_peer().unwrap();
+        let (reader, mut writer) = peer.into_split();
+        let mut reader = BufReader::new(reader);
+        remote.resume_session("running-session").await.unwrap();
+        let mut request = String::new();
+        reader.read_line(&mut request).await.unwrap();
+        let id = match serde_json::from_str::<Request>(&request).unwrap() {
+            Request::ResumeSession { id, .. } => id,
+            other => panic!("expected resume, got {other:?}"),
+        };
+        writer.write_all(format!(
+            "{{\"type\":\"done\",\"id\":{id}}}\n{{\"type\":\"done\",\"id\":{id}}}\n{{\"type\":\"text_delta\",\"text\":\"Still working\"}}\n{{\"type\":\"done\",\"id\":44}}\n"
+        ).as_bytes()).await.unwrap();
+        assert!(matches!(remote.next_event().await,
+            RemoteRead::Event(ServerEvent::TextDelta { text }) if text == "Still working"));
+        assert!(matches!(
+            remote.next_event().await,
+            RemoteRead::Event(ServerEvent::Done { id: 44 })
+        ));
+
+        // An ordinary Message's Done still completes normally on this client.
+        let message_id = remote.send_message("next turn".to_string()).await.unwrap();
+        writer
+            .write_all(format!("{{\"type\":\"done\",\"id\":{message_id}}}\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(matches!(remote.next_event().await,
+            RemoteRead::Event(ServerEvent::Done { id }) if id == message_id));
     }
 
     #[tokio::test]

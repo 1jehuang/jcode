@@ -597,6 +597,11 @@ impl Provider for DualMethodMockProvider {
         "claude-sonnet-4".to_string()
     }
 
+    fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+        jcode_provider_core::AuthRoute::parse(&self.api_method.lock().unwrap())
+            .map(|route| route.resolved_credential())
+    }
+
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
@@ -676,9 +681,7 @@ fn test_apply_fallback_offer_switches_route_and_resends() {
     with_temp_jcode_home(|| {
         let (mut app, applied) = create_dual_method_test_app();
 
-        app.handle_turn_error(
-            "Anthropic API error (401 Unauthorized): invalid x-api-key",
-        );
+        app.handle_turn_error("Anthropic API error (401 Unauthorized): invalid x-api-key");
         assert!(app.pending_fallback_offer.is_some());
 
         let consumed = app.apply_pending_fallback_offer();
@@ -698,5 +701,116 @@ fn test_apply_fallback_offer_no_offer_is_noop() {
     with_temp_jcode_home(|| {
         let (mut app, _applied) = create_dual_method_test_app();
         assert!(!app.apply_pending_fallback_offer());
+    });
+}
+
+#[test]
+fn test_fallback_uses_live_local_credential_over_stale_route() {
+    with_temp_jcode_home(|| {
+        let (mut app, _) = create_dual_method_test_app();
+        app.session.route_api_method = Some("claude-oauth".to_string());
+
+        assert_eq!(
+            app.current_route_api_method().as_deref(),
+            Some("claude-api")
+        );
+        assert!(app.offer_fallback_after_error("provider failed"));
+        assert_eq!(
+            app.pending_fallback_offer
+                .as_ref()
+                .unwrap()
+                .selection
+                .api_method,
+            "claude-oauth",
+            "the live API-key route must not be offered as its own fallback"
+        );
+    });
+}
+
+#[test]
+fn test_fallback_uses_remote_openai_credential_over_stale_route() {
+    with_temp_jcode_home(|| {
+        let (mut app, _) = create_dual_method_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_provider_model = Some("gpt-6-astra".to_string());
+        app.remote_model_options = ["openai-api", "openai-oauth"]
+            .into_iter()
+            .map(|method| crate::provider::ModelRoute {
+                model: "gpt-6-astra".to_string(),
+                provider: "OpenAI".to_string(),
+                api_method: method.to_string(),
+                available: true,
+                detail: String::new(),
+                cheapness: None,
+            })
+            .collect();
+
+        for (credential, active_method, alternative) in [
+            (
+                jcode_provider_core::ResolvedCredential::ApiKey,
+                "openai-api",
+                "openai-oauth",
+            ),
+            (
+                jcode_provider_core::ResolvedCredential::Oauth,
+                "openai-oauth",
+                "openai-api",
+            ),
+        ] {
+            app.remote_resolved_credential = Some(credential);
+            // Stale bookkeeping must not make the live route look like an alternative.
+            app.session.route_api_method = Some(alternative.to_string());
+            assert_eq!(
+                app.current_route_api_method().as_deref(),
+                Some(active_method)
+            );
+            assert!(app.offer_fallback_after_error("OpenAI request failed"));
+            assert_eq!(
+                app.pending_fallback_offer
+                    .as_ref()
+                    .unwrap()
+                    .selection
+                    .api_method,
+                alternative
+            );
+
+            // With no historical selection, the reported credential still lets
+            // us offer a genuine same-model alternative instead of excluding both.
+            app.session.route_api_method = None;
+            assert_eq!(
+                app.current_route_api_method().as_deref(),
+                Some(active_method)
+            );
+        }
+
+        app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
+        app.session.route_api_method = Some("openai-oauth".to_string());
+        app.remote_model_options
+            .retain(|route| route.api_method == "openai-api");
+        app.clear_pending_fallback_offer();
+        assert!(
+            !app.offer_fallback_after_error("OpenAI request failed"),
+            "no offer is valid when only the active API-key route exists"
+        );
+        assert!(app.pending_fallback_offer.is_none());
+    });
+}
+
+#[test]
+fn test_fallback_remote_without_credential_preserves_route_metadata() {
+    with_temp_jcode_home(|| {
+        let (mut app, _) = create_dual_method_test_app();
+        app.is_remote = true;
+        app.remote_provider_name = Some("OpenAI".to_string());
+        app.remote_resolved_credential = None;
+        app.session.route_api_method = Some("openai-api-key".to_string());
+        assert_eq!(
+            app.current_route_api_method().as_deref(),
+            Some("openai-api-key")
+        );
+
+        app.session.route_api_method = None;
+        assert_eq!(app.current_route_api_method(), None);
     });
 }

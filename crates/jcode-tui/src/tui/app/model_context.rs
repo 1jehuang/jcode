@@ -196,30 +196,32 @@ impl App {
     /// The api_method string of the route currently in use, used to exclude the
     /// failed route and to recognize same-model/different-method alternatives.
     pub(super) fn current_route_api_method(&self) -> Option<String> {
-        if self.is_remote {
-            return self.session.route_api_method.clone();
-        }
-        // Prefer the explicitly applied route api_method, then derive one from the
-        // active OAuth/API-key credential for the dual-auth providers.
-        if let Some(method) = self.session.route_api_method.clone() {
-            return Some(method);
-        }
-        let provider_name = self.provider.name().to_ascii_lowercase();
-        let credential = self.provider.active_resolved_credential();
-        match (provider_name.as_str(), credential) {
-            ("claude", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
+        // Session route metadata records a past selection, not necessarily the
+        // credential now in use (e.g. after /account or a remote route switch).
+        // Prefer the same authoritative credential that drives billing identity
+        // so we never offer the active route as its own fallback.
+        let provider =
+            jcode_provider_core::parse_provider_hint(&self.current_provider_label_for_fallback());
+        let credential = if self.is_remote {
+            self.remote_resolved_credential
+        } else {
+            self.provider.active_resolved_credential()
+        };
+        use jcode_provider_core::{ActiveProvider, ResolvedCredential};
+        match (provider, credential) {
+            (Some(ActiveProvider::Claude), Some(ResolvedCredential::Oauth)) => {
                 Some("claude-oauth".to_string())
             }
-            ("claude", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            (Some(ActiveProvider::Claude), Some(ResolvedCredential::ApiKey)) => {
                 Some("claude-api".to_string())
             }
-            ("openai", Some(jcode_provider_core::ResolvedCredential::Oauth)) => {
+            (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::Oauth)) => {
                 Some("openai-oauth".to_string())
             }
-            ("openai", Some(jcode_provider_core::ResolvedCredential::ApiKey)) => {
+            (Some(ActiveProvider::OpenAI), Some(ResolvedCredential::ApiKey)) => {
                 Some("openai-api".to_string())
             }
-            _ => None,
+            _ => self.session.route_api_method.clone(),
         }
     }
 
