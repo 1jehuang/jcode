@@ -45,6 +45,23 @@ irm https://jcode.sh/install.ps1 | iex
 Need Homebrew, source builds, provider setup, or want an agent to set it up for you?
 [Jump to detailed installation](#detailed-installation).
 
+### Updating
+
+Run `/update` in the TUI to download the latest stable release in the background
+and reload with your session preserved. From a terminal, use `jcode update`, then
+restart the client. Both commands use the same update policy, including for dev builds.
+
+Older or equal release versions are skipped. For a development build, Jcode also
+compares the running binary's Git commit with the release tag. Builds ahead of,
+identical to, or diverged from the release are preserved. If ancestry cannot be
+verified locally or through GitHub, the update stops rather than risking a downgrade.
+The displayed dev patch includes a commit-count offset, so it is not used as a
+release version comparison.
+
+This is the default `features.update_channel = "stable"` behavior. An explicit
+`"main"` channel still opts into source-branch updates. Use `/rebuild` or the
+self-dev build workflow to rebuild your own checkout.
+
 ---
 
 

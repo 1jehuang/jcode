@@ -20,7 +20,11 @@ callback whose state demonstrably differs from the remote pending state. It also
 sets a closed loopback HTTP proxy as defense in depth, not as packet-capture proof.
 
 Acceptance contract agreed with the TUI/CLI implementers:
-* /login shows 'SSH login: choose a provider' and remote provider choices.
+* /login shows the shared inline Login picker with remote provider status and
+  explicit local-import choices. Arrow keys/filter/Enter navigate, Esc cancels.
+* A genuinely empty remote HOME offers Yes/No import onboarding on each fresh
+  attach. Yes opens the import chooser only, default No opens the full catalog.
+  Canceling either path creates no credentials or pending OAuth state.
 * /login openai shows the exact real VM-generated URL. Its state/PKCE challenge
   match the VM pending file, whose verifier is never returned to this machine.
 * /login claude begins and cancels only. Legacy Claude puts its verifier in URL
@@ -390,6 +394,7 @@ class LoginPTY:
     """Real CLI in a real PTY. No application-event injection or model messages."""
 
     def __init__(self, config, env, cwd, session_id):
+        self.config = config
         self.socket_temp = tempfile.TemporaryDirectory(prefix="jlogin-", dir="/tmp")
         self.output = bytearray()
         self.ssh_children, self.sockets, self.answered = set(), set(), set()
@@ -451,21 +456,79 @@ class LoginPTY:
 
     def wait(self, marker, since=0, timeout=TIMEOUT):
         deadline = time.monotonic() + timeout
+        next_repaint = time.monotonic() + 1
         while time.monotonic() < deadline:
             self.pump()
             text = native.visible(self.output[since:])
             if marker in text:
                 return text
             require(self.process.poll() is None, "Login PTY exited before expected marker; raw output withheld")
+            if time.monotonic() >= next_repaint:
+                # The asynchronous action may finish after the first resize.
+                # Request another complete terminal frame rather than treating
+                # missing unchanged ANSI cells as a missing UI acknowledgement.
+                self.repaint()
+                next_repaint = time.monotonic() + 1
         raise AssertionError("Login PTY timed out waiting for " + marker.split("https://")[0] + "; raw output withheld")
 
     def command(self, command):
-        require(command in {"/login", "/login openai", "/login claude", "/login not-a-provider", "/cancel", "/quit"},
+        require(command in {"/login", "/login openai", "/login claude", "/login openai-api", "/login not-a-provider", "/cancel", "/quit"},
                 "Harness permits only non-inference login/quit commands")
         self.pump(0.2)
         mark = len(self.output)
         os.write(self.master, command.encode() + b"\r")
         return mark
+
+    def repaint(self):
+        """Request a real full frame before asserting labels after navigation.
+
+        ANSI stripping is not terminal emulation: differential draws can omit
+        unchanged cells and split visible labels in the captured byte stream.
+        A kernel-delivered resize redraws the actual TUI without injecting any
+        application state or exposing private terminal output.
+        """
+        for width in (599, 600):
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 60, width, 0, 0))
+            self.pump(0.3)
+
+    def choose_startup_import(self, accept=False):
+        """Respond only to the real empty-host offer, never to credential consent."""
+        host = self.config["HOST"]
+        self.wait(f"No logins are configured on {host}. Import a local login first?")
+        self.pump(0.2)
+        mark = len(self.output)
+        # Enter alone exercises default No. Yes opens a chooser, not a transfer.
+        os.write(self.master, b"yes\r" if accept else b"\r")
+        self.repaint()
+        self.wait(f"Login on {host}:", mark)
+        if accept:
+            self.wait("Import local OpenAI login", mark)
+            self.wait("Import local Claude login", mark)
+        else:
+            self.wait("Anthropic/Claude", mark)
+        return mark
+
+    def dismiss_startup_import(self):
+        self.choose_startup_import(False)
+        mark = self.command("/cancel")
+        self.wait("No authorization was started.", mark)
+
+    def check_catalog_choices(self):
+        # The full catalog exceeds the viewport. Filter rather than depending on
+        # fixed row positions or expecting offscreen providers in terminal output.
+        for query, labels in (
+            ("openai api", ("OpenAI API", "API key")),
+            ("copilot", ("GitHub Copilot", "device code")),
+            ("import local", ("Import local OpenAI login", "Import local Claude login")),
+        ):
+            mark = len(self.output)
+            os.write(self.master, b"\x1b[200~" + query.encode() + b"\x1b[201~")
+            self.pump(0.3)
+            self.repaint()
+            for label in labels:
+                self.wait(label, mark)
+            os.write(self.master, b"\x1b")  # Clear nonempty filter, keep picker open.
+            self.pump(0.2)
 
     def private_url(self, call, since=0):
         deadline = time.monotonic() + TIMEOUT
@@ -534,17 +597,37 @@ def run_acceptance(config):
                 bridge.send({"type": "message", "id": 103, "content": sentinel, "images": [], "no_reply": True})
                 bridge.until(lambda event: event.get("type") == "context_message_added" and event.get("id") == 103)
             needles = []
+            for accept in (True, False):
+                with LoginPTY(config, env, root, session_id) as tui:
+                    tui.wait(f"SSH {config['HOST']}")
+                    tui.wait(sentinel)
+                    tui.choose_startup_import(accept)
+                    if not accept:
+                        tui.check_catalog_choices()
+                    snapshot = inspect_remote(config)
+                    require(not snapshot["pending"] and not snapshot["credentials"]
+                            and not snapshot["calls"], "Startup choice started authentication or copied credentials")
+                    assert_local_clean(root)
+                    mark = tui.command("/cancel")
+                    tui.wait("No authorization was started.", mark)
+                    tui.quit()
+                print("PASS empty-host startup " + ("Yes opens import chooser" if accept else "default No opens catalog")
+                      + ": no credentials, OAuth, or model turns")
             with LoginPTY(config, env, root, session_id) as tui:
                 tui.wait(f"SSH {config['HOST']}")
                 tui.wait(sentinel)
+                tui.dismiss_startup_import()
                 mark = tui.command("/login")
-                text = tui.wait("SSH login: choose a provider", mark)
-                for provider in ("openai", "claude", "gemini", "antigravity", "google", "copilot"):
-                    if provider not in text.lower():
-                        tui.wait(provider, mark)
+                tui.wait(f"Login on {config['HOST']}:", mark)
+                tui.check_catalog_choices()
                 require(not inspect_remote(config)["pending"], "Bare /login started OAuth before provider choice")
                 mark = tui.command("/cancel")
                 tui.wait("No authorization was started.", mark)
+
+                mark = tui.command("/login openai-api")
+                tui.wait(f"OpenAI API setup on {config['HOST']}", mark)
+                tui.wait("no local credentials were accessed", mark)
+                require(not inspect_remote(config)["pending"], "Unsupported API route started OAuth")
 
                 mark = tui.command("/login openai")
                 tui.wait("https://auth.openai.com/", mark)
@@ -585,6 +668,7 @@ def run_acceptance(config):
             with LoginPTY(config, env, root, session_id) as tui:
                 tui.wait(f"SSH {config['HOST']}")
                 tui.wait(sentinel)
+                tui.dismiss_startup_import()
                 mark = tui.command("/login not-a-provider")
                 tui.wait("SSH login supports:", mark)
                 require(not inspect_remote(config, needles)["pending"], "Unsupported provider created pending state")
@@ -605,6 +689,7 @@ def run_acceptance(config):
             with LoginPTY(config, env, root, session_id) as tui:
                 tui.wait(f"SSH {config['HOST']}")
                 tui.wait(sentinel)
+                tui.dismiss_startup_import()
                 # Claude initiation is network-free, but its legacy URL carries
                 # its PKCE verifier in state. Keep that URL private and never
                 # send ANY completion input, synthetic or otherwise, for Claude.
@@ -678,13 +763,31 @@ def run_acceptance(config):
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_wait_repaints_until_an_async_marker_is_visible(self):
+        tui = object.__new__(LoginPTY)
+        tui.output, tui.pump = bytearray(), mock.Mock()
+        tui.process = mock.Mock()
+        tui.process.poll.return_value = None
+        repaints = []
+
+        def repaint():
+            repaints.append(True)
+            if len(repaints) == 2:
+                tui.output.extend(b"delayed picker ready")
+
+        tui.repaint = repaint
+        clock = iter(value / 4 for value in range(100))
+        with mock.patch.object(time, "monotonic", side_effect=lambda: next(clock)):
+            self.assertIn("delayed picker ready", tui.wait("delayed picker ready", timeout=10))
+        self.assertEqual(len(repaints), 2)
+
     def test_cancel_waits_are_unique_and_scenarios_use_fresh_ptys(self):
         import ast
         import inspect
         tree = ast.parse(inspect.getsource(run_acceptance))
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
         ptys = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "LoginPTY"]
-        self.assertEqual(len(ptys), 3)
+        self.assertEqual(len(ptys), 4)  # Startup loop plus three OAuth/error scenarios.
         waits = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == "wait"]
         self.assertEqual(sum(isinstance(node.args[0], ast.Name) and node.args[0].id == "CANCEL_COMPLETE"
                              for node in waits), 3)
@@ -692,6 +795,49 @@ class HarnessSelfTests(unittest.TestCase):
                              for node in waits))
         self.assertNotIn(CANCEL_COMPLETE, "SSH login cancelled. No authorization was started.")
         self.assertNotIn(CANCEL_COMPLETE, "SSH login cancelled locally, but remote cleanup could not be confirmed.")
+
+    def test_startup_choice_waits_for_offer_and_never_confirms_transfer(self):
+        for accept in (False, True):
+            tui = object.__new__(LoginPTY)
+            tui.master, tui.output = 123, bytearray()
+            tui.config = {"HOST": "test-remote"}
+            tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
+            with mock.patch("os.write") as write:
+                tui.choose_startup_import(accept)
+            write.assert_called_once_with(123, b"yes\r" if accept else b"\r")
+            self.assertEqual(tui.wait.call_args_list[0].args,
+                             ("No logins are configured on test-remote. Import a local login first?",))
+            self.assertEqual(tui.wait.call_args_list[1].args, ("Login on test-remote:", 0))
+            tui.wait.side_effect = AssertionError("No real startup offer")
+            with mock.patch("os.write") as write, self.assertRaises(AssertionError):
+                tui.choose_startup_import(accept)
+            write.assert_not_called()
+
+    def test_catalog_checks_filter_without_selecting_authentication(self):
+        tui = object.__new__(LoginPTY)
+        tui.master, tui.output = 123, bytearray()
+        tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
+        with mock.patch("os.write") as write:
+            tui.check_catalog_choices()
+        payloads = [call.args[1] for call in write.call_args_list]
+        self.assertEqual(payloads, [
+            b"\x1b[200~openai api\x1b[201~", b"\x1b",
+            b"\x1b[200~copilot\x1b[201~", b"\x1b",
+            b"\x1b[200~import local\x1b[201~", b"\x1b",
+        ])
+        self.assertNotIn(b"\r", b"".join(payloads))
+
+    def test_repaint_uses_kernel_resize_without_terminal_input(self):
+        tui = object.__new__(LoginPTY)
+        tui.master, tui.pump = 123, mock.Mock()
+        with mock.patch("fcntl.ioctl") as resize, mock.patch("os.write") as write:
+            tui.repaint()
+        self.assertEqual([call.args for call in resize.call_args_list], [
+            (123, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 599, 0, 0)),
+            (123, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 600, 0, 0)),
+        ])
+        self.assertEqual(tui.pump.call_count, 2)
+        write.assert_not_called()
 
     def exercise_wrapper(self, root, flags, payload=b"", result=None, provider="openai"):
         argv = ["remote-jcode", "login", "--provider", provider, "--flow-id", "test-flow", *flags]

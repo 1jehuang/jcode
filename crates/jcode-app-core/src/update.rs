@@ -17,6 +17,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+#[path = "update_dev_guard.rs"]
+mod update_dev_guard;
 #[path = "update_metadata.rs"]
 mod update_metadata;
 #[path = "update_rate_limit.rs"]
@@ -98,6 +100,33 @@ pub fn is_release_build() -> bool {
 
 fn current_update_semver() -> &'static str {
     jcode_build_meta::update_semver()
+}
+
+/// Dev display versions include a commit-count offset, not release precedence.
+/// Use the base version to reject older releases, then verify that installing
+/// a newer release would not discard commits from the running development build.
+fn release_is_update(release: &GitHubRelease) -> Result<bool> {
+    release_is_update_with(
+        &release.tag_name,
+        current_update_semver(),
+        is_release_build(),
+        || update_dev_guard::should_install_release(&release.tag_name),
+    )
+}
+
+fn release_is_update_with(
+    release: &str,
+    current: &str,
+    release_build: bool,
+    dev_guard: impl FnOnce() -> Result<bool>,
+) -> Result<bool> {
+    if !version_is_newer(release, current) {
+        return Ok(false);
+    }
+    if release_build {
+        return Ok(true);
+    }
+    dev_guard()
 }
 
 fn source_build_root() -> Result<PathBuf> {
@@ -323,16 +352,9 @@ fn install_main_source_update_blocking(latest_sha: &str) -> Result<PathBuf> {
 
 fn prepare_stable_update_blocking() -> Result<PreparedUpdate> {
     let current_version = jcode_build_meta::version();
-    let current_update_version = current_update_semver();
     let release = fetch_latest_release_blocking()?;
-    let release_version = release.tag_name.trim_start_matches('v');
 
-    if release_version == current_update_version.trim_start_matches('v')
-        || !version_is_newer(
-            release_version,
-            current_update_version.trim_start_matches('v'),
-        )
-    {
+    if !release_is_update(&release)? {
         return Ok(PreparedUpdate::None {
             current: current_version.to_string(),
         });
@@ -556,15 +578,9 @@ pub fn check_for_update_blocking() -> Result<Option<GitHubRelease>> {
 }
 
 fn check_for_stable_update_blocking() -> Result<Option<GitHubRelease>> {
-    let current_version = current_update_semver();
     let release = fetch_latest_release_blocking()?;
 
-    let release_version = release.tag_name.trim_start_matches('v');
-    if release_version == current_version.trim_start_matches('v') {
-        return Ok(None);
-    }
-
-    if version_is_newer(release_version, current_version.trim_start_matches('v')) {
+    if release_is_update(&release)? {
         let asset_name = get_asset_name();
         let has_asset = release
             .assets
@@ -638,9 +654,7 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
             .iter()
             .any(|a| a.name.starts_with(asset_name));
         if has_asset {
-            let release_version = release.tag_name.trim_start_matches('v');
-            let current_version = current_update_semver().trim_start_matches('v');
-            if version_is_newer(release_version, current_version) {
+            if release_is_update(&release)? {
                 return Ok(Some(release));
             }
         }
@@ -1292,6 +1306,48 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid SHA256 digest"));
+    }
+
+    #[test]
+    fn release_update_rejects_equal_or_older_versions_without_ancestry_probe() {
+        for release_build in [true, false] {
+            for release in ["v0.82.9", "v0.83.0"] {
+                assert!(
+                    !release_is_update_with(release, "0.83.0", release_build, || {
+                        panic!("older releases must not need a GitHub ancestry check")
+                    })
+                    .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn release_update_allows_newer_release_build_without_ancestry_probe() {
+        assert!(
+            release_is_update_with("v0.83.1", "0.83.0", true, || {
+                panic!("release builds must not need a GitHub ancestry check")
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn release_update_preserves_dev_commits_even_when_release_number_is_newer() {
+        assert!(!release_is_update_with("v0.84.0", "0.83.0", false, || Ok(false)).unwrap());
+    }
+
+    #[test]
+    fn release_update_allows_dev_build_behind_release() {
+        assert!(release_is_update_with("v0.83.1", "0.83.0", false, || Ok(true)).unwrap());
+    }
+
+    #[test]
+    fn release_update_fails_closed_when_dev_ancestry_cannot_be_verified() {
+        let result = release_is_update_with("v0.84.0", "0.83.0", false, || {
+            anyhow::bail!("Cannot verify development build ancestry")
+        });
+        assert!(result.unwrap_err().to_string().contains("Cannot verify"));
     }
 
     #[test]

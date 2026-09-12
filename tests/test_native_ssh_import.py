@@ -17,11 +17,15 @@ proxies block provider HTTP access (defense in depth, not packet-capture proof).
 System SSH config/keys/agent remain available for the explicitly selected host.
 
 Each provider gets its own isolated remote root with the OTHER provider seeded
-independently on the VM. Cancellation must invoke no import and leave all remote
+independently on the VM. Bare /login and /login --import-local use the real shared
+inline picker, exercising arrow and filter selection before canceling consent.
+Cancellation, including highlighting Yes then selecting No with arrows, must
+invoke no import and leave all remote
 credentials unchanged. Confirmation must invoke the actual ELF's `auth import
 --provider <id> --stdin --json`, write only the selected store with mode0600, and
 leave both local stores and the remote other-provider store byte-identical.
-Repeat confirmation must refuse without overwrite. Real `auth status --json`
+Typed yes performs the selected synthetic import. Legacy confirm is retained
+for the repeated attempt, which must refuse without overwrite. Real `auth status --json`
 must see the selected configuration. A safety wrapper validates synthetic stdin,
 then runs the real CLI, never a replacement auth service. Only hashes/booleans
 are audited. Full tokens must not appear in argv, PTY, logs, history, or output.
@@ -58,7 +62,7 @@ TOKEN_PREFIX = "JCODE_SYNTHETIC_IMPORT_"
 TOKEN_RE = re.compile(rb"JCODE_SYNTHETIC_IMPORT_[a-z]+_[0-9a-f]{32}")
 FILES = {"openai": "openai-auth.json", "claude": "auth.json"}
 EXPIRES = 4102444800000
-CONFIRM = "SSH credential import: {provider} to {host}"
+CONFIRM = "Import your local {provider} login to {host}?"
 SUCCESS = "SSH login: {provider} imported on the remote host."
 # Kept in sync with auth_remote's static, secret-free UX contract.
 CANCELLED = "SSH credential import cancelled"
@@ -330,12 +334,38 @@ class ImportPTY(login.LoginPTY):
                     "Synthetic token appeared in observed local/SSH argv")
 
     def command(self, command):
-        require(command in {"/login --import-local openai", "/login --import-local claude",
-                            "/cancel", "/quit", "confirm"},
+        require(command in {"/login", "/login --import-local",
+                            "/login --import-local openai", "/login --import-local claude",
+                            "/cancel", "/quit", "confirm", "yes"},
                 "Only import confirmation/cancel/quit input permitted")
         self.pump(0.2)
         mark = len(self.output)
         os.write(self.master, command.encode() + b"\r")
+        return mark
+
+    def choose_import(self, provider, imports_only=False):
+        """Actual terminal navigation, never injected picker/application events."""
+        require(provider in FILES, "Only synthetic import provider selection permitted")
+        mark = self.command("/login --import-local" if imports_only else "/login")
+        self.wait(f"Login on {self.config['HOST']}:", mark)
+        # Exact-name match ranks first. Fuzzy filters can reorder the catalog,
+        # so fixed arrow counts after filtering would select the wrong account.
+        label = "Import local " + ("OpenAI" if provider == "openai" else "Claude") + " login"
+        os.write(self.master, b"\x1b[200~" + label.encode() + b"\x1b[201~")
+        self.pump(0.3)
+        self.repaint()
+        self.wait(label, mark)
+        mark = len(self.output)
+        os.write(self.master, b"\r")
+        return mark
+
+    def decline_with_arrows(self):
+        """Prove highlighting Yes alone does nothing, then choose No with Enter."""
+        self.pump(0.2)
+        mark = len(self.output)
+        os.write(self.master, b"\x1b[A")  # Default No -> Yes, without confirming.
+        self.pump(0.2)
+        os.write(self.master, b"\x1b[B\r")  # Back to No, then cancel.
         return mark
 
     def quit(self):
@@ -384,25 +414,35 @@ def run_provider(config, provider, root, env, local_before, expected):
             bridge.send({"type": "message", "id": 103, "content": sentinel, "images": [], "no_reply": True})
             bridge.until(lambda event: event.get("type") == "context_message_added" and event.get("id") == 103)
         after_import = None
-        for action in ("cancel", "import", "repeat"):
+        for action in ("picker_cancel", "filtered_cancel", "arrow_cancel", "cancel", "import", "repeat"):
             print(f"CHECK {provider} {action}", flush=True)
             # Fresh TUI prevents an old success/error repaint satisfying this step.
             with ImportPTY(config, env, root, session_id) as tui:
                 tui.wait(f"SSH {config['HOST']}")
                 tui.wait(sentinel)
-                mark = tui.command("/login --import-local " + provider)
+                cancelling = action.endswith("cancel")
+                if action in ("picker_cancel", "filtered_cancel"):
+                    mark = tui.choose_import(provider, imports_only=action == "filtered_cancel")
+                else:
+                    mark = tui.command("/login --import-local " + provider)
                 tui.wait(CONFIRM.format(provider=provider, host=config["HOST"]), mark)
                 pending = remote_control(config, "inspect")
-                before_count = 0 if action in ("cancel", "import") else 1
+                before_count = 1 if action == "repeat" else 0
                 assert_snapshot(pending, provider, baseline, expected, action == "repeat", before_count)
-                mark = tui.command("/cancel" if action == "cancel" else "confirm")
-                marker = CANCELLED if action == "cancel" else (SUCCESS.format(provider=provider)
+                require(scan_files(root, local_before) == local_before, "Picker/consent changed local source stores")
+                require("-otter" not in native.visible(tui.output), "Picker exposed private account labels")
+                if action == "arrow_cancel":
+                    mark = tui.decline_with_arrows()
+                else:
+                    mark = tui.command("/cancel" if cancelling else
+                                       ("yes" if action == "import" else "confirm"))
+                marker = CANCELLED if cancelling else (SUCCESS.format(provider=provider)
                                                               if action == "import" else REFUSED)
                 tui.wait(marker, mark)
                 tui.quit()  # Checks real owned SSH children and native socket removal.
             snapshot = remote_control(config, "inspect")
-            assert_snapshot(snapshot, provider, baseline, expected, action != "cancel",
-                            {"cancel": 0, "import": 1, "repeat": 2}[action])
+            assert_snapshot(snapshot, provider, baseline, expected, not cancelling,
+                            0 if cancelling else (1 if action == "import" else 2))
             require(scan_files(root, local_before) == local_before, "Local source stores changed")
             if action == "import":
                 call = snapshot["calls"][-1]
@@ -588,6 +628,37 @@ class HarnessSelfTests(unittest.TestCase):
         for command in ("hello", "/login openai", "/login claude", "/login --import-local google"):
             with self.assertRaises(AssertionError):
                 tui.command(command)
+
+    def test_picker_navigation_uses_terminal_keys_and_never_confirms_copy(self):
+        for provider in FILES:
+            for imports_only in (False, True):
+                tui = object.__new__(ImportPTY)
+                tui.master, tui.output = 123, bytearray()
+                tui.config = {"HOST": "test-remote"}
+                tui.pump, tui.wait, tui.repaint = mock.Mock(), mock.Mock(), mock.Mock()
+                with mock.patch("os.write") as write:
+                    tui.choose_import(provider, imports_only)
+                expected = [b"/login --import-local\r" if imports_only else b"/login\r"]
+                label = "Import local " + ("OpenAI" if provider == "openai" else "Claude") + " login"
+                expected.append(b"\x1b[200~" + label.encode() + b"\x1b[201~")
+                expected.append(b"\r")
+                self.assertEqual([call.args for call in write.call_args_list],
+                                 [(123, value) for value in expected])
+                self.assertEqual(tui.wait.call_count, 2)
+                tui.repaint.assert_called_once_with()
+                self.assertNotIn(b"confirm", b"".join(expected))
+        tui = object.__new__(ImportPTY)
+        with mock.patch("os.write") as write, self.assertRaises(AssertionError):
+            tui.choose_import("google")
+        write.assert_not_called()
+
+    def test_arrow_decline_never_submits_highlighted_yes(self):
+        tui = object.__new__(ImportPTY)
+        tui.master, tui.output, tui.pump = 123, bytearray(), mock.Mock()
+        with mock.patch("os.write") as write:
+            tui.decline_with_arrows()
+        self.assertEqual([call.args for call in write.call_args_list],
+                         [(123, b"\x1b[A"), (123, b"\x1b[B\r")])
 
     def test_snapshot_detects_cancel_transfer_and_repeat_mutation(self):
         other = {"sha256": "other", "mode": 0o600, "tokens": ["other"]}
