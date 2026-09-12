@@ -188,7 +188,6 @@ struct PreviewCacheKey {
     /// drives the scrollbar decision (which can narrow the content one column).
     inner_width: u16,
     inner_height: u16,
-    centered: bool,
     diff_mode: crate::config::DiffDisplayMode,
     /// Normalized (trimmed + lowercased) active search query. Included so the
     /// wrapped-line cache is rebuilt (and match highlighting reapplied) whenever
@@ -1350,13 +1349,10 @@ impl SessionPicker {
             return;
         };
 
-        let centered = crate::config::config().display.centered;
         let diff_mode = crate::config::config().display.diff_mode;
-        let align = if centered {
-            Alignment::Center
-        } else {
-            Alignment::Left
-        };
+        // The narrow preview is always left-aligned, independently of the main
+        // chat's alignment preference.
+        let align = Alignment::Left;
 
         // Draw the bordered block first so we know the inner rect (which drives
         // wrapping width and the scrollbar decision) before building content.
@@ -1381,10 +1377,9 @@ impl SessionPicker {
         // changes, and idle redraws reuse the cached wrapped lines. This mirrors
         // the main chat viewport, whose prepared frame is cached the same way.
         let key = PreviewCacheKey {
-            content_hash: self.preview_content_hash(&session, centered, diff_mode),
+            content_hash: self.preview_content_hash(&session, diff_mode),
             inner_width: inner.width,
             inner_height: inner.height,
-            centered,
             diff_mode,
             search_query: self.search_query.trim().to_lowercase(),
         };
@@ -1393,7 +1388,12 @@ impl SessionPicker {
             .as_ref()
             .is_some_and(|cache| cache.key == key);
         if !cache_valid {
-            let rebuilt = self.build_preview_cache(&session, area, inner, key, align, diff_mode);
+            // Shared markdown renderers also center structured blocks via a
+            // thread-local setting. Scope it so lists/code/tools stay flush
+            // left here without changing the chat rendered behind the picker.
+            let rebuilt = markdown::with_center_code_blocks(false, || {
+                self.build_preview_cache(&session, area, inner, key, align, diff_mode)
+            });
             self.preview_cache = Some(rebuilt);
         }
         // Read cache geometry through a short-lived borrow so the scroll-offset
@@ -1498,7 +1498,6 @@ impl SessionPicker {
     fn preview_content_hash(
         &self,
         session: &SessionInfo,
-        centered: bool,
         diff_mode: crate::config::DiffDisplayMode,
     ) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -1533,7 +1532,6 @@ impl SessionPicker {
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == session.id);
         is_loading.hash(&mut h);
-        centered.hash(&mut h);
         diff_mode.hash(&mut h);
         for msg in &session.messages_preview {
             msg.role.hash(&mut h);
