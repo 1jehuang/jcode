@@ -757,3 +757,38 @@ fn model_switch_refusal_is_a_typed_error_not_a_success() {
     );
     assert!(error.message.contains("credential"));
 }
+
+#[test]
+fn recovery_events_are_delivered_and_filtered_by_session() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::Ping = frame.request {
+            reply(frame, ApiEvent::Pong, writer);
+            for session_id in ["other", "mine"] {
+                push(
+                    ApiEvent::SessionRecovery {
+                        session_id: session_id.into(),
+                        continuation_message: "continue task".into(),
+                        reconnect_notice: Some("reconnected".into()),
+                    },
+                    writer,
+                );
+            }
+        }
+    });
+    let stream = client.events(Some("mine"));
+    let all = client.events(None);
+    client.ping().expect("ping");
+    assert_eq!(
+        stream.next_timeout(Duration::from_secs(5)),
+        Some(ApiEvent::SessionRecovery {
+            session_id: "mine".into(),
+            continuation_message: "continue task".into(),
+            reconnect_notice: Some("reconnected".into()),
+        })
+    );
+    for expected in ["other", "mine"] {
+        assert!(
+            matches!(all.next_timeout(Duration::from_secs(5)), Some(ApiEvent::SessionRecovery {session_id, ..}) if session_id == expected)
+        );
+    }
+}

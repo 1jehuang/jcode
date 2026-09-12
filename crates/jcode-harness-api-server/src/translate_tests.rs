@@ -2403,3 +2403,158 @@ fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
     assert_eq!(stats.cache_creation_tokens, Some(8));
     assert_eq!(stats.duration_secs, None);
 }
+
+fn recovery_attach(state: &mut BridgeState, target: Option<&str>) -> (Value, Value) {
+    let request = match target {
+        Some(target) => json!({"req":"attach_session", "id":71, "session_id":target}),
+        None => json!({"req":"create_session", "id":71}),
+    };
+    let out = state.api_request_to_legacy(&request);
+    let Outbound::Legacy(subscribe) = &out[0] else {
+        panic!("subscribe")
+    };
+    let Outbound::Legacy(snapshot) = &out[1] else {
+        panic!("state")
+    };
+    (
+        json!({"type":"history", "id":subscribe["id"], "session_id":"recover",
+            "messages":[{"role":"user", "content":"finish task"}],
+            "activity":{"is_processing":false}, "was_interrupted":true,
+            "reload_recovery":{"continuation_message":"Continue the exact task", "reconnect_notice":"Recovered build"}}),
+        json!({"type":"state", "id":snapshot["id"], "session_id":"recover", "is_processing":false}),
+    )
+}
+
+#[test]
+fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
+    for history_first in [true, false] {
+        for target in [None, Some("recover")] {
+            let mut state = BridgeState::default();
+            let (history, snapshot) = recovery_attach(&mut state, target);
+            if !history_first {
+                let frames = state.legacy_event_to_api(&snapshot);
+                assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
+            }
+            let frames = state.legacy_event_to_api(&history);
+            assert_eq!(frames.len(), 1);
+            assert_eq!(
+                frames[0],
+                ServerFrame::event(ApiEvent::SessionRecovery {
+                    session_id: "recover".into(),
+                    continuation_message: "Continue the exact task".into(),
+                    reconnect_notice: Some("Recovered build".into()),
+                })
+            );
+            if history_first {
+                assert!(
+                    state.session_id.is_none(),
+                    "history must not establish attachment identity"
+                );
+                let frames = state.legacy_event_to_api(&snapshot);
+                assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
+            }
+            assert!(
+                state.legacy_event_to_api(&history).is_empty(),
+                "duplicate attach history"
+            );
+            let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":72}));
+            let Outbound::Legacy(refresh) = &out[0] else {
+                panic!("get_history")
+            };
+            let mut refreshed = history.clone();
+            refreshed["id"] = refresh["id"].clone();
+            let frames = state.legacy_event_to_api(&refreshed);
+            assert!(matches!(frames[0].event, ApiEvent::History { .. }));
+            assert!(
+                !frames
+                    .iter()
+                    .any(|f| matches!(f.event, ApiEvent::SessionRecovery { .. }))
+            );
+            // Each new attachment gets its own single opportunity.
+            let (history, _) = recovery_attach(&mut state, target);
+            assert_eq!(state.legacy_event_to_api(&history).len(), 1);
+        }
+    }
+}
+
+#[test]
+fn attachment_recovery_ignores_wrong_session_and_request_without_consuming_intent() {
+    let mut state = BridgeState::default();
+    state.session_id = Some("previous".into());
+    let (history, _) = recovery_attach(&mut state, Some("recover"));
+    let mut unrelated = history.clone();
+    unrelated["session_id"] = json!("other");
+    assert!(state.legacy_event_to_api(&unrelated).is_empty());
+    unrelated = history.clone();
+    unrelated["id"] = json!(u64::MAX);
+    assert!(state.legacy_event_to_api(&unrelated).is_empty());
+    let frames = state.legacy_event_to_api(&history);
+    assert!(
+        matches!(&frames[0].event, ApiEvent::SessionRecovery {session_id, ..} if session_id == "recover")
+    );
+}
+
+#[test]
+fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_once() {
+    for case in ["empty", "active", "completed", "blank"] {
+        let mut state = BridgeState::default();
+        let (mut history, _) = recovery_attach(&mut state, Some("recover"));
+        let recoverable = history.clone();
+        match case {
+            "empty" => history["messages"] = json!([]),
+            "active" => history["activity"]["is_processing"] = json!(true),
+            "completed" => {
+                history["was_interrupted"] = json!(false);
+                history["reload_recovery"] = Value::Null;
+            }
+            "blank" => history["reload_recovery"]["continuation_message"] = json!("  "),
+            _ => unreachable!(),
+        }
+        assert!(state.legacy_event_to_api(&history).is_empty(), "{case}");
+        assert!(
+            state.legacy_event_to_api(&recoverable).is_empty(),
+            "{case} duplicate"
+        );
+    }
+}
+
+#[test]
+fn attachment_recovery_supports_interrupted_legacy_history_and_server_directive_priority() {
+    for interrupted in [true, false] {
+        let mut state = BridgeState::default();
+        let (mut history, _) = recovery_attach(&mut state, Some("recover"));
+        history["was_interrupted"] = json!(interrupted);
+        if interrupted {
+            history["reload_recovery"] = Value::Null;
+        }
+        let frames = state.legacy_event_to_api(&history);
+        let ApiEvent::SessionRecovery {
+            continuation_message,
+            reconnect_notice,
+            ..
+        } = &frames[0].event
+        else {
+            panic!("recovery")
+        };
+        if interrupted {
+            assert_eq!(
+                continuation_message,
+                "Your session was interrupted by a server reload while a tool was running. The tool was aborted and results may be incomplete. Continue exactly where you left off and do not ask the user what to do next."
+            );
+            assert_eq!(reconnect_notice, &None);
+        } else {
+            assert_eq!(continuation_message, "Continue the exact task");
+            assert_eq!(reconnect_notice.as_deref(), Some("Recovered build"));
+        }
+    }
+}
+
+#[test]
+fn attachment_recovery_is_cleared_on_attach_failure() {
+    let mut state = BridgeState::default();
+    let (history, _) = recovery_attach(&mut state, Some("recover"));
+    let frames = state
+        .legacy_event_to_api(&json!({"type":"error", "id":history["id"], "message":"missing"}));
+    assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
+    assert!(state.legacy_event_to_api(&history).is_empty());
+}

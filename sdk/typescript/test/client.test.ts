@@ -606,3 +606,33 @@ test("globalEvents explicitly rejects custom transports", async () => {
     await server.close();
   }
 });
+
+test("session recovery events are typed, buffered, and filtered by session", async () => {
+  const server = await startMockHarness();
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  const stream = client.events("mine");
+  const all = client.events();
+  try {
+    for (const session_id of ["other", "mine"]) {
+      server.broadcast({ v: 1, ev: "session_recovery", session_id,
+        continuation_message: "continue task", reconnect_notice: "reconnected" });
+    }
+    const event = (await stream.next()).value;
+    assert.equal(event?.ev, "session_recovery");
+    if (event?.ev === "session_recovery") {
+      assert.equal(event.session_id, "mine");
+      assert.equal(event.continuation_message, "continue task");
+      assert.equal(event.reconnect_notice, "reconnected");
+    }
+    for (const expected of ["other", "mine"]) {
+      const event = (await all.next()).value;
+      assert.ok(event?.ev === "session_recovery");
+      assert.equal(event.session_id, expected);
+    }
+  } finally {
+    await stream.return();
+    await all.return();
+    client.close();
+    await server.close();
+  }
+});
