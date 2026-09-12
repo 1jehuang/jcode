@@ -347,7 +347,16 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    if auth::cursor::has_cursor_api_key() {
+    // Cursor's supported usage APIs are team/admin scoped. Still expose a
+    // report for native or managed personal auth so `/usage` does not hide a
+    // configured Cursor pool just because no supported personal quota reader
+    // exists. The fetcher labels that quota as unsupported rather than
+    // fabricating a zero or treating an internal endpoint as authoritative.
+    if auth::cursor::has_cursor_native_auth()
+        || !auth::provider_pool::list_accounts("cursor")
+            .unwrap_or_default()
+            .is_empty()
+    {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");

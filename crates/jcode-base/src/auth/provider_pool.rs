@@ -24,6 +24,15 @@ static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
 static ACCOUNT_LEASES: LazyLock<Mutex<HashMap<(String, String), (Instant, u64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ACCOUNT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+// Account refresh, import, and switching all use a read-modify-write cycle.
+// Keep those mutations serialized within the daemon so concurrent refreshes do
+// not overwrite an account imported or updated by another request.
+static ACCOUNT_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+// Quota and cooldown updates are performed by concurrent provider requests.
+// Serialize the read-modify-write cycle so one account's update cannot erase
+// another account's freshly recorded state. This is process-local by design,
+// matching the daemon-owned provider pool state boundary.
+static HEALTH_STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// A short-lived admission lease prevents concurrent failover attempts from
 /// stampeding the same alternate account. The lease is held by the returned
@@ -155,6 +164,9 @@ pub fn active_account(provider: &str) -> Result<Option<ManagedProviderAccount>> 
 }
 
 pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
+    let _guard = ACCOUNT_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut file = read(provider)?;
     crate::auth::account_store::set_active_account(
         label,
@@ -183,7 +195,7 @@ fn unix_now() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-fn read_health() -> PoolHealthFile {
+fn read_health_unlocked() -> PoolHealthFile {
     let Ok(path) = health_path() else {
         return PoolHealthFile::default();
     };
@@ -193,7 +205,7 @@ fn read_health() -> PoolHealthFile {
     crate::storage::read_json(&path).unwrap_or_default()
 }
 
-fn write_health(health: &PoolHealthFile) {
+fn write_health_unlocked(health: &PoolHealthFile) {
     let Ok(path) = health_path() else {
         return;
     };
@@ -206,6 +218,22 @@ fn write_health(health: &PoolHealthFile) {
     }
 }
 
+fn read_health() -> PoolHealthFile {
+    let Ok(_guard) = HEALTH_STATE_LOCK.lock() else {
+        return PoolHealthFile::default();
+    };
+    read_health_unlocked()
+}
+
+fn update_health(update: impl FnOnce(&mut PoolHealthFile)) {
+    let Ok(_guard) = HEALTH_STATE_LOCK.lock() else {
+        return;
+    };
+    let mut health = read_health_unlocked();
+    update(&mut health);
+    write_health_unlocked(&health);
+}
+
 fn persisted_cooldown_until(provider: &str, label: &str) -> Option<i64> {
     read_health()
         .cooldowns
@@ -214,20 +242,20 @@ fn persisted_cooldown_until(provider: &str, label: &str) -> Option<i64> {
 }
 
 fn persist_cooldown(provider: &str, label: &str, until: Option<i64>) {
-    let mut health = read_health();
-    let accounts = health.cooldowns.entry(provider.to_string()).or_default();
-    match until {
-        Some(until) => {
-            accounts.insert(label.to_string(), until);
-        }
-        None => {
-            accounts.remove(label);
-            if accounts.is_empty() {
-                health.cooldowns.remove(provider);
+    update_health(|health| {
+        let accounts = health.cooldowns.entry(provider.to_string()).or_default();
+        match until {
+            Some(until) => {
+                accounts.insert(label.to_string(), until);
+            }
+            None => {
+                accounts.remove(label);
+                if accounts.is_empty() {
+                    health.cooldowns.remove(provider);
+                }
             }
         }
-    }
-    write_health(&health);
+    });
 }
 
 /// Record model-scoped quota metadata without ever persisting credentials.
@@ -253,38 +281,38 @@ pub fn record_account_quotas(
     label: &str,
     quotas: &[(String, Option<u16>, Option<String>)],
 ) {
-    let mut health = read_health();
-    let models = health
-        .quotas
-        .entry(provider.to_string())
-        .or_default()
-        .entry(label.to_string())
-        .or_default();
-    let observed_at_unix_secs = unix_now();
-    for (model, remaining_fraction_milli, reset_time) in quotas {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if models.len() >= MAX_QUOTA_MODELS_PER_ACCOUNT && !models.contains_key(model) {
-            if let Some(oldest) = models
-                .iter()
-                .min_by_key(|(_, snapshot)| snapshot.observed_at_unix_secs)
-                .map(|(model, _)| model.clone())
-            {
-                models.remove(&oldest);
+    update_health(|health| {
+        let models = health
+            .quotas
+            .entry(provider.to_string())
+            .or_default()
+            .entry(label.to_string())
+            .or_default();
+        let observed_at_unix_secs = unix_now();
+        for (model, remaining_fraction_milli, reset_time) in quotas {
+            let model = model.trim();
+            if model.is_empty() {
+                continue;
             }
+            if models.len() >= MAX_QUOTA_MODELS_PER_ACCOUNT && !models.contains_key(model) {
+                if let Some(oldest) = models
+                    .iter()
+                    .min_by_key(|(_, snapshot)| snapshot.observed_at_unix_secs)
+                    .map(|(model, _)| model.clone())
+                {
+                    models.remove(&oldest);
+                }
+            }
+            models.insert(
+                model.to_string(),
+                AccountQuotaSnapshot {
+                    remaining_fraction_milli: *remaining_fraction_milli,
+                    reset_time: reset_time.clone(),
+                    observed_at_unix_secs,
+                },
+            );
         }
-        models.insert(
-            model.to_string(),
-            AccountQuotaSnapshot {
-                remaining_fraction_milli: *remaining_fraction_milli,
-                reset_time: reset_time.clone(),
-                observed_at_unix_secs,
-            },
-        );
-    }
-    write_health(&health);
+    });
 }
 
 /// Return the best recent remaining quota signal for an account. `None` means
@@ -387,6 +415,9 @@ pub fn cooldown_for_error(error: &anyhow::Error, default: Duration) -> Duration 
 }
 
 pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result<String> {
+    let _guard = ACCOUNT_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut file = read(provider)?;
     let id = account.id.clone();
     if let Some(existing) = file.accounts.iter_mut().find(|existing| existing.id == id) {
@@ -420,6 +451,9 @@ pub fn update_tokens_for_refresh(
     email: Option<String>,
     project_id: Option<String>,
 ) -> Result<bool> {
+    let _guard = ACCOUNT_STORE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut file = read(provider)?;
     let Some(account) = file
         .accounts
@@ -720,6 +754,91 @@ mod tests {
             ),
             None
         );
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn concurrent_health_updates_preserve_each_account_snapshot() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let workers = (0..12)
+            .map(|index| {
+                std::thread::spawn(move || {
+                    let label = format!("antigravity-concurrent-{index}");
+                    record_account_quota(
+                        "antigravity",
+                        &label,
+                        "gemini-3-flash",
+                        Some((index as u16 + 1) * 50),
+                        None,
+                    );
+                    label
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            let label = worker.join().expect("health update worker should finish");
+            assert!(
+                account_quota_score_for_model("antigravity", &label, "gemini-3-flash").is_some(),
+                "concurrent update for {label} was lost"
+            );
+        }
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn concurrent_account_upserts_preserve_each_account() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let workers = (0..12)
+            .map(|index| {
+                std::thread::spawn(move || {
+                    upsert_account(
+                        "cursor",
+                        ManagedProviderAccount {
+                            id: format!("cursor-id-{index}"),
+                            label: format!("cursor-imported-{index}"),
+                            access_token: format!("access-{index}"),
+                            refresh_token: format!("refresh-{index}"),
+                            expires_at: 1,
+                            email: None,
+                            project_id: None,
+                        },
+                    )
+                    .expect("account upsert should succeed");
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().expect("account upsert worker should finish");
+        }
+
+        let accounts = list_accounts("cursor").expect("list accounts");
+        assert_eq!(accounts.len(), 12);
+        for index in 0..12 {
+            assert!(
+                accounts
+                    .iter()
+                    .any(|account| account.id == format!("cursor-id-{index}")),
+                "concurrent account {index} was lost"
+            );
+        }
 
         match previous_home {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),
