@@ -1866,6 +1866,72 @@ fn test_preview_is_left_aligned_independently_of_chat_markdown_context() {
 }
 
 #[test]
+fn test_preview_structured_messages_stay_left_aligned() {
+    let todos = serde_json::json!([{
+        "id": "alignment", "content": "Verify structured preview alignment",
+        "status": "completed", "priority": "high", "confidence": "verified"
+    }]);
+    let mut session = make_session(
+        "structured_alignment",
+        "alignment",
+        false,
+        SessionStatus::Closed,
+    );
+    session.messages_preview[1].tool_calls = vec!["todo".to_string()];
+    for (role, content, tool) in [
+        ("tool", todos.to_string(), Some("todo")),
+        ("system", "🔍 Reviewing the weak points of this turn for you...".to_string(), None),
+        ("tool", "Command completed successfully (no output)".to_string(), Some("bash")),
+        ("background_task", "**Background task** `alignment-task` · `selfdev test` (`selfdev-test`) · ✓ completed · 18.5s · exit 0\n\n```text\nAll alignment checks passed\n```".to_string(), None),
+    ] {
+        session.messages_preview.push(PreviewMessage {
+            role: role.to_string(), content, tool_calls: Vec::new(), timestamp: None,
+            tool_data: tool.map(|name| crate::message::ToolCall {
+                id: format!("alignment-{name}"), name: name.to_string(),
+                input: serde_json::json!({"command": "echo alignment"}),
+                intent: Some("Check structured preview alignment".to_string()),
+                thought_signature: None,
+            }),
+        });
+    }
+    for width in [100, 200, 320] {
+        markdown::with_center_code_blocks(true, || {
+            let mut picker = SessionPicker::new(vec![session.clone()]);
+            picker.auto_scroll_preview = false;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 60)).unwrap();
+            terminal
+                .draw(|frame| picker.render_preview(frame, frame.area()))
+                .unwrap();
+            assert!(
+                markdown::center_code_blocks(),
+                "preview must restore chat context"
+            );
+            let cache = picker.preview_cache.as_ref().unwrap();
+            for needle in [
+                "tool:",
+                "Verify structured preview alignment",
+                "Reviewing the weak points",
+                "Check structured preview alignment",
+                "All alignment checks passed",
+            ] {
+                let line = cache
+                    .wrapped_lines
+                    .iter()
+                    .find(|line| line_text(line).contains(needle))
+                    .unwrap_or_else(|| panic!("missing {needle}"));
+                let text = line_text(line);
+                assert_eq!(line.alignment, Some(Alignment::Left), "{needle}: {line:?}");
+                assert!(
+                    text.chars().take_while(|c| *c == ' ').count() <= 4,
+                    "unwanted centering at width {width}: {text:?}"
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn test_preview_pane_shows_scrollbar_when_overflowing() {
     let session = make_session_with_many_turns("preview_scroll", 60);
     let mut picker = SessionPicker::new(vec![session]);
