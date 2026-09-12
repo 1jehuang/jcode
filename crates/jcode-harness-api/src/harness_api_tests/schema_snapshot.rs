@@ -447,3 +447,24 @@ fn snake_case(name: &str) -> String {
     }
     out
 }
+
+#[test]
+fn session_recovery_wire_shape_roundtrips_optional_notice() {
+    for reconnect_notice in [None, Some("reconnected".into())] {
+        let frame = ServerFrame::event(ApiEvent::SessionRecovery {
+            session_id: "s1".into(),
+            continuation_message: "continue task".into(),
+            reconnect_notice: reconnect_notice.clone(),
+        });
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["ev"], "session_recovery");
+        assert_eq!(wire["session_id"], "s1");
+        assert_eq!(wire["continuation_message"], "continue task");
+        assert_eq!(
+            wire.get("reconnect_notice").is_some(),
+            reconnect_notice.is_some()
+        );
+        assert!(wire.get("reply_to").is_none());
+        assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+    }
+}

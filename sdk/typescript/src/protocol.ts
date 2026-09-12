@@ -200,6 +200,8 @@ export type ApiEvent =
       tool_name: string;
       description: string;
     }
+  /** Attachment recovery intent. Can precede attached. Never auto-sent by the bridge. */
+  | { ev: "session_recovery"; session_id: string; continuation_message: string; reconnect_notice?: string }
   | { ev: "session_status"; session_id: string; status: string }
   | { ev: "connection_phase"; session_id: string; phase: string }
   | {
@@ -301,6 +303,7 @@ export const KNOWN_EVENT_KINDS = [
   "message_accepted",
   "permission_request",
   "session_status",
+  "session_recovery",
   "connection_phase",
   "model_info",
   "models",

@@ -155,6 +155,17 @@ pub enum ApiEvent {
         description: String,
     },
 
+    /// Recovery intent from attachment history, emitted at most once per attach.
+    /// May precede `Attached`. Subscribe to events before attaching. The client
+    /// decides whether to send the continuation; the bridge never sends it.
+    /// Ordinary history refreshes, empty histories, and active turns do not emit it.
+    SessionRecovery {
+        session_id: String,
+        continuation_message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconnect_notice: Option<String>,
+    },
+
     /// Session-level status change (idle, generating, tool_running, ...).
     SessionStatus { session_id: String, status: String },
 

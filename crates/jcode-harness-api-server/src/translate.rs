@@ -129,6 +129,10 @@ pub struct BridgeState {
     pending_attach_id: Option<(u64, u64, Option<String>)>,
     /// Subscribe errors can arrive before the correlated state response.
     pending_attach_subscribe_id: Option<u64>,
+    /// Subscribe history may arrive before or after the correlated state reply.
+    /// Keep its correlation independently, and consume even non-recovery history
+    /// so duplicates cannot later inject a continuation into a completed turn.
+    pending_recovery_history: Option<(u64, Option<String>)>,
     /// Legacy and API ids for an in-flight session fork.
     pending_fork_id: Option<(u64, u64)>,
     /// Legacy id of the unsolicited model-catalog probe sent after attach. Its
@@ -417,6 +421,7 @@ impl BridgeState {
                 let requested_session = (req == "attach_session")
                     .then(|| request["session_id"].as_str().map(str::to_string))
                     .flatten();
+                self.pending_recovery_history = Some((id, requested_session.clone()));
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_attach_subscribe_id = Some(id);
                 self.pending_model_probe = Some(catalog_id);
@@ -968,6 +973,37 @@ impl BridgeState {
         }
     }
 
+    fn attachment_recovery(event: &Value) -> Option<ServerFrame> {
+        if event["messages"].as_array().is_none_or(Vec::is_empty)
+            || event["activity"]["is_processing"].as_bool() == Some(true)
+        {
+            return None;
+        }
+        let directive = &event["reload_recovery"];
+        let (continuation_message, reconnect_notice) = if let Some(message) =
+            directive["continuation_message"].as_str()
+        {
+            (
+                message.to_string(),
+                directive["reconnect_notice"].as_str().map(str::to_string),
+            )
+        } else if event["was_interrupted"].as_bool() == Some(true) {
+            // Compatibility with daemons predating reload_recovery. Keep in
+            // sync with ReloadContext::interrupted_session_continuation_message.
+            ("Your session was interrupted by a server reload while a tool was running. The tool was aborted and results may be incomplete. Continue exactly where you left off and do not ask the user what to do next.".to_string(), None)
+        } else {
+            return None;
+        };
+        if continuation_message.trim().is_empty() {
+            return None;
+        }
+        Some(ServerFrame::event(ApiEvent::SessionRecovery {
+            session_id: event["session_id"].as_str()?.to_string(),
+            continuation_message,
+            reconnect_notice,
+        }))
+    }
+
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
@@ -1247,6 +1283,20 @@ impl BridgeState {
                 // which is the only place it appears: remember it so
                 // `list_sessions` can answer with more than this connection.
                 self.note_sessions(event);
+                if self
+                    .pending_recovery_history
+                    .as_ref()
+                    .is_some_and(|(subscribe_id, target)| {
+                        *subscribe_id == id
+                            && event["session_id"].as_str().is_some_and(|sid| {
+                                !sid.is_empty()
+                                    && target.as_deref().is_none_or(|target| target == sid)
+                            })
+                    })
+                {
+                    self.pending_recovery_history = None;
+                    return Self::attachment_recovery(event).into_iter().collect();
+                }
                 // The catalog probe rides the same `history` reply shape but
                 // carries no messages: it is model identity, not transcript.
                 if self.pending_model_probe == Some(id) {
@@ -1518,6 +1568,7 @@ impl BridgeState {
                     self.pending_attach_id = None;
                     self.pending_attach_subscribe_id = None;
                     self.pending_model_probe = None;
+                    self.pending_recovery_history = None;
                     return vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Error {
