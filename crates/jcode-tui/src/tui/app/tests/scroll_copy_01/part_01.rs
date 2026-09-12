@@ -326,6 +326,44 @@ fn render_and_snap(
 }
 
 #[test]
+fn test_blockquote_paragraph_border_is_continuous_in_terminal_cells() {
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_blockquote_copy_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.display_messages[1].content =
+        "Draft only:\n\n> Hello,\n>\n> A quoted paragraph.\n>\n> Thanks,\n> Someone\n\nOutside the quote."
+            .to_string();
+    app.bump_display_messages_version();
+    let screen = render_and_snap(&app, &mut terminal);
+    let rows: Vec<_> = screen.lines().collect();
+    let start = rows
+        .iter()
+        .position(|line| line.contains("│ Hello,"))
+        .unwrap();
+    let end = rows
+        .iter()
+        .position(|line| line.contains("│ Someone"))
+        .unwrap();
+    let gutter_x = rows[start].chars().position(|ch| ch == '│').unwrap();
+    assert_eq!(end - start, 5, "paragraph spacing changed:\n{screen}");
+    let buffer = terminal.backend().buffer();
+    for y in start..=end {
+        assert_eq!(
+            buffer[(gutter_x as u16, y as u16)].symbol(),
+            "│",
+            "gap on row {y}:\n{screen}"
+        );
+    }
+    assert_eq!(buffer[(gutter_x as u16, (start - 1) as u16)].symbol(), " ");
+    assert_eq!(buffer[(gutter_x as u16, (end + 1) as u16)].symbol(), " ");
+    eprintln!(
+        "Verified six continuous quote-border cells, including two paragraph separators:\n{}",
+        rows[start..=end].join("\n")
+    );
+}
+
+#[test]
 fn test_armed_new_session_mode_shows_input_hint_and_indicator() {
     let _lock = scroll_render_test_lock();
 
