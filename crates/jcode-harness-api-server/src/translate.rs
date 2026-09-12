@@ -489,6 +489,9 @@ impl BridgeState {
                 if no_reply {
                     message["no_reply"] = json!(true);
                 }
+                if let Some(reminder) = request["system_reminder"].as_str() {
+                    message["system_reminder"] = json!(reminder);
+                }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
                 {
