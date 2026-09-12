@@ -717,6 +717,26 @@ impl BridgeState {
                     self.runtime_info(),
                 ))]
             }
+            "notify_auth_changed" => {
+                let provider = request["provider"].as_str().unwrap_or_default();
+                if provider.is_empty()
+                    || provider.len() > 64
+                    || !provider
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "invalid auth provider identifier",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({
+                    "type": "notify_auth_changed", "id": id, "provider": provider
+                }))]
+            }
             "set_api_key" | "clear_api_key" => {
                 let provider = request["provider"].as_str().unwrap_or_default();
                 let Some((provider, env_keys, file_name)) = Self::credential_binding(provider)

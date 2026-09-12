@@ -3868,12 +3868,15 @@ name = "jcode-sdk"
 version = "0.1.0"
 dependencies = [
  "jcode-harness-api",
+ "jcode-provider-metadata",
  "jcode-transport",
  "jsonschema",
  "libc",
  "serde",
  "serde_json",
  "tempfile",
+ "url",
+ "uuid",
 ]
 
 [[package]]

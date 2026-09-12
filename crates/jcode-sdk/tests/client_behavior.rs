@@ -190,7 +190,8 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
         let event = match &frame.request {
             ApiRequest::ArchiveSession { .. }
             | ApiRequest::RestoreSession { .. }
-            | ApiRequest::SetRetentionPolicy { .. } => ApiEvent::Ok,
+            | ApiRequest::SetRetentionPolicy { .. }
+            | ApiRequest::NotifyAuthChanged { .. } => ApiEvent::Ok,
             ApiRequest::Ping => ApiEvent::Pong,
             ApiRequest::GetRuntimeInfo { .. } => ApiEvent::RuntimeInfo {
                 session_id: "s1".to_string(),
@@ -259,6 +260,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
 
     client.set_api_key("gemini-api", "secret").expect("set key");
     client.clear_api_key("jcode").expect("clear key");
+    client.notify_auth_changed("openai").expect("refresh OAuth");
 
     let content = client
         .read_file("s1", "src/a.rs", Some(5))
@@ -320,6 +322,9 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             },
             ApiRequest::ClearApiKey {
                 provider: "jcode".to_string(),
+            },
+            ApiRequest::NotifyAuthChanged {
+                provider: "openai".to_string(),
             },
             ApiRequest::ReadFile {
                 session_id: "s1".to_string(),

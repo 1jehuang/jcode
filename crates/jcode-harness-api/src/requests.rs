@@ -129,6 +129,10 @@ pub enum ApiRequest {
     /// Remove a previously persisted API-key credential.
     ClearApiKey { provider: String },
 
+    /// Reload provider credentials already saved outside the harness (e.g. OAuth).
+    /// No tokens or callback input travel in this request.
+    NotifyAuthChanged { provider: String },
+
     /// Read one UTF-8 file under the session working directory.
     ReadFile {
         session_id: String,

@@ -1671,6 +1671,34 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
 }
 
 #[test]
+fn notify_auth_changed_is_secret_free_and_acknowledged() {
+    let mut state = BridgeState::default();
+    let outbound = state.api_request_to_legacy(&json!({
+        "req": "notify_auth_changed", "id": 42, "provider": "openai"
+    }));
+    let [Outbound::Legacy(notify)] = outbound.as_slice() else {
+        panic!("expected one non-transcript control request");
+    };
+    assert_eq!(notify["type"], "notify_auth_changed");
+    assert_eq!(notify["provider"], "openai");
+    assert!(notify.get("content").is_none());
+    let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": notify["id"]}));
+    assert_eq!(frames[0].reply_to, Some(42));
+    assert!(matches!(frames[0].event, ApiEvent::Ok));
+    let event = only_reply_event(state.api_request_to_legacy(&json!({
+        "req": "notify_auth_changed", "id": 43, "provider": "invalid\nprivate-fixture-secret"
+    })));
+    assert!(matches!(
+        event,
+        ApiEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    assert!(!format!("{event:?}").contains("private-fixture-secret"));
+}
+
+#[test]
 fn credential_provisioning_normalizes_gemini_and_supports_jcode() {
     let home = ScopedJcodeHome::new("credentials");
     let config = home.path.join("config/jcode");

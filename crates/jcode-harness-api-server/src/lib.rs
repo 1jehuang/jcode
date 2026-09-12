@@ -281,6 +281,7 @@ where
                 "persisted_session_discovery",
                 "runtime_info",
                 "api_key_provisioning",
+                "auth_changed_notification",
                 "session_archive",
                 "session_retention",
                 "session_files",
