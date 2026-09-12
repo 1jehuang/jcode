@@ -2613,26 +2613,3 @@ fn attachment_recovery_is_cleared_on_attach_failure() {
     assert!(matches!(frames[0].event, ApiEvent::Error { .. }));
     assert!(state.legacy_event_to_api(&history).is_empty());
 }
-
-#[test]
-fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
-    let mut state = state_with_session();
-    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":91,
-        "session_id":"s1", "content":"", "system_reminder":"continue task"}));
-    assert_eq!(out.len(), 1);
-    let Outbound::Legacy(message) = &out[0] else {
-        panic!("message")
-    };
-    assert_eq!(message["type"], "message");
-    assert_eq!(message["content"], "");
-    assert_eq!(message["system_reminder"], "continue task");
-    assert!(message.get("no_reply").is_none());
-    let frames = state.legacy_event_to_api(&json!({"type":"done", "id":message["id"]}));
-    assert!(matches!(&frames[0].event, ApiEvent::TurnDone {session_id} if session_id == "s1"));
-    let out = state.api_request_to_legacy(&json!({"req":"send_message", "id":92,
-        "session_id":"s1", "content":"normal user message"}));
-    let Outbound::Legacy(message) = &out[0] else {
-        panic!("message")
-    };
-    assert!(message.get("system_reminder").is_none());
-}

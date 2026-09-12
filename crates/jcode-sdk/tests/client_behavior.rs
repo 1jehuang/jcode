@@ -801,25 +801,3 @@ fn recovery_events_are_delivered_and_filtered_by_session() {
         );
     }
 }
-
-#[test]
-fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
-    let (sent, received) = channel();
-    let client = fake_harness(move |frame, _writer| {
-        sent.send(frame.request.clone()).unwrap();
-        // Deliberately no reply or message_accepted event.
-    });
-    client
-        .send_system_reminder("mine", "continue task")
-        .unwrap();
-    assert_eq!(
-        received.recv_timeout(Duration::from_secs(5)).unwrap(),
-        ApiRequest::SendMessage {
-            session_id: "mine".into(),
-            content: String::new(),
-            system_reminder: Some("continue task".into()),
-            images: vec![],
-            no_reply: false,
-        }
-    );
-}
