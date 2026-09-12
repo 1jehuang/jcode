@@ -267,6 +267,26 @@ pub fn account_quota_score(provider: &str, label: &str) -> Option<u16> {
         })
 }
 
+/// Return the recent remaining quota signal for one model on an account.
+/// Callers should use this when selecting an account for a concrete request;
+/// the provider-wide score remains useful when no model is known yet.
+pub fn account_quota_score_for_model(provider: &str, label: &str, model: &str) -> Option<u16> {
+    let model = model.trim();
+    if model.is_empty() {
+        return account_quota_score(provider, label);
+    }
+    let now = unix_now();
+    read_health()
+        .quotas
+        .get(provider)
+        .and_then(|accounts| accounts.get(label))
+        .and_then(|models| models.get(model))
+        .filter(|snapshot| {
+            now.saturating_sub(snapshot.observed_at_unix_secs) <= QUOTA_SNAPSHOT_TTL_SECS
+        })
+        .and_then(|snapshot| snapshot.remaining_fraction_milli)
+}
+
 pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
     let key = (provider.to_string(), label.to_string());
     if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
@@ -604,6 +624,53 @@ mod tests {
         assert!(state.contains("reset"));
         assert!(!state.contains("access_token"));
         assert!(!state.contains("refresh_token"));
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn model_quota_score_does_not_use_another_model_as_a_proxy() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        record_account_quotas(
+            "antigravity",
+            "antigravity-model-scoped",
+            &[
+                ("gemini-3-pro".to_string(), Some(900), None),
+                ("gemini-3-flash".to_string(), Some(100), None),
+            ],
+        );
+
+        assert_eq!(
+            account_quota_score_for_model(
+                "antigravity",
+                "antigravity-model-scoped",
+                "gemini-3-pro",
+            ),
+            Some(900)
+        );
+        assert_eq!(
+            account_quota_score_for_model(
+                "antigravity",
+                "antigravity-model-scoped",
+                "gemini-3-flash",
+            ),
+            Some(100)
+        );
+        assert_eq!(
+            account_quota_score_for_model(
+                "antigravity",
+                "antigravity-model-scoped",
+                "unknown-model",
+            ),
+            None
+        );
 
         match previous_home {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),

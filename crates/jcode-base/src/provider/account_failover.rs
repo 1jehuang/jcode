@@ -54,7 +54,10 @@ pub(super) fn set_account_override_for_provider(provider: ActiveProvider, label:
     }
 }
 
-pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
+pub(super) fn same_provider_account_candidates(
+    provider: ActiveProvider,
+    model: Option<&str>,
+) -> Vec<String> {
     let current_label = active_account_label_for_provider(provider);
     let mut labels = Vec::new();
 
@@ -106,12 +109,12 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
             }
         }
         ActiveProvider::Antigravity => {
-            for label in managed_pool_candidates("antigravity") {
+            for label in managed_pool_candidates("antigravity", model) {
                 push_unique(label);
             }
         }
         ActiveProvider::Cursor => {
-            for label in managed_pool_candidates("cursor") {
+            for label in managed_pool_candidates("cursor", model) {
                 push_unique(label);
             }
         }
@@ -121,7 +124,13 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
     labels
 }
 
-fn managed_pool_candidates(provider: &str) -> Vec<String> {
+fn managed_pool_candidates(provider: &str, model: Option<&str>) -> Vec<String> {
+    let score_for = |label: &str| match model.map(str::trim) {
+        Some(model) if !model.is_empty() => {
+            crate::auth::provider_pool::account_quota_score_for_model(provider, label, model)
+        }
+        _ => crate::auth::provider_pool::account_quota_score(provider, label),
+    };
     let mut accounts = crate::auth::provider_pool::list_accounts(provider)
         .unwrap_or_default()
         .into_iter()
@@ -129,16 +138,11 @@ fn managed_pool_candidates(provider: &str) -> Vec<String> {
             !crate::auth::provider_pool::account_on_cooldown(provider, &account.label)
         })
         .collect::<Vec<_>>();
-    accounts.sort_by(|a, b| {
-        match (
-            crate::auth::provider_pool::account_quota_score(provider, &a.label),
-            crate::auth::provider_pool::account_quota_score(provider, &b.label),
-        ) {
-            (Some(a), Some(b)) => b.cmp(&a),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        }
+    accounts.sort_by(|a, b| match (score_for(&a.label), score_for(&b.label)) {
+        (Some(a), Some(b)) => b.cmp(&a),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
     });
     accounts.into_iter().map(|account| account.label).collect()
 }

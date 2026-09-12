@@ -20,7 +20,9 @@ impl MultiProvider {
             return Ok(None);
         };
 
-        let alternatives = same_provider_account_candidates(provider);
+        let model = self.model();
+        let alternatives =
+            account_failover::same_provider_account_candidates(provider, Some(&model));
         if alternatives.is_empty() {
             return Ok(None);
         }

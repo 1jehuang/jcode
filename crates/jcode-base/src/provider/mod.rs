@@ -34,8 +34,7 @@ use crate::auth;
 use crate::message::{Message, ToolDefinition};
 use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
-    same_provider_account_candidates, same_provider_account_failover_enabled,
-    set_account_override_for_provider,
+    same_provider_account_failover_enabled, set_account_override_for_provider,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -604,7 +603,7 @@ impl MultiProvider {
 
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
-        account_failover::same_provider_account_candidates(provider)
+        account_failover::same_provider_account_candidates(provider, None)
     }
 
     /// Return the best currently available same-provider account according to
@@ -612,7 +611,7 @@ impl MultiProvider {
     /// request is about to hit a known exhausted account, so normal requests
     /// preserve the user's selected account and session affinity.
     pub fn preferred_openai_account_label() -> Option<String> {
-        account_failover::same_provider_account_candidates(ActiveProvider::OpenAI)
+        account_failover::same_provider_account_candidates(ActiveProvider::OpenAI, None)
             .into_iter()
             .next()
     }
