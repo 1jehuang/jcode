@@ -10,6 +10,58 @@ fn catalog_error_is_auth_rejection(err: &anyhow::Error) -> bool {
         .is_some_and(|status| status.0 == 401 || status.0 == 403)
 }
 
+fn is_account_rotation_error(error: &anyhow::Error) -> bool {
+    let lower = format!("{error:#}").to_ascii_lowercase();
+    [
+        "401",
+        "403",
+        "429",
+        "unauthorized",
+        "authentication",
+        "invalid token",
+        "usage_limit",
+        "insufficient_quota",
+        "quota",
+        "rate limit",
+        "too many requests",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+const MAX_ACCOUNT_ROTATIONS: usize = 2;
+
+async fn try_rotate_openai_account(
+    credentials: &Arc<RwLock<CodexCredentials>>,
+    attempted_accounts: &mut HashSet<String>,
+) -> Option<String> {
+    let current = jcode_base::auth::codex::active_account_label()?;
+    let candidate = jcode_base::provider::MultiProvider::preferred_openai_account_label()?;
+    if candidate == current || !attempted_accounts.insert(candidate.clone()) {
+        return None;
+    }
+
+    jcode_base::auth::codex::set_active_account_override(Some(candidate.clone()));
+    let next = match jcode_base::auth::codex::load_oauth_credentials() {
+        Ok(next) => next,
+        Err(error) => {
+            jcode_base::auth::codex::set_active_account_override(Some(current));
+            jcode_base::logging::info(&format!(
+                "OpenAI stream account rotation could not load '{}': {}",
+                candidate, error
+            ));
+            return None;
+        }
+    };
+    *credentials.write().await = next;
+    jcode_base::provider::clear_all_model_unavailability_for_account();
+    jcode_base::logging::info(&format!(
+        "OpenAI stream account rotation switched account {} -> {}",
+        current, candidate
+    ));
+    Some(candidate)
+}
+
 #[async_trait]
 impl Provider for OpenAIProvider {
     fn reload_credentials(&self) {
@@ -346,259 +398,213 @@ impl Provider for OpenAIProvider {
 
                 // Normal path: fresh connection with full input (with retry logic)
                 let mut last_error = None;
-                let mut force_https_for_request = false;
-                let mut skip_backoff_once = false;
-                let mut next_retry_delay = None;
-
-                for attempt in 0..MAX_RETRIES {
-                    if attempt > 0 {
-                        emit_connection_phase(
-                            &tx,
-                            jcode_message_types::ConnectionPhase::Retrying {
-                                attempt: attempt + 1,
-                                max: MAX_RETRIES,
-                            },
-                        )
-                        .await;
+                let mut attempted_accounts = HashSet::new();
+                let mut account_saw_output = false;
+                'account_attempts: for account_attempt in 0..=MAX_ACCOUNT_ROTATIONS {
+                    if account_attempt > 0 {
+                        last_error = None;
                     }
-                    if attempt > 0 && !skip_backoff_once {
-                        let delay = jcode_provider_core::retry_after::retry_delay(
-                            attempt,
-                            RETRY_BASE_DELAY_MS,
-                            next_retry_delay.take(),
+                    let mut force_https_for_request = false;
+                    let mut skip_backoff_once = false;
+                    let mut next_retry_delay = None;
+
+                    for attempt in 0..MAX_RETRIES {
+                        if attempt > 0 {
+                            emit_connection_phase(
+                                &tx,
+                                jcode_message_types::ConnectionPhase::Retrying {
+                                    attempt: attempt + 1,
+                                    max: MAX_RETRIES,
+                                },
+                            )
+                            .await;
+                        }
+                        if attempt > 0 && !skip_backoff_once {
+                            let delay = jcode_provider_core::retry_after::retry_delay(
+                                attempt,
+                                RETRY_BASE_DELAY_MS,
+                                next_retry_delay.take(),
+                            );
+                            tokio::time::sleep(delay).await;
+                            jcode_base::logging::info(&format!(
+                                "Retrying OpenAI API request (attempt {}/{})",
+                                attempt + 1,
+                                MAX_RETRIES
+                            ));
+                        }
+                        skip_backoff_once = false;
+
+                        let transport = if force_https_for_request {
+                            OpenAITransport::HTTPS
+                        } else {
+                            match transport_mode {
+                                OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
+                                OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
+                                OpenAITransportMode::Auto => {
+                                    if !Self::should_prefer_websocket(&model_for_transport) {
+                                        OpenAITransport::HTTPS
+                                    } else if let Some(remaining) = websocket_cooldown_remaining(
+                                        &websocket_cooldowns,
+                                        &model_for_transport,
+                                    )
+                                    .await
+                                    {
+                                        jcode_base::logging::info(&format!(
+                                            "OpenAI websocket cooldown active for model='{}' ({}s remaining); using HTTPS",
+                                            model_for_transport,
+                                            remaining.as_secs()
+                                        ));
+                                        emit_status_detail(
+                                            &tx,
+                                            format!(
+                                                "https cooldown {}",
+                                                format_status_duration(remaining)
+                                            ),
+                                        )
+                                        .await;
+                                        OpenAITransport::HTTPS
+                                    } else {
+                                        OpenAITransport::WebSocket
+                                    }
+                                }
+                            }
+                        };
+
+                        let transport_label = transport.as_str();
+                        let attempt_started = Instant::now();
+                        log_openai_stream_lifecycle(
+                            jcode_base::logging::LogLevel::Info,
+                            "attempt_start",
+                            vec![
+                                ("model", model_for_transport.clone()),
+                                ("attempt", (attempt + 1).to_string()),
+                                ("max_attempts", MAX_RETRIES.to_string()),
+                                ("transport", transport_label.to_string()),
+                                ("transport_mode", transport_mode.as_str().to_string()),
+                                ("forced_https", force_https_for_request.to_string()),
+                            ],
                         );
-                        tokio::time::sleep(delay).await;
                         jcode_base::logging::info(&format!(
-                            "Retrying OpenAI API request (attempt {}/{})",
+                            "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
                             attempt + 1,
-                            MAX_RETRIES
+                            MAX_RETRIES,
+                            transport_label,
+                            model_for_transport,
+                            transport_mode.as_str()
                         ));
-                    }
-                    skip_backoff_once = false;
 
-                    let transport = if force_https_for_request {
-                        OpenAITransport::HTTPS
-                    } else {
-                        match transport_mode {
-                            OpenAITransportMode::HTTPS => OpenAITransport::HTTPS,
-                            OpenAITransportMode::WebSocket => OpenAITransport::WebSocket,
-                            OpenAITransportMode::Auto => {
-                                if !Self::should_prefer_websocket(&model_for_transport) {
-                                    OpenAITransport::HTTPS
+                        let use_websocket = matches!(transport, OpenAITransport::WebSocket);
+                        // Track whether this attempt streams replay-visible output
+                        // so a mid-stream transport fault can roll the partial
+                        // output back on the consumer before the retry (or HTTPS
+                        // fallback) replays the response from the top.
+                        let (attempt_tx, attempt_guard) =
+                            jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
+                        let result = if use_websocket {
+                            stream_response_websocket_persistent(
+                                Arc::clone(&credentials),
+                                request.clone(),
+                                attempt_tx,
+                                Arc::clone(&persistent_ws),
+                                input_item_count,
+                            )
+                            .await
+                        } else {
+                            // Retries use a fresh unpooled client: the fault that
+                            // broke attempt N (e.g. TLS BadRecordMac from a
+                            // corrupting middlebox) may also have poisoned other
+                            // idle pooled connections opened through the same
+                            // path, so reusing the shared pool can fail
+                            // identically. A fresh client guarantees a brand-new
+                            // TCP+TLS connection. (Websocket attempts always dial
+                            // a new connection already.)
+                            let attempt_client = if attempt == 0 {
+                                client.clone()
+                            } else {
+                                jcode_provider_core::fresh_transport_client()
+                            };
+                            stream_response(
+                                attempt_client,
+                                Arc::clone(&credentials),
+                                request.clone(),
+                                if force_https_for_request {
+                                    let reason = last_error
+                                        .as_ref()
+                                        .map(|error: &anyhow::Error| {
+                                            summarize_websocket_fallback_reason(&error.to_string())
+                                        })
+                                        .unwrap_or("websocket error");
+                                    format!("https fallback: {}", reason)
                                 } else if let Some(remaining) = websocket_cooldown_remaining(
                                     &websocket_cooldowns,
                                     &model_for_transport,
                                 )
                                 .await
                                 {
-                                    jcode_base::logging::info(&format!(
-                                        "OpenAI websocket cooldown active for model='{}' ({}s remaining); using HTTPS",
-                                        model_for_transport,
-                                        remaining.as_secs()
-                                    ));
-                                    emit_status_detail(
-                                        &tx,
-                                        format!(
-                                            "https cooldown {}",
-                                            format_status_duration(remaining)
-                                        ),
-                                    )
-                                    .await;
-                                    OpenAITransport::HTTPS
+                                    format!("https cooldown {}", format_status_duration(remaining))
                                 } else {
-                                    OpenAITransport::WebSocket
-                                }
-                            }
-                        }
-                    };
-
-                    let transport_label = transport.as_str();
-                    let attempt_started = Instant::now();
-                    log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Info,
-                        "attempt_start",
-                        vec![
-                            ("model", model_for_transport.clone()),
-                            ("attempt", (attempt + 1).to_string()),
-                            ("max_attempts", MAX_RETRIES.to_string()),
-                            ("transport", transport_label.to_string()),
-                            ("transport_mode", transport_mode.as_str().to_string()),
-                            ("forced_https", force_https_for_request.to_string()),
-                        ],
-                    );
-                    jcode_base::logging::info(&format!(
-                        "OpenAI stream attempt {}/{} using transport '{}'; model='{}'; mode='{}'",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        transport_label,
-                        model_for_transport,
-                        transport_mode.as_str()
-                    ));
-
-                    let use_websocket = matches!(transport, OpenAITransport::WebSocket);
-                    // Track whether this attempt streams replay-visible output
-                    // so a mid-stream transport fault can roll the partial
-                    // output back on the consumer before the retry (or HTTPS
-                    // fallback) replays the response from the top.
-                    let (attempt_tx, attempt_guard) =
-                        jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
-                    let result = if use_websocket {
-                        stream_response_websocket_persistent(
-                            Arc::clone(&credentials),
-                            request.clone(),
-                            attempt_tx,
-                            Arc::clone(&persistent_ws),
-                            input_item_count,
-                        )
-                        .await
-                    } else {
-                        // Retries use a fresh unpooled client: the fault that
-                        // broke attempt N (e.g. TLS BadRecordMac from a
-                        // corrupting middlebox) may also have poisoned other
-                        // idle pooled connections opened through the same
-                        // path, so reusing the shared pool can fail
-                        // identically. A fresh client guarantees a brand-new
-                        // TCP+TLS connection. (Websocket attempts always dial
-                        // a new connection already.)
-                        let attempt_client = if attempt == 0 {
-                            client.clone()
-                        } else {
-                            jcode_provider_core::fresh_transport_client()
-                        };
-                        stream_response(
-                            attempt_client,
-                            Arc::clone(&credentials),
-                            request.clone(),
-                            if force_https_for_request {
-                                let reason = last_error
-                                    .as_ref()
-                                    .map(|error: &anyhow::Error| {
-                                        summarize_websocket_fallback_reason(&error.to_string())
-                                    })
-                                    .unwrap_or("websocket error");
-                                format!("https fallback: {}", reason)
-                            } else if let Some(remaining) = websocket_cooldown_remaining(
-                                &websocket_cooldowns,
-                                &model_for_transport,
+                                    "https".to_string()
+                                },
+                                attempt_tx,
                             )
                             .await
-                            {
-                                format!("https cooldown {}", format_status_duration(remaining))
-                            } else {
-                                "https".to_string()
-                            },
-                            attempt_tx,
-                        )
-                        .await
-                    };
-                    let saw_output = attempt_guard.finish().await;
+                        };
+                        let saw_output = attempt_guard.finish().await;
+                        account_saw_output |= saw_output;
 
-                    match result {
-                        Ok(()) => {
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Info,
-                                "attempt_success",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    (
-                                        "elapsed_ms",
-                                        attempt_started.elapsed().as_millis().to_string(),
-                                    ),
-                                ],
-                            );
-                            if use_websocket {
-                                record_websocket_success(
-                                    &websocket_cooldowns,
-                                    &websocket_failure_streaks,
-                                    &model_for_transport,
-                                )
-                                .await;
-                            }
-                            return;
-                        }
-                        Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
-                            let elapsed_ms = attempt_started.elapsed().as_millis();
-                            let reason = summarize_websocket_fallback_reason(&error.to_string());
-                            let fallback_reason =
-                                classify_websocket_fallback_reason(&error.to_string());
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Warn,
-                                "fallback_to_https",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    ("reason", reason.to_string()),
-                                    ("fallback_reason", fallback_reason.summary().to_string()),
-                                    ("elapsed_ms", elapsed_ms.to_string()),
-                                ],
-                            );
-                            jcode_base::logging::warn(&format!(
-                                "WebSocket fallback after {}ms: {}",
-                                elapsed_ms, error
-                            ));
-                            emit_status_detail(&tx, format!("https fallback: {}", reason)).await;
-                            if saw_output {
-                                // Partial output already reached the consumer
-                                // before the websocket fault; roll it back so
-                                // the HTTPS replay renders cleanly instead of
-                                // duplicating.
-                                let _ = tx
-                                    .send(Ok(StreamEvent::RetryRollback {
-                                        attempt: attempt + 2,
-                                        max: MAX_RETRIES,
-                                    }))
+                        match result {
+                            Ok(()) => {
+                                log_openai_stream_lifecycle(
+                                    jcode_base::logging::LogLevel::Info,
+                                    "attempt_success",
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        (
+                                            "elapsed_ms",
+                                            attempt_started.elapsed().as_millis().to_string(),
+                                        ),
+                                    ],
+                                );
+                                if use_websocket {
+                                    record_websocket_success(
+                                        &websocket_cooldowns,
+                                        &websocket_failure_streaks,
+                                        &model_for_transport,
+                                    )
                                     .await;
+                                }
+                                return;
                             }
-                            force_https_for_request = true;
-                            skip_backoff_once = true;
-                            if matches!(transport_mode, OpenAITransportMode::Auto) {
-                                let (streak, cooldown) = record_websocket_fallback(
-                                    &websocket_cooldowns,
-                                    &websocket_failure_streaks,
-                                    &model_for_transport,
-                                    fallback_reason,
-                                )
-                                .await;
+                            Err(OpenAIStreamFailure::FallbackToHttps(error)) => {
+                                let elapsed_ms = attempt_started.elapsed().as_millis();
+                                let reason =
+                                    summarize_websocket_fallback_reason(&error.to_string());
+                                let fallback_reason =
+                                    classify_websocket_fallback_reason(&error.to_string());
+                                log_openai_stream_lifecycle(
+                                    jcode_base::logging::LogLevel::Warn,
+                                    "fallback_to_https",
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                        ("transport", transport_label.to_string()),
+                                        ("reason", reason.to_string()),
+                                        ("fallback_reason", fallback_reason.summary().to_string()),
+                                        ("elapsed_ms", elapsed_ms.to_string()),
+                                    ],
+                                );
                                 jcode_base::logging::warn(&format!(
-                                    "OpenAI websocket backoff for model='{}': reason='{}' streak={} cooldown={}s",
-                                    model_for_transport,
-                                    fallback_reason.summary(),
-                                    streak,
-                                    cooldown.as_secs()
+                                    "WebSocket fallback after {}ms: {}",
+                                    elapsed_ms, error
                                 ));
-                            }
-                            // Clear persistent state on fallback
-                            {
-                                let mut guard = persistent_ws.lock().await;
-                                *guard = None;
-                            }
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Warn,
-                                "persistent_state_reset",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("reason", "fallback_to_https".to_string()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                ],
-                            );
-                            last_error = Some(error);
-                            continue;
-                        }
-                        Err(OpenAIStreamFailure::Other(error)) => {
-                            let elapsed_ms = attempt_started.elapsed().as_millis();
-                            // Full anyhow chain ({:#}) so a send-level transport
-                            // cause wrapped behind `.context("Failed to send
-                            // request to OpenAI API")` (e.g. TLS BadRecordMac) is
-                            // visible to the retry classifier.
-                            let error_str = format!("{error:#}").to_lowercase();
-                            if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                                emit_status_detail(&tx, format!("https fallback: {}", reason))
+                                    .await;
                                 if saw_output {
-                                    // Partial output already reached the
-                                    // consumer; roll it back so the retried
-                                    // response replays cleanly instead of
+                                    // Partial output already reached the consumer
+                                    // before the websocket fault; roll it back so
+                                    // the HTTPS replay renders cleanly instead of
                                     // duplicating.
                                     let _ = tx
                                         .send(Ok(StreamEvent::RetryRollback {
@@ -607,86 +613,192 @@ impl Provider for OpenAIProvider {
                                         }))
                                         .await;
                                 }
+                                force_https_for_request = true;
+                                skip_backoff_once = true;
+                                if matches!(transport_mode, OpenAITransportMode::Auto) {
+                                    let (streak, cooldown) = record_websocket_fallback(
+                                        &websocket_cooldowns,
+                                        &websocket_failure_streaks,
+                                        &model_for_transport,
+                                        fallback_reason,
+                                    )
+                                    .await;
+                                    jcode_base::logging::warn(&format!(
+                                        "OpenAI websocket backoff for model='{}': reason='{}' streak={} cooldown={}s",
+                                        model_for_transport,
+                                        fallback_reason.summary(),
+                                        streak,
+                                        cooldown.as_secs()
+                                    ));
+                                }
+                                // Clear persistent state on fallback
+                                {
+                                    let mut guard = persistent_ws.lock().await;
+                                    *guard = None;
+                                }
                                 log_openai_stream_lifecycle(
                                     jcode_base::logging::LogLevel::Warn,
-                                    "retry_scheduled",
+                                    "persistent_state_reset",
+                                    vec![
+                                        ("model", model_for_transport.clone()),
+                                        ("reason", "fallback_to_https".to_string()),
+                                        ("attempt", (attempt + 1).to_string()),
+                                    ],
+                                );
+                                last_error = Some(error);
+                                continue;
+                            }
+                            Err(OpenAIStreamFailure::Other(error)) => {
+                                let elapsed_ms = attempt_started.elapsed().as_millis();
+                                // Full anyhow chain ({:#}) so a send-level transport
+                                // cause wrapped behind `.context("Failed to send
+                                // request to OpenAI API")` (e.g. TLS BadRecordMac) is
+                                // visible to the retry classifier.
+                                let error_str = format!("{error:#}").to_lowercase();
+                                if is_account_rotation_error(&error)
+                                    && account_attempt < MAX_ACCOUNT_ROTATIONS
+                                    && let Some(account) = try_rotate_openai_account(
+                                        &credentials,
+                                        &mut attempted_accounts,
+                                    )
+                                    .await
+                                {
+                                    {
+                                        let mut guard = persistent_ws.lock().await;
+                                        *guard = None;
+                                    }
+                                    if account_saw_output {
+                                        let _ = tx
+                                            .send(Ok(StreamEvent::RetryRollback {
+                                                attempt: account_attempt as u32 + 2,
+                                                max: MAX_RETRIES,
+                                            }))
+                                            .await;
+                                    }
+                                    jcode_base::logging::info(&format!(
+                                        "Retrying OpenAI stream on alternate account '{}' after quota/auth failure",
+                                        account
+                                    ));
+                                    account_saw_output = false;
+                                    continue 'account_attempts;
+                                }
+                                if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                                    if saw_output {
+                                        // Partial output already reached the
+                                        // consumer; roll it back so the retried
+                                        // response replays cleanly instead of
+                                        // duplicating.
+                                        let _ = tx
+                                            .send(Ok(StreamEvent::RetryRollback {
+                                                attempt: attempt + 2,
+                                                max: MAX_RETRIES,
+                                            }))
+                                            .await;
+                                    }
+                                    log_openai_stream_lifecycle(
+                                        jcode_base::logging::LogLevel::Warn,
+                                        "retry_scheduled",
+                                        vec![
+                                            ("model", model_for_transport.clone()),
+                                            ("attempt", (attempt + 1).to_string()),
+                                            ("next_attempt", (attempt + 2).to_string()),
+                                            ("transport", transport_label.to_string()),
+                                            ("error", error.to_string()),
+                                            ("elapsed_ms", elapsed_ms.to_string()),
+                                        ],
+                                    );
+                                    jcode_base::logging::info(&format!(
+                                        "Transient error after {}ms, will retry: {}",
+                                        elapsed_ms, error
+                                    ));
+                                    next_retry_delay =
+                                        jcode_provider_core::retry_after::retry_after_from_error(
+                                            &error,
+                                        );
+                                    last_error = Some(error);
+                                    continue;
+                                }
+                                log_openai_stream_lifecycle(
+                                    jcode_base::logging::LogLevel::Error,
+                                    "attempt_failed",
                                     vec![
                                         ("model", model_for_transport.clone()),
                                         ("attempt", (attempt + 1).to_string()),
-                                        ("next_attempt", (attempt + 2).to_string()),
                                         ("transport", transport_label.to_string()),
+                                        ("will_retry", "false".to_string()),
                                         ("error", error.to_string()),
                                         ("elapsed_ms", elapsed_ms.to_string()),
                                     ],
                                 );
-                                jcode_base::logging::info(&format!(
-                                    "Transient error after {}ms, will retry: {}",
-                                    elapsed_ms, error
-                                ));
-                                next_retry_delay =
-                                    jcode_provider_core::retry_after::retry_after_from_error(
-                                        &error,
-                                    );
-                                last_error = Some(error);
-                                continue;
+                                // A tool schema OpenAI rejects fails every turn, not
+                                // just this one, and one bad construct invalidates
+                                // the whole catalog (#446, #543, #687, #711, #713).
+                                // Learn what it refused so the user's next request
+                                // omits it, instead of every request failing until
+                                // a release adds the keyword to a list. Learning,
+                                // not retrying: this loop owns its own retry and
+                                // backoff, and a second retry inside it would double
+                                // attempts against a possibly rate-limited endpoint.
+                                let error = match jcode_schema_dialect::learn_from_error(
+                                    &error.to_string(),
+                                    &jcode_schema_dialect::registry::OPENAI,
+                                ) {
+                                    Some(explanation) => {
+                                        jcode_base::logging::warn(&format!(
+                                            "OpenAI tool-schema rejection: {explanation}"
+                                        ));
+                                        error.context(explanation)
+                                    }
+                                    None => error,
+                                };
+                                let _ = tx.send(Err(error)).await;
+                                return;
                             }
-                            log_openai_stream_lifecycle(
-                                jcode_base::logging::LogLevel::Error,
-                                "attempt_failed",
-                                vec![
-                                    ("model", model_for_transport.clone()),
-                                    ("attempt", (attempt + 1).to_string()),
-                                    ("transport", transport_label.to_string()),
-                                    ("will_retry", "false".to_string()),
-                                    ("error", error.to_string()),
-                                    ("elapsed_ms", elapsed_ms.to_string()),
-                                ],
-                            );
-                            // A tool schema OpenAI rejects fails every turn, not
-                            // just this one, and one bad construct invalidates
-                            // the whole catalog (#446, #543, #687, #711, #713).
-                            // Learn what it refused so the user's next request
-                            // omits it, instead of every request failing until
-                            // a release adds the keyword to a list. Learning,
-                            // not retrying: this loop owns its own retry and
-                            // backoff, and a second retry inside it would double
-                            // attempts against a possibly rate-limited endpoint.
-                            let error = match jcode_schema_dialect::learn_from_error(
-                                &error.to_string(),
-                                &jcode_schema_dialect::registry::OPENAI,
-                            ) {
-                                Some(explanation) => {
-                                    jcode_base::logging::warn(&format!(
-                                        "OpenAI tool-schema rejection: {explanation}"
-                                    ));
-                                    error.context(explanation)
-                                }
-                                None => error,
-                            };
-                            let _ = tx.send(Err(error)).await;
-                            return;
                         }
                     }
-                }
 
-                // All retries exhausted
-                if let Some(e) = last_error {
-                    log_openai_stream_lifecycle(
-                        jcode_base::logging::LogLevel::Error,
-                        "retries_exhausted",
-                        vec![
-                            ("model", model_for_transport.clone()),
-                            ("max_attempts", MAX_RETRIES.to_string()),
-                            ("error", e.to_string()),
-                        ],
-                    );
-                    let _ = tx
-                        .send(Err(anyhow::anyhow!(
-                            "Failed after {} retries: {}",
-                            MAX_RETRIES,
-                            e
-                        )))
-                        .await;
+                    // All retries exhausted
+                    if let Some(e) = last_error.take() {
+                        if is_account_rotation_error(&e)
+                            && let Some(account) =
+                                try_rotate_openai_account(&credentials, &mut attempted_accounts)
+                                    .await
+                        {
+                            {
+                                let mut guard = persistent_ws.lock().await;
+                                *guard = None;
+                            }
+                            if account_saw_output {
+                                let _ = tx
+                                    .send(Ok(StreamEvent::RetryRollback {
+                                        attempt: MAX_RETRIES + 1,
+                                        max: MAX_RETRIES,
+                                    }))
+                                    .await;
+                            }
+                            jcode_base::logging::info(&format!(
+                                "Retrying OpenAI stream on alternate account '{}' after retries exhausted",
+                                account
+                            ));
+                            continue 'account_attempts;
+                        }
+                        log_openai_stream_lifecycle(
+                            jcode_base::logging::LogLevel::Error,
+                            "retries_exhausted",
+                            vec![
+                                ("model", model_for_transport.clone()),
+                                ("max_attempts", MAX_RETRIES.to_string()),
+                                ("error", e.to_string()),
+                            ],
+                        );
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "Failed after {} retries: {}",
+                                MAX_RETRIES,
+                                e
+                            )))
+                            .await;
+                    }
                 }
             };
 
