@@ -514,35 +514,40 @@ fn launch_hotkey_notice_hides_individually_learned_bindings() {
     let mut usage = std::collections::HashMap::new();
     // cmd+; used enough to be considered learned; cmd+' still new.
     usage.insert("cmd+;".to_string(), LAUNCH_HOTKEY_LEARNED_USES);
-    let lines = launch_hotkey_notice_lines(&rows, &usage, 3).expect("one binding still new");
+    let lines = launch_hotkey_notice_lines(&rows, &usage, 1).expect("one binding still new");
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("⌘' → last project"));
 }
 
 #[test]
-fn launch_hotkey_notice_stops_once_learned_and_experienced() {
+fn launch_hotkey_notice_does_not_repeat_with_partially_learned_bindings() {
     let rows = vec![
         row("cmd+;", "home", false),
         row("cmd+'", "last project", false),
     ];
     let mut usage = std::collections::HashMap::new();
     usage.insert("cmd+;".to_string(), LAUNCH_HOTKEY_LEARNED_USES);
-    // Learned at least one binding AND launched enough overall -> stop entirely,
-    // even though cmd+' was never used.
-    assert!(
-        launch_hotkey_notice_lines(&rows, &usage, LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP)
-            .is_none()
-    );
+    for launch_count in [2, 3, 10, 50, u64::MAX] {
+        assert!(launch_hotkey_notice_lines(&rows, &usage, launch_count).is_none());
+    }
 }
 
 #[test]
-fn launch_hotkey_notice_keeps_showing_for_new_user_with_many_launches() {
-    // Many launches but no binding learned yet: keep showing so they can adopt it.
+fn launch_hotkey_notice_does_not_repeat_even_when_hotkeys_are_never_used() {
     let rows = vec![row("cmd+;", "home", false)];
     let usage = std::collections::HashMap::new();
-    let lines =
-        launch_hotkey_notice_lines(&rows, &usage, 50).expect("never learned -> keep showing");
-    assert_eq!(lines.len(), 1);
+    for launch_count in [0, 2, 3, 10, 50, u64::MAX] {
+        assert!(launch_hotkey_notice_lines(&rows, &usage, launch_count).is_none());
+    }
+}
+
+#[test]
+fn launch_hotkey_notice_hides_empty_or_fully_learned_bindings_on_first_launch() {
+    let mut usage = std::collections::HashMap::new();
+    assert!(launch_hotkey_notice_lines(&[], &usage, 1).is_none());
+    let rows = vec![row("cmd+;", "home", false)];
+    usage.insert("cmd+;".to_string(), LAUNCH_HOTKEY_LEARNED_USES);
+    assert!(launch_hotkey_notice_lines(&rows, &usage, 1).is_none());
 }
 
 #[test]
