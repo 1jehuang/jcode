@@ -3,6 +3,34 @@
 use crate::*;
 
 #[test]
+fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
+    let legacy = r#"{"v":1,"ev":"token_usage","session_id":"s1","input":10,"output":5,"cache_read_input":2}"#;
+    let legacy_frame: ServerFrame = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(
+        &legacy_frame.event,
+        ApiEvent::TokenUsage {
+            cache_creation_input: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_string(&legacy_frame).unwrap(), legacy);
+
+    for cache_creation_input in [Some(0), Some(42)] {
+        let frame = ServerFrame::event(ApiEvent::TokenUsage {
+            session_id: "s1".into(),
+            input: 10,
+            output: 5,
+            cache_read_input: Some(2),
+            cache_creation_input,
+        });
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["cache_creation_input"], cache_creation_input.unwrap());
+        let decoded: ServerFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.event, frame.event);
+    }
+}
+
+#[test]
 fn client_frame_wire_shape() {
     let frame = ClientFrame::new(
         7,

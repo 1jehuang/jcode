@@ -547,6 +547,7 @@ fn run_collects_one_turn() {
                     input: 10,
                     output: 5,
                     cache_read_input: Some(2),
+                    cache_creation_input: Some(3),
                 },
                 writer,
             );
@@ -561,7 +562,48 @@ fn run_collects_one_turn() {
     assert_eq!(turn.reasoning, "thinking");
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].name, "bash");
-    assert_eq!(turn.usage.expect("usage").input, 10);
+    let usage = turn.usage.expect("usage");
+    assert_eq!(usage.input, 10);
+    assert_eq!(usage.output, 5);
+    assert_eq!(usage.cache_read_input, Some(2));
+    assert_eq!(usage.cache_creation_input, Some(3));
+}
+
+#[test]
+fn run_usage_is_latest_call_and_does_not_retain_previous_cache_counters() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::SendMessage { session_id, .. } = &frame.request {
+            for (input, cache_read_input, cache_creation_input) in
+                [(10, Some(2), Some(3)), (20, None, None)]
+            {
+                push(
+                    ApiEvent::TokenUsage {
+                        session_id: session_id.clone(),
+                        input,
+                        output: 5,
+                        cache_read_input,
+                        cache_creation_input,
+                    },
+                    writer,
+                );
+            }
+            push(
+                ApiEvent::TurnDone {
+                    session_id: session_id.clone(),
+                },
+                writer,
+            );
+        }
+    });
+    let usage = client
+        .run("s1", "hi", Default::default())
+        .expect("the turn must complete")
+        .usage
+        .expect("usage");
+    assert_eq!(usage.input, 20);
+    assert_eq!(usage.output, 5);
+    assert_eq!(usage.cache_read_input, None);
+    assert_eq!(usage.cache_creation_input, None);
 }
 
 /// An error mid-turn fails `run` rather than hanging: the harness sends `error`
