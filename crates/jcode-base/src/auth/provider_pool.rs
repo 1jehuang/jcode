@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_ACCOUNTS: usize = 100;
 const MAX_QUOTA_MODELS_PER_ACCOUNT: usize = 200;
 const QUOTA_SNAPSHOT_TTL_SECS: i64 = 6 * 60 * 60;
+const MAX_QUOTA_HISTORY: usize = 8;
 
 /// Process-local health state. Credential files remain durable, while cooldowns
 /// are intentionally ephemeral and cannot strand an account after a restart.
@@ -85,6 +86,32 @@ pub struct AccountQuotaSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_time: Option<String>,
     pub observed_at_unix_secs: i64,
+    /// Recent observations make durable quota state inspectable without allowing
+    /// an unbounded provider response stream to grow the state file. This is
+    /// additive so snapshots written before history was introduced still load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<QuotaObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuotaObservation {
+    pub remaining_fraction_milli: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_time: Option<String>,
+    pub observed_at_unix_secs: i64,
+}
+
+impl AccountQuotaSnapshot {
+    fn observations(&self) -> impl Iterator<Item = QuotaObservation> + '_ {
+        self.history
+            .iter()
+            .cloned()
+            .chain(std::iter::once(QuotaObservation {
+                remaining_fraction_milli: self.remaining_fraction_milli,
+                reset_time: self.reset_time.clone(),
+                observed_at_unix_secs: self.observed_at_unix_secs,
+            }))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,12 +330,30 @@ pub fn record_account_quotas(
                     models.remove(&oldest);
                 }
             }
+            let observation = QuotaObservation {
+                remaining_fraction_milli: *remaining_fraction_milli,
+                reset_time: reset_time.clone(),
+                observed_at_unix_secs,
+            };
+            let history = models
+                .get(model)
+                .map(|previous| {
+                    previous
+                        .observations()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .take(MAX_QUOTA_HISTORY - 1)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
             models.insert(
                 model.to_string(),
                 AccountQuotaSnapshot {
-                    remaining_fraction_milli: *remaining_fraction_milli,
-                    reset_time: reset_time.clone(),
+                    remaining_fraction_milli: observation.remaining_fraction_milli,
+                    reset_time: observation.reset_time.clone(),
                     observed_at_unix_secs,
+                    history,
                 },
             );
         }
@@ -753,6 +798,41 @@ mod tests {
                 "unknown-model",
             ),
             None
+        );
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn quota_history_is_bounded_and_legacy_snapshots_still_deserialize() {
+        let legacy: AccountQuotaSnapshot = serde_json::from_str(
+            r#"{"remaining_fraction_milli":321,"reset_time":"reset","observed_at_unix_secs":1}"#,
+        )
+        .expect("legacy quota snapshot should deserialize");
+        assert!(legacy.history.is_empty());
+
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        for remaining in 0..(MAX_QUOTA_HISTORY as u16 + 3) {
+            record_account_quota(
+                "antigravity",
+                "history-test",
+                "gemini-3-flash",
+                Some(remaining),
+                None,
+            );
+        }
+        let health = read_health();
+        let snapshot = &health.quotas["antigravity"]["history-test"]["gemini-3-flash"];
+        assert_eq!(snapshot.history.len(), MAX_QUOTA_HISTORY - 1);
+        assert_eq!(
+            account_quota_score_for_model("antigravity", "history-test", "gemini-3-flash"),
+            Some(MAX_QUOTA_HISTORY as u16 + 2)
         );
 
         match previous_home {
