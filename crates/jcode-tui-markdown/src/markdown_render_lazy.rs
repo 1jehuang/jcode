@@ -31,6 +31,7 @@ pub fn render_markdown_lazy(
     let mut code_block_start_line: usize = 0;
     let mut heading_level: Option<u8> = None;
     let mut blockquote_depth = 0usize;
+    let mut blockquote_starts = Vec::new();
     let mut list_stack: Vec<ListRenderState> = Vec::new();
     let mut link_targets: Vec<String> = Vec::new();
     let mut in_image = false;
@@ -127,6 +128,7 @@ pub fn render_markdown_lazy(
                     ),
                 );
                 enter_centered_structured_block(&mut centered_blocks, lines.len());
+                blockquote_starts.push(lines.len());
                 blockquote_depth += 1;
             }
             Event::End(TagEnd::BlockQuote(_)) => {
@@ -140,6 +142,9 @@ pub fn render_markdown_lazy(
                         in_footnote_definition,
                     ),
                 );
+                if let Some(start) = blockquote_starts.pop() {
+                    fill_blockquote_separators(&mut lines[start..], blockquote_depth);
+                }
                 blockquote_depth = blockquote_depth.saturating_sub(1);
                 exit_centered_structured_block(&mut centered_blocks, lines.len());
                 if blockquote_depth == 0
