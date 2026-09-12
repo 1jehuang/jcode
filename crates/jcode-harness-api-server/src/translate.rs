@@ -1277,18 +1277,28 @@ impl BridgeState {
                 let Some(api_id) = self.take_simple(id, SimpleKind::History) else {
                     return vec![];
                 };
-                let messages = event["messages"]
+                let mut messages: Vec<HistoryMessage> = event["messages"]
                     .as_array()
                     .map(|messages| {
                         messages
                             .iter()
                             .map(|m| HistoryMessage {
+                                response_stats: serde_json::from_value(m["response_stats"].clone())
+                                    .unwrap_or(None),
                                 role: m["role"].as_str().unwrap_or("").to_string(),
                                 content: m["content"].as_str().unwrap_or("").to_string(),
                             })
                             .collect()
                     })
                     .unwrap_or_default();
+                // A stored terminal-looking row can still belong to a running
+                // turn (e.g. an automatic continuation). Do not show a footer yet.
+                if event["activity"]["is_processing"].as_bool() == Some(true) {
+                    let start = messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+                    for message in &mut messages[start..] {
+                        message.response_stats = None;
+                    }
+                }
                 let images = serde_json::from_value(event["images"].clone()).unwrap_or_default();
                 let mut frames = vec![ServerFrame::reply(
                     api_id,
@@ -2519,6 +2529,7 @@ impl BridgeState {
                 }
                 let content = flatten_content(&message["content"]);
                 (!content.trim().is_empty()).then(|| HistoryMessage {
+                    response_stats: None,
                     role: role.to_string(),
                     content,
                 })

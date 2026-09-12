@@ -2322,3 +2322,84 @@ fn history_image_boundaries_survive_loss_of_tool_data() {
         "after"
     );
 }
+
+#[test]
+fn history_response_stats_roundtrip_and_active_turn_suppression() {
+    for active in [false, true] {
+        let mut state = state_with_session();
+        let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":44}));
+        let Outbound::Legacy(request) = &out[0] else {
+            panic!("expected history request")
+        };
+        let stats = json!({"input_tokens":30,"output_tokens":4,"cache_read_tokens":6,"cache_creation_tokens":8});
+        let frames = state.legacy_event_to_api(&json!({
+            "type":"history", "id":request["id"], "session_id":"s1",
+            "messages":[
+                {"role":"user","content":"earlier"},
+                {"role":"assistant","content":"earlier answer","response_stats":stats},
+                {"role":"user","content":"current"},
+                {"role":"assistant","content":"current answer","response_stats":stats}
+            ], "activity":{"is_processing":active}
+        }));
+        let ApiEvent::History { messages, .. } = &frames[0].event else {
+            panic!("expected history")
+        };
+        assert!(messages[0].response_stats.is_none());
+        let previous = messages[1].response_stats.as_ref().unwrap();
+        assert_eq!(previous.input_tokens, Some(30));
+        assert_eq!(previous.output_tokens, Some(4));
+        assert_eq!(previous.cache_read_tokens, Some(6));
+        assert_eq!(previous.cache_creation_tokens, Some(8));
+        assert_eq!(previous.duration_secs, None);
+        assert_eq!(messages[3].response_stats.is_some(), !active);
+    }
+}
+
+#[test]
+fn history_response_stats_old_and_malformed_fields_are_optional() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":45}));
+    let Outbound::Legacy(request) = &out[0] else {
+        panic!("expected history request")
+    };
+    let frames =
+        state.legacy_event_to_api(&json!({"type":"history", "id":request["id"], "messages":[
+            {"role":"assistant","content":"old"},
+            {"role":"assistant","content":"bad","response_stats":{"input_tokens":"oops"}}
+        ]}));
+    let ApiEvent::History { messages, .. } = &frames[0].event else {
+        panic!("expected history")
+    };
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.response_stats.is_none())
+    );
+}
+
+#[test]
+fn history_response_stats_cross_real_render_protocol_and_sdk_boundary() {
+    let mut session = jcode_base::session::Session::create(None, None);
+    session.messages = serde_json::from_value(json!([
+        {"id":"u","role":"user","content":[{"type":"text","text":"question"}]},
+        {"id":"a","role":"assistant","content":[{"type":"text","text":"answer"}],
+            "token_usage":{"input_tokens":123,"output_tokens":45,"cache_read_input_tokens":7,"cache_creation_input_tokens":8}}
+    ])).unwrap();
+    let legacy: Vec<_> = jcode_base::session::render_messages(&session).into_iter()
+        .map(|row| jcode_base::protocol::HistoryMessage {
+            role: row.role, content: row.content, tool_calls: None, tool_data: row.tool_data,
+            response_stats: row.response_stats,
+        }).collect();
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({"req":"get_history", "id":46}));
+    let Outbound::Legacy(request) = &out[0] else { panic!("expected history request") };
+    let frames = state.legacy_event_to_api(&json!({"type":"history", "id":request["id"],
+        "messages":legacy,"activity":{"is_processing":false}}));
+    let ApiEvent::History { messages, .. } = &frames[0].event else { panic!("expected history") };
+    let stats = messages[1].response_stats.as_ref().unwrap();
+    assert_eq!(stats.input_tokens, Some(123));
+    assert_eq!(stats.output_tokens, Some(45));
+    assert_eq!(stats.cache_read_tokens, Some(7));
+    assert_eq!(stats.cache_creation_tokens, Some(8));
+    assert_eq!(stats.duration_secs, None);
+}

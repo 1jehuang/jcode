@@ -896,18 +896,21 @@ fn in_flight_count_excludes_foreign_queued_session() {
 fn latest_assistant_report_uses_last_non_empty_assistant_message() {
     let messages = vec![
         HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: " earlier ".to_string(),
             tool_calls: None,
             tool_data: None,
         },
         HistoryMessage {
+            response_stats: None,
             role: "user".to_string(),
             content: "ignored".to_string(),
             tool_calls: None,
             tool_data: None,
         },
         HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: " final report ".to_string(),
             tool_calls: None,

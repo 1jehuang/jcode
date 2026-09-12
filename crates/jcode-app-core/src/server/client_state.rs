@@ -362,6 +362,7 @@ pub(super) async fn handle_get_compacted_history(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
+        response_stats: msg.response_stats,
         role: msg.role,
         content: msg.content,
         tool_calls: if msg.tool_calls.is_empty() {
