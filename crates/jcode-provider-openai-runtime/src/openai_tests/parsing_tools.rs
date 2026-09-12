@@ -111,35 +111,35 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
     let mut pending = VecDeque::new();
 
     let added = r#"{"type":"response.output_item.added","item":{"id":"fc_123","type":"function_call","call_id":"call_123","name":"batch","arguments":""}}"#;
-    assert!(
-        parse_openai_response_event(
-            added,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "output_item.added should just seed tool state"
-    );
+    let first = parse_openai_response_event(
+        added,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("tool name must be emitted at output_item.added");
+    assert!(matches!(first, StreamEvent::ToolUseStart { id, name }
+        if id == "call_123" && name == "batch"));
+    assert!(pending.is_empty());
 
     let delta = r#"{"type":"response.function_call_arguments.delta","item_id":"fc_123","delta":"{\"tool_calls\":[{\"tool\":\"read\"}]"}"#;
-    assert!(
-        parse_openai_response_event(
-            delta,
-            &mut saw_text_delta,
-            &mut saw_thinking_delta,
-            &mut streaming_tool_calls,
-            &mut completed_tool_items,
-            &mut pending,
-        )
-        .is_none(),
-        "argument delta should accumulate state only"
-    );
+    let event = parse_openai_response_event(
+        delta,
+        &mut saw_text_delta,
+        &mut saw_thinking_delta,
+        &mut streaming_tool_calls,
+        &mut completed_tool_items,
+        &mut pending,
+    )
+    .expect("argument fragments must stream before completion");
+    assert!(matches!(event, StreamEvent::ToolInputDelta(ref delta)
+        if delta == r#"{"tool_calls":[{"tool":"read"}]"#));
+    assert!(pending.is_empty());
 
     let done = r#"{"type":"response.function_call_arguments.done","item_id":"fc_123","arguments":"{\"tool_calls\":[{\"tool\":\"read\"}]}"}"#;
-    let first = parse_openai_response_event(
+    let event = parse_openai_response_event(
         done,
         &mut saw_text_delta,
         &mut saw_thinking_delta,
@@ -147,29 +147,10 @@ fn test_parse_openai_response_function_call_arguments_streaming() {
         &mut completed_tool_items,
         &mut pending,
     )
-    .expect("expected tool start");
-
-    match first {
-        StreamEvent::ToolUseStart { id, name } => {
-            assert_eq!(id, "call_123");
-            assert_eq!(name, "batch");
-        }
-        other => panic!("expected ToolUseStart, got {:?}", other),
-    }
-
-    match pending.pop_front() {
-        Some(StreamEvent::ToolInputDelta(delta)) => {
-            let parsed: Value = serde_json::from_str(&delta).expect("valid args json");
-            let tool_calls = parsed
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .expect("tool_calls array");
-            assert_eq!(tool_calls.len(), 1);
-        }
-        other => panic!("expected ToolInputDelta, got {:?}", other),
-    }
-
+    .expect("only the unstreamed suffix should be emitted");
+    assert!(matches!(event, StreamEvent::ToolInputDelta(ref delta) if delta == "}"));
     assert!(matches!(pending.pop_front(), Some(StreamEvent::ToolUseEnd)));
+    assert!(pending.is_empty());
     assert!(streaming_tool_calls.is_empty());
     assert!(completed_tool_items.contains("fc_123"));
 }
@@ -194,7 +175,7 @@ fn test_parse_openai_response_output_item_done_skips_duplicate_after_arguments_d
 
     assert!(event.is_none(), "duplicate function call should be skipped");
     assert!(pending.is_empty());
-    assert!(!completed_tool_items.contains("fc_123"));
+    assert!(completed_tool_items.contains("fc_123"));
 }
 
 #[test]
