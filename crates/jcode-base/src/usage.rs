@@ -13,7 +13,9 @@ mod provider_fetch;
 pub use accessors::*;
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
-pub use jcode_usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{
+    CursorUsageSemantics, ProviderUsage, ProviderUsageProgress, UsageLimit,
+};
 pub use model::*;
 use provider_fetch::*;
 

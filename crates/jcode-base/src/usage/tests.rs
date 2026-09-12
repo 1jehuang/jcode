@@ -9,6 +9,28 @@ fn test_usage_data_default() {
 }
 
 #[test]
+fn cursor_usage_semantics_keep_personal_quota_distinct_from_team_api() {
+    assert_eq!(
+        CursorUsageSemantics::from_api_key_available(true),
+        CursorUsageSemantics::OfficialTeamApi
+    );
+    assert_eq!(
+        CursorUsageSemantics::from_api_key_available(false),
+        CursorUsageSemantics::PersonalQuotaUnsupported
+    );
+    assert!(CursorUsageSemantics::OfficialTeamApi.is_quota_supported());
+    assert_eq!(
+        CursorUsageSemantics::OfficialTeamApi.as_str(),
+        "official_team_api"
+    );
+    assert!(!CursorUsageSemantics::PersonalQuotaUnsupported.is_quota_supported());
+    assert_eq!(
+        CursorUsageSemantics::PersonalQuotaUnsupported.as_str(),
+        "personal_quota_unsupported"
+    );
+}
+
+#[test]
 fn test_usage_percent_format() {
     let data = UsageData {
         five_hour: 0.42,

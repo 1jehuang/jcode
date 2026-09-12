@@ -527,6 +527,12 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
     let mut extra_info = Vec::new();
     let api_key = auth::cursor::load_api_key().ok();
     let managed_accounts = auth::provider_pool::list_accounts("cursor").unwrap_or_default();
+    let semantics = CursorUsageSemantics::from_api_key_available(api_key.is_some());
+
+    extra_info.push((
+        "Usage semantics".to_string(),
+        semantics.as_str().to_string(),
+    ));
 
     if let Some(api_key) = api_key {
         let client = crate::provider::shared_http_client();
@@ -544,6 +550,10 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
                 let body: serde_json::Value = response.json().await.unwrap_or_default();
                 if status.is_success() {
                     extra_info.push(("Key status".to_string(), "valid".to_string()));
+                    extra_info.push((
+                        "Usage API".to_string(),
+                        "official Cursor team/admin API".to_string(),
+                    ));
                     if let Some(email) = body.get("email").and_then(|v| v.as_str()) {
                         extra_info.push(("Account".to_string(), mask_email(email)));
                     }
@@ -554,7 +564,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
                         extra_info.push(("Plan".to_string(), "free".to_string()));
                         extra_info.push((
                             "Usage API".to_string(),
-                            "requires Cursor Pro (admin API)".to_string(),
+                            "official Cursor team/admin API requires Cursor Pro".to_string(),
                         ));
                     } else {
                         extra_info.push((
