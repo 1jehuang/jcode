@@ -507,6 +507,27 @@ pub fn account_quota_score_for_model(provider: &str, label: &str, model: &str) -
         .and_then(|snapshot| snapshot.remaining_fraction_milli)
 }
 
+/// Return recent quota snapshots without exposing credentials. This is used by
+/// usage reporters to keep the last known-good display when a provider briefly
+/// returns 401/429 or malformed data.
+pub fn account_quota_snapshots(provider: &str, label: &str) -> Vec<(String, AccountQuotaSnapshot)> {
+    let now = unix_now();
+    read_health()
+        .quotas
+        .get(provider)
+        .and_then(|accounts| accounts.get(label))
+        .map(|models| {
+            models
+                .iter()
+                .filter(|(_, snapshot)| {
+                    now.saturating_sub(snapshot.observed_at_unix_secs) <= QUOTA_SNAPSHOT_TTL_SECS
+                })
+                .map(|(model, snapshot)| (model.clone(), snapshot.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
     let key = (provider.to_string(), label.to_string());
     if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {

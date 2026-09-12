@@ -6,6 +6,7 @@ use crate::auth;
 mod accessors;
 mod api_keys;
 mod cache;
+mod cursor;
 mod display;
 mod model;
 mod openai_helpers;
@@ -349,16 +350,21 @@ fn enqueue_provider_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<Provider
         total += 1;
     }
 
-    // Cursor's supported usage APIs are team/admin scoped. Still expose a
-    // report for native or managed personal auth so `/usage` does not hide a
-    // configured Cursor pool just because no supported personal quota reader
-    // exists. The fetcher labels that quota as unsupported rather than
-    // fabricating a zero or treating an internal endpoint as authoritative.
-    if auth::cursor::has_cursor_native_auth()
-        || !auth::provider_pool::list_accounts("cursor")
-            .unwrap_or_default()
-            .is_empty()
-    {
+    // Managed Cursor accounts are fetched independently. The account-bound
+    // adapter never switches the active override, and its semaphore keeps a
+    // large imported pool from stampeding Cursor's endpoints.
+    let cursor_accounts = auth::provider_pool::list_accounts("cursor").unwrap_or_default();
+    if !cursor_accounts.is_empty() {
+        let cursor_account_count = cursor_accounts.len();
+        for account in cursor_accounts {
+            tasks.spawn(async move {
+                let mut report = fetch_cursor_usage_report_for_account(account).await;
+                attach_activity(&mut report, "cursor");
+                Some(report)
+            });
+        }
+        total += cursor_account_count;
+    } else if auth::cursor::has_cursor_native_auth() {
         tasks.spawn(async {
             fetch_cursor_usage_report().await.map(|mut report| {
                 attach_activity(&mut report, "cursor");

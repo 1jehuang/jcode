@@ -7,6 +7,7 @@ pub(super) fn multi_account_provider_kind(
     match provider {
         ActiveProvider::Claude => Some(crate::usage::MultiAccountProviderKind::Anthropic),
         ActiveProvider::OpenAI => Some(crate::usage::MultiAccountProviderKind::OpenAI),
+        ActiveProvider::Cursor => Some(crate::usage::MultiAccountProviderKind::Cursor),
         _ => None,
     }
 }

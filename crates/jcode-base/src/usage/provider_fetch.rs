@@ -1,3 +1,4 @@
+use super::cursor::fetch_cursor_usage_for_account;
 use super::*;
 
 pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
@@ -613,6 +614,12 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+pub(super) async fn fetch_cursor_usage_report_for_account(
+    account: auth::provider_pool::ManagedProviderAccount,
+) -> ProviderUsage {
+    fetch_cursor_usage_for_account(account).await
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {

@@ -498,6 +498,99 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
     })
 }
 
+/// Resolve one managed account without consulting or changing the active
+/// account override. Usage polling calls this for every account in the pool so
+/// a background refresh cannot accidentally move request traffic to a
+/// different login.
+pub async fn resolve_direct_tokens_for_account(
+    client: &Client,
+    account: &crate::auth::provider_pool::ManagedProviderAccount,
+) -> Result<CursorDirectTokens> {
+    let tokens = CursorDirectTokens {
+        access_token: account.access_token.clone(),
+        refresh_token: Some(account.refresh_token.clone()),
+        source: "cursor_managed",
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let account_expiring = account.expires_at > 0
+        && account.expires_at <= i64::try_from(now.saturating_add(60)).unwrap_or(i64::MAX);
+    if !account_expiring && !token_is_expiring_soon(&tokens.access_token) {
+        return Ok(tokens);
+    }
+    let refresh_token = account.refresh_token.trim();
+    if refresh_token.is_empty() {
+        return Ok(tokens);
+    }
+    let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
+    refreshed.source = "cursor_managed";
+    let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+        "cursor",
+        refresh_token,
+        refreshed.access_token.clone(),
+        refreshed
+            .refresh_token
+            .clone()
+            .unwrap_or_else(|| refresh_token.to_string()),
+        token_expiry_epoch_secs(&refreshed.access_token)
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(account.expires_at),
+        None,
+        None,
+    );
+    Ok(refreshed)
+}
+
+/// Return stable identity claims from a JWT without returning or logging the
+/// token itself. Opaque tokens intentionally return `None`.
+pub fn token_identities(access_token: &str) -> Vec<String> {
+    let Some(payload) = access_token.split('.').nth(1) else {
+        return Vec::new();
+    };
+    let Ok(decoded) = URL_SAFE_NO_PAD.decode(payload) else {
+        return Vec::new();
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+        return Vec::new();
+    };
+    [
+        "sub",
+        "user_id",
+        "userId",
+        "uid",
+        "email",
+        "preferred_username",
+    ]
+    .into_iter()
+    .filter_map(|key| claims.get(key).and_then(|value| value.as_str()))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+/// A web-origin usage endpoint may only receive a token when its identity is
+/// provably the managed account being inspected. This deliberately requires an
+/// exact match against the imported account id or email.
+pub fn token_is_bound_to_account(
+    access_token: &str,
+    account: &crate::auth::provider_pool::ManagedProviderAccount,
+) -> bool {
+    let expected = std::iter::once(account.id.trim())
+        .chain(account.email.as_deref().into_iter().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    !expected.is_empty()
+        && token_identities(access_token).into_iter().any(|identity| {
+            expected
+                .iter()
+                .any(|value| value == &identity.to_ascii_lowercase())
+        })
+}
+
 /// Force-refresh a resolved Cursor token set, preserving the original source label.
 pub async fn refresh_resolved_tokens(
     client: &Client,
