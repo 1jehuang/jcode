@@ -527,12 +527,16 @@ impl AntigravityProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
             let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-            anyhow::bail!(
-                "Antigravity generateContent failed (HTTP {}): {}",
-                status,
-                body.trim()
-            );
+            return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                format!(
+                    "Antigravity generateContent failed (HTTP {}): {}",
+                    status,
+                    body.trim()
+                ),
+                retry_after,
+            ));
         }
 
         response

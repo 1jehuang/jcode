@@ -6,12 +6,15 @@
 //! cannot stall a turn indefinitely.
 
 use anyhow::Error;
-use reqwest::header::{HeaderMap, RETRY_AFTER};
+use reqwest::header::{HeaderMap, HeaderName, RETRY_AFTER};
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Longest server-requested delay a provider retry loop will honor.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
+
+const RETRY_AFTER_MS: HeaderName = HeaderName::from_static("retry-after-ms");
+const X_MS_RETRY_AFTER_MS: HeaderName = HeaderName::from_static("x-ms-retry-after-ms");
 
 /// Parse a `Retry-After` header as delta-seconds or an HTTP date.
 ///
@@ -23,6 +26,14 @@ pub fn retry_after(headers: &HeaderMap) -> Option<RetryAfter> {
 }
 
 fn retry_after_delay_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
+    for header in [&RETRY_AFTER_MS, &X_MS_RETRY_AFTER_MS] {
+        if let Some(value) = headers.get(header).and_then(|value| value.to_str().ok())
+            && let Ok(milliseconds) = value.trim().parse::<u64>()
+        {
+            return Some(Duration::from_millis(milliseconds).min(MAX_RETRY_AFTER));
+        }
+    }
+
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if value.is_empty() {
         return None;
@@ -175,6 +186,36 @@ mod tests {
                 SystemTime::UNIX_EPOCH,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn parses_retry_after_milliseconds_headers() {
+        let mut header_map = HeaderMap::new();
+        header_map.insert(RETRY_AFTER_MS, HeaderValue::from_static("1250"));
+        assert_eq!(
+            retry_after_delay_at(&header_map, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_millis(1250))
+        );
+
+        let mut azure_header_map = HeaderMap::new();
+        azure_header_map.insert(X_MS_RETRY_AFTER_MS, HeaderValue::from_static("2500"));
+        assert_eq!(
+            retry_after_delay_at(&azure_header_map, SystemTime::UNIX_EPOCH),
+            Some(Duration::from_millis(2500))
+        );
+    }
+
+    #[test]
+    fn retry_after_milliseconds_are_bounded() {
+        let mut header_map = HeaderMap::new();
+        header_map.insert(
+            RETRY_AFTER_MS,
+            HeaderValue::from_static("999999999999999999"),
+        );
+        assert_eq!(
+            retry_after_delay_at(&header_map, SystemTime::UNIX_EPOCH),
+            Some(MAX_RETRY_AFTER)
         );
     }
 
