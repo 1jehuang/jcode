@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,44 @@ const QUOTA_SNAPSHOT_TTL_SECS: i64 = 6 * 60 * 60;
 /// are intentionally ephemeral and cannot strand an account after a restart.
 static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static ACCOUNT_LEASES: LazyLock<Mutex<HashMap<(String, String), (Instant, u64)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_ACCOUNT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A short-lived admission lease prevents concurrent failover attempts from
+/// stampeding the same alternate account. The lease is held by the returned
+/// value and released when the request stream is dropped or completes.
+#[derive(Debug)]
+pub struct AccountLease {
+    key: (String, String),
+    id: u64,
+}
+
+impl Drop for AccountLease {
+    fn drop(&mut self) {
+        if let Ok(mut leases) = ACCOUNT_LEASES.lock()
+            && leases.get(&self.key).is_some_and(|(_, id)| *id == self.id)
+        {
+            leases.remove(&self.key);
+        }
+    }
+}
+
+pub fn try_acquire_account_lease(
+    provider: &str,
+    label: &str,
+    duration: Duration,
+) -> Option<AccountLease> {
+    let key = (provider.to_string(), label.to_string());
+    let now = Instant::now();
+    let id = NEXT_ACCOUNT_LEASE_ID.fetch_add(1, AtomicOrdering::Relaxed);
+    let mut leases = ACCOUNT_LEASES.lock().ok()?;
+    if leases.get(&key).is_some_and(|(until, _)| *until > now) {
+        return None;
+    }
+    leases.insert(key.clone(), (now + duration, id));
+    Some(AccountLease { key, id })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PoolHealthFile {
@@ -686,5 +725,16 @@ mod tests {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+    }
+
+    #[test]
+    fn account_lease_excludes_concurrent_acquisition_and_releases_on_drop() {
+        let label = format!("lease-test-{}", std::process::id());
+        let first = try_acquire_account_lease("cursor", &label, Duration::from_secs(60))
+            .expect("first lease should be available");
+        assert!(try_acquire_account_lease("cursor", &label, Duration::from_secs(60)).is_none());
+
+        drop(first);
+        assert!(try_acquire_account_lease("cursor", &label, Duration::from_secs(60)).is_some());
     }
 }

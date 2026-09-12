@@ -1,5 +1,27 @@
 use super::*;
 use anyhow::Result;
+use futures::{
+    Stream,
+    task::{Context, Poll},
+};
+use std::pin::Pin;
+
+struct LeasedEventStream {
+    inner: EventStream,
+    lease: Option<crate::auth::provider_pool::AccountLease>,
+}
+
+impl Stream for LeasedEventStream {
+    type Item = anyhow::Result<jcode_message_types::StreamEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let item = self.inner.as_mut().poll_next(context);
+        if matches!(item, Poll::Ready(None)) {
+            self.lease = None;
+        }
+        item
+    }
+}
 
 impl MultiProvider {
     pub(super) async fn try_same_provider_account_failover(
@@ -31,6 +53,19 @@ impl MultiProvider {
         let provider_label = Self::provider_label(provider);
 
         for alternative_label in &alternatives {
+            let lease = crate::auth::provider_pool::try_acquire_account_lease(
+                provider_key,
+                alternative_label,
+                std::time::Duration::from_secs(120),
+            );
+            if lease.is_none() {
+                crate::logging::info(&format!(
+                    "Same-provider failover{}: account '{}' is already leased",
+                    mode.log_suffix(),
+                    alternative_label
+                ));
+                continue;
+            }
             crate::logging::info(&format!(
                 "Same-provider failover{}: retrying {} using account '{}'",
                 mode.log_suffix(),
@@ -85,9 +120,13 @@ impl MultiProvider {
                         "⚡ Auto-switched {} account: {} → {}. To turn this off, set `[provider].same_provider_account_failover = false` in `~/.jcode/config.toml` or export `JCODE_SAME_PROVIDER_ACCOUNT_FAILOVER=false`.",
                         provider_label, original_label, alternative_label
                     ));
-                    return Ok(Some(stream));
+                    return Ok(Some(Box::pin(LeasedEventStream {
+                        inner: stream,
+                        lease,
+                    })));
                 }
                 Err(err) => {
+                    drop(lease);
                     let summary =
                         maybe_annotate_limit_summary(provider, Self::summarize_error(&err));
                     let decision = Self::classify_failover_error(&err);
