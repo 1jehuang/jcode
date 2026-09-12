@@ -89,13 +89,17 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
-    /// Token usage update for the attached session.
+    /// Usage for the latest provider call, not cumulative session or turn totals.
+    /// Input/cache accounting is provider-specific: Anthropic reports cache
+    /// reads and writes separately, while OpenAI includes cache reads in input.
     TokenUsage {
         session_id: String,
         input: u64,
         output: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
     },
 
     /// The turn finished; the agent is idle.

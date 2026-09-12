@@ -1136,6 +1136,7 @@ impl BridgeState {
                 input: event["input"].as_u64().unwrap_or(0),
                 output: event["output"].as_u64().unwrap_or(0),
                 cache_read_input: event["cache_read_input"].as_u64(),
+                cache_creation_input: event["cache_creation_input"].as_u64(),
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);

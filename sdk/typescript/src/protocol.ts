@@ -161,6 +161,7 @@ export type ApiEvent =
       input: number;
       output: number;
       cache_read_input?: number;
+      cache_creation_input?: number;
     }
   | { ev: "turn_done"; session_id: string }
   | {

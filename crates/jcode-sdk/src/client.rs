@@ -1213,12 +1213,14 @@ impl JcodeClient {
                     input,
                     output,
                     cache_read_input,
+                    cache_creation_input,
                     ..
                 } => {
                     result.usage = Some(Usage {
                         input,
                         output,
                         cache_read_input,
+                        cache_creation_input,
                     })
                 }
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
@@ -1302,6 +1304,7 @@ pub struct TurnResult {
     pub text: String,
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Usage from the latest provider call in this turn, not a sum of calls.
     pub usage: Option<Usage>,
 }
 
@@ -1313,11 +1316,14 @@ pub struct ToolCall {
     pub error: Option<String>,
 }
 
+/// Provider-reported counters. Cache counters may be separate from input
+/// (Anthropic) or a subset of it (OpenAI), so do not blindly add them together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,
     pub cache_read_input: Option<u64>,
+    pub cache_creation_input: Option<u64>,
 }
 
 fn discover_global_sessions(
