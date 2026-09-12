@@ -366,6 +366,9 @@ test("GA methods send stable request shapes and map typed replies", async () => 
         case "clear_api_key":
           reply({ ev: "credential_updated", provider: "jcode", configured: false });
           break;
+        case "notify_auth_changed":
+          reply({ ev: "ok" });
+          break;
         case "read_file":
           reply({
             ev: "file_content",
@@ -416,6 +419,7 @@ test("GA methods send stable request shapes and map typed replies", async () => 
 
     await client.setApiKey("gemini-api", "secret");
     await client.clearApiKey("jcode");
+    await client.notifyAuthChanged("openai");
     assert.deepEqual(await client.readFile("s1", "src/a.ts", 5), {
       path: "src/a.ts",
       content: "hello",

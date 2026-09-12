@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 0;
+export const API_VERSION_MINOR = 1;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -109,6 +109,7 @@ export type ApiRequest =
   | { req: "list_models"; session_id: string }
   | { req: "get_runtime_info"; session_id: string }
   | { req: "set_api_key"; provider: string; api_key: string }
+  | { req: "notify_auth_changed"; provider: string }
   | { req: "clear_api_key"; provider: string }
   | { req: "read_file"; session_id: string; path: string; max_bytes?: number }
   | { req: "find_files"; session_id: string; query: string; limit?: number }
@@ -314,6 +315,7 @@ export const KNOWN_REQUEST_KINDS = [
   "get_runtime_info",
   "set_api_key",
   "clear_api_key",
+  "notify_auth_changed",
   "read_file",
   "find_files",
   "search_text",

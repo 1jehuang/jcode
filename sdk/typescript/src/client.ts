@@ -663,6 +663,11 @@ export class JcodeClient extends EventEmitter {
     await this.expectReply({ req: "clear_api_key", provider }, "credential_updated");
   }
 
+  /** Reload credentials saved by an out-of-band OAuth login. No secrets or chat messages. */
+  async notifyAuthChanged(provider: string): Promise<void> {
+    await this.expectReply({ req: "notify_auth_changed", provider }, "ok");
+  }
+
   async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {
     const frame = await this.expectReply(
       { req: "read_file", session_id: sessionId, path, max_bytes: maxBytes },

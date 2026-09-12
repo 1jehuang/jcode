@@ -52,6 +52,7 @@ const CAPABILITIES: &[Capability] = &[
     cap("get_runtime_info", "getRuntimeInfo"),
     cap("set_api_key", "setApiKey"),
     cap("clear_api_key", "clearApiKey"),
+    cap("notify_auth_changed", "notifyAuthChanged"),
     cap("read_file", "readFile"),
     cap("find_files", "findFiles"),
     cap("search_text", "searchText"),

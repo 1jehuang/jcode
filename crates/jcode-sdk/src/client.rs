@@ -986,6 +986,20 @@ impl JcodeClient {
         }
     }
 
+    /// Reload credentials saved by an out-of-band OAuth login. This does not
+    /// send a chat message or transport any credential material.
+    pub fn notify_auth_changed(&self, provider: &str) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::NotifyAuthChanged {
+                provider: provider.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
     /// Remove a persisted API-key credential and hot-reload provider
     /// credentials.
     pub fn clear_api_key(&self, provider: &str) -> Result<()> {
