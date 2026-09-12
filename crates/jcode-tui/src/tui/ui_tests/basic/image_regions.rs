@@ -24,6 +24,7 @@ fn anchored_tool_image_with(
     label: &str,
 ) -> crate::session::RenderedImage {
     crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: png_b64.to_string(),
         label: Some(label.to_string()),

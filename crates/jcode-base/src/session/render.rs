@@ -533,6 +533,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
+                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
                         label: current_tool

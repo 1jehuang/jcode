@@ -1726,6 +1726,7 @@ fn assert_clear_usage_reset(app: &App) {
 
 fn seed_stale_clear_image(app: &mut App) -> u64 {
     app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: "stale-image".to_string(),
         label: Some("stale.png".to_string()),

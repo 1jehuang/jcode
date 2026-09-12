@@ -2541,3 +2541,124 @@ fn test_rewind_after_undo_uses_the_new_target_not_the_previous_one() {
     assert_eq!(after.last().unwrap(), "prompt-6");
     assert_eq!(session.rewind_target_count(), 11);
 }
+
+#[test]
+fn restored_tool_image_boundaries_follow_returned_history_rows() {
+    let mut session = Session::create_with_id("image-boundaries".into(), None, None);
+    let text = |text: &str| ContentBlock::Text {
+        text: text.into(),
+        cache_control: None,
+    };
+    let result = |id: &str| ContentBlock::ToolResult {
+        tool_use_id: id.into(),
+        content: "read image".into(),
+        is_error: None,
+    };
+    let image = |data: &str| ContentBlock::Image {
+        media_type: "image/png".into(),
+        data: data.into(),
+    };
+    session.add_message(Role::User, vec![text("prompt")]);
+    session.add_message(
+        Role::Assistant,
+        vec![
+            text("before read"),
+            ContentBlock::ToolUse {
+                id: "read-1".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            },
+        ],
+    );
+    session.add_message(
+        Role::User,
+        vec![
+            result("read-1"),
+            image("one"),
+            image("two"),
+            result("read-2"),
+            image("three"),
+        ],
+    );
+    session.add_message(Role::Assistant, vec![text("after read")]);
+    let (messages, images) = render_messages_and_images(&session);
+    assert_eq!(
+        messages.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(),
+        ["user", "assistant", "tool", "tool", "assistant"]
+    );
+    assert_eq!(
+        images
+            .iter()
+            .map(|i| i.history_message_index)
+            .collect::<Vec<_>>(),
+        [Some(3), Some(3), Some(4)]
+    );
+    assert_eq!(
+        messages[images[2].history_message_index.unwrap()].content,
+        "after read"
+    );
+    assert_eq!(
+        images[0].anchor,
+        Some(RenderedImageAnchor::ToolCall {
+            id: "read-1".into()
+        })
+    );
+
+    // Compaction adds a synthetic notice. Boundaries count returned rows, not
+    // stored message indices or user-prompt ordinals.
+    session.compaction = Some(StoredCompactionState {
+        summary_text: "summary".into(),
+        openai_encrypted_content: None,
+        covers_up_to_turn: 1,
+        original_turn_count: 1,
+        compacted_count: 1,
+    });
+    let (messages, images, _) =
+        render_messages_and_images_with_compacted_history(&session, usize::MAX);
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(
+        images
+            .iter()
+            .map(|i| i.history_message_index)
+            .collect::<Vec<_>>(),
+        [Some(4), Some(4), Some(5)]
+    );
+}
+
+#[test]
+fn restored_tool_image_boundary_can_be_history_end() {
+    let mut session = Session::create_with_id("image-tail-boundary".into(), None, None);
+    session.add_message(
+        Role::User,
+        vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "orphan".into(),
+                content: String::new(),
+                is_error: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "image".into(),
+            },
+        ],
+    );
+    let (messages, images) = render_messages_and_images(&session);
+    assert_eq!(images[0].history_message_index, Some(messages.len()));
+}
+
+#[test]
+fn rendered_image_history_boundary_is_backward_compatible() {
+    let legacy = serde_json::json!({"media_type": "image/png", "data": "bytes", "label": null,
+        "source": {"kind": "tool_result", "tool_name": "read"}, "anchor": {"kind": "tool_call", "id": "read-1"}});
+    let mut image: RenderedImage = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(image.history_message_index, None);
+    assert_eq!(serde_json::to_value(&image).unwrap(), legacy);
+    image.history_message_index = Some(2);
+    let encoded = serde_json::to_value(&image).unwrap();
+    assert_eq!(encoded["history_message_index"], 2);
+    assert_eq!(
+        serde_json::from_value::<RenderedImage>(encoded).unwrap(),
+        image
+    );
+}

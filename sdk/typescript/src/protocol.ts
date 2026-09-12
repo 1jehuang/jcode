@@ -72,6 +72,8 @@ export interface RenderedImage {
   label?: string;
   source: RenderedImageSource;
   anchor?: RenderedImageAnchor;
+  /** Insert before this History.messages index (including hidden rows). Length means append. */
+  history_message_index?: number;
 }
 
 /** Base64 image attachment: [mediaType, base64Data]. */

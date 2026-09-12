@@ -109,6 +109,13 @@ pub struct RenderedImage {
     /// bottom of the transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<RenderedImageAnchor>,
+    /// Insert before this zero-based entry in the accompanying History.messages
+    /// array (including hidden/system/tool rows). Its length means append.
+    /// Set for restored tool images, whose tool-call row may not be exposed by
+    /// a client. Absent on live events and older servers. Preserve vector order
+    /// for multiple images at the same boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_message_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

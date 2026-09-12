@@ -358,6 +358,7 @@ fn test_side_pane_images_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePaneImages {
         session_id: "session_active".to_string(),
         images: vec![jcode_session_types::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "base64-data".to_string(),
             label: Some("openclaw.png".to_string()),

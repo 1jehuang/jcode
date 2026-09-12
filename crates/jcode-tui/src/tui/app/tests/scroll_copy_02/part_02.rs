@@ -93,6 +93,7 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
     app.is_remote = true;
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "image-data".to_string(),
             label: Some("preview.png".to_string()),
@@ -140,6 +141,7 @@ fn text_only_transcript_updates_keep_inline_image_signature_cached() {
     app.is_remote = true;
     app.remote_side_pane_images = (0..24)
         .map(|index| crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             // Large enough to make accidental payload cloning/re-rendering costly,
             // without bloating the test process excessively.
@@ -176,6 +178,7 @@ fn inline_image_signature_distinguishes_labels_and_same_prefix_payloads() {
         hasher.finish()
     };
     let base = crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: format!("{}tail-a", "A".repeat(128)),
         label: Some("first.png".to_string()),
