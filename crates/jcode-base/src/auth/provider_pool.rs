@@ -13,6 +13,8 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_ACCOUNTS: usize = 100;
+const MAX_QUOTA_MODELS_PER_ACCOUNT: usize = 200;
+const QUOTA_SNAPSHOT_TTL_SECS: i64 = 6 * 60 * 60;
 
 /// Process-local health state. Credential files remain durable, while cooldowns
 /// are intentionally ephemeral and cannot strand an account after a restart.
@@ -25,6 +27,16 @@ struct PoolHealthFile {
     /// This file must never contain access or refresh tokens.
     #[serde(default)]
     cooldowns: HashMap<String, HashMap<String, i64>>,
+    #[serde(default)]
+    quotas: HashMap<String, HashMap<String, HashMap<String, AccountQuotaSnapshot>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccountQuotaSnapshot {
+    pub remaining_fraction_milli: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_time: Option<String>,
+    pub observed_at_unix_secs: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +189,82 @@ fn persist_cooldown(provider: &str, label: &str, until: Option<i64>) {
         }
     }
     write_health(&health);
+}
+
+/// Record model-scoped quota metadata without ever persisting credentials.
+/// Providers may omit either quota value when their response has no usable
+/// quota signal. Old snapshots are ignored by the ranking helper below.
+pub fn record_account_quota(
+    provider: &str,
+    label: &str,
+    model: &str,
+    remaining_fraction_milli: Option<u16>,
+    reset_time: Option<String>,
+) {
+    record_account_quotas(
+        provider,
+        label,
+        &[(model.to_string(), remaining_fraction_milli, reset_time)],
+    );
+}
+
+/// Record several model-scoped quota values in one atomic state-file update.
+pub fn record_account_quotas(
+    provider: &str,
+    label: &str,
+    quotas: &[(String, Option<u16>, Option<String>)],
+) {
+    let mut health = read_health();
+    let models = health
+        .quotas
+        .entry(provider.to_string())
+        .or_default()
+        .entry(label.to_string())
+        .or_default();
+    let observed_at_unix_secs = unix_now();
+    for (model, remaining_fraction_milli, reset_time) in quotas {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if models.len() >= MAX_QUOTA_MODELS_PER_ACCOUNT && !models.contains_key(model) {
+            if let Some(oldest) = models
+                .iter()
+                .min_by_key(|(_, snapshot)| snapshot.observed_at_unix_secs)
+                .map(|(model, _)| model.clone())
+            {
+                models.remove(&oldest);
+            }
+        }
+        models.insert(
+            model.to_string(),
+            AccountQuotaSnapshot {
+                remaining_fraction_milli: *remaining_fraction_milli,
+                reset_time: reset_time.clone(),
+                observed_at_unix_secs,
+            },
+        );
+    }
+    write_health(&health);
+}
+
+/// Return the best recent remaining quota signal for an account. `None` means
+/// the provider has not supplied a usable quota signal recently.
+pub fn account_quota_score(provider: &str, label: &str) -> Option<u16> {
+    let now = unix_now();
+    read_health()
+        .quotas
+        .get(provider)
+        .and_then(|accounts| accounts.get(label))
+        .and_then(|models| {
+            models
+                .values()
+                .filter(|snapshot| {
+                    now.saturating_sub(snapshot.observed_at_unix_secs) <= QUOTA_SNAPSHOT_TTL_SECS
+                })
+                .filter_map(|snapshot| snapshot.remaining_fraction_milli)
+                .max()
+        })
 }
 
 pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
@@ -473,6 +561,49 @@ mod tests {
 
         clear_account_cooldown(provider, account);
         assert!(!account_on_cooldown(provider, account));
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn quota_score_prefers_recent_high_remaining_account() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        record_account_quotas(
+            "antigravity",
+            "antigravity-low",
+            &[("gemini-3-flash".to_string(), Some(100), None)],
+        );
+        record_account_quotas(
+            "antigravity",
+            "antigravity-high",
+            &[(
+                "gemini-3-flash".to_string(),
+                Some(900),
+                Some("reset".to_string()),
+            )],
+        );
+
+        assert_eq!(
+            account_quota_score("antigravity", "antigravity-low"),
+            Some(100)
+        );
+        assert_eq!(
+            account_quota_score("antigravity", "antigravity-high"),
+            Some(900)
+        );
+        let state = std::fs::read_to_string(health_path().expect("resolve health path"))
+            .expect("read quota state");
+        assert!(state.contains("gemini-3-flash"));
+        assert!(state.contains("reset"));
+        assert!(!state.contains("access_token"));
+        assert!(!state.contains("refresh_token"));
 
         match previous_home {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),

@@ -387,6 +387,10 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
     }
 
     let client = crate::provider::shared_http_client();
+    // Refresh alternate managed accounts as well as the active account. Their
+    // secret-free snapshots let the request path prefer accounts with recent
+    // remaining quota without changing the account used for this report.
+    crate::provider::antigravity::refresh_managed_account_quotas(&client).await;
     let snapshot = match crate::provider::antigravity::fetch_catalog_snapshot(&client).await {
         Ok(snapshot) if !snapshot.models.is_empty() => {
             crate::provider::antigravity::persist_catalog(&snapshot);

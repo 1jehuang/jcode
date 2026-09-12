@@ -110,6 +110,100 @@ async fn fetch_available_models_with_project(
     Ok(parse_fetch_available_models_response(&parsed))
 }
 
+/// Fetch a model/quota catalog for a specific OAuth credential without
+/// changing the process-wide active account or the legacy token file.
+///
+/// Managed account polling uses this boundary so each account can be measured
+/// independently. The returned snapshot contains only model metadata and
+/// quota/reset fields, never credentials.
+pub async fn fetch_catalog_snapshot_for_credentials(
+    client: &reqwest::Client,
+    access_token: &str,
+    project_id: Option<&str>,
+) -> Result<CatalogSnapshot> {
+    if let Some(project_id) = project_id.filter(|value| !value.trim().is_empty())
+        && let Ok(snapshot) =
+            fetch_available_models_with_project(client, access_token, Some(project_id)).await
+        && !snapshot.models.is_empty()
+    {
+        return Ok(snapshot);
+    }
+
+    if let Ok(project_id) = antigravity_auth::fetch_project_id(access_token).await
+        && let Ok(snapshot) =
+            fetch_available_models_with_project(client, access_token, Some(&project_id)).await
+        && !snapshot.models.is_empty()
+    {
+        return Ok(snapshot);
+    }
+
+    fetch_available_models_with_project(client, access_token, None).await
+}
+
+/// Refresh quota snapshots for managed accounts other than the active account.
+/// The active account is still fetched by the existing usage path so its report
+/// remains authoritative and this sweep does not issue a duplicate request.
+pub async fn refresh_managed_account_quotas(client: &reqwest::Client) {
+    let active = crate::auth::provider_pool::active_account("antigravity")
+        .ok()
+        .flatten()
+        .map(|account| account.label);
+
+    let accounts = crate::auth::provider_pool::list_accounts("antigravity").unwrap_or_default();
+    for account in accounts {
+        if active.as_deref() == Some(account.label.as_str())
+            || crate::auth::provider_pool::account_on_cooldown("antigravity", &account.label)
+        {
+            continue;
+        }
+
+        let mut tokens = antigravity_auth::AntigravityTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            expires_at: account.expires_at,
+            email: account.email,
+            project_id: account.project_id,
+        };
+        if tokens.is_expired() {
+            tokens = match antigravity_auth::refresh_tokens(&tokens).await {
+                Ok(tokens) => tokens,
+                Err(error) => {
+                    crate::logging::info(&format!(
+                        "Skipping Antigravity quota refresh for account '{}': {}",
+                        account.label, error
+                    ));
+                    continue;
+                }
+            };
+        }
+
+        match fetch_catalog_snapshot_for_credentials(
+            client,
+            &tokens.access_token,
+            tokens.project_id.as_deref(),
+        )
+        .await
+        {
+            Ok(snapshot) => {
+                let quotas = snapshot
+                    .models
+                    .into_iter()
+                    .map(|model| (model.id, model.remaining_fraction_milli, model.reset_time))
+                    .collect::<Vec<_>>();
+                crate::auth::provider_pool::record_account_quotas(
+                    "antigravity",
+                    &account.label,
+                    &quotas,
+                );
+            }
+            Err(error) => crate::logging::info(&format!(
+                "Antigravity quota refresh failed for account '{}': {}",
+                account.label, error
+            )),
+        }
+    }
+}
+
 /// Fetch the live Antigravity model catalog using the resolved Google OAuth
 /// credential, trying the stored project id, then a freshly-resolved project
 /// id, then no project.
