@@ -127,7 +127,6 @@ export type ApiRequest =
       content: string;
       images?: ImageAttachment[];
       no_reply?: boolean;
-      system_reminder?: string;
     }
   | { req: "cancel"; session_id: string }
   | {

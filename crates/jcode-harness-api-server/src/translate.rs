@@ -489,9 +489,6 @@ impl BridgeState {
                 if no_reply {
                     message["no_reply"] = json!(true);
                 }
-                if let Some(reminder) = request["system_reminder"].as_str() {
-                    message["system_reminder"] = json!(reminder);
-                }
                 if let Some(images) = request["images"].as_array()
                     && !images.is_empty()
                 {
@@ -1495,9 +1492,6 @@ impl BridgeState {
                     display_title: event["display_title"].as_str().unwrap_or("").to_string(),
                 })]
             }
-            "available_models_updated" => {
-                self.note_models(event);
-                vec![
             "model_usage_updated" => {
                 let route = &event["route"];
                 let (Some(model), Some(provider), Some(api_method), Ok(usage)) = (
@@ -1526,6 +1520,9 @@ impl BridgeState {
                 }
                 vec![ServerFrame::event(self.runtime_info())]
             }
+            "available_models_updated" => {
+                self.note_models(event);
+                vec![
                     ServerFrame::event(self.model_info(session(self), event)),
                     ServerFrame::event(self.runtime_info()),
                 ]
@@ -1701,13 +1698,10 @@ impl BridgeState {
                         api_method: route["api_method"].as_str()?.to_string(),
                         available: route["available"].as_bool().unwrap_or(false),
                         detail: route["detail"].as_str().unwrap_or_default().to_string(),
+                        usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
                     })
                 })
                 .collect();
-                        usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
-        }
-    }
-
             for route in &mut self.available_routes {
                 if let Some(usage) = self.model_usage_updates.get(&(
                     route.model.clone(),
@@ -1720,6 +1714,9 @@ impl BridgeState {
                         .merge_observation(usage);
                 }
             }
+        }
+    }
+
     fn note_provider(&mut self, provider: &str) {
         if self.current_provider.as_deref() != Some(provider) {
             // Effort is provider-specific. ModelChanged and auth pushes can
