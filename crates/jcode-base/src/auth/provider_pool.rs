@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_ACCOUNTS: usize = 100;
 
@@ -18,6 +18,14 @@ const MAX_ACCOUNTS: usize = 100;
 /// are intentionally ephemeral and cannot strand an account after a restart.
 static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PoolHealthFile {
+    /// Provider health is deliberately stored separately from credential files.
+    /// This file must never contain access or refresh tokens.
+    #[serde(default)]
+    cooldowns: HashMap<String, HashMap<String, i64>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedProviderAccount {
@@ -111,15 +119,89 @@ pub fn set_runtime_active_override(provider: &'static str, label: Option<String>
     crate::auth::account_store::set_runtime_active_override(provider, label);
 }
 
-pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
-    let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() else {
-        return false;
+fn health_path() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("provider_pool_state.json"))
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn read_health() -> PoolHealthFile {
+    let Ok(path) = health_path() else {
+        return PoolHealthFile::default();
     };
+    if !path.exists() {
+        return PoolHealthFile::default();
+    }
+    crate::storage::read_json(&path).unwrap_or_default()
+}
+
+fn write_health(health: &PoolHealthFile) {
+    let Ok(path) = health_path() else {
+        return;
+    };
+    if let Err(error) = jcode_storage::write_json(&path, health) {
+        crate::logging::warn(&format!(
+            "Could not persist provider pool health state at {}: {}",
+            path.display(),
+            error
+        ));
+    }
+}
+
+fn persisted_cooldown_until(provider: &str, label: &str) -> Option<i64> {
+    read_health()
+        .cooldowns
+        .get(provider)
+        .and_then(|accounts| accounts.get(label).copied())
+}
+
+fn persist_cooldown(provider: &str, label: &str, until: Option<i64>) {
+    let mut health = read_health();
+    let accounts = health.cooldowns.entry(provider.to_string()).or_default();
+    match until {
+        Some(until) => {
+            accounts.insert(label.to_string(), until);
+        }
+        None => {
+            accounts.remove(label);
+            if accounts.is_empty() {
+                health.cooldowns.remove(provider);
+            }
+        }
+    }
+    write_health(&health);
+}
+
+pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
     let key = (provider.to_string(), label.to_string());
-    match cooldowns.get(&key).copied() {
-        Some(until) if until > Instant::now() => true,
+    if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
+        match cooldowns.get(&key).copied() {
+            Some(until) if until > Instant::now() => return true,
+            Some(_) => {
+                cooldowns.remove(&key);
+            }
+            None => {}
+        }
+    }
+
+    let now = unix_now();
+    match persisted_cooldown_until(provider, label) {
+        Some(until) if until > now => {
+            if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
+                let seconds = (until - now).try_into().unwrap_or(u64::MAX);
+                cooldowns.insert(key, Instant::now() + Duration::from_secs(seconds));
+            }
+            true
+        }
         Some(_) => {
-            cooldowns.remove(&key);
+            persist_cooldown(provider, label, None);
             false
         }
         None => false,
@@ -133,12 +215,18 @@ pub fn mark_account_cooldown(provider: &str, label: &str, duration: Duration) {
             Instant::now() + duration,
         );
     }
+    persist_cooldown(
+        provider,
+        label,
+        Some(unix_now().saturating_add(duration.as_secs().try_into().unwrap_or(i64::MAX))),
+    );
 }
 
 pub fn clear_account_cooldown(provider: &str, label: &str) {
     if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
         cooldowns.remove(&(provider.to_string(), label.to_string()));
     }
+    persist_cooldown(provider, label, None);
 }
 
 pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result<String> {
@@ -356,5 +444,39 @@ mod tests {
             "cursor-Work-Email"
         );
         assert_eq!(label("cursor", 0, None, "id/unsafe"), "cursor-id-unsafe");
+    }
+
+    #[test]
+    fn cooldown_state_survives_process_local_cache_reset_without_secrets() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        let provider = "cursor";
+        let account = "cursor-persistence-test";
+
+        clear_account_cooldown(provider, account);
+        mark_account_cooldown(provider, account, Duration::from_secs(60));
+        assert!(account_on_cooldown(provider, account));
+
+        let state_path = health_path().expect("resolve health path");
+        let state = std::fs::read_to_string(&state_path).expect("read persisted health state");
+        assert!(state.contains(account));
+        assert!(!state.contains("access_token"));
+        assert!(!state.contains("refresh_token"));
+
+        ACCOUNT_COOLDOWNS
+            .lock()
+            .expect("lock cooldown cache")
+            .clear();
+        assert!(account_on_cooldown(provider, account));
+
+        clear_account_cooldown(provider, account);
+        assert!(!account_on_cooldown(provider, account));
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
     }
 }
