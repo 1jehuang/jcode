@@ -1058,6 +1058,12 @@ pub(crate) enum AuthCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Import managed Cursor and Antigravity accounts from ~/.opencodex/auth.json
+    ImportOpencodex {
+        /// Emit a secret-free JSON acknowledgement
+        #[arg(long)]
+        json: bool,
+    },
     /// Show configured authentication status for model/tool providers
     Status {
         /// Emit JSON instead of plain text

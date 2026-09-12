@@ -27,6 +27,14 @@ pub(super) fn active_account_label_for_provider(provider: ActiveProvider) -> Opt
     match provider {
         ActiveProvider::Claude => crate::auth::claude::active_account_label(),
         ActiveProvider::OpenAI => crate::auth::codex::active_account_label(),
+        ActiveProvider::Antigravity => crate::auth::provider_pool::active_account("antigravity")
+            .ok()
+            .flatten()
+            .map(|account| account.label),
+        ActiveProvider::Cursor => crate::auth::provider_pool::active_account("cursor")
+            .ok()
+            .flatten()
+            .map(|account| account.label),
         _ => None,
     }
 }
@@ -35,6 +43,12 @@ pub(super) fn set_account_override_for_provider(provider: ActiveProvider, label:
     match provider {
         ActiveProvider::Claude => crate::auth::claude::set_active_account_override(label),
         ActiveProvider::OpenAI => crate::auth::codex::set_active_account_override(label),
+        ActiveProvider::Antigravity => {
+            crate::auth::provider_pool::set_runtime_active_override("antigravity", label)
+        }
+        ActiveProvider::Cursor => {
+            crate::auth::provider_pool::set_runtime_active_override("cursor", label)
+        }
         _ => {}
     }
 }
@@ -88,6 +102,22 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
         ActiveProvider::OpenAI => {
             for account in crate::auth::codex::list_accounts().unwrap_or_default() {
                 push_unique(account.label);
+            }
+        }
+        ActiveProvider::Antigravity => {
+            for account in
+                crate::auth::provider_pool::list_accounts("antigravity").unwrap_or_default()
+            {
+                if !crate::auth::provider_pool::account_on_cooldown("antigravity", &account.label) {
+                    push_unique(account.label);
+                }
+            }
+        }
+        ActiveProvider::Cursor => {
+            for account in crate::auth::provider_pool::list_accounts("cursor").unwrap_or_default() {
+                if !crate::auth::provider_pool::account_on_cooldown("cursor", &account.label) {
+                    push_unique(account.label);
+                }
             }
         }
         _ => {}

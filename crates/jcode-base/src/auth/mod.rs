@@ -19,6 +19,7 @@ pub mod lifecycle;
 pub mod login_diagnostics;
 pub mod login_flows;
 pub mod oauth;
+pub mod provider_pool;
 pub(crate) mod refresh_coordinator;
 pub mod refresh_state;
 mod status_types;
@@ -1519,6 +1520,19 @@ fn gemini_source() -> Option<(AuthCredentialSource, String)> {
 }
 
 fn antigravity_source() -> Option<(AuthCredentialSource, String)> {
+    if let Ok(accounts) = crate::auth::provider_pool::list_accounts("antigravity")
+        && !accounts.is_empty()
+    {
+        let active = crate::auth::provider_pool::active_account("antigravity")
+            .ok()
+            .flatten()
+            .map(|account| account.label)
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            format!("{} accounts; active {}", accounts.len(), active),
+        ));
+    }
     if let Ok(path) = crate::auth::antigravity::tokens_path()
         && path.exists()
     {
@@ -1551,6 +1565,19 @@ fn google_source() -> Option<(AuthCredentialSource, String)> {
 }
 
 fn cursor_source() -> Option<(AuthCredentialSource, String)> {
+    if let Ok(accounts) = crate::auth::provider_pool::list_accounts("cursor")
+        && !accounts.is_empty()
+    {
+        let active = crate::auth::provider_pool::active_account("cursor")
+            .ok()
+            .flatten()
+            .map(|account| account.label)
+            .unwrap_or_else(|| "unknown".to_string());
+        return Some((
+            AuthCredentialSource::JcodeManagedFile,
+            format!("{} accounts; active {}", accounts.len(), active),
+        ));
+    }
     if env_var_nonempty("CURSOR_ACCESS_TOKEN") || env_var_nonempty("CURSOR_API_KEY") {
         return Some((
             AuthCredentialSource::EnvironmentVariable,

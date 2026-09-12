@@ -110,6 +110,39 @@ pub(crate) fn run(choice: &ProviderChoice, json: bool) -> Result<()> {
     }
 }
 
+pub(crate) fn run_opencodex(json: bool) -> Result<()> {
+    let result = crate::auth::provider_pool::import_opencodex();
+    match result {
+        Ok(summary) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "imported",
+                        "cursor_accounts": summary.cursor_imported,
+                        "antigravity_accounts": summary.antigravity_imported,
+                    })
+                );
+            } else {
+                println!(
+                    "Imported {} Cursor and {} Antigravity accounts from ~/.opencodex.",
+                    summary.cursor_imported, summary.antigravity_imported
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"status":"error", "message": error.to_string()})
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

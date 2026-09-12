@@ -53,6 +53,106 @@ impl Clone for AntigravityProvider {
 }
 
 impl AntigravityProvider {
+    /// Retry quota/auth failures on another managed account before the stream
+    /// reports an error. MultiProvider cannot observe errors emitted after an
+    /// EventStream has been returned, so this boundary must own provider-level
+    /// account rotation.
+    #[expect(clippy::too_many_arguments)]
+    async fn generate_content_with_pool_failover(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let original = jcode_base::auth::provider_pool::active_account("antigravity")
+            .ok()
+            .flatten()
+            .map(|account| account.label);
+        let first = self
+            .generate_content(
+                model,
+                messages,
+                tools,
+                system,
+                resume_session_id,
+                force_function_call,
+                signature_policy,
+            )
+            .await;
+        let Err(first_error) = first else {
+            return first;
+        };
+        if !jcode_provider_core::classify_failover_error_message(&first_error.to_string())
+            .should_failover()
+        {
+            return Err(first_error);
+        }
+        let Some(original) = original else {
+            return Err(first_error);
+        };
+        let alternatives = jcode_base::auth::provider_pool::list_accounts("antigravity")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|account| account.label != original)
+            .filter(|account| {
+                !jcode_base::auth::provider_pool::account_on_cooldown("antigravity", &account.label)
+            })
+            .collect::<Vec<_>>();
+        for account in alternatives {
+            jcode_base::auth::provider_pool::mark_account_cooldown(
+                "antigravity",
+                &original,
+                std::time::Duration::from_secs(300),
+            );
+            jcode_base::auth::provider_pool::set_runtime_active_override(
+                "antigravity",
+                Some(account.label.clone()),
+            );
+            match self
+                .generate_content(
+                    model,
+                    messages,
+                    tools,
+                    system,
+                    resume_session_id,
+                    force_function_call,
+                    signature_policy,
+                )
+                .await
+            {
+                Ok(response) => {
+                    jcode_base::auth::provider_pool::clear_account_cooldown(
+                        "antigravity",
+                        &account.label,
+                    );
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if !jcode_provider_core::classify_failover_error_message(&error.to_string())
+                        .should_failover()
+                    {
+                        jcode_base::auth::provider_pool::set_runtime_active_override(
+                            "antigravity",
+                            Some(original.clone()),
+                        );
+                        return Err(error);
+                    }
+                    jcode_base::auth::provider_pool::mark_account_cooldown(
+                        "antigravity",
+                        &account.label,
+                        std::time::Duration::from_secs(300),
+                    );
+                }
+            }
+        }
+        jcode_base::auth::provider_pool::set_runtime_active_override("antigravity", Some(original));
+        Err(first_error)
+    }
+
     fn load_persisted_catalog() -> Option<PersistedCatalog> {
         jcode_base::provider::antigravity::load_persisted_catalog()
     }
@@ -490,7 +590,7 @@ impl Provider for AntigravityProvider {
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
             let response = match provider
-                .generate_content(
+                .generate_content_with_pool_failover(
                     &model,
                     &messages,
                     &tools,

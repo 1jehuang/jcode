@@ -1,0 +1,360 @@
+//! Managed provider-account storage and safe import from OpenCodeX.
+//!
+//! This module deliberately stores credentials separately from provider runtime
+//! state. Selection is process-local, while the account file is an encrypted-at-
+//! rest boundary only in the sense that it is protected as a secret file. Never
+//! include its contents in logs, quota snapshots, or diagnostics.
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+const MAX_ACCOUNTS: usize = 100;
+
+/// Process-local health state. Credential files remain durable, while cooldowns
+/// are intentionally ephemeral and cannot strand an account after a restart.
+static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedProviderAccount {
+    pub id: String,
+    pub label: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AccountFile {
+    #[serde(default)]
+    active_account: Option<String>,
+    #[serde(default)]
+    accounts: Vec<ManagedProviderAccount>,
+}
+
+pub fn accounts_path(provider: &str) -> Result<PathBuf> {
+    let filename = match provider {
+        "antigravity" => "antigravity_accounts.json",
+        "cursor" => "cursor_accounts.json",
+        _ => anyhow::bail!("unsupported managed account provider: {provider}"),
+    };
+    Ok(crate::storage::jcode_dir()?.join(filename))
+}
+
+fn read(provider: &str) -> Result<AccountFile> {
+    let file_path = accounts_path(provider)?;
+    if !file_path.exists() {
+        return Ok(AccountFile::default());
+    }
+    crate::storage::harden_secret_file_permissions(&file_path);
+    let file: AccountFile = crate::storage::read_json(&file_path)
+        .with_context(|| format!("failed to read managed {provider} account store"))?;
+    if file.accounts.len() > MAX_ACCOUNTS {
+        anyhow::bail!("managed {provider} account store exceeds the {MAX_ACCOUNTS} account limit");
+    }
+    if file.accounts.iter().any(|account| {
+        account.id.trim().is_empty()
+            || account.label.trim().is_empty()
+            || account.access_token.trim().is_empty()
+            || account.refresh_token.trim().is_empty()
+    }) {
+        anyhow::bail!("managed {provider} account store contains an incomplete account");
+    }
+    Ok(file)
+}
+
+fn write(provider: &str, file: &AccountFile) -> Result<()> {
+    let file_path = accounts_path(provider)?;
+    crate::storage::write_json_secret(&file_path, file)
+}
+
+pub fn list_accounts(provider: &str) -> Result<Vec<ManagedProviderAccount>> {
+    Ok(read(provider)?.accounts)
+}
+
+pub fn active_account(provider: &str) -> Result<Option<ManagedProviderAccount>> {
+    let file = read(provider)?;
+    let label = crate::auth::account_store::active_account_label(
+        crate::auth::account_store::runtime_active_override(provider),
+        file.active_account,
+        &file.accounts,
+        |account| account.label.as_str(),
+    );
+    Ok(label.and_then(|label| {
+        file.accounts
+            .into_iter()
+            .find(|account| account.label == label)
+    }))
+}
+
+pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
+    let mut file = read(provider)?;
+    crate::auth::account_store::set_active_account(
+        label,
+        &file.accounts,
+        &mut file.active_account,
+        &format!("No managed {provider} account named '{{}}'"),
+        |account| account.label.as_str(),
+    )?;
+    write(provider, &file)
+}
+
+pub fn set_runtime_active_override(provider: &'static str, label: Option<String>) {
+    crate::auth::account_store::set_runtime_active_override(provider, label);
+}
+
+pub fn account_on_cooldown(provider: &str, label: &str) -> bool {
+    let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() else {
+        return false;
+    };
+    let key = (provider.to_string(), label.to_string());
+    match cooldowns.get(&key).copied() {
+        Some(until) if until > Instant::now() => true,
+        Some(_) => {
+            cooldowns.remove(&key);
+            false
+        }
+        None => false,
+    }
+}
+
+pub fn mark_account_cooldown(provider: &str, label: &str, duration: Duration) {
+    if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
+        cooldowns.insert(
+            (provider.to_string(), label.to_string()),
+            Instant::now() + duration,
+        );
+    }
+}
+
+pub fn clear_account_cooldown(provider: &str, label: &str) {
+    if let Ok(mut cooldowns) = ACCOUNT_COOLDOWNS.lock() {
+        cooldowns.remove(&(provider.to_string(), label.to_string()));
+    }
+}
+
+pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result<String> {
+    let mut file = read(provider)?;
+    let id = account.id.clone();
+    if let Some(existing) = file.accounts.iter_mut().find(|existing| existing.id == id) {
+        let label = existing.label.clone();
+        *existing = ManagedProviderAccount { label, ..account };
+    } else {
+        if file.accounts.len() >= MAX_ACCOUNTS {
+            anyhow::bail!("managed {provider} account store is full");
+        }
+        file.accounts.push(account);
+    }
+    if file.active_account.is_none() {
+        file.active_account = file.accounts.first().map(|account| account.label.clone());
+    }
+    let label = file
+        .accounts
+        .iter()
+        .find(|account| account.id == id)
+        .map(|account| account.label.clone())
+        .context("managed account disappeared while importing")?;
+    write(provider, &file)?;
+    Ok(label)
+}
+
+pub fn update_tokens_for_refresh(
+    provider: &str,
+    previous_refresh_token: &str,
+    access_token: String,
+    refresh_token: String,
+    expires_at: i64,
+    email: Option<String>,
+    project_id: Option<String>,
+) -> Result<bool> {
+    let mut file = read(provider)?;
+    let Some(account) = file
+        .accounts
+        .iter_mut()
+        .find(|account| account.refresh_token == previous_refresh_token)
+    else {
+        return Ok(false);
+    };
+    account.access_token = access_token;
+    account.refresh_token = refresh_token;
+    account.expires_at = expires_at;
+    if email.is_some() {
+        account.email = email;
+    }
+    if project_id.is_some() {
+        account.project_id = project_id;
+    }
+    write(provider, &file)?;
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportSummary {
+    pub cursor_imported: usize,
+    pub antigravity_imported: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeXAuth {
+    #[serde(rename = "cursor", default)]
+    cursor: Option<OpenCodeXProvider>,
+    #[serde(rename = "google-antigravity", default)]
+    antigravity: Option<OpenCodeXProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeXProvider {
+    #[serde(default)]
+    accounts: Vec<OpenCodeXAccount>,
+    #[serde(default, rename = "activeAccountId")]
+    active_account_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeXAccount {
+    id: String,
+    #[serde(default)]
+    alias: Option<String>,
+    credential: OpenCodeXCredential,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenCodeXCredential {
+    access: String,
+    refresh: String,
+    expires: i64,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default, rename = "projectId")]
+    project_id: Option<String>,
+}
+
+fn opencodex_path() -> Result<PathBuf> {
+    crate::storage::user_home_path(".opencodex/auth.json")
+        .context("could not locate the user home directory")
+}
+
+fn label(provider: &str, index: usize, alias: Option<&str>, id: &str) -> String {
+    let alias = alias.map(str::trim).filter(|v| !v.is_empty());
+    let suffix = alias.unwrap_or(id);
+    let safe = suffix
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let safe = safe.trim_matches('-');
+    if safe.is_empty() {
+        crate::auth::account_store::canonical_account_label(provider, index + 1)
+    } else {
+        format!("{provider}-{safe}")
+    }
+}
+
+pub fn import_opencodex() -> Result<ImportSummary> {
+    let source = opencodex_path()?;
+    if !source.exists() {
+        anyhow::bail!("OpenCodeX auth file not found at {}", source.display());
+    }
+    let safe_source = crate::storage::validate_external_auth_file(&source)
+        .context("refusing to import an unsafe OpenCodeX auth file")?;
+    let raw =
+        std::fs::read_to_string(&safe_source).context("failed to read OpenCodeX auth file")?;
+    if raw.len() > 2 * 1024 * 1024 {
+        anyhow::bail!("OpenCodeX auth file is unexpectedly large");
+    }
+    let parsed: OpenCodeXAuth =
+        serde_json::from_str(&raw).context("failed to parse OpenCodeX auth file")?;
+    let mut summary = ImportSummary {
+        cursor_imported: 0,
+        antigravity_imported: 0,
+    };
+
+    if let Some(provider) = parsed.cursor {
+        for (index, account) in provider.accounts.into_iter().enumerate() {
+            let account_id = account.id.trim();
+            let access = account.credential.access.trim();
+            let refresh = account.credential.refresh.trim();
+            if account_id.is_empty() || access.is_empty() || refresh.is_empty() {
+                anyhow::bail!("OpenCodeX cursor account contains incomplete credentials");
+            }
+            let account = ManagedProviderAccount {
+                id: account_id.to_string(),
+                label: label("cursor", index, account.alias.as_deref(), account_id),
+                access_token: access.to_string(),
+                refresh_token: refresh.to_string(),
+                expires_at: account.credential.expires,
+                email: account.credential.email,
+                project_id: account.credential.project_id,
+            };
+            upsert_account("cursor", account)?;
+            summary.cursor_imported += 1;
+        }
+        if let Some(active) = provider.active_account_id {
+            if let Some(account) = list_accounts("cursor")?
+                .into_iter()
+                .find(|a| a.id == active)
+            {
+                set_active_account("cursor", &account.label)?;
+            }
+        }
+    }
+
+    if let Some(provider) = parsed.antigravity {
+        for (index, account) in provider.accounts.into_iter().enumerate() {
+            let account_id = account.id.trim();
+            let access = account.credential.access.trim();
+            let refresh = account.credential.refresh.trim();
+            if account_id.is_empty() || access.is_empty() || refresh.is_empty() {
+                anyhow::bail!("OpenCodeX Antigravity account contains incomplete credentials");
+            }
+            let account = ManagedProviderAccount {
+                id: account_id.to_string(),
+                label: label("antigravity", index, account.alias.as_deref(), account_id),
+                access_token: access.to_string(),
+                refresh_token: refresh.to_string(),
+                expires_at: account.credential.expires,
+                email: account.credential.email,
+                project_id: account.credential.project_id,
+            };
+            upsert_account("antigravity", account)?;
+            summary.antigravity_imported += 1;
+        }
+        if let Some(active) = provider.active_account_id {
+            if let Some(account) = list_accounts("antigravity")?
+                .into_iter()
+                .find(|a| a.id == active)
+            {
+                set_active_account("antigravity", &account.label)?;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_are_stable_and_safe() {
+        assert_eq!(
+            label("cursor", 0, Some("Work Email"), "id"),
+            "cursor-Work-Email"
+        );
+        assert_eq!(label("cursor", 0, None, "id/unsafe"), "cursor-id-unsafe");
+    }
+}

@@ -124,6 +124,15 @@ pub fn tokens_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn load_tokens() -> Result<AntigravityTokens> {
+    if let Some(account) = crate::auth::provider_pool::active_account("antigravity")? {
+        return Ok(AntigravityTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            expires_at: account.expires_at,
+            email: account.email,
+            project_id: account.project_id,
+        });
+    }
     let path = tokens_path()?;
     if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
@@ -209,7 +218,17 @@ async fn refresh_tokens_uncoordinated(tokens: &AntigravityTokens) -> Result<Anti
             refreshed.project_id = fetch_project_id(&refreshed.access_token).await.ok();
         }
 
-        save_tokens(&refreshed)?;
+        if !crate::auth::provider_pool::update_tokens_for_refresh(
+            "antigravity",
+            &tokens.refresh_token,
+            refreshed.access_token.clone(),
+            refreshed.refresh_token.clone(),
+            refreshed.expires_at,
+            refreshed.email.clone(),
+            refreshed.project_id.clone(),
+        )? {
+            save_tokens(&refreshed)?;
+        }
         Ok(refreshed)
     }
     .await;

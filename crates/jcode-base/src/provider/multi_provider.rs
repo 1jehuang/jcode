@@ -67,6 +67,15 @@ impl MultiProvider {
 
             match attempt {
                 Ok(stream) => {
+                    if matches!(
+                        provider,
+                        ActiveProvider::Antigravity | ActiveProvider::Cursor
+                    ) {
+                        crate::auth::provider_pool::clear_account_cooldown(
+                            Self::provider_key(provider),
+                            alternative_label,
+                        );
+                    }
                     self.startup_notices
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -92,6 +101,24 @@ impl MultiProvider {
                         "{} account {}: {}",
                         provider_label, alternative_label, summary
                     ));
+                    if matches!(
+                        provider,
+                        ActiveProvider::Antigravity | ActiveProvider::Cursor
+                    ) {
+                        let cooldown = if summary.to_ascii_lowercase().contains("429")
+                            || summary.to_ascii_lowercase().contains("rate limit")
+                            || summary.to_ascii_lowercase().contains("quota")
+                        {
+                            std::time::Duration::from_secs(300)
+                        } else {
+                            std::time::Duration::from_secs(30)
+                        };
+                        crate::auth::provider_pool::mark_account_cooldown(
+                            Self::provider_key(provider),
+                            alternative_label,
+                            cooldown,
+                        );
+                    }
                     if decision.should_mark_provider_unavailable() {
                         record_provider_unavailable_for_account(provider_key, &summary);
                     }

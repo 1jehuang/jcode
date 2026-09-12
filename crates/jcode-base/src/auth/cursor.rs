@@ -408,8 +408,45 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
     )
 }
 
+fn load_managed_tokens() -> Result<CursorDirectTokens> {
+    let account = crate::auth::provider_pool::active_account("cursor")?
+        .context("no managed Cursor account is active")?;
+    Ok(CursorDirectTokens {
+        access_token: account.access_token,
+        refresh_token: Some(account.refresh_token),
+        source: "cursor_managed",
+    })
+}
+
 /// Resolve the best available direct-auth credentials for Cursor's native API.
 pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens> {
+    if let Ok(tokens) = load_managed_tokens() {
+        if !token_is_expiring_soon(&tokens.access_token) {
+            return Ok(tokens);
+        }
+        if let Some(refresh_token) = tokens.refresh_token.as_deref()
+            && let Ok(refreshed) = refresh_direct_access_token(client, refresh_token).await
+        {
+            let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+                "cursor",
+                refresh_token,
+                refreshed.access_token.clone(),
+                refreshed
+                    .refresh_token
+                    .clone()
+                    .unwrap_or_else(|| refresh_token.to_string()),
+                token_expiry_epoch_secs(&refreshed.access_token)
+                    .and_then(|value| i64::try_from(value).ok())
+                    .unwrap_or_default(),
+                None,
+                None,
+            );
+            return Ok(CursorDirectTokens {
+                source: "cursor_managed",
+                ..refreshed
+            });
+        }
+    }
     if let Ok(tokens) = load_access_token_from_env_or_file() {
         if !token_is_expiring_soon(&tokens.access_token) {
             return Ok(tokens);
@@ -474,6 +511,21 @@ pub async fn refresh_resolved_tokens(
     refreshed.source = tokens.source;
     if tokens.source == "cursor_auth_file" {
         let _ = save_auth_file_tokens(&refreshed);
+    } else if tokens.source == "cursor_managed" {
+        let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+            "cursor",
+            refresh_token,
+            refreshed.access_token.clone(),
+            refreshed
+                .refresh_token
+                .clone()
+                .unwrap_or_else(|| refresh_token.to_string()),
+            token_expiry_epoch_secs(&refreshed.access_token)
+                .and_then(|value| i64::try_from(value).ok())
+                .unwrap_or_default(),
+            None,
+            None,
+        );
     }
     Ok(refreshed)
 }
