@@ -21,6 +21,12 @@ export type ErrorCode =
 
 export interface SessionInfo {
   session_id: string;
+  /** Swarm owner, never the transcript's ordinary fork parent. */
+  parent_session_id?: string;
+  /** Stable task/role label, separate from the canonical display title. */
+  agent_label?: string;
+  /** Last persisted swarm lifecycle status, not connection status. */
+  swarm_status?: string;
   working_dir?: string;
   title?: string;
   status: string;

@@ -279,6 +279,19 @@ pub enum ErrorCode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
     pub session_id: String,
+    /// Swarm owner this agent reports to, not the transcript's fork parent.
+    /// Absent for ordinary sessions and user-created forks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// Stable task/role label assigned when spawning or assigning a swarm agent.
+    /// Separate from `title`, which remains the user's canonical display title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+    /// Last persisted swarm lifecycle status (for example `running`, `ready`,
+    /// `completed`, or `failed`). Independent of this connection's `status`.
+    /// Clients should tolerate new status strings and missing snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     /// The effective persisted display title. A custom rename takes precedence
