@@ -116,6 +116,9 @@ fn run_demo() {
                     id,
                     ApiEvent::Attached {
                         session: jcode_harness_api::SessionInfo {
+                            parent_session_id: None,
+                            agent_label: None,
+                            swarm_status: None,
                             session_id: "demo-1".into(),
                             working_dir: None,
                             title: Some("demo".into()),

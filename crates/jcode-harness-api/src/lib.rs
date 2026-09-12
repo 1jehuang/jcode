@@ -19,11 +19,15 @@ mod client;
 mod events;
 mod requests;
 mod sockets;
+mod swarm_metadata;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
+pub use swarm_metadata::{
+    enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
+};
 
 #[cfg(test)]
 #[path = "harness_api_tests/schema_snapshot.rs"]
