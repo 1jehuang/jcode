@@ -1273,7 +1273,7 @@ async fn request_history(session: &DaemonSession) -> Result<ServerEvent> {
 
 async fn request_model_catalog(session: &DaemonSession) -> Result<ServerEvent> {
     let id = session.next_id();
-    session.send(&Request::GetModelCatalog { id }).await?;
+    session.send(&Request::GetModelCatalog { id, subscribe_usage_updates: false }).await?;
     loop {
         match session.read_event().await? {
             ServerEvent::Ack { .. } => {}

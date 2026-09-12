@@ -553,6 +553,7 @@ mod tests {
                 api_method: "a".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -561,6 +562,7 @@ mod tests {
                 api_method: "a".to_string(),
                 available: false,
                 detail: "duplicate".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -569,6 +571,7 @@ mod tests {
                 api_method: "b".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ];
@@ -587,6 +590,7 @@ mod tests {
                 api_method: "openai-compatible".to_string(),
                 available: true,
                 detail: "generic transport".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -595,6 +599,7 @@ mod tests {
                 api_method: "openai-compatible:cerebras".to_string(),
                 available: true,
                 detail: "profile transport".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -603,6 +608,7 @@ mod tests {
                 api_method: "openai-compatible:other".to_string(),
                 available: true,
                 detail: "different provider".to_string(),
+                usage: None,
                 cheapness: None,
             },
             ModelRoute {
@@ -611,6 +617,7 @@ mod tests {
                 api_method: "openai-compatible:cerebras-alt".to_string(),
                 available: true,
                 detail: "distinct profile route".to_string(),
+                usage: None,
                 cheapness: None,
             },
         ];
@@ -662,6 +669,7 @@ mod tests {
                 api_method: a.to_string(),
                 available: seed & 1 == 0,
                 detail: format!("route-{i}"),
+                usage: None,
                 cheapness: None,
             });
         }

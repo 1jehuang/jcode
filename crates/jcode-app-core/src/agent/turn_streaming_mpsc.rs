@@ -81,6 +81,7 @@ impl Agent {
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.set_log_context();
+        let usage_turn_id = self.model_usage_turn_id();
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
@@ -1108,6 +1109,7 @@ impl Agent {
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
+                self.record_model_turn_usage(&usage_turn_id);
                 Some(message_id)
             } else {
                 None

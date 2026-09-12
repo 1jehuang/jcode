@@ -8,5 +8,6 @@ description = "Stable, versioned client API for the jcode harness (agent runtime
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+jcode-usage-types = { path = "../jcode-usage-types" }
 
 [dev-dependencies]

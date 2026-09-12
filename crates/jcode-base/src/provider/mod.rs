@@ -228,6 +228,7 @@ fn direct_openai_compatible_profile_routes(
             api_method: api_method.clone(),
             available: true,
             detail: detail.clone(),
+            usage: None,
             cheapness: None,
         });
     }

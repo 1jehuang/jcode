@@ -156,6 +156,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
         }
@@ -170,6 +171,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
             if self.include_generic_profile_duplicate {
@@ -183,6 +185,7 @@ impl AuthUxStateSpaceProvider {
                     } else {
                         "no API key".to_string()
                     },
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -200,6 +203,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -208,6 +212,7 @@ impl MixedModelRoutesProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -216,6 +221,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-compatible:chutes".to_string(),
                 available: true,
                 detail: "https://llm.chutes.ai/v1".to_string(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -224,6 +230,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -478,6 +485,7 @@ impl Provider for CountingModelRoutesProvider {
                 api_method: "test".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()
@@ -1611,6 +1619,7 @@ impl Provider for AzureLoginMockProvider {
             api_method: "openai-compatible".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }]
     }

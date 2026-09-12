@@ -173,6 +173,7 @@ impl Provider for AuthRefreshingMockProvider {
                     api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
@@ -181,6 +182,7 @@ impl Provider for AuthRefreshingMockProvider {
                     api_method: "copilot".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 },
             ]
@@ -191,6 +193,7 @@ impl Provider for AuthRefreshingMockProvider {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             }]
         }
@@ -297,6 +300,7 @@ impl Provider for AntigravityMockProvider {
                 api_method: "cli".to_string(),
                 available: true,
                 detail: "cached catalog".to_string(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -305,6 +309,7 @@ impl Provider for AntigravityMockProvider {
                 api_method: "cli".to_string(),
                 available: true,
                 detail: "cached catalog".to_string(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -369,6 +374,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -377,6 +383,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -385,6 +392,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -393,6 +401,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openai-compatible:comtegra".to_string(),
                 available: true,
                 detail: "recently added · https://llm.comtegra.cloud/v1".to_string(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -401,6 +410,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "copilot".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -409,6 +419,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -417,6 +428,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -425,6 +437,7 @@ impl Provider for LoginSmokeModelProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -479,6 +492,7 @@ impl Provider for FailingModelSwitchProvider {
             api_method: "copilot".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }]
     }
@@ -610,6 +624,7 @@ impl Provider for DualMethodMockProvider {
                 api_method: "claude-api".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -618,6 +633,7 @@ impl Provider for DualMethodMockProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -742,6 +758,7 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
                 api_method: method.to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect();

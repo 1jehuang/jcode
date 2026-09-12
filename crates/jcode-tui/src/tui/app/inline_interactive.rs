@@ -746,6 +746,7 @@ impl App {
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: crate::subscription_catalog::routing_policy_detail(model),
+                usage: None,
                 cheapness: None,
             });
         }
@@ -1570,12 +1571,31 @@ impl App {
                 api_method: "current".to_string(),
                 available: true,
                 detail: "catalog still loading".to_string(),
+                usage: None,
                 cheapness: None,
             }]
         } else {
             routes
         };
-        let routes = crate::provider::dedupe_model_routes(routes);
+        let mut routes = crate::provider::dedupe_model_routes(routes);
+        if !self.is_remote {
+            crate::model_usage::enrich_routes(&mut routes);
+        }
+        let shared_usage: HashMap<_, _> = routes
+            .iter()
+            .filter_map(|route| {
+                route.usage.clone().map(|usage| {
+                    (
+                        (
+                            route.model.clone(),
+                            route.provider.clone(),
+                            route.api_method.clone(),
+                        ),
+                        usage,
+                    )
+                })
+            })
+            .collect();
         let routes = filter_routes_by_provider_allowlist(
             routes,
             config.provider.model_picker_providers.as_deref(),
@@ -1818,6 +1838,15 @@ impl App {
             }
         }
 
+        let entry_usage = |entry: &PickerEntry| {
+            entry.active_option().and_then(|route| {
+                shared_usage.get(&(
+                    model_entry_base_name(entry),
+                    route.provider.clone(),
+                    route.api_method.clone(),
+                ))
+            })
+        };
         entries.sort_by(|a, b| {
             let a_current = if a.is_current { 0u8 } else { 1 };
             let b_current = if b.is_current { 0u8 } else { 1 };
@@ -1871,6 +1900,10 @@ impl App {
                 .cmp(&b_current)
                 .then(a_favorite.cmp(&b_favorite))
                 .then(a_recent.cmp(&b_recent))
+                .then(jcode_provider_core::compare_model_usage(
+                    entry_usage(a),
+                    entry_usage(b),
+                ))
                 .then(a_usage.cmp(&b_usage))
                 .then(a_rec.cmp(&b_rec))
                 .then(a_rec_rank.cmp(&b_rec_rank))
@@ -4531,6 +4564,7 @@ mod tests {
             api_method: api_method.to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }
     }

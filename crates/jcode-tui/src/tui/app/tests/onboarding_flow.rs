@@ -37,6 +37,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -45,6 +46,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -53,6 +55,7 @@ impl Provider for QualityFirstOpenAiProvider {
                 api_method: "openai-api-key".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]

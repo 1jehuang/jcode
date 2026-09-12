@@ -162,7 +162,13 @@ pub enum Request {
 
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
-    GetModelCatalog { id: u64 },
+    GetModelCatalog {
+        id: u64,
+        /// Older clients cannot decode new event variants. Only clients that
+        /// explicitly opt in receive incremental model_usage_updated events.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        subscribe_usage_updates: bool,
+    },
 
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
     #[serde(rename = "get_compacted_history")]
@@ -1296,6 +1302,10 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+
+    /// Usage delta for a route, independent of catalog availability or Agent locks.
+    #[serde(rename = "model_usage_updated")]
+    ModelUsageUpdated { route: jcode_provider_core::ModelRoute },
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]

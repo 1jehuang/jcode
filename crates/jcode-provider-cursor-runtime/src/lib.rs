@@ -342,6 +342,7 @@ impl Provider for CursorCliProvider {
                 api_method: "cursor".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()

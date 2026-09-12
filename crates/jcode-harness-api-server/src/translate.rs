@@ -167,6 +167,8 @@ pub struct BridgeState {
     /// carry it without a round trip.
     current_effort: Option<String>,
     available_routes: Vec<ModelRouteInfo>,
+    /// Deltas can precede the first catalog or a delayed snapshot reply.
+    model_usage_updates: BTreeMap<(String, String, String), jcode_harness_api::ModelUsage>,
 }
 
 impl BridgeState {
@@ -468,7 +470,7 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id})),
+                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
                 ]
             }
             "send_message" => {
@@ -700,7 +702,7 @@ impl BridgeState {
                     let id = self.legacy_id();
                     self.pending_simple.push((id, api_id, SimpleKind::Models));
                     return vec![Outbound::Legacy(
-                        json!({"type": "get_model_catalog", "id": id}),
+                        json!({"type": "get_model_catalog", "id": id, "subscribe_usage_updates": true}),
                     )];
                 }
                 vec![Outbound::Reply(ServerFrame::reply(
@@ -718,7 +720,7 @@ impl BridgeState {
                     self.pending_simple
                         .push((id, api_id, SimpleKind::RuntimeInfo));
                     return vec![Outbound::Legacy(
-                        json!({"type": "get_model_catalog", "id": id}),
+                        json!({"type": "get_model_catalog", "id": id, "subscribe_usage_updates": true}),
                     )];
                 }
                 vec![Outbound::Reply(ServerFrame::reply(
@@ -1493,6 +1495,34 @@ impl BridgeState {
             "available_models_updated" => {
                 self.note_models(event);
                 vec![
+            "model_usage_updated" => {
+                let route = &event["route"];
+                let (Some(model), Some(provider), Some(api_method), Ok(usage)) = (
+                    route["model"].as_str(),
+                    route["provider"].as_str(),
+                    route["api_method"].as_str(),
+                    serde_json::from_value::<jcode_harness_api::ModelUsage>(route["usage"].clone()),
+                ) else {
+                    return vec![];
+                };
+                let observed = self
+                    .model_usage_updates
+                    .entry((model.into(), provider.into(), api_method.into()))
+                    .or_default();
+                observed.merge_observation(&usage);
+                for cached in &mut self.available_routes {
+                    if model == cached.model
+                        && provider == cached.provider
+                        && api_method == cached.api_method
+                    {
+                        cached
+                            .usage
+                            .get_or_insert_with(Default::default)
+                            .merge_observation(observed);
+                    }
+                }
+                vec![ServerFrame::event(self.runtime_info())]
+            }
                     ServerFrame::event(self.model_info(session(self), event)),
                     ServerFrame::event(self.runtime_info()),
                 ]
@@ -1671,9 +1701,22 @@ impl BridgeState {
                     })
                 })
                 .collect();
+                        usage: serde_json::from_value(route["usage"].clone()).unwrap_or(None),
         }
     }
 
+            for route in &mut self.available_routes {
+                if let Some(usage) = self.model_usage_updates.get(&(
+                    route.model.clone(),
+                    route.provider.clone(),
+                    route.api_method.clone(),
+                )) {
+                    route
+                        .usage
+                        .get_or_insert_with(Default::default)
+                        .merge_observation(usage);
+                }
+            }
     fn note_provider(&mut self, provider: &str) {
         if self.current_provider.as_deref() != Some(provider) {
             // Effort is provider-specific. ModelChanged and auth pushes can

@@ -914,6 +914,7 @@ impl Provider for StubExternalRuntime {
                 api_method: self.api_method.to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()

@@ -67,6 +67,7 @@ impl JcodeProvider {
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: crate::subscription_catalog::routing_policy_detail(model),
+                usage: None,
                 cheapness: None,
             })
             .collect()

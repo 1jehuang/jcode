@@ -5,6 +5,8 @@ mod environment;
 mod inline_tail;
 mod interrupts;
 mod messages;
+#[cfg(test)]
+mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;

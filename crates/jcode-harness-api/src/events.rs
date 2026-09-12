@@ -347,6 +347,9 @@ pub struct ModelRouteInfo {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    /// Tracked turns and prior picker selections, when supplied by the runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::ModelUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -46,6 +46,7 @@ pub fn simplified_model_routes_for_picker(
                     } else {
                         "requires OPENAI_API_KEY".to_string()
                     },
+                    usage: None,
                     cheapness: None,
                 });
                 continue;
@@ -57,6 +58,7 @@ pub fn simplified_model_routes_for_picker(
                     api_method: "openai-oauth".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -67,6 +69,7 @@ pub fn simplified_model_routes_for_picker(
                     api_method: "openai-api-key".to_string(),
                     available: true,
                     detail: String::new(),
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -77,6 +80,7 @@ pub fn simplified_model_routes_for_picker(
                     api_method: "openai-oauth".to_string(),
                     available: false,
                     detail: "no credentials".to_string(),
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -143,6 +147,7 @@ pub fn simplified_model_routes_for_picker(
             api_method,
             available,
             detail,
+            usage: None,
             cheapness: None,
         });
     }
@@ -154,6 +159,7 @@ pub fn simplified_model_routes_for_picker(
             api_method: "current".to_string(),
             available: true,
             detail: "simplified catalog".to_string(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -174,6 +180,7 @@ pub fn append_simplified_anthropic_model_routes(
             api_method: "claude-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -184,6 +191,7 @@ pub fn append_simplified_anthropic_model_routes(
             api_method: "claude-api".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -194,6 +202,7 @@ pub fn append_simplified_anthropic_model_routes(
             api_method: "claude-oauth".to_string(),
             available: false,
             detail: "no credentials".to_string(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -251,6 +260,7 @@ pub(super) fn multiprovider_model_routes(provider: &MultiProvider) -> Vec<ModelR
             api_method: "openrouter".to_string(),
             available: false,
             detail: "OPENROUTER_API_KEY not set".to_string(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -355,6 +365,7 @@ fn append_anthropic_routes(
                 api_method: "claude-api".to_string(),
                 available: ak_available,
                 detail: ak_detail,
+                usage: None,
                 cheapness: cheapness_for_route(&model, "Anthropic", "claude-api"),
             });
         }
@@ -365,6 +376,7 @@ fn append_anthropic_routes(
                 api_method: "claude-oauth".to_string(),
                 available: false,
                 detail: "no credentials".to_string(),
+                usage: None,
                 cheapness: cheapness_for_route(&model, "Anthropic", "claude-oauth"),
             });
         }
@@ -540,6 +552,7 @@ fn named_provider_profile_routes(
             api_method: api_method.clone(),
             available: true,
             detail: detail.clone(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -577,6 +590,7 @@ fn append_gemini_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 api_method: "code-assist-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             });
         }
@@ -598,6 +612,7 @@ fn append_cursor_routes(provider: &MultiProvider, routes: &mut Vec<ModelRoute>) 
                 api_method: "cursor".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             });
         }
@@ -699,6 +714,7 @@ fn append_openrouter_routes(
                 api_method,
                 available: has_openrouter,
                 detail,
+                usage: None,
                 cheapness: None,
             });
         }
@@ -862,6 +878,7 @@ pub fn remote_model_routes_fallback(
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: "jcode subscription routing · managed server-side".to_string(),
+                usage: None,
                 cheapness: None,
             })
             .collect();
@@ -892,6 +909,7 @@ pub fn remote_model_routes_fallback(
                 } else {
                     "no Bedrock credentials or region; run /login bedrock".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
             continue;
@@ -956,6 +974,7 @@ pub fn remote_model_routes_fallback(
                     api_method: "claude-api".to_string(),
                     available,
                     detail,
+                    usage: None,
                     cheapness: cheapness_for_route(model, "Anthropic", "claude-api"),
                 });
                 added_any = true;
@@ -1047,6 +1066,7 @@ pub fn remote_model_routes_fallback(
                 api_method: "code-assist-oauth".to_string(),
                 available: auth.gemini == AuthState::Available,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             });
             added_any = true;
@@ -1059,6 +1079,7 @@ pub fn remote_model_routes_fallback(
                 api_method: "unknown".to_string(),
                 available: false,
                 detail: "no matching configured provider route".to_string(),
+                usage: None,
                 cheapness: None,
             });
         }
@@ -1096,6 +1117,7 @@ pub fn remote_model_routes_lightweight_fallback(
             } else {
                 "refreshing route details…".to_string()
             },
+            usage: None,
             cheapness: None,
         });
     }
@@ -1107,6 +1129,7 @@ pub fn remote_model_routes_lightweight_fallback(
             api_method: "current".to_string(),
             available: true,
             detail: "refreshing model catalog…".to_string(),
+            usage: None,
             cheapness: None,
         });
     }
@@ -1144,6 +1167,7 @@ pub fn remote_current_openai_compatible_route_for_model(
         api_method: format!("openai-compatible:{}", resolved.id),
         available: true,
         detail: resolved.api_base,
+        usage: None,
         cheapness: None,
     })
 }
@@ -1185,6 +1209,7 @@ pub fn remote_openai_compatible_route_for_model(model: &str) -> Option<ModelRout
             api_method: format!("openai-compatible:{}", resolved.id),
             available: true,
             detail,
+            usage: None,
             cheapness: None,
         });
     }
@@ -1229,6 +1254,7 @@ fn named_provider_profile_route_for_model_in(
             api_method: format!("openai-compatible:{}", profile_name),
             available: true,
             detail,
+            usage: None,
             cheapness: None,
         });
     }

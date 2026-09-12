@@ -36,12 +36,31 @@ export interface SessionInfo {
   archived_at_ms?: number;
 }
 
+/** Tracked turns with a persisted response, separate from historical picker selections. */
+export interface ModelUsage {
+  count: number;
+  last_used_unix_secs?: number | null;
+  tracking_started_unix_secs?: number | null;
+  selection_count: number;
+  last_selected_unix_secs?: number | null;
+}
+
+/** Best-first usage ordering. Apply search relevance first and stable identity last. */
+export function compareModelUsage(a?: ModelUsage | null, b?: ModelUsage | null): number {
+  if (!a || !b) return a ? -1 : b ? 1 : 0;
+  return b.count - a.count
+    || (b.last_used_unix_secs ?? -1) - (a.last_used_unix_secs ?? -1)
+    || b.selection_count - a.selection_count
+    || (b.last_selected_unix_secs ?? -1) - (a.last_selected_unix_secs ?? -1);
+}
+
 export interface ModelRouteInfo {
   model: string;
   provider: string;
   api_method: string;
   available: boolean;
   detail: string;
+  usage?: ModelUsage;
 }
 
 export interface TextMatch {

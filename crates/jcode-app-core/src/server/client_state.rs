@@ -216,6 +216,8 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                let mut model_routes = provider.model_routes();
+                crate::model_usage::enrich_routes(&mut model_routes);
                 (
                     Some(provider.name().to_string()),
                     persisted_model.or_else(|| Some(provider.model())),

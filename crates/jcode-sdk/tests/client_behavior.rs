@@ -171,6 +171,13 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
     let seen = std::sync::Arc::clone(&requests);
     let routes = vec![
         ModelRouteInfo {
+            usage: Some(jcode_sdk::ModelUsage {
+                count: 7,
+                last_used_unix_secs: Some(100),
+                tracking_started_unix_secs: Some(10),
+                selection_count: 3,
+                last_selected_unix_secs: Some(5),
+            }),
             model: "claude".to_string(),
             provider: "anthropic".to_string(),
             api_method: "messages".to_string(),
@@ -178,6 +185,7 @@ fn ga_runtime_and_file_methods_map_requests_and_typed_replies() {
             detail: "ready".to_string(),
         },
         ModelRouteInfo {
+            usage: None,
             model: "gemini".to_string(),
             provider: "google".to_string(),
             api_method: "generate_content".to_string(),
@@ -709,6 +717,7 @@ fn model_switch_preserves_identity_and_catalog_events_around_the_reply() {
                 model: Some("new-model".into()),
                 reasoning_effort: None,
                 routes: vec![ModelRouteInfo {
+                    usage: None,
                     model: "new-model".into(),
                     provider: "openai-api".into(),
                     api_method: "responses".into(),

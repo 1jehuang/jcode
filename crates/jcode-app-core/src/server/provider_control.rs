@@ -68,7 +68,9 @@ async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> ModelCatalogSna
 }
 
 fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> ModelCatalogSnapshot {
-    ModelCatalogSnapshot::from_provider(provider.as_ref())
+    let mut snapshot = ModelCatalogSnapshot::from_provider(provider.as_ref());
+    crate::model_usage::enrich_routes(&mut snapshot.model_routes);
+    snapshot
 }
 
 pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {

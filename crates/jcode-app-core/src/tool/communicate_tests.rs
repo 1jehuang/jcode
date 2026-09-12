@@ -1208,6 +1208,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
             api_method: "openai-api-key".to_string(),
             available: true,
             detail: "API key".to_string(),
+            usage: None,
             cheapness: None,
         },
         jcode_provider_core::ModelRoute {
@@ -1216,6 +1217,7 @@ fn format_swarm_model_list_renders_routes_and_default() {
             api_method: "anthropic-api-key".to_string(),
             available: false,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
     ];

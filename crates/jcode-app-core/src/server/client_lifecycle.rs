@@ -570,6 +570,7 @@ pub(super) async fn handle_client(
     let mut processing_session_id: Option<String> = None;
     let mut current_client_instance_id: Option<String> = None;
     let mut continue_on_disconnect = false;
+    let mut model_usage_updates_enabled = false;
     // Client selfdev status is determined by Subscribe request, not server's env
     let mut client_selfdev = false;
 
@@ -866,6 +867,11 @@ pub(super) async fn handle_client(
             // Forward bus events to this client
             bus_event = bus_rx.recv(), if client_subscribed => {
                 match bus_event {
+                    Ok(BusEvent::ModelUsageUpdated(route)) => {
+                        if model_usage_updates_enabled {
+                            let _ = client_event_tx.send(ServerEvent::ModelUsageUpdated { route });
+                        }
+                    }
                     Ok(BusEvent::ModelsUpdated) => {
                         let Some(event) = try_available_models_updated_event(&agent) else {
                             crate::logging::info(&format!(
@@ -1780,7 +1786,8 @@ pub(super) async fn handle_client(
                 }
             }
 
-            Request::GetModelCatalog { id } => {
+            Request::GetModelCatalog { id, subscribe_usage_updates } => {
+                model_usage_updates_enabled = subscribe_usage_updates;
                 if handle_get_model_catalog(id, &client_session_id, &agent, &provider, &writer)
                     .await
                     .is_err()

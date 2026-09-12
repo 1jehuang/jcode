@@ -3349,6 +3349,7 @@ dependencies = [
 name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
+ "jcode-usage-types",
  "serde",
  "serde_json",
 ]
@@ -3636,6 +3637,7 @@ dependencies = [
  "jcode-logging",
  "jcode-message-types",
  "jcode-schema-dialect",
+ "jcode-usage-types",
  "rand 0.9.3",
  "reqwest 0.12.28",
  "serde",

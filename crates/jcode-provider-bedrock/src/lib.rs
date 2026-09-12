@@ -1429,6 +1429,7 @@ impl Provider for BedrockProvider {
                                 .join(" · ")
                         )
                     },
+                    usage: None,
                     cheapness: Self::route_pricing(&model),
                 }
             })

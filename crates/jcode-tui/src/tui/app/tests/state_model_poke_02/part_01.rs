@@ -1238,6 +1238,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             api_method: "openai-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         })
         .collect();
@@ -1247,6 +1248,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         api_method: "claude-oauth".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1255,6 +1257,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         api_method: "claude-api".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
 }
@@ -1271,6 +1274,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: "→ Fireworks".to_string(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -1279,6 +1283,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -1287,6 +1292,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
     ];
