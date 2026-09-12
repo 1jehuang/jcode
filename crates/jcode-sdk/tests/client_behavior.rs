@@ -6,6 +6,8 @@
 //! of that is visible from a passing `cargo build`, so it is driven here
 //! against a scripted server on a real socket pair.
 
+#![cfg(unix)]
+
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, ModelRouteInfo, ServerFrame, SessionInfo,
     TextMatch, read_frame, write_frame,

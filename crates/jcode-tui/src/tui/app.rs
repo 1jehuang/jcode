@@ -50,8 +50,8 @@ pub enum AppRuntimeMode {
 }
 
 mod auth;
-mod auth_remote;
 mod auth_account_picker_saved_accounts;
+mod auth_remote;
 mod catchup;
 mod commands;
 mod commands_colors;
@@ -1591,6 +1591,7 @@ pub struct App {
     /// Pending login flow: if set, next input is intercepted as OAuth code or API key
     pending_login: Option<PendingLogin>,
     remote_login: Option<auth_remote::RemoteLogin>,
+    remote_login_onboarding: auth_remote::Onboarding,
     /// Pending account picker follow-up input (new label or setting value)
     pending_account_input: Option<auth::PendingAccountInput>,
     /// Pending SSH remote target prompt. Stores the friendly remote name.

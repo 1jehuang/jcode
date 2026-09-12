@@ -21,8 +21,30 @@ selects the remote executable. With no workspace argument, the bridge's remote
 working directory is used, never the local client's directory. An explicit resume
 ID is resolved on the remote server, not in local session storage.
 
-Authenticate the remote host directly from the local TUI with `/login`, or choose
-a provider explicitly, for example `/login openai` or `/login claude`. The browser
+Authenticate the remote host directly from the local TUI with `/login`. It uses
+the same inline Login picker as local mode: arrow keys move, typing filters,
+Enter selects, and Esc cancels. The remote picker uses the same provider catalog,
+labels, ordering, and authentication-method labels as local `/login`, followed by
+**Import local OpenAI login** and **Import local Claude login**.
+The six supported OAuth routes authenticate through the SSH bridge. Other rows
+explain how to set up that method directly on the remote host, never starting
+laptop-local authentication or pretending the bridge supports those methods.
+Its destination notice names the SSH host. Provider status is fetched from that
+host with `jcode auth status --json`, never from the laptop's credential stores.
+Unknown or unavailable status is shown as unknown, not as signed out. Only
+provider state and fixed method labels are displayed, not remote account labels,
+credential paths, or raw remote errors.
+
+On first attach, an idle client checks the remote host's login status. If every
+expected provider is explicitly unconfigured, it asks **Import a local login
+first?** with **Yes / No** choices. Yes opens the OpenAI/Claude import picker.
+No opens the normal login picker. Neither choice reads or copies credentials.
+Missing, failed, or expired status does not count as an empty host. The offer is
+shown at most once per client launch and does not replace drafts, active turns,
+or an explicit login flow. This check never inspects the laptop's login stores.
+
+You can also choose a provider explicitly, for example `/login openai` or
+`/login claude`. The browser
 approval happens on your laptop, while pending login records, token exchange, and
 saved credentials stay on the SSH host. Treat authorization URLs as sensitive and
 do not share them. Paste the returned callback URL or authorization
@@ -46,15 +68,21 @@ completed exchange. Closing the UI terminates its owned authentication subproces
 
 ### One-time import of a local login
 
-To avoid another browser login on a trusted SSH host, run one of these commands
-**inside the native SSH TUI**:
+To avoid another browser login on a trusted SSH host, open `/login` **inside the
+native SSH TUI** and choose an **Import local … login** row. `/login --import-local`
+opens a smaller picker containing just those two import choices. Both routes lead
+to the same explicit confirmation, and neither reads local credentials while
+the picker is open. Direct commands remain available:
 
 ```text
 /login --import-local openai
 /login --import-local claude
 ```
 
-Read the destination-host warning, then type exactly `confirm` and press Enter.
+Read the destination-host warning, choose **Yes**, and press Enter. Arrow keys
+select Yes/No, or type `yes`/`no` and press Enter. **No is selected by default**,
+so Enter alone never approves a copy. The legacy `confirm` input remains accepted.
+You do not need to find or paste any credentials.
 Before confirmation, no credential export is performed. Esc or `/cancel` at the
 confirmation prompt reads and copies nothing. After confirmation, the selected
 active account is read from the laptop's Jcode-managed OAuth store and sent over
@@ -185,6 +213,9 @@ not claimed as passed by the context-only SSH acceptance.
 `JCODE_NATIVE_SSH_LOGIN=1`, plus the local binary, SSH host, workspace, and
 `JCODE_NATIVE_SSH_LOGIN_REMOTE_EXECUTABLE` (the actual remote ELF, not a wrapper).
 It creates a private remote home/runtime and never uses the user's credentials.
+The current harness checks the shared provider catalog and two import
+choices before the isolated login scenarios. Updating this harness does not by
+itself establish that the new picker has passed real SSH acceptance.
 
 On 2026-09-06, the real local PTY and EC2 SSH workflow passed:
 
@@ -223,6 +254,13 @@ offline harness checks and the expanded live acceptance passed.
 fresh local and remote homes with unmistakably synthetic credentials. Its safety
 wrapper refuses anything except the selected synthetic payload before invoking
 the real receiver CLI. No personal credentials are imported by the test.
+The current harness adds bare-picker arrow selection and import-only filtered
+selection, each followed by cancellation at the destination warning, for both
+providers. It checks that no import subprocess started, no account labels were
+displayed, and the synthetic local/remote stores remained unchanged. It retains
+the direct-command cancel, confirmed import, and repeat/refusal scenarios. Run
+`python3 tests/test_native_ssh_import.py --self-test` for offline harness safety
+checks. Real PTY/SSH acceptance still requires the explicit opt-in above.
 
 On 2026-09-06 at 11:07 UTC, the real local TUI, OpenSSH, remote CLI and daemon
 passed all six scenarios: cancel, confirm/import, and repeat/refuse for each of
@@ -248,3 +286,50 @@ These checks establish the import workflow with synthetic credentials. They do
 not establish successful provider-backed inference, personal token validity, or
 long-term refresh-token coexistence. Closed loopback HTTP proxies were used as
 defense in depth, not as proof of zero network packets.
+
+### Yes/No onboarding and shared catalog follow-up (2026-09-07)
+
+The client-side implementation passed 37 focused `auth_remote` tests. Real
+OpenSSH/PTY acceptance with an Arch client and Ubuntu VM also observed:
+
+| Requirement | Observed result |
+| --- | --- |
+| Empty-host startup | Yes opened only the import choices. Default No opened the normal provider catalog. Neither action started OAuth or copied credentials. |
+| Shared provider choices | The catalog showed local-equivalent provider labels and methods, remote-only setup guidance, and explicit OpenAI/Claude import entries. |
+| Explicit copy consent | Twelve real import scenarios passed: picker/filter cancellation, arrow-key No, command cancellation, typed Yes transfer, and legacy-confirm overwrite refusal, for each supported provider. |
+| Privacy and lifecycle | Synthetic selected-provider data crossed SSH stdin only after consent. Source and other-provider stores remained unchanged, receiver files were private, and every test PTY reaped owned SSH children and adapter sockets. |
+| OAuth regression | The remote-generated OpenAI URL matched private pending state. A synthetic callback failed real state validation before token exchange, and scoped cancellation preserved unrelated pending state. |
+
+The full TUI unit suite was not green: 2,272 passed, 11 failed, and 18 were
+ignored. The failures were in untouched areas, including account-label and
+clipboard-copy expectations, empty-session persistence, and todo final-response
+scheduling. No baseline runtime comparison was performed. These results do not
+establish real provider approval, successful token exchange, or live inference.
+
+Terminal acceptance requests complete kernel-resize redraws when necessary:
+stripping ANSI escape sequences alone does not reconstruct differential terminal
+frames. A status response missing a newly added provider remains unknown, so an
+older remote CLI must be updated before the empty-host offer can be verified.
+
+### Deployed workflow and personal import follow-up (2026-09-07)
+
+The following observations distinguish the requested outcome from supporting
+synthetic tests. The real SSH onboarding run completed at 03:29 UTC. A personal
+Claude import subsequently completed through the deployed native SSH TUI, and a
+fresh independent public-CLI check at 03:49 UTC confirmed persistent storage.
+
+| Requested behavior or changed output | Concrete acceptance observation | Boundary or remaining constraint |
+| --- | --- | --- |
+| The existing SSH shortcut opens the VM workspace | The existing launcher selects the native SSH client, remote wrapper and VM workspace. The shortcut's actual kernel chord was exercised in the earlier real CLI acceptance above. The updated wrapper independently reports `v0.83.12-dev (1ce0f6e56)`. | The physical chord was not repeated after this deployment. Existing user sessions were not restarted. |
+| An empty VM first asks whether to import local credentials | The real local PTY and OpenSSH run displayed the startup offer against a fresh isolated remote home. Selecting Yes opened the import-only picker. Default No opened the normal catalog. Neither branch copied credentials or began OAuth. | This is the real binary/UI/SSH path with an isolated empty home, not the user's now-configured home. |
+| Remote `/login` has familiar local choices | The same run navigated and filtered the shared provider catalog and explicit OpenAI/Claude imports. OpenAI and Claude initiation generated actual remote pending OAuth state and cancelled cleanly. | Catalog parity is delivered, not full functional parity for every method. Unsupported bridge methods give setup-on-remote guidance. Provider approval/token exchange was not completed. |
+| Import asks Yes/No rather than requiring a magic word or pasted secret | The actual personal Claude import was invoked through `/login --import-local claude`. Its destination warning appeared before consent. Selecting Yes returned `claude imported on the remote host`. | No token was pasted into chat, prompt history or process arguments. Legacy `confirm` remains supported. |
+| Copy usable personal credentials to the trusted VM | After the real Claude transfer, a separate invocation of the deployed remote `auth status --json` reported Claude `available`. The 03:49 UTC recheck again reported `available`, and `stat` showed directory mode 0700 and credential-file mode 0600. | This verifies successful import and persisted configuration, not successful external inference or long-term refresh coexistence. |
+| Import the OpenAI login too | Native import refused the unusable source. A token-private exact comparison confirmed the selected refresh token matches the native permanent-rejection record. Remote public status remains `not_configured`. | **Blocked:** new provider authorization is required. No retry-guard bypass, credential overwrite or token reset was attempted. |
+| No unintended copy, overwrite or private-data exposure | The real personal flow transferred only the selected provider after consent. Twelve additional real-transport scenarios exercised cancellation, typed Yes, repeat refusal, private storage and process cleanup using synthetic credentials and a safety wrapper. | Synthetic edge-case coverage does not establish personal-token validity or successful provider refresh. |
+
+The initial observation that both local sources were expired became stale during
+the task: the managed Claude source became current before the successful retry.
+The final result is therefore **Claude imported, OpenAI authorization blocked**,
+not “neither account copied.” The broader unit-suite failures recorded above
+remain unresolved and are not counted as passing acceptance evidence.
