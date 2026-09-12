@@ -726,6 +726,43 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn maybe_select_quota_account(&self) {
+        if self.is_browser_only()
+            || matches!(
+                self.credential_mode_snapshot(),
+                OpenAICredentialMode::ApiKey
+            )
+            || !jcode_base::config::Config::load()
+                .provider
+                .same_provider_account_failover
+        {
+            return;
+        }
+
+        let usage = jcode_base::usage::get_openai_usage_sync();
+        if !usage.hard_limit_reached {
+            return;
+        }
+
+        let Some(original) = jcode_base::auth::codex::active_account_label() else {
+            return;
+        };
+        let Some(candidate) = jcode_base::provider::MultiProvider::preferred_openai_account_label()
+        else {
+            return;
+        };
+        if candidate == original {
+            return;
+        }
+
+        jcode_base::auth::codex::set_active_account_override(Some(candidate.clone()));
+        self.reload_credentials_now();
+        jcode_base::logging::info(&format!(
+            "OpenAI proactive quota selection switched account {} -> {}",
+            original, candidate
+        ));
+    }
+
     pub(crate) fn supports_extended_prompt_cache_retention(model_id: &str) -> bool {
         jcode_base::provider::openai::supports_extended_prompt_cache_retention(model_id)
     }

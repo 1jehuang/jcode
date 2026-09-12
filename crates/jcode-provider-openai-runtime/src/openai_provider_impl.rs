@@ -93,6 +93,7 @@ impl Provider for OpenAIProvider {
                 .await;
         }
 
+        self.maybe_select_quota_account();
         let input = build_responses_input(messages);
         let input_item_count = input.len();
         let request = self.response_request(&input, tools, system).await;

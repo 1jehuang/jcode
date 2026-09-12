@@ -607,6 +607,16 @@ impl MultiProvider {
         account_failover::same_provider_account_candidates(provider)
     }
 
+    /// Return the best currently available same-provider account according to
+    /// the provider's cached usage probe. Runtime crates use this only when a
+    /// request is about to hit a known exhausted account, so normal requests
+    /// preserve the user's selected account and session affinity.
+    pub fn preferred_openai_account_label() -> Option<String> {
+        account_failover::same_provider_account_candidates(ActiveProvider::OpenAI)
+            .into_iter()
+            .next()
+    }
+
     async fn complete_with_failover(
         &self,
         messages: &[Message],
