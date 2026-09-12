@@ -778,6 +778,18 @@ impl JcodeClient {
         .map(drop)
     }
 
+    /// Submit a hidden continuation without a user transcript row or accept wait.
+    /// The caller, not the bridge, decides when recovery is appropriate.
+    pub fn send_system_reminder(&self, session_id: &str, reminder: &str) -> Result<()> {
+        self.notify(ApiRequest::SendMessage {
+            session_id: session_id.to_string(),
+            content: String::new(),
+            system_reminder: Some(reminder.to_string()),
+            images: Vec::new(),
+            no_reply: false,
+        })
+    }
+
     /// Send a user message.
     ///
     /// The harness does not reply to `send_message` at the request level: it
@@ -798,6 +810,7 @@ impl JcodeClient {
         self.notify(ApiRequest::SendMessage {
             session_id: session_id.to_string(),
             content: content.to_string(),
+            system_reminder: None,
             images,
             no_reply: false,
         })?;

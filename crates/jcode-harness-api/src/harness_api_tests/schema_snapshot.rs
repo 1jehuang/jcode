@@ -38,6 +38,7 @@ fn client_frame_wire_shape() {
             session_id: "s1".into(),
             content: "hi".into(),
             images: vec![],
+            system_reminder: None,
             no_reply: false,
         },
     );
@@ -56,6 +57,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
             session_id: "s1".into(),
             content: "context".into(),
             images: vec![],
+            system_reminder: None,
             no_reply: true,
         },
     );
@@ -72,6 +74,7 @@ fn send_message_no_reply_wire_shape_and_legacy_default() {
     assert!(matches!(
         legacy.request,
         ApiRequest::SendMessage {
+            system_reminder: None,
             no_reply: false,
             ..
         }
@@ -467,4 +470,34 @@ fn session_recovery_wire_shape_roundtrips_optional_notice() {
         assert!(wire.get("reply_to").is_none());
         assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
     }
+}
+
+#[test]
+fn hidden_system_reminder_wire_shape_and_legacy_default() {
+    let frame = ClientFrame::new(
+        12,
+        ApiRequest::SendMessage {
+            session_id: "s1".into(),
+            content: String::new(),
+            system_reminder: Some("continue task".into()),
+            images: vec![],
+            no_reply: false,
+        },
+    );
+    let wire = serde_json::to_value(&frame).unwrap();
+    assert_eq!(wire["content"], "");
+    assert_eq!(wire["system_reminder"], "continue task");
+    assert!(wire.get("no_reply").is_none());
+    assert_eq!(serde_json::from_value::<ClientFrame>(wire).unwrap(), frame);
+    let legacy: ClientFrame = serde_json::from_str(
+        r#"{"v":1,"id":13,"req":"send_message","session_id":"s1","content":"hello"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        legacy.request,
+        ApiRequest::SendMessage {
+            system_reminder: None,
+            ..
+        }
+    ));
 }

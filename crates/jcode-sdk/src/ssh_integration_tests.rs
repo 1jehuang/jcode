@@ -200,6 +200,7 @@ fn localhost_native_harness() {
             session_id: session.session_id.clone(),
             content: "SSH acceptance context, no model reply requested".into(),
             images: vec![],
+            system_reminder: None,
             no_reply: true,
         })
         .unwrap();
