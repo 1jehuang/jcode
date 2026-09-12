@@ -32,6 +32,7 @@ impl MultiProvider {
         mode: CompletionMode<'_>,
         initial_reason: &str,
         notes: &mut Vec<String>,
+        request_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
     ) -> Result<Option<EventStream>> {
         if !same_provider_account_failover_enabled() {
             return Ok(None);
@@ -51,6 +52,12 @@ impl MultiProvider {
 
         let provider_key = Self::provider_key(provider);
         let provider_label = Self::provider_label(provider);
+        let request_lease = match request_lease {
+            Some(lease) => lease,
+            None => crate::auth::provider_pool::acquire_account_request_lease(provider_key)
+                .await
+                .expect("account provider failover must have a request lease"),
+        };
 
         for alternative_label in &alternatives {
             let lease = crate::auth::provider_pool::try_acquire_account_lease(
@@ -83,20 +90,28 @@ impl MultiProvider {
 
             let attempt = match mode {
                 CompletionMode::Unified { system } => {
-                    self.complete_on_provider(provider, messages, tools, system, None)
-                        .await
+                    self.complete_on_provider_with_guard(
+                        provider,
+                        messages,
+                        tools,
+                        system,
+                        None,
+                        Some(request_lease.clone()),
+                    )
+                    .await
                 }
                 CompletionMode::Split {
                     system_static,
                     system_dynamic,
                 } => {
-                    self.complete_split_on_provider(
+                    self.complete_split_on_provider_with_guard(
                         provider,
                         messages,
                         tools,
                         system_static,
                         system_dynamic,
                         None,
+                        Some(request_lease.clone()),
                     )
                     .await
                 }

@@ -1,4 +1,9 @@
 use super::*;
+use futures::{
+    Stream,
+    task::{Context, Poll},
+};
+use std::pin::Pin;
 
 #[derive(Clone, Copy)]
 pub(super) enum CompletionMode<'a> {
@@ -25,6 +30,33 @@ impl CompletionMode<'_> {
             CompletionMode::Split { .. } => "Auto-fallback (split)",
         }
     }
+}
+
+pub(super) struct AccountScopedEventStream {
+    inner: EventStream,
+    account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+}
+
+impl Stream for AccountScopedEventStream {
+    type Item = anyhow::Result<jcode_message_types::StreamEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let item = self.inner.as_mut().poll_next(context);
+        if matches!(item, Poll::Ready(None)) {
+            self.account_lease = None;
+        }
+        item
+    }
+}
+
+pub(super) fn scope_event_stream(
+    stream: EventStream,
+    account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+) -> EventStream {
+    Box::pin(AccountScopedEventStream {
+        inner: stream,
+        account_lease,
+    })
 }
 
 impl MultiProvider {
@@ -54,16 +86,17 @@ impl MultiProvider {
         (chars, tokens)
     }
 
-    pub(super) async fn complete_on_provider(
+    pub(super) async fn complete_on_provider_with_guard(
         &self,
         provider: ActiveProvider,
         messages: &[Message],
         tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
+        account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
-        match provider {
+        let attempt = match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic
@@ -173,10 +206,11 @@ impl MultiProvider {
                     ))
                 }
             }
-        }
+        };
+        attempt.map(|stream| scope_event_stream(stream, account_lease))
     }
 
-    pub(super) async fn complete_split_on_provider(
+    pub(super) async fn complete_split_on_provider_with_guard(
         &self,
         provider: ActiveProvider,
         messages: &[Message],
@@ -184,9 +218,10 @@ impl MultiProvider {
         system_static: &str,
         system_dynamic: &str,
         resume_session_id: Option<&str>,
+        account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
-        match provider {
+        let attempt = match provider {
             ActiveProvider::Claude => {
                 if let Some(anthropic) = self.anthropic_provider() {
                     anthropic
@@ -350,6 +385,7 @@ impl MultiProvider {
                     ))
                 }
             }
-        }
+        };
+        attempt.map(|stream| scope_event_stream(stream, account_lease))
     }
 }

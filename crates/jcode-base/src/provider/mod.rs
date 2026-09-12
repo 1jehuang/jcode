@@ -641,6 +641,12 @@ impl MultiProvider {
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
 
         let active = self.active_provider();
+        // Capture the account scope before any account-dependent precheck or
+        // provider call. The legacy override remains process-local for provider
+        // compatibility, but it cannot change underneath this request.
+        let active_account_lease =
+            crate::auth::provider_pool::acquire_account_request_lease(Self::provider_key(active))
+                .await;
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -708,22 +714,35 @@ impl MultiProvider {
                 continue;
             }
 
+            let account_lease = if candidate == active {
+                active_account_lease.clone()
+            } else {
+                crate::auth::provider_pool::acquire_account_request_lease(key).await
+            };
             let attempt = match mode {
                 CompletionMode::Unified { system } => {
-                    self.complete_on_provider(candidate, messages, tools, system, resume_session_id)
-                        .await
+                    self.complete_on_provider_with_guard(
+                        candidate,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        account_lease,
+                    )
+                    .await
                 }
                 CompletionMode::Split {
                     system_static,
                     system_dynamic,
                 } => {
-                    self.complete_split_on_provider(
+                    self.complete_split_on_provider_with_guard(
                         candidate,
                         messages,
                         tools,
                         system_static,
                         system_dynamic,
                         resume_session_id,
+                        account_lease,
                     )
                     .await
                 }
@@ -773,7 +792,13 @@ impl MultiProvider {
                         if candidate == active
                             && let Some(stream) = self
                                 .try_same_provider_account_failover(
-                                    candidate, messages, tools, mode, &summary, &mut notes,
+                                    candidate,
+                                    messages,
+                                    tools,
+                                    mode,
+                                    &summary,
+                                    &mut notes,
+                                    active_account_lease.clone(),
                                 )
                                 .await?
                         {

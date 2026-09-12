@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Notify;
 
 const MAX_ACCOUNTS: usize = 100;
 const MAX_QUOTA_MODELS_PER_ACCOUNT: usize = 200;
@@ -25,6 +26,8 @@ static ACCOUNT_COOLDOWNS: LazyLock<Mutex<HashMap<(String, String), Instant>>> =
 static ACCOUNT_LEASES: LazyLock<Mutex<HashMap<(String, String), (Instant, u64)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ACCOUNT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+static ACCOUNT_REQUEST_GATES: LazyLock<Mutex<HashMap<String, Arc<AccountRequestGate>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 // Account refresh, import, and switching all use a read-modify-write cycle.
 // Keep those mutations serialized within the daemon so concurrent refreshes do
 // not overwrite an account imported or updated by another request.
@@ -68,6 +71,108 @@ pub fn try_acquire_account_lease(
     }
     leases.insert(key.clone(), (now + duration, id));
     Some(AccountLease { key, id })
+}
+
+/// Providers whose credentials are selected through the process-local account
+/// override need an exclusive request scope. The downstream runtimes read that
+/// override while constructing a request and some of them may rotate it while
+/// a stream is still alive. Keeping this gate for the complete stream lifetime
+/// prevents two requests from observing each other's account.
+fn uses_runtime_account_override(provider: &str) -> bool {
+    matches!(provider, "claude" | "openai" | "antigravity" | "cursor")
+}
+
+struct AccountRequestGate {
+    held: std::sync::atomic::AtomicBool,
+    released: Notify,
+}
+
+impl AccountRequestGate {
+    fn new() -> Self {
+        Self {
+            held: std::sync::atomic::AtomicBool::new(false),
+            released: Notify::new(),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<AccountRequestLease> {
+        self.held
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+            .then(|| AccountRequestLease {
+                _inner: Arc::new(AccountRequestLeaseInner {
+                    gate: Arc::clone(self),
+                }),
+            })
+    }
+
+    async fn acquire(self: Arc<Self>) -> AccountRequestLease {
+        loop {
+            let notified = self.released.notified();
+            if let Some(lease) = self.try_acquire() {
+                return lease;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct AccountRequestLeaseInner {
+    gate: Arc<AccountRequestGate>,
+}
+
+impl Drop for AccountRequestLeaseInner {
+    fn drop(&mut self) {
+        self.gate
+            .held
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.gate.released.notify_one();
+    }
+}
+
+/// Request-scoped ownership of a provider's account override. It is cloneable
+/// so a caller can retain the scope while passing one ownership reference to a
+/// returned event stream. The gate is released only after the final clone is
+/// dropped.
+#[derive(Clone)]
+pub struct AccountRequestLease {
+    _inner: Arc<AccountRequestLeaseInner>,
+}
+
+fn account_request_gate(provider: &str) -> Option<Arc<AccountRequestGate>> {
+    if !uses_runtime_account_override(provider) {
+        return None;
+    }
+    let mut gates = ACCOUNT_REQUEST_GATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Some(
+        gates
+            .entry(provider.to_string())
+            .or_insert_with(|| Arc::new(AccountRequestGate::new()))
+            .clone(),
+    )
+}
+
+/// Acquire the request scope asynchronously. Non-account providers return
+/// `None` and retain their existing concurrent behavior.
+pub async fn acquire_account_request_lease(provider: &str) -> Option<AccountRequestLease> {
+    match account_request_gate(provider) {
+        Some(gate) => Some(gate.acquire().await),
+        None => None,
+    }
+}
+
+/// Try to acquire the request scope from synchronous account-management paths.
+/// A switch is rejected while an active stream owns the scope instead of
+/// mutating the global override underneath that request.
+pub fn try_acquire_account_request_lease(provider: &str) -> Option<AccountRequestLease> {
+    account_request_gate(provider).and_then(|gate| gate.try_acquire())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -191,6 +296,9 @@ pub fn active_account(provider: &str) -> Result<Option<ManagedProviderAccount>> 
 }
 
 pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
+    let _request_lease = try_acquire_account_request_lease(provider).ok_or_else(|| {
+        anyhow::anyhow!("Cannot switch {provider} accounts while a request is active")
+    })?;
     let _guard = ACCOUNT_STORE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -876,6 +984,51 @@ mod tests {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),
             None => crate::env::remove_var("JCODE_HOME"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn account_request_scopes_serialize_same_provider_and_isolate_other_providers() {
+        let first = acquire_account_request_lease("openai")
+            .await
+            .expect("OpenAI should use an account request scope");
+        assert!(
+            try_acquire_account_request_lease("openai").is_none(),
+            "a synchronous account switch must not mutate an active request"
+        );
+
+        let second_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_started_task = std::sync::Arc::clone(&second_started);
+        let second = tokio::spawn(async move {
+            let lease = acquire_account_request_lease("openai")
+                .await
+                .expect("OpenAI should use an account request scope");
+            second_started_task.store(true, std::sync::atomic::Ordering::Release);
+            lease
+        });
+
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !second_started.load(std::sync::atomic::Ordering::Acquire),
+            "same-provider requests must wait for the prior request scope"
+        );
+
+        let other_provider = acquire_account_request_lease("claude").await;
+        assert!(
+            other_provider.is_some(),
+            "different account providers must retain independent request scopes"
+        );
+        drop(other_provider);
+        drop(first);
+
+        let second = second.await.expect("waiting request should finish");
+        assert!(second_started.load(std::sync::atomic::Ordering::Acquire));
+        drop(second);
+        assert!(
+            try_acquire_account_request_lease("openai").is_some(),
+            "the request scope must be reusable after the stream owner drops it"
+        );
     }
 
     #[test]
