@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
+        parent_session_id: (id == "persisted-2").then(|| "persisted-1".into()),
+        agent_label: (id == "persisted-2").then(|| "API reviewer".into()),
+        swarm_status: (id == "persisted-2").then(|| "running".into()),
         session_id: id.to_string(),
         working_dir: None,
         title: Some(format!("Title for {id}")),
@@ -46,6 +49,41 @@ fn public_client_exposes_titles_from_list_and_attach() {
         .attach_session("persisted-1")
         .expect("attach session");
     assert_eq!(attached.title.as_deref(), Some("Title for persisted-1"));
+}
+
+#[test]
+fn public_client_exposes_swarm_metadata_from_list_and_attach() {
+    let server = UnixHarness::start(0);
+    let client = server.connect();
+    let sessions = client.list_sessions().expect("list sessions");
+    assert_eq!(sessions[0].parent_session_id, None);
+    let child = &sessions[1];
+    assert_eq!(child.parent_session_id.as_deref(), Some("persisted-1"));
+    assert_eq!(child.agent_label.as_deref(), Some("API reviewer"));
+    assert_eq!(child.swarm_status.as_deref(), Some("running"));
+    let attached = client.attach_session("persisted-2").expect("attach child");
+    assert_eq!(attached.parent_session_id, child.parent_session_id);
+    assert_eq!(attached.agent_label, child.agent_label);
+    assert_eq!(attached.swarm_status, child.swarm_status);
+}
+
+#[test]
+fn public_sdk_enrichment_helper_accepts_older_session_records() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("swarm.json"),
+        r#"{"members":[{
+        "session_id":"child", "report_back_to_session_id":"root",
+        "task_label":"review", "status":"ready"
+    }]}"#,
+    )
+    .unwrap();
+    let mut sessions: Vec<jcode_sdk::SessionInfo> =
+        serde_json::from_str(r#"[{"session_id":"child","status":"idle"}]"#).unwrap();
+    jcode_sdk::enrich_sessions_from_swarm_state(&mut sessions, dir.path());
+    assert_eq!(sessions[0].parent_session_id.as_deref(), Some("root"));
+    assert_eq!(sessions[0].agent_label.as_deref(), Some("review"));
+    assert_eq!(sessions[0].swarm_status.as_deref(), Some("ready"));
 }
 
 struct UnixHarness {

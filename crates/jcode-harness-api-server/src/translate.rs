@@ -635,12 +635,15 @@ impl BridgeState {
                     }
                 }
                 let include_archived = request["include_archived"].as_bool().unwrap_or(false);
-                let sessions: Vec<_> = ids
+                let mut sessions: Vec<_> = ids
                     .into_iter()
                     .filter(|session_id| {
                         include_archived || !archive.sessions.contains_key(session_id)
                     })
                     .map(|session_id| SessionInfo {
+                        parent_session_id: None,
+                        agent_label: None,
+                        swarm_status: None,
                         working_dir: self.session_dirs.get(&session_id).cloned(),
                         title: metadata
                             .get(&session_id)
@@ -666,6 +669,7 @@ impl BridgeState {
                         session_id,
                     })
                     .collect();
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(&mut sessions);
                 let completed = list_started.elapsed();
                 eprintln!(
                     "harness API bridge: list_sessions ids={:.1}ms metadata={:.1}ms total={:.1}ms count={}",
@@ -956,7 +960,7 @@ impl BridgeState {
             self.observed_turn_active = true;
             self.activity_version += 1;
         }
-        match kind {
+        let mut frames = match kind {
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 // `session` is a broadcast lifecycle notification. The daemon
@@ -1014,6 +1018,9 @@ impl BridgeState {
                         api_id,
                         ApiEvent::Attached {
                             session: SessionInfo {
+                                parent_session_id: None,
+                                agent_label: None,
+                                swarm_status: None,
                                 transcript_bytes: Self::transcript_bytes(&session_id),
                                 saved: metadata.as_ref().is_some_and(|value| value.saved),
                                 updated_at_ms: metadata
@@ -1054,9 +1061,10 @@ impl BridgeState {
                             .into(),
                         }));
                     }
-                    return frames;
+                    frames
+                } else {
+                    vec![]
                 }
-                vec![]
             }
             "text_delta" => vec![ServerFrame::event(ApiEvent::TextDelta {
                 session_id: session(self),
@@ -1179,6 +1187,9 @@ impl BridgeState {
                     api_id,
                     ApiEvent::SessionForked {
                         session: SessionInfo {
+                            parent_session_id: None,
+                            agent_label: None,
+                            swarm_status: None,
                             transcript_bytes: Self::transcript_bytes(&session_id),
                             saved: metadata.as_ref().is_some_and(|value| value.saved),
                             updated_at_ms: Self::session_modified_ms(&session_id)
@@ -1527,7 +1538,17 @@ impl BridgeState {
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.
             _ => vec![],
+        };
+        for frame in &mut frames {
+            if let ApiEvent::Attached { session } | ApiEvent::SessionForked { session } =
+                &mut frame.event
+            {
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(
+                    std::slice::from_mut(session),
+                );
+            }
         }
+        frames
     }
 
     /// Read provider/model identity out of any legacy event that carries the

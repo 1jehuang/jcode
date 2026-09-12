@@ -2138,3 +2138,99 @@ fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
         assert_eq!(state.observed_turn_active, !active);
     }
 }
+
+#[test]
+fn list_and_attach_expose_swarm_ownership_without_nesting_forks() {
+    let home = ScopedJcodeHome::new("swarm-sidebar");
+    // Keep the runtime override isolated as well, including under test runners
+    // that already set JCODE_RUNTIME_DIR.
+    let previous_runtime = std::env::var_os("JCODE_RUNTIME_DIR");
+    struct RuntimeGuard(Option<OsString>);
+    impl Drop for RuntimeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("JCODE_RUNTIME_DIR", value) },
+                None => unsafe { std::env::remove_var("JCODE_RUNTIME_DIR") },
+            }
+        }
+    }
+    let _runtime = RuntimeGuard(previous_runtime);
+    let runtime = home.path.join("runtime");
+    unsafe { std::env::set_var("JCODE_RUNTIME_DIR", &runtime) };
+    let swarm_dir = runtime.join("durable-state/swarm");
+    std::fs::create_dir_all(&swarm_dir).unwrap();
+    let snapshot_path = swarm_dir.join("swarm.json");
+    let snapshot = |status: &str| {
+        json!({"updated_at_unix_ms": 1, "members": [
+            {"session_id": "child", "report_back_to_session_id": "root", "task_label": "API reviewer", "status": status}
+        ]})
+    };
+    std::fs::write(&snapshot_path, snapshot("running").to_string()).unwrap();
+    for id in ["root", "child", "fork"] {
+        write_session_record_with_titles(
+            &home.path,
+            id,
+            &home.path,
+            Some("Generated"),
+            Some("Custom"),
+        );
+    }
+    let fork_path = home.path.join("sessions/fork.json");
+    let mut fork: Value = serde_json::from_slice(&std::fs::read(&fork_path).unwrap()).unwrap();
+    fork["parent_id"] = json!("root");
+    std::fs::write(fork_path, fork.to_string()).unwrap();
+    let mut state = BridgeState::default();
+    let list = |state: &mut BridgeState| {
+        let ApiEvent::Sessions { sessions } = only_reply_event(
+            state.api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
+        ) else {
+            panic!("expected sessions")
+        };
+        sessions
+    };
+    let sessions = list(&mut state);
+    let child = sessions.iter().find(|s| s.session_id == "child").unwrap();
+    assert_eq!(child.parent_session_id.as_deref(), Some("root"));
+    assert_eq!(child.agent_label.as_deref(), Some("API reviewer"));
+    assert_eq!(child.swarm_status.as_deref(), Some("running"));
+    assert_eq!(child.title.as_deref(), Some("Custom"));
+    assert!(
+        sessions
+            .iter()
+            .filter(|s| s.session_id != "child")
+            .all(|s| s.parent_session_id.is_none() && s.swarm_status.is_none())
+    );
+    std::fs::write(&snapshot_path, snapshot("completed").to_string()).unwrap();
+    let sessions = list(&mut state);
+    assert_eq!(
+        sessions
+            .iter()
+            .find(|s| s.session_id == "child")
+            .unwrap()
+            .swarm_status
+            .as_deref(),
+        Some("completed")
+    );
+
+    let out = state
+        .api_request_to_legacy(&json!({"req": "attach_session", "id": 2, "session_id": "child"}));
+    let Outbound::Legacy(probe) = &out[1] else {
+        panic!("expected state probe")
+    };
+    let frames = state.legacy_event_to_api(
+        &json!({"type": "state", "id": probe["id"], "session_id": "child", "is_processing": false}),
+    );
+    let ApiEvent::Attached { session } = &frames[0].event else {
+        panic!("expected attach")
+    };
+    assert_eq!(session.parent_session_id.as_deref(), Some("root"));
+    assert_eq!(session.agent_label.as_deref(), Some("API reviewer"));
+    assert_eq!(session.swarm_status.as_deref(), Some("completed"));
+
+    std::fs::remove_file(snapshot_path).unwrap();
+    assert!(
+        list(&mut state)
+            .iter()
+            .all(|s| s.parent_session_id.is_none() && s.swarm_status.is_none())
+    );
+}
