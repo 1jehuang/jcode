@@ -46,8 +46,33 @@ impl ResumeTarget {
     }
 }
 
+/// Durable usage for one user turn, summed across its assistant/tool rounds.
+/// Input is the raw provider-reported count, not normalized across providers.
+/// Cache reads may be included in input (OpenAI) or separate (Anthropic).
+/// Missing telemetry is unknown, not zero. Counts are absent if any assistant
+/// round lacks that metric. This is not a session total or a billing estimate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResponseStats {
+    /// Whole-turn wall-clock seconds, including tools. Currently not persisted,
+    /// so restored history leaves this absent. Never inferred from tool timings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderedMessage {
+    /// Present only on the final visible assistant row of a completed stored
+    /// user turn. Tool-only intermediate rounds contribute to these totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_stats: Option<ResponseStats>,
     pub role: String,
     pub content: String,
     pub tool_calls: Vec<String>,

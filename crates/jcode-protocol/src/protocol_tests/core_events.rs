@@ -442,6 +442,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -533,6 +534,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,

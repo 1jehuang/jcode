@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 1;
+export const API_VERSION_MINOR = 3;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -51,7 +51,20 @@ export interface TextMatch {
   preview: string;
 }
 
+/** Durable raw provider counts summed over all assistant rounds in one user turn.
+ * Missing metrics are unknown, not zero. Cache accounting differs by provider.
+ * Restored duration is currently unavailable. */
+export interface ResponseStats {
+  duration_secs?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+}
+
 export interface HistoryMessage {
+  /** Only on the final assistant row. Preview/old-server history may omit it. */
+  response_stats?: ResponseStats;
   /** "user" | "assistant" | "tool" */
   role: string;
   content: string;
