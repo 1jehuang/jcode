@@ -1397,7 +1397,6 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     let rows: Vec<LaunchHotkeyRow> = entries
         .into_iter()
         .map(|entry| {
-            let cwd = launch_hotkeys::resolve_target_dir(&entry.dir, &last_dir, &last_repo);
             let display = keymap::KeyChord::parse(&entry.chord)
                 .map(|c| c.display_symbols())
                 .unwrap_or_else(|| entry.chord.clone());
@@ -1405,7 +1404,6 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
                 chord: entry.chord,
                 display,
                 label: entry.label,
-                cwd_display: cwd.display().to_string(),
                 self_dev: entry.args.iter().any(|arg| arg == "self-dev"),
             }
         })
@@ -1416,7 +1414,7 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     Some(StartupHints::with_status_and_display(
         "Launch hotkeys available".to_string(),
         "Launch hotkeys",
-        format!("Configured Jcode launch hotkeys:\n{}", lines.join("\n")),
+        compact_launch_hotkey_notice(&lines),
     ))
 }
 
@@ -2210,7 +2208,6 @@ fn linux_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
             chord: hk.chord.canonical(),
             display: hk.chord.display_super(),
             label: hk.label.clone(),
-            cwd_display: hk.dir.clone(),
             self_dev: hk.self_dev,
         })
         .collect();
@@ -2223,20 +2220,10 @@ fn linux_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     if !linux_hotkeys_installed(comp) {
         return None;
     }
-    let footer = format!(
-        "Bound via {} and available system-wide.",
-        linux_hotkey_target_description(comp)
-    );
-
     Some(StartupHints::with_status_and_display(
         "Launch hotkeys available".to_string(),
         "Launch hotkeys",
-        format!(
-            "Configured Jcode launch hotkeys ({}): {} {}",
-            comp.name(),
-            lines.join("; "),
-            footer
-        ),
+        compact_launch_hotkey_notice(&lines),
     ))
 }
 
@@ -2248,8 +2235,13 @@ pub(crate) struct LaunchHotkeyRow {
     /// Pretty, user-facing chord rendering (e.g. `⌘;` or `Super+;`).
     pub display: String,
     pub label: String,
-    pub cwd_display: String,
     pub self_dev: bool,
+}
+
+/// Keep startup reminders focused on the shortcuts, not installation details.
+#[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
+pub(crate) fn compact_launch_hotkey_notice(lines: &[String]) -> String {
+    format!("Hotkeys: {}", lines.join(" · "))
 }
 
 /// Decide which launch-hotkey lines to surface on the first launch. Pure so
@@ -2278,10 +2270,7 @@ pub(crate) fn launch_hotkey_notice_lines(
         .filter(|row| uses_for(&row.chord) < LAUNCH_HOTKEY_LEARNED_USES)
         .map(|row| {
             let suffix = if row.self_dev { " [self-dev]" } else { "" };
-            format!(
-                "{} → {} ({}){}",
-                row.display, row.label, row.cwd_display, suffix
-            )
+            format!("{} → {}{}", row.display, row.label, suffix)
         })
         .collect();
 

@@ -486,7 +486,6 @@ fn row(chord: &str, label: &str, self_dev: bool) -> LaunchHotkeyRow {
             .map(|c| c.display_symbols())
             .unwrap_or_else(|| chord.to_string()),
         label: label.to_string(),
-        cwd_display: format!("/repos/{label}"),
         self_dev,
     }
 }
@@ -501,8 +500,27 @@ fn launch_hotkey_notice_lists_all_unlearned_bindings() {
     let usage = std::collections::HashMap::new();
     let lines = launch_hotkey_notice_lines(&rows, &usage, 1).expect("should show all bindings");
     assert_eq!(lines.len(), 3);
-    assert!(lines[0].starts_with("⌘; → home (/repos/home)"));
+    assert_eq!(lines[0], "⌘; → home");
     assert!(lines[2].ends_with("[self-dev]"));
+}
+
+#[test]
+fn launch_hotkey_notice_is_compact() {
+    let rows = vec![
+        LaunchHotkeyRow {
+            display: "Super+;".to_string(),
+            ..row("super+;", "jcode", false)
+        },
+        LaunchHotkeyRow {
+            display: "Super+'".to_string(),
+            ..row("super+'", "home", false)
+        },
+    ];
+    let lines = launch_hotkey_notice_lines(&rows, &HashMap::new(), 1).unwrap();
+    assert_eq!(
+        compact_launch_hotkey_notice(&lines),
+        "Hotkeys: Super+; → jcode · Super+' → home"
+    );
 }
 
 #[test]

@@ -84,6 +84,25 @@ fn render_cold_cache_warning_is_always_one_width_bounded_line() {
 }
 
 #[test]
+fn render_launch_hotkeys_keeps_both_shortcuts_visible() {
+    let saved = crate::tui::markdown::center_code_blocks();
+    let content = "Hotkeys: Super+; → jcode · Super+' → home";
+    let msg = DisplayMessage::system(content).with_title("Launch hotkeys");
+
+    for centered in [false, true] {
+        crate::tui::markdown::set_center_code_blocks(centered);
+        for width in [80_u16, 50] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(extract_line_text(&lines[0]).trim(), content);
+            assert!(lines[0].width() <= width as usize);
+        }
+    }
+
+    crate::tui::markdown::set_center_code_blocks(saved);
+}
+
+#[test]
 fn render_compact_launch_and_divergence_notices_as_one_line() {
     let saved = crate::tui::markdown::center_code_blocks();
     let notices = [
