@@ -1,0 +1,12 @@
+[package]
+name = "jcode-permission-bubble"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Permission bubble: subagents inherit parent context and bubble permission prompts back to the parent"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
