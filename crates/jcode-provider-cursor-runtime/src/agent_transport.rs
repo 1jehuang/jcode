@@ -483,6 +483,31 @@ pub(crate) fn parse_tool_request_id(request_id: &str) -> (u32, &str) {
     (id, parts.next().unwrap_or(""))
 }
 
+pub(crate) fn resolve_native_tool_name(
+    advertised_name: &str,
+    auxiliary_name: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+) -> String {
+    let candidates = [auxiliary_name, advertised_name];
+    for tool in tools {
+        let wire_name = crate::wire::mcp_wire_name(&tool.name);
+        let safe_bare_name = crate::wire::mcp_bare_name(&wire_name);
+        if candidates.iter().any(|candidate| {
+            !candidate.is_empty()
+                && (*candidate == tool.name
+                    || *candidate == wire_name
+                    || *candidate == safe_bare_name)
+        }) {
+            return tool.name.clone();
+        }
+    }
+
+    auxiliary_name
+        .is_empty()
+        .then(|| crate::wire::mcp_bare_name(advertised_name).to_string())
+        .unwrap_or_else(|| auxiliary_name.to_string())
+}
+
 /// Run one Cursor agent turn and forward assistant text as [`StreamEvent`]s.
 pub async fn run_agent_turn(
     access_token: &str,
@@ -821,14 +846,23 @@ pub async fn run_agent_turn(
                                 let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
                                 in_thinking = false;
                             }
-                            let bare_tool_name = crate::wire::mcp_bare_name(&mcp_args.name);
+                            // Cursor echoes the advertised wire name in `name`,
+                            // but the original registry name is carried in
+                            // `tool_name`. Prefer the latter so sanitizing a
+                            // name for Cursor's identifier grammar does not
+                            // break local MCP dispatch.
+                            let bare_tool_name = resolve_native_tool_name(
+                                &mcp_args.name,
+                                &mcp_args.tool_name,
+                                tools,
+                            );
                             let corr_request_id =
                                 format!("{}:{}:{}", stream_uuid, msg.id, msg.exec_id);
                             active_tool_calls += 1;
                             if tx
                                 .send(Ok(StreamEvent::NativeToolCall {
                                     request_id: corr_request_id,
-                                    tool_name: bare_tool_name.to_string(),
+                                    tool_name: bare_tool_name,
                                     input: mcp_args.args,
                                 }))
                                 .await

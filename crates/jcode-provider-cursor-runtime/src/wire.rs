@@ -280,11 +280,22 @@ pub fn decode_google_protobuf_value(bytes: &[u8], depth: usize) -> Result<Value>
 
 /// Derive the `cc_` namespaced wire name used by Cursor's AgentService.
 pub fn mcp_wire_name(tool_name: &str) -> String {
-    if tool_name.starts_with(JCODE_TOOL_PREFIX) {
-        tool_name.to_string()
-    } else {
-        format!("{JCODE_TOOL_PREFIX}{tool_name}")
+    let bare = tool_name
+        .strip_prefix(JCODE_TOOL_PREFIX)
+        .unwrap_or(tool_name);
+    let mut sanitized = String::with_capacity(bare.len() + JCODE_TOOL_PREFIX.len());
+    sanitized.push_str(JCODE_TOOL_PREFIX);
+    for ch in bare.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            sanitized.push(ch);
+        } else {
+            sanitized.push('_');
+        }
     }
+    if sanitized.len() == JCODE_TOOL_PREFIX.len() {
+        sanitized.push_str("tool");
+    }
+    sanitized
 }
 
 /// Extract bare tool name from an advertised or inbound wire name.
@@ -303,10 +314,14 @@ pub fn mcp_bare_name(wire_name: &str) -> &str {
 /// - field 2: description (string)
 /// - field 3: input_schema (bytes, serialized google.protobuf.Value)
 /// - field 4: provider_identifier (string, `ccbridge`)
-/// - field 5: tool_name (string, bare name)
+/// - field 5: tool_name (string, bare/safe name)
 pub fn encode_mcp_tool_definition(def: &ToolDefinition) -> Result<Vec<u8>> {
     let wire_name = mcp_wire_name(&def.name);
-    let bare_name = mcp_bare_name(&def.name);
+    // Cursor validates both name-bearing fields even though the public bridge
+    // calls field 5 `tool_name`. Use the same safe spelling for both fields.
+    // The runtime resolves this alias back to the original registry key when a
+    // call returns, so sanitizing cannot break local MCP dispatch.
+    let tool_name = mcp_bare_name(&wire_name);
     let schema_bytes = encode_google_protobuf_value(&def.input_schema, 0)
         .context("Failed to encode tool input_schema to google.protobuf.Value")?;
 
@@ -314,7 +329,7 @@ pub fn encode_mcp_tool_definition(def: &ToolDefinition) -> Result<Vec<u8>> {
     out.extend(field_str(2, &def.description));
     out.extend(field_ld(3, &schema_bytes));
     out.extend(field_str(4, JCODE_TOOL_PROVIDER));
-    out.extend(field_str(5, bare_name));
+    out.extend(field_str(5, tool_name));
     Ok(out)
 }
 

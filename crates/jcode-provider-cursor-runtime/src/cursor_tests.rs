@@ -213,6 +213,82 @@ fn test_encode_mcp_tools() {
 }
 
 #[test]
+fn mcp_wire_names_are_cursor_safe_and_auxiliary_name_is_safe() {
+    let tools = vec![ToolDefinition {
+        name: "mcp__weather-server__get.weather".to_string(),
+        description: "Read weather".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
+    let encoded = wire::encode_mcp_tools(&tools).expect("encode MCP tool");
+    let definition = wire::iter_fields(&encoded)
+        .next()
+        .expect("MCP definition wrapper");
+    let fields = wire::iter_fields(definition.data).collect::<Vec<_>>();
+    let name = fields
+        .iter()
+        .find(|field| field.field == 1)
+        .and_then(|field| std::str::from_utf8(field.data).ok())
+        .unwrap();
+    let registry_name = fields
+        .iter()
+        .find(|field| field.field == 5)
+        .and_then(|field| std::str::from_utf8(field.data).ok())
+        .unwrap();
+
+    assert_eq!(name, "cc_mcp__weather-server__get_weather");
+    assert_eq!(registry_name, "mcp__weather-server__get_weather");
+    assert!(
+        registry_name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    );
+    assert!(
+        name.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    );
+}
+
+#[test]
+fn auxiliary_tool_name_is_safe_for_non_mcp_definitions() {
+    let tool = ToolDefinition {
+        name: "custom tool.name".to_string(),
+        description: "Custom tool".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    };
+    let encoded = wire::encode_mcp_tool_definition(&tool).expect("encode tool");
+    let fields = wire::iter_fields(&encoded).collect::<Vec<_>>();
+    let auxiliary = fields
+        .iter()
+        .find(|field| field.field == 5)
+        .and_then(|field| std::str::from_utf8(field.data).ok())
+        .unwrap();
+
+    assert_eq!(auxiliary, "custom_tool_name");
+    assert!(
+        auxiliary
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    );
+}
+
+#[test]
+fn sanitized_mcp_aliases_resolve_to_the_registry_name() {
+    let registry_name = "mcp__Mobile MCP__mobile_click.on_screen";
+    let tools = vec![ToolDefinition {
+        name: registry_name.to_string(),
+        description: "Click".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
+    let wire_name = wire::mcp_wire_name(registry_name);
+    let safe_bare_name = wire::mcp_bare_name(&wire_name);
+
+    assert_eq!(
+        agent_transport::resolve_native_tool_name(&wire_name, &safe_bare_name, &tools),
+        registry_name
+    );
+}
+
+#[test]
 fn test_google_protobuf_value_roundtrip() {
     let test_values = vec![
         serde_json::Value::Null,
