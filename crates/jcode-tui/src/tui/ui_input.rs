@@ -1221,27 +1221,30 @@ fn push_queued_suffix(spans: &mut Vec<Span<'static>>, queued_suffix: &str) {
 /// tag.
 fn truncate_line_for_narrow(line: Line<'static>, max_cols: usize) -> Line<'static> {
     use unicode_width::UnicodeWidthStr;
+    let mut remaining = max_cols;
     let spans: Vec<Span<'static>> = line
         .spans
         .into_iter()
-        .flat_map(|span| {
+        .filter_map(|span| {
+            if remaining == 0 {
+                return None;
+            }
             let s: &str = span.content.as_ref();
             let w = UnicodeWidthStr::width(s);
             if w == 0 {
-                return vec![];
+                return None;
             }
-            if w <= max_cols {
-                let style = span.style;
-                vec![Span::styled(s.to_string(), style)]
+            if w <= remaining {
+                remaining -= w;
+                Some(Span::styled(s.to_string(), span.style))
             } else {
-                // Truncate with ellipsis
-                let mut out = String::with_capacity(max_cols);
+                // Truncate with ellipsis if there is room.
+                let mut out = String::with_capacity(remaining);
                 let mut used = 0;
                 for ch in s.chars() {
                     let cw = UnicodeWidthStr::width(ch.to_string().as_str());
-                    if used + cw + 1 > max_cols {
-                        // Room for ellipsis?
-                        if used + 1 <= max_cols {
+                    if used + cw + 1 > remaining {
+                        if used + 1 <= remaining {
                             out.push('…');
                         }
                         break;
@@ -1249,8 +1252,8 @@ fn truncate_line_for_narrow(line: Line<'static>, max_cols: usize) -> Line<'stati
                     out.push(ch);
                     used += cw;
                 }
-                let style = span.style;
-                vec![Span::styled(out, style)]
+                remaining = 0;
+                Some(Span::styled(out, span.style))
             }
         })
         .collect();

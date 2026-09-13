@@ -930,7 +930,8 @@ fn truncate_line_for_narrow_multiple_spans() {
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
-    assert!(total_width <= 8, "total width {total_width} exceeds 8");
+    // Span 1 uses 2 cols, span 2 is truncated to the remaining 6 cols.
+    assert_eq!(total_width, 8, "exact cumulative width: got {total_width}");
 }
 
 #[test]
