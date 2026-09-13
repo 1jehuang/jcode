@@ -1556,7 +1556,7 @@ fn handle_server_event_inner(
                 && crate::tui::app::commands::is_non_retryable_auto_poke_error(&message)
             {
                 if app.schedule_pending_remote_retry_with_limit(
-                    "⚠ The request failed in a way a retry probably won't fix. Trying once more anyway.",
+                    "▲ The request failed in a way a retry probably won't fix. Trying once more anyway.",
                     2,
                 ) {
                     return false;
@@ -1578,7 +1578,7 @@ fn handle_server_event_inner(
                 );
                 return false;
             }
-            if !is_failover_prompt && !app.schedule_pending_remote_retry("⚠ Remote request failed.")
+            if !is_failover_prompt && !app.schedule_pending_remote_retry("▲ Remote request failed.")
             {
                 app.clear_pending_remote_retry();
                 // No automatic retry will resend this turn, so restore the prompt the
@@ -1653,7 +1653,7 @@ fn handle_server_event_inner(
         }
         ServerEvent::Reloading { .. } => {
             app.scheduled_reload_recoveries.clear();
-            app.append_reload_message("🔄 Server reload initiated...");
+            app.append_reload_message("⟳ Server reload initiated...");
             // In-process server reloads (self-dev build-reload) keep the same
             // server PID and never disconnect this client, so the reconnect-time
             // client re-exec never fires. If a newer client binary is on disk and
@@ -3085,7 +3085,7 @@ fn handle_server_event_inner(
                 });
             }
             if let Some(n) = tools_skipped {
-                app.set_status_notice(format!("⚡ {} tool(s) skipped", n));
+                app.set_status_notice(format!("◈ {} tool(s) skipped", n));
             }
             false
         }
@@ -3108,12 +3108,12 @@ fn handle_server_event_inner(
             };
             crate::memory::record_injected_prompt(&prompt, count, computed_age_ms);
             let summary = if count == 1 {
-                "🧠 auto-recalled 1 memory".to_string()
+                "◉ auto-recalled 1 memory".to_string()
             } else {
-                format!("🧠 auto-recalled {} memories", count)
+                format!("◉ auto-recalled {} memories", count)
             };
             app.push_display_message(DisplayMessage::memory(summary, display_prompt));
-            app.set_status_notice(format!("🧠 {} relevant {} injected", count, plural));
+            app.set_status_notice(format!("◉ {} relevant {} injected", count, plural));
             false
         }
         ServerEvent::MemoryActivity { activity } => {
@@ -3457,7 +3457,7 @@ fn handle_server_event_inner(
                 Ok(true) => {
                     if let Some(label) = split_label.as_deref() {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "🔍 {} launched in {}.",
+                            "◎ {} launched in {}.",
                             label, new_session_name,
                         )));
                         app.set_status_notice(format!("{} launched", label));
@@ -3472,7 +3472,7 @@ fn handle_server_event_inner(
                 Ok(false) => {
                     if let Some(label) = split_label.as_deref() {
                         app.push_display_message(DisplayMessage::system(format!(
-                            "🔍 {} session {} created.\n\nNo terminal found. Resume manually:\n  jcode --resume {}",
+                            "◎ {} session {} created.\n\nNo terminal found. Resume manually:\n  jcode --resume {}",
                             label, new_session_name, new_session_id,
                         )));
                         app.set_status_notice(format!("{} session created", label));

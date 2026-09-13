@@ -451,7 +451,7 @@ fn is_status_only_line(line: &str) -> bool {
         || line.starts_with("Auto-translating")
         || line.starts_with('🀄')
         || line.starts_with("Pinyin shown")
-        || line.starts_with('🎯')
+        || line.starts_with('◇')
         || line.starts_with("Silence threshold:")
         || line.starts_with("Listening...")
         || line.contains("Recording...")

@@ -497,12 +497,12 @@ pub(super) fn infer_spawned_session_startup_hints(
     let parent_session_id = message.split('`').nth(1).unwrap_or("parent");
     let body = if label == "Autojudge" {
         format!(
-            "🔍 {} session started for parent `{}`.\n\nThis session is analysis-only: it will inspect the recent work, send exactly one DM back telling the parent either to `CONTINUE:` with specific next steps or `STOP:` because the work is complete, and then stop. It should not continue the work or modify repo state.\n\nJudge sessions use a user-visible mirror of the parent conversation: user prompts, visible assistant replies, and shallow tool-call summaries - not the parent's full hidden tool context.",
+            "◎ {} session started for parent `{}`.\n\nThis session is analysis-only: it will inspect the recent work, send exactly one DM back telling the parent either to `CONTINUE:` with specific next steps or `STOP:` because the work is complete, and then stop. It should not continue the work or modify repo state.\n\nJudge sessions use a user-visible mirror of the parent conversation: user prompts, visible assistant replies, and shallow tool-call summaries - not the parent's full hidden tool context.",
             label, parent_session_id
         )
     } else {
         format!(
-            "🔍 {} session started for parent `{}`.\n\nThis session is analysis-only: it will inspect the recent work, send exactly one DM back to the parent session, and stop. It should not continue the work or modify repo state.\n\nJudge sessions use a user-visible mirror of the parent conversation: user prompts, visible assistant replies, and shallow tool-call summaries - not the parent's full hidden tool context.",
+            "◎ {} session started for parent `{}`.\n\nThis session is analysis-only: it will inspect the recent work, send exactly one DM back to the parent session, and stop. It should not continue the work or modify repo state.\n\nJudge sessions use a user-visible mirror of the parent conversation: user prompts, visible assistant replies, and shallow tool-call summaries - not the parent's full hidden tool context.",
             label, parent_session_id
         )
     };

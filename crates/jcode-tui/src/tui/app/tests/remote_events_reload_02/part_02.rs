@@ -327,7 +327,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
     assert_eq!(last.role, "system");
     assert_eq!(
         last.content,
-        "📦 Compacted (semantic): ~12,345 tokens (6.2%) → ~4,321 tokens (2.2%)"
+        "◧ Compacted (semantic): ~12,345 tokens (6.2%) → ~4,321 tokens (2.2%)"
     );
 }
 

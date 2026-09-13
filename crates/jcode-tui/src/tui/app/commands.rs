@@ -1849,12 +1849,12 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         let name = app.session.display_name().to_string();
         let msg = if let Some(ref lbl) = app.session.save_label {
             format!(
-                "📌 Session {} saved as \"{}\". It will appear at the top of /resume.",
+                "◈ Session {} saved as \"{}\". It will appear at the top of /resume.",
                 name, lbl,
             )
         } else {
             format!(
-                "📌 Session {} saved. It will appear at the top of /resume.",
+                "◈ Session {} saved. It will appear at the top of /resume.",
                 name,
             )
         };
@@ -2291,7 +2291,7 @@ pub(super) fn triage_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting GitHub issue triage...".to_string()
     } else {
-        "🚀 Starting GitHub issue triage...".to_string()
+        "▸ Starting GitHub issue triage...".to_string()
     }
 }
 
@@ -2314,7 +2314,7 @@ pub(super) fn merge_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting merge into main/master...".to_string()
     } else {
-        "🚀 Starting merge into main/master...".to_string()
+        "▸ Starting merge into main/master...".to_string()
     }
 }
 
@@ -2337,7 +2337,7 @@ pub(super) fn commit_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits...".to_string()
     } else {
-        "🚀 Starting logical commits...".to_string()
+        "▸ Starting logical commits...".to_string()
     }
 }
 
@@ -2345,7 +2345,7 @@ pub(super) fn commit_push_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push...".to_string()
     } else {
-        "🚀 Starting logical commits + push...".to_string()
+        "▸ Starting logical commits + push...".to_string()
     }
 }
 
@@ -2353,7 +2353,7 @@ pub(super) fn fast_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + fast local release...".to_string()
     } else {
-        "🚀 Starting logical commits + push + fast local release...".to_string()
+        "▸ Starting logical commits + push + fast local release...".to_string()
     }
 }
 
@@ -2361,7 +2361,7 @@ pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + fast macOS release...".to_string()
     } else {
-        "🚀 Starting logical commits + push + fast macOS release...".to_string()
+        "▸ Starting logical commits + push + fast macOS release...".to_string()
     }
 }
 
@@ -2369,7 +2369,7 @@ pub(super) fn merge_remote_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting merge + push + remote release...".to_string()
     } else {
-        "🚀 Starting merge + push + remote release...".to_string()
+        "▸ Starting merge + push + remote release...".to_string()
     }
 }
 
@@ -2377,7 +2377,7 @@ pub(super) fn remote_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + remote release...".to_string()
     } else {
-        "🚀 Starting logical commits + push + remote release...".to_string()
+        "▸ Starting logical commits + push + remote release...".to_string()
     }
 }
 
@@ -3587,7 +3587,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
                         app.push_display_message(DisplayMessage {
                             role: "system".to_string(),
                             content: format!(
-                                "{}\n\n⚠ Cannot compact: {}\n\
+                                "{}\n\n▲ Cannot compact: {}\n\
                                 Try /fix for emergency recovery.",
                                 status_msg, reason
                             ),
@@ -3602,7 +3602,7 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
             Err(_) => {
                 app.push_display_message(DisplayMessage {
                     role: "system".to_string(),
-                    content: "⚠ Cannot access compaction manager (lock held)".to_string(),
+                    content: "▲ Cannot access compaction manager (lock held)".to_string(),
                     tool_calls: vec![],
                     duration_secs: None,
                     title: None,

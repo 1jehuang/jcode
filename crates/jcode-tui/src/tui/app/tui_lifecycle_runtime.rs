@@ -404,7 +404,7 @@ impl App {
                     Err(e) => {
                         self.push_display_message(DisplayMessage {
                             role: "system".to_string(),
-                            content: format!("⚠ Failed to restore model '{}': {}", model, e),
+                            content: format!("▲ Failed to restore model '{}': {}", model, e),
                             tool_calls: vec![],
                             duration_secs: None,
                             title: None,
@@ -522,7 +522,7 @@ impl App {
                 self.push_display_message(DisplayMessage {
                     role: "system".to_string(),
                     content: format!(
-                        "⚠ Reload failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
+                        "▲ Reload failed. Session could not be restored. Previous version: {}, Target version: {}.{}\n\
                          Starting fresh session. You may need to re-examine your changes.",
                         ctx.version_before,
                         ctx.version_after,

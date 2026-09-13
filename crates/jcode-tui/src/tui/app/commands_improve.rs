@@ -239,7 +239,7 @@ pub(super) fn improve_launch_notice(
     let prefix = if interrupted {
         "👉 Interrupting and starting"
     } else {
-        "🚀 Starting"
+        "▸ Starting"
     };
     match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
         Some(focus) => format!("{} {} focused on {}...", prefix, action, focus),
@@ -272,7 +272,7 @@ pub(super) fn refactor_launch_notice(
     let prefix = if interrupted {
         "👉 Interrupting and starting"
     } else {
-        "🚀 Starting"
+        "▸ Starting"
     };
     match focus.map(str::trim).filter(|focus| !focus.is_empty()) {
         Some(focus) => format!("{} {} focused on {}...", prefix, action, focus),
@@ -309,7 +309,7 @@ pub(super) fn build_improve_resume_prompt(
     let mut todo_list = String::new();
     for todo in incomplete {
         let icon = if todo.status == "in_progress" {
-            "🔄"
+            "⟳"
         } else {
             "⬜"
         };
@@ -356,7 +356,7 @@ pub(super) fn build_refactor_resume_prompt(
     let mut todo_list = String::new();
     for todo in incomplete {
         let icon = if todo.status == "in_progress" {
-            "🔄"
+            "⟳"
         } else {
             "⬜"
         };
@@ -497,7 +497,7 @@ pub(super) fn format_improve_status(app: &App) -> String {
         lines.push("Current improve batch:".to_string());
         for todo in incomplete.iter().take(5) {
             let icon = if todo.status == "in_progress" {
-                "🔄"
+                "⟳"
             } else {
                 "⬜"
             };
@@ -566,7 +566,7 @@ pub(super) fn format_refactor_status(app: &App) -> String {
         lines.push("Current refactor batch:".to_string());
         for todo in incomplete.iter().take(5) {
             let icon = if todo.status == "in_progress" {
-                "🔄"
+                "⟳"
             } else {
                 "⬜"
             };

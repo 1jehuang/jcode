@@ -1011,7 +1011,7 @@ impl App {
                                             .map(|t| format!(" (was {} tokens)", t))
                                             .unwrap_or_default();
                                         let compact_msg = format!(
-                                            "📦 **Compaction complete** - context summarized ({}){}\n\n",
+                                            "◧ **Compaction complete** - context summarized ({}){}\n\n",
                                             trigger, tokens_str
                                         );
                                         self.append_streaming_text(&compact_msg);

@@ -756,12 +756,12 @@ impl App {
             // We have a bookmark - teleport back to it
             self.scroll_offset = saved;
             self.auto_scroll_paused = saved > 0;
-            self.set_status_notice("📌 Returned to bookmark");
+            self.set_status_notice("◈ Returned to bookmark");
         } else if self.auto_scroll_paused && self.scroll_offset > 0 {
             // We're scrolled up - save position and jump to bottom
             self.scroll_bookmark = Some(self.scroll_offset);
             self.follow_chat_bottom();
-            self.set_status_notice("📌 Bookmark set - press again to return");
+            self.set_status_notice("◈ Bookmark set - press again to return");
         }
         // If already at bottom with no bookmark, do nothing
     }

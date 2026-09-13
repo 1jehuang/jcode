@@ -1210,7 +1210,7 @@ pub(super) fn handle_disconnect(
     state.last_disconnect_reason = Some(detail.clone());
 
     let scheduled_retry =
-        app.schedule_pending_remote_retry(&format!("⚡ Connection lost ({detail})."));
+        app.schedule_pending_remote_retry(&format!("◈ Connection lost ({detail})."));
     if !scheduled_retry {
         // A queued follow-up that was already dispatched (dequeued into an
         // in-flight send) has no auto-retry path. Dropping it here would lose
@@ -1366,7 +1366,7 @@ async fn recover_stuck_remote_history(app: &mut App, remote: &mut RemoteConnecti
                  'loading session…'. Advising /restart.",
             );
             app.push_display_message(DisplayMessage::system(
-                "⚠ Still loading session… the server hasn't sent the conversation history. \
+                "▲ Still loading session… the server hasn't sent the conversation history. \
                  This usually clears on its own; if it persists, run /restart to reconnect."
                     .to_string(),
             ));
@@ -2018,7 +2018,7 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
             }
             let stall_desc = format_stall_duration(stall_timeout);
             if !app.schedule_pending_remote_retry(&format!(
-                "⚠ Stream stalled (no response for {stall_desc}). Processing cancelled.",
+                "▲ Stream stalled (no response for {stall_desc}). Processing cancelled.",
             )) {
                 // Keep a dispatched-but-unfinished queued follow-up on the
                 // queue instead of silently dropping it (issue #391).
@@ -2026,11 +2026,11 @@ async fn detect_and_cancel_stall(app: &mut App, remote: &mut RemoteConnection) {
                 app.clear_pending_remote_retry();
                 if recovered {
                     app.push_display_message(DisplayMessage::system(format!(
-                        "⚠ Stream stalled (no response for {stall_desc}). Processing cancelled. Your queued follow-up stays queued.",
+                        "▲ Stream stalled (no response for {stall_desc}). Processing cancelled. Your queued follow-up stays queued.",
                     )));
                 } else {
                     app.push_display_message(DisplayMessage::system(format!(
-                        "⚠ Stream stalled (no response for {stall_desc}). Processing cancelled. You can resend your message. Raise `[provider] stream_idle_timeout_secs` in config.toml if your model thinks silently for longer.",
+                        "▲ Stream stalled (no response for {stall_desc}). Processing cancelled. You can resend your message. Raise `[provider] stream_idle_timeout_secs` in config.toml if your model thinks silently for longer.",
                     )));
                 }
             }

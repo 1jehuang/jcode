@@ -1274,7 +1274,7 @@ pub(crate) fn recent_flicker_ui_notice() -> Option<FlickerUiNotice> {
     let log_hint = crate::logging::log_path()
         .map(|path| abbreviate_flicker_log_path(&path))
         .unwrap_or_else(|| "~/.jcode/logs/".to_string());
-    let summary = format!("⚠ flicker detected ({})", flicker_event_label(&event.kind));
+    let summary = format!("▲ flicker detected ({})", flicker_event_label(&event.kind));
     let hint = format!("logs: {} · debug: client:flicker-frames 32", log_hint);
     Some(FlickerUiNotice { summary, hint })
 }

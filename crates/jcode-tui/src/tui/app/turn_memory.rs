@@ -59,9 +59,9 @@ impl App {
         }
         crate::memory::record_injected_prompt(prompt, count, age_ms);
         let summary = if count == 1 {
-            "🧠 auto-recalled 1 memory".to_string()
+            "◉ auto-recalled 1 memory".to_string()
         } else {
-            format!("🧠 auto-recalled {} memories", count)
+            format!("◉ auto-recalled {} memories", count)
         };
         // Record to session for replay visualization
         self.session.record_memory_injection(
@@ -82,11 +82,11 @@ impl App {
             self.note_experimental_feature_use("memory_injection")
         {
             format!(
-                "🧠 {} {} injected · ⚠ {}",
+                "◉ {} {} injected · ▲ {}",
                 count, plural, experimental_notice
             )
         } else {
-            format!("🧠 {} {} injected", count, plural)
+            format!("◉ {} {} injected", count, plural)
         };
         self.set_status_notice(notice);
     }
