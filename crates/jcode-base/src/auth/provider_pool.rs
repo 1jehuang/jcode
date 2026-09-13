@@ -8,6 +8,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -321,6 +324,52 @@ fn health_path() -> Result<PathBuf> {
     Ok(crate::storage::jcode_dir()?.join("provider_pool_state.json"))
 }
 
+fn health_lock_path() -> Result<PathBuf> {
+    Ok(crate::storage::jcode_dir()?.join("provider_pool_state.json.lock"))
+}
+
+/// Coordinate health read-modify-write cycles across independent jcode
+/// processes. The in-process mutex remains necessary for threads, while this
+/// advisory lock protects the durable JSON file when more than one daemon or
+/// CLI process shares the same JCODE_HOME.
+struct HealthFileLock {
+    file: File,
+}
+
+impl HealthFileLock {
+    fn acquire(shared: bool) -> Option<Self> {
+        let path = health_lock_path().ok()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+
+        #[cfg(unix)]
+        {
+            let operation = if shared { libc::LOCK_SH } else { libc::LOCK_EX };
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                return None;
+            }
+        }
+
+        Some(Self { file })
+    }
+}
+
+impl Drop for HealthFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -357,11 +406,18 @@ fn read_health() -> PoolHealthFile {
     let Ok(_guard) = HEALTH_STATE_LOCK.lock() else {
         return PoolHealthFile::default();
     };
+    let Some(_file_lock) = HealthFileLock::acquire(true) else {
+        return PoolHealthFile::default();
+    };
     read_health_unlocked()
 }
 
 fn update_health(update: impl FnOnce(&mut PoolHealthFile)) {
     let Ok(_guard) = HEALTH_STATE_LOCK.lock() else {
+        return;
+    };
+    let Some(_file_lock) = HealthFileLock::acquire(false) else {
+        crate::logging::warn("Could not acquire provider pool health state lock");
         return;
     };
     let mut health = read_health_unlocked();
