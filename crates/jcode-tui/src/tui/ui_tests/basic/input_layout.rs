@@ -509,16 +509,28 @@ fn test_estimate_pinned_diagram_pane_width_respects_minimum() {
 #[test]
 fn test_idle_donut_reserved_height_absorbs_composer_growth() {
     // No donut: nothing reserved regardless of composer size.
-    assert_eq!(idle_donut_reserved_height(false, 1), 0);
-    assert_eq!(idle_donut_reserved_height(false, 9), 0);
+    assert_eq!(idle_donut_reserved_height(false, 1, 50), 0);
+    assert_eq!(idle_donut_reserved_height(false, 9, 50), 0);
 
     // Resting composer (1 row input, no hints): full donut reservation.
-    assert_eq!(idle_donut_reserved_height(true, 1), 14);
+    assert_eq!(idle_donut_reserved_height(true, 1, 50), 14);
 
     // Slash menu open (1 input row + 8 suggestion rows = 9): the extra 8 rows
     // come out of the donut so the transcript above does not shift.
-    assert_eq!(idle_donut_reserved_height(true, 9), 6);
+    assert_eq!(idle_donut_reserved_height(true, 9, 50), 6);
 
     // Pathologically tall composer: reservation bottoms out at zero.
-    assert_eq!(idle_donut_reserved_height(true, 40), 0);
+    assert_eq!(idle_donut_reserved_height(true, 40, 50), 0);
+}
+
+#[test]
+fn test_idle_donut_suppressed_in_small_panes() {
+    // Panes shorter than 8 rows suppress the donut entirely so every row is
+    // available for transcript content.
+    assert_eq!(idle_donut_reserved_height(true, 1, 7), 0);
+    assert_eq!(idle_donut_reserved_height(true, 1, 5), 0);
+    assert_eq!(idle_donut_reserved_height(true, 1, 1), 0);
+
+    // At exactly 8 rows the donut is allowed.
+    assert_eq!(idle_donut_reserved_height(true, 1, 8), 14);
 }

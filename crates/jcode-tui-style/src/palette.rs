@@ -77,6 +77,8 @@ pub enum Role {
     Border,
     /// Selected row background.
     SelectionBg,
+    /// Bottom status line text (higher contrast than dim for scannability).
+    StatusText,
 }
 
 /// All roles, in declaration order. Used by `/colors` listings and harmony
@@ -104,6 +106,7 @@ pub const ALL_ROLES: &[Role] = &[
     Role::Info,
     Role::Border,
     Role::SelectionBg,
+    Role::StatusText,
 ];
 
 impl Role {
@@ -132,6 +135,7 @@ impl Role {
             Role::Info => "info",
             Role::Border => "border",
             Role::SelectionBg => "selection_bg",
+            Role::StatusText => "status_text",
         }
     }
 
@@ -169,6 +173,7 @@ impl Role {
             Role::Info => (140, 180, 255),
             Role::Border => (100, 100, 110),
             Role::SelectionBg => (60, 60, 80),
+            Role::StatusText => (140, 140, 155),
         }
     }
 
@@ -841,6 +846,7 @@ mod default_palette_is_frozen {
         (Role::Info, (140, 180, 255)),
         (Role::Border, (100, 100, 110)),
         (Role::SelectionBg, (60, 60, 80)),
+        (Role::StatusText, (140, 140, 155)),
     ];
 
     #[test]

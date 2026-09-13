@@ -3330,9 +3330,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let user_count = next_prompt.saturating_sub(1);
 
     // Calculate input height based on the same wrapping logic used for rendering
-    // (max 10 lines visible, scrolls if more).
+    // (max 10 lines visible, scrolls if more).  In small panes the flat min(10)
+    // cap can exceed 1/3 of the available height, squeezing the transcript to
+    // near-zero rows.  Clamp to at most available_height / 3 (min 1) so the
+    // messages area always keeps at least 2/3 of the pane.
+    let max_input_lines = (chat_area.height / 3).max(1);
     let base_input_height =
-        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
+        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt)
+            .min(10)
+            .min(max_input_lines as usize) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
@@ -3400,7 +3406,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     }
 
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
-    let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
+    let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height, chat_area.height);
     let notification_height =
         input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
     // Session status line (dir, branch, context, provider, model), always
@@ -3875,11 +3881,15 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let mut widget_render_ms: Option<f32> = None;
     let mut placements: Vec<info_widget::WidgetPlacement> = Vec::new();
     let widget_bounds = messages_area;
+    // In small panes (< 5 rows for the messages area) info widgets would overlap
+    // the transcript so aggressively they obscure more content than they add.
+    // Suppress them entirely when the space is too tight.
     if app.info_widget_overlays_enabled()
         && !widget_data.is_empty()
         && !show_donut
         && !swarm_page_active
         && !side_panel_fullscreen
+        && messages_area.height >= 5
     {
         if let Some(ref mut capture) = debug_capture {
             capture.render_order.push("render_info_widgets".to_string());

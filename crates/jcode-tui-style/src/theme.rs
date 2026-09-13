@@ -75,6 +75,10 @@ pub fn border_color() -> Color {
 pub fn selection_bg_color() -> Color {
     crate::palette::role_color(crate::palette::Role::SelectionBg)
 }
+/// Bottom status line text (higher contrast than dim for scannability).
+pub fn status_text_color() -> Color {
+    crate::palette::role_color(crate::palette::Role::StatusText)
+}
 
 // Spinner frames for animated status. Keep these single-cell because the fast
 // spinner-only renderer patches one status cell between full TUI redraws. This
