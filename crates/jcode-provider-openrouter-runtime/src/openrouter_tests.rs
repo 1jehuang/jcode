@@ -404,7 +404,7 @@ fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
 }
 
 #[test]
-fn direct_deepseek_profile_does_not_advertise_image_input_support() {
+fn direct_deepseek_profile_unknown_model_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
         supports_provider_features: false,
@@ -412,6 +412,159 @@ fn direct_deepseek_profile_does_not_advertise_image_input_support() {
     };
 
     assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn deepseek_image_input_capability_matrix() {
+    for (profile, model, provider_features, expected) in [
+        ("deepseek", "deepseek-flash", false, true),
+        ("deepseek", "deepseek-v4-flash", false, true),
+        ("deepseek", "deepseek-v4-flash-vision-exp", false, true),
+        ("DeepSeek", "DEEPSEEK-FLASH", false, true),
+        ("deepseek", "deepseek:deepseek-flash", false, true),
+        ("deepseek", "deepseek-v4-pro", false, false),
+        ("deepseek", "deepseek-pro", false, false),
+        ("deepseek", "deepseek-chat", false, false),
+        ("deepseek", "deepseek-reasoner", false, false),
+        ("deepseek", "unknown", false, false),
+        ("deepseek", "deepseek-v4-flash-free", false, false),
+        ("deepseek", "deepseek-flash-future", false, false),
+        ("deepseek", "deepseek/deepseek-flash", false, false),
+        ("zai", "deepseek-flash", false, false),
+        ("zai", "glm-5", false, false),
+        ("openrouter", "deepseek-flash", true, false),
+        ("custom", "unknown", false, true),
+    ] {
+        let provider = OpenRouterProvider {
+            profile_id: Some(profile.to_string()),
+            model: Arc::new(RwLock::new(model.to_string())),
+            supports_provider_features: provider_features,
+            ..make_custom_compatible_provider()
+        };
+        assert_eq!(
+            provider.supports_image_input(),
+            expected,
+            "profile={profile}, model={model}"
+        );
+    }
+}
+
+#[test]
+fn deepseek_image_input_explicit_model_inputs_take_precedence() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    for profile_id in ["deepseek", "zai"] {
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: "http://localhost:1234/v1".to_string(),
+            auth: jcode_base::config::NamedProviderAuth::None,
+            default_model: Some("deepseek-flash".to_string()),
+            models: vec![
+                jcode_base::config::NamedProviderModelConfig {
+                    id: "deepseek-flash".to_string(),
+                    input: vec!["text".to_string()],
+                    ..Default::default()
+                },
+                jcode_base::config::NamedProviderModelConfig {
+                    id: "deepseek-v4-pro".to_string(),
+                    input: vec!["text".to_string(), "image".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let provider = OpenRouterProvider::new_named_openai_compatible(profile_id, &profile)
+            .expect("named profile should initialize without auth");
+        assert!(
+            !provider.supports_image_input(),
+            "{profile_id}: explicit text-only Flash"
+        );
+        provider.set_model("deepseek-v4-pro").unwrap();
+        assert!(
+            provider.supports_image_input(),
+            "{profile_id}: explicit image-capable Pro"
+        );
+    }
+}
+
+#[test]
+fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
+    let _lock = ENV_LOCK.lock();
+    // A real 1x1 PNG, retained byte-for-byte in the outbound data URL.
+    let pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1cAAAAASUVORK5CYII=";
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: pixels.to_string(),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    for (profile, model, override_support, expected) in [
+        ("deepseek", "deepseek-flash", None, true),
+        ("deepseek", "deepseek-v4-flash", None, true),
+        ("deepseek", "deepseek-v4-flash-vision-exp", None, true),
+        ("deepseek", "deepseek-v4-pro", None, false),
+        ("deepseek", "unknown", None, false),
+        ("zai", "deepseek-flash", None, false),
+        ("deepseek", "deepseek-flash", Some(false), false),
+        ("deepseek", "deepseek-v4-pro", Some(true), true),
+    ] {
+        let (api_base, request_rx) = spawn_single_response_chat_server();
+        let provider = OpenRouterProvider {
+            api_base,
+            model: Arc::new(RwLock::new(model.to_string())),
+            profile_id: Some(profile.to_string()),
+            supports_provider_features: false,
+            supports_model_catalog: false,
+            static_image_input_support: override_support
+                .map(|value| HashMap::from([(model.to_string(), value)]))
+                .unwrap_or_default(),
+            ..make_custom_compatible_provider()
+        };
+        rt.block_on(async {
+            let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.expect("local fixture stream should succeed");
+            }
+        });
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let body = parse_captured_request_body(&request);
+        assert_eq!(body["model"], model);
+        let parts = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "image_url")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parts.len(),
+            usize::from(expected),
+            "{profile}/{model}: {body}"
+        );
+        if expected {
+            assert_eq!(
+                parts[0]["image_url"]["url"],
+                format!("data:image/png;base64,{pixels}")
+            );
+            assert!(!request.contains("Image omitted"), "{body}");
+        } else {
+            assert!(request.contains("Image omitted"), "{body}");
+            assert!(!request.contains(pixels), "{body}");
+        }
+    }
 }
 
 #[test]
