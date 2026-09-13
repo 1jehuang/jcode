@@ -1531,6 +1531,36 @@ fn session_records_are_read_from_the_instance_home() {
 }
 
 #[test]
+fn unattached_list_sessions_handles_no_session_candidates() {
+    let home = ScopedJcodeHome::new("empty-session-discovery");
+    let sessions_dir = home.path.join("sessions");
+    let mut state = BridgeState::default();
+
+    // Missing directory, empty directory, and entries that are all filtered out.
+    for layout in 0..3 {
+        if layout == 1 {
+            std::fs::create_dir(&sessions_dir).unwrap();
+        } else if layout == 2 {
+            std::fs::write(sessions_dir.join("not-a-session.txt"), "ignored").unwrap();
+            std::fs::create_dir(sessions_dir.join("directory.json")).unwrap();
+        }
+        for limit in [None, Some(0), Some(10)] {
+            let event = only_reply_event(state.api_request_to_legacy(&json!({
+                "req": "list_sessions", "id": 1, "limit": limit,
+            })));
+            assert_eq!(event, ApiEvent::Sessions { sessions: vec![] });
+            assert_eq!(
+                only_reply_event(state.api_request_to_legacy(&json!({"req": "ping", "id": 2}))),
+                ApiEvent::Pong,
+            );
+        }
+    }
+
+    write_session_record(&home.path, "first_session", &home.path);
+    assert_eq!(BridgeState::stored_session_ids(None), ["first_session"]);
+}
+
+#[test]
 fn unattached_list_sessions_discovers_all_persisted_records() {
     let home = ScopedJcodeHome::new("persisted-discovery");
     let first_root = home.path.join("first-project");
