@@ -431,6 +431,7 @@ impl Agent {
             self.locked_tools = None;
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
+            self.cache_vectors.reset();
         }
         // Allow the late-MCP-registration recheck to fire once for the next
         // snapshot (e.g. after an explicit `mcp` reload).
@@ -570,6 +571,7 @@ impl Agent {
             self.mcp_late_register_resolved = false;
             self.cache_tracker.reset();
             self.kv_cache_monitor.reset();
+            self.cache_vectors.reset();
         }
         if native {
             return self.native_deferred_tool_definitions().await;
@@ -624,6 +626,7 @@ impl Agent {
                 self.locked_tools = None;
                 self.cache_tracker.reset();
                 self.kv_cache_monitor.reset();
+                self.cache_vectors.reset();
             } else {
                 // No MCP tools have appeared. They may still be connecting, so
                 // leave the guard unset and re-check on the next turn. Once they
@@ -1026,6 +1029,7 @@ impl Agent {
         self.locked_tools = None;
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
+        self.cache_vectors.reset();
     }
 
     pub(crate) async fn set_desktop_response_capability(&mut self, enabled: bool) {

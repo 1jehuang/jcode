@@ -7,6 +7,7 @@ mod directives;
 mod manager;
 mod paths;
 mod persistence;
+pub mod auto_dream;
 pub mod session_memory;
 mod prompt;
 pub mod runner;

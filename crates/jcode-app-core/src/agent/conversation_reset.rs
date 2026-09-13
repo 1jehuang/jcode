@@ -80,6 +80,7 @@ impl Agent {
         self.session.provider_session_id = None;
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
+        self.cache_vectors.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.persist_session_best_effort("conversation rewind");
@@ -99,6 +100,7 @@ impl Agent {
         self.session.updated_at = chrono::Utc::now();
         self.cache_tracker.reset();
         self.kv_cache_monitor.reset();
+        self.cache_vectors.reset();
         self.locked_tools = None;
         self.reset_tool_output_tracking();
         self.persist_session_best_effort("conversation rewind undo");
