@@ -51,6 +51,7 @@ pub(crate) mod session_search_index;
 mod side_panel;
 mod skill;
 mod todo;
+pub mod tool_search;
 mod user_response;
 mod webfetch;
 mod websearch;
