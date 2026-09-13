@@ -1134,19 +1134,20 @@ impl Registry {
                         .collect()
                 };
                 let mut advertised_tool_count = 0usize;
+                let mut cached_tools = Vec::new();
                 for (server, cfg) in &config_servers {
                     if let Some(cached) = schema_cache.tools_for(server, cfg) {
-                        let tools = crate::mcp::create_mcp_tools_from_cached(
-                            server,
-                            cached,
-                            Arc::clone(&mcp_manager),
-                        );
-                        advertised_tool_count += tools.len();
-                        for (name, tool) in tools {
-                            self.register(name, tool).await;
-                        }
+                        advertised_tool_count += cached.len();
+                        cached_tools
+                            .extend(cached.iter().cloned().map(|tool| (server.clone(), tool)));
                         advertised_servers.insert(server.clone());
                     }
+                }
+                for (name, tool) in crate::mcp::create_mcp_tools_from_cached_many(
+                    &cached_tools,
+                    Arc::clone(&mcp_manager),
+                ) {
+                    self.register(name, tool).await;
                 }
                 if advertised_tool_count > 0 {
                     crate::logging::info(&format!(
