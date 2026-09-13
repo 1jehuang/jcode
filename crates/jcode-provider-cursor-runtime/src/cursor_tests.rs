@@ -289,6 +289,45 @@ fn sanitized_mcp_aliases_resolve_to_the_registry_name() {
 }
 
 #[test]
+fn colliding_and_overlong_mcp_names_get_unique_bounded_aliases() {
+    let tools = vec![
+        ToolDefinition {
+            name: "mcp__server-a__tool.name".to_string(),
+            description: "First".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        ToolDefinition {
+            name: "mcp__server_a__tool_name".to_string(),
+            description: "Second".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        ToolDefinition {
+            name: format!("mcp__{}", "x".repeat(180)),
+            description: "Long".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+    ];
+    let aliases = wire::mcp_wire_aliases(&tools);
+    let values = aliases.values().collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(aliases.len(), tools.len());
+    assert_eq!(values.len(), tools.len());
+    assert!(aliases.values().all(|alias| {
+        alias.len() <= wire::MAX_CURSOR_TOOL_NAME_LEN
+            && alias
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    }));
+    for tool in &tools {
+        let alias = aliases.get(&tool.name).unwrap();
+        assert_eq!(
+            agent_transport::resolve_native_tool_name(alias, wire::mcp_bare_name(alias), &tools,),
+            tool.name
+        );
+    }
+}
+
+#[test]
 fn test_google_protobuf_value_roundtrip() {
     let test_values = vec![
         serde_json::Value::Null,

@@ -489,8 +489,9 @@ pub(crate) fn resolve_native_tool_name(
     tools: &[jcode_message_types::ToolDefinition],
 ) -> String {
     let candidates = [auxiliary_name, advertised_name];
+    let aliases = crate::wire::mcp_wire_aliases(tools);
     for tool in tools {
-        let wire_name = crate::wire::mcp_wire_name(&tool.name);
+        let wire_name = aliases.get(&tool.name).map(String::as_str).unwrap_or("");
         let safe_bare_name = crate::wire::mcp_bare_name(&wire_name);
         if candidates.iter().any(|candidate| {
             !candidate.is_empty()

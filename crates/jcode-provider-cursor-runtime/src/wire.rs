@@ -8,6 +8,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use jcode_message_types::ToolDefinition;
 use serde_json::{Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 /// Maximum recursion depth allowed during google.protobuf.Value encoding and decoding.
@@ -20,6 +21,7 @@ pub const MAX_VALUE_BYTES: usize = 10 * 1024 * 1024;
 /// `cc_` is the namespace used by the proven public bridge implementation.
 pub const JCODE_TOOL_PROVIDER: &str = "ccbridge";
 pub const JCODE_TOOL_PREFIX: &str = "cc_";
+pub const MAX_CURSOR_TOOL_NAME_LEN: usize = 128;
 
 // --------------------------------------------------------------------------
 // Protobuf Wire Primitives
@@ -295,7 +297,66 @@ pub fn mcp_wire_name(tool_name: &str) -> String {
     if sanitized.len() == JCODE_TOOL_PREFIX.len() {
         sanitized.push_str("tool");
     }
-    sanitized
+    fit_cursor_name(&sanitized, tool_name)
+}
+
+/// Build a deterministic, reversible mapping from local registry names to
+/// Cursor-safe names. Normalization is intentionally lossy, so collisions are
+/// resolved with a stable hash instead of silently dispatching the wrong tool.
+pub fn mcp_wire_aliases(tools: &[ToolDefinition]) -> HashMap<String, String> {
+    let mut names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+
+    let mut aliases = HashMap::with_capacity(names.len());
+    let mut used = HashSet::with_capacity(names.len());
+    for name in names {
+        let base = mcp_wire_name(&name);
+        let alias = if used.insert(base.clone()) {
+            base
+        } else {
+            let hash = stable_name_hash(&name);
+            let mut candidate = fit_cursor_name(&base, &name);
+            let suffix = format!("__{hash:08x}");
+            let prefix_len = MAX_CURSOR_TOOL_NAME_LEN.saturating_sub(suffix.len());
+            candidate.truncate(prefix_len);
+            candidate.push_str(&suffix);
+            let mut counter = 2u32;
+            while !used.insert(candidate.clone()) {
+                let numbered = format!("{suffix}_{counter}");
+                let prefix_len = MAX_CURSOR_TOOL_NAME_LEN.saturating_sub(numbered.len());
+                candidate = base.chars().take(prefix_len).collect();
+                candidate.push_str(&numbered);
+                counter = counter.saturating_add(1);
+            }
+            candidate
+        };
+        aliases.insert(name, alias);
+    }
+    aliases
+}
+
+fn fit_cursor_name(name: &str, original: &str) -> String {
+    if name.len() <= MAX_CURSOR_TOOL_NAME_LEN {
+        return name.to_string();
+    }
+    let suffix = format!("__{:08x}", stable_name_hash(original));
+    let prefix_len = MAX_CURSOR_TOOL_NAME_LEN.saturating_sub(suffix.len());
+    let mut fitted = name.chars().take(prefix_len).collect::<String>();
+    fitted.push_str(&suffix);
+    fitted
+}
+
+fn stable_name_hash(value: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in value.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
 }
 
 /// Extract bare tool name from an advertised or inbound wire name.
@@ -317,6 +378,13 @@ pub fn mcp_bare_name(wire_name: &str) -> &str {
 /// - field 5: tool_name (string, bare/safe name)
 pub fn encode_mcp_tool_definition(def: &ToolDefinition) -> Result<Vec<u8>> {
     let wire_name = mcp_wire_name(&def.name);
+    encode_mcp_tool_definition_with_wire_name(def, &wire_name)
+}
+
+fn encode_mcp_tool_definition_with_wire_name(
+    def: &ToolDefinition,
+    wire_name: &str,
+) -> Result<Vec<u8>> {
     // Cursor validates both name-bearing fields even though the public bridge
     // calls field 5 `tool_name`. Use the same safe spelling for both fields.
     // The runtime resolves this alias back to the original registry key when a
@@ -335,9 +403,14 @@ pub fn encode_mcp_tool_definition(def: &ToolDefinition) -> Result<Vec<u8>> {
 
 /// Encode an `McpTools` message containing repeated `mcp_tools` (field 1).
 pub fn encode_mcp_tools(tools: &[ToolDefinition]) -> Result<Vec<u8>> {
+    let aliases = mcp_wire_aliases(tools);
     let mut out = Vec::new();
     for tool in tools {
-        let def_bytes = encode_mcp_tool_definition(tool)?;
+        let wire_name = aliases
+            .get(&tool.name)
+            .cloned()
+            .unwrap_or_else(|| mcp_wire_name(&tool.name));
+        let def_bytes = encode_mcp_tool_definition_with_wire_name(tool, &wire_name)?;
         out.extend(field_ld(1, &def_bytes));
     }
     Ok(out)

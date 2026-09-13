@@ -2,6 +2,7 @@
 name = "jcode-provider-cursor-runtime"
 version = "0.1.0"
 edition = "2024"
+publish = false
 description = "Cursor provider runtime (direct ChatService streaming) for jcode, kept downstream of jcode-base so provider edits do not rebuild the app spine"
 
 [lib]
