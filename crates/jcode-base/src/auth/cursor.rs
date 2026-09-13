@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
+const CURSOR_API_KEY_NATIVE_KEY: &str = "cursor/api-key";
 // Cursor's server rejects stale client versions for chat ("Update Required").
 // This must track a real, currently-served Cursor IDE release (e.g. 3.8.x),
 // not the Composer model number. Override at runtime with
@@ -269,6 +270,13 @@ pub fn load_api_key() -> Result<String> {
         }
     }
 
+    if let Ok(key) = crate::storage::get_native_credential(CURSOR_API_KEY_NATIVE_KEY) {
+        let trimmed = jcode_provider_env::sanitize_secret_value(&key);
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
     let file_path = config_file_path()?;
     if file_path.exists() {
         crate::storage::harden_secret_file_permissions(&file_path);
@@ -291,12 +299,25 @@ pub fn load_api_key() -> Result<String> {
     )
 }
 
-/// Save a Cursor API key to `~/.config/jcode/cursor.env`.
+/// Save a Cursor API key to the native secret store.
+///
+/// Existing `cursor.env` files remain a compatibility fallback when the native
+/// store is unavailable. Successful native saves remove the legacy value so a
+/// second plaintext copy is not retained.
 pub fn save_api_key(key: &str) -> Result<()> {
-    let file_path = config_file_path()?;
-    crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
+    let key = jcode_provider_env::sanitize_secret_value(key);
+    if key.is_empty() {
+        anyhow::bail!("Cursor API key cannot be empty");
+    }
 
-    crate::env::set_var("CURSOR_API_KEY", key);
+    let file_path = config_file_path()?;
+    if crate::storage::set_native_credential(CURSOR_API_KEY_NATIVE_KEY, &key).is_ok() {
+        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
+    } else {
+        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(&key))?;
+    }
+
+    crate::env::set_var("CURSOR_API_KEY", &key);
     Ok(())
 }
 
@@ -304,6 +325,7 @@ pub fn save_api_key(key: &str) -> Result<()> {
 /// current process environment.
 pub fn clear_api_key() -> Result<()> {
     let file_path = config_file_path()?;
+    let _ = crate::storage::delete_native_credential(CURSOR_API_KEY_NATIVE_KEY);
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
 
     crate::env::remove_var("CURSOR_API_KEY");

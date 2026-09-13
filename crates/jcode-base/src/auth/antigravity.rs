@@ -32,6 +32,7 @@ const LOAD_ENDPOINTS: &[&str] = &[
     "https://autopush-cloudcode-pa.sandbox.googleapis.com",
 ];
 const GOOGLE_OAUTH_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+const STANDALONE_NATIVE_CREDENTIAL_KEY: &str = "antigravity/standalone";
 
 fn antigravity_client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
@@ -133,14 +134,29 @@ pub fn load_tokens() -> Result<AntigravityTokens> {
             project_id: account.project_id,
         });
     }
+
+    if let Ok(serialized) = crate::storage::get_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY)
+        && let Ok(tokens) = serde_json::from_str(&serialized)
+    {
+        return Ok(tokens);
+    }
+
     let path = tokens_path()?;
     if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
-        return crate::storage::read_json(&path).map_err(|_| {
+        let tokens: AntigravityTokens = crate::storage::read_json(&path).map_err(|_| {
             anyhow::anyhow!(
                 "No Antigravity tokens found. Run `jcode login --provider antigravity`."
             )
-        });
+        })?;
+        if let Ok(serialized) = serde_json::to_string(&tokens)
+            && crate::storage::set_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY, &serialized)
+                .is_ok()
+        {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("bak"));
+        }
+        return Ok(tokens);
     }
 
     if let Some(tokens) = crate::auth::external::load_antigravity_oauth_tokens() {
@@ -176,6 +192,16 @@ pub fn load_tokens_for_account(label: &str) -> Result<AntigravityTokens> {
 }
 
 pub fn save_tokens(tokens: &AntigravityTokens) -> Result<()> {
+    if let Ok(serialized) = serde_json::to_string(tokens)
+        && crate::storage::set_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY, &serialized)
+            .is_ok()
+    {
+        let path = tokens_path()?;
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("bak"));
+        return Ok(());
+    }
+
     let path = tokens_path()?;
     crate::storage::write_json_secret(&path, tokens)
 }
@@ -700,5 +726,31 @@ mod tests {
             extract_project_id(Some(serde_json::json!({ "id": "   " }))),
             None
         );
+    }
+
+    #[test]
+    fn standalone_tokens_prefer_native_storage_without_plaintext_copy() {
+        let _lock = lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let tokens = AntigravityTokens {
+            access_token: "antigravity-access".to_string(),
+            refresh_token: "antigravity-refresh".to_string(),
+            expires_at: i64::MAX,
+            email: Some("test@example.com".to_string()),
+            project_id: Some("test-project".to_string()),
+        };
+        save_tokens(&tokens).unwrap();
+
+        let path = tokens_path().unwrap();
+        assert!(!path.exists());
+        assert_eq!(load_tokens().unwrap().access_token, "antigravity-access");
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
     }
 }
