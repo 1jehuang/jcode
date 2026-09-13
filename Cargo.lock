@@ -3711,6 +3711,7 @@ dependencies = [
  "jcode-base",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
+ "jcode-provider-command-code-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-cursor-runtime",
  "jcode-provider-gemini-runtime",
