@@ -997,6 +997,62 @@ pub fn import_opencodex() -> Result<ImportSummary> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn account_lease_cross_process_helper() {
+        let Ok(status_path) = std::env::var("JCODE_ACCOUNT_LEASE_STATUS") else {
+            return;
+        };
+        let acquired =
+            try_acquire_account_lease("cursor", "cross-process-test", Duration::from_secs(30))
+                .is_some();
+        std::fs::write(status_path, if acquired { "acquired" } else { "blocked" })
+            .expect("write child lease status");
+        if acquired {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_lease_is_exclusive_across_processes() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let lease =
+            try_acquire_account_lease("cursor", "cross-process-test", Duration::from_secs(30))
+                .expect("parent should acquire account lease");
+        let run_child = |expected: &str| {
+            let status_path = home.path().join(format!("status-{expected}"));
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "auth::provider_pool::tests::account_lease_cross_process_helper",
+                    "--nocapture",
+                ])
+                .env("JCODE_HOME", home.path())
+                .env("JCODE_ACCOUNT_LEASE_STATUS", &status_path)
+                .status()
+                .expect("run child lease test");
+            assert!(status.success(), "child lease test failed: {status}");
+            assert_eq!(
+                std::fs::read_to_string(status_path).expect("read child lease status"),
+                expected
+            );
+        };
+
+        run_child("blocked");
+        drop(lease);
+        run_child("acquired");
+
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
     #[test]
     fn labels_are_stable_and_safe() {
         assert_eq!(
