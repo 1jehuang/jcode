@@ -1352,6 +1352,11 @@ impl App {
             return app;
         }
 
+        // Minimal local clients start with empty skill registries. Load global
+        // metadata once so autocomplete works before the first History event.
+        // SSH clients above must use only the remote server's skill metadata.
+        app.refresh_skills_snapshot();
+
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);

@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
+#[path = "runner_live_delivery_tests.rs"]
+mod live_delivery;
+
 struct EnvVarGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,

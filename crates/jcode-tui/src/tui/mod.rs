@@ -150,8 +150,9 @@ pub fn disable_keyboard_enhancement() {
 
 /// Reassert terminal modes that terminals may clear while the TUI remains alive.
 ///
-/// These commands are idempotent. Kitty keyboard enhancement uses its `set`
-/// form rather than the stack-based `push`, keeping the shutdown pop balanced.
+/// Kitty keyboard enhancement uses its `set` form rather than the stack-based
+/// `push`, keeping the shutdown pop balanced. Enabling focus reporting may itself
+/// produce a focus event, so focus-event handlers must pass `focus_change = false`.
 pub(crate) fn reapply_terminal_modes_to(
     writer: &mut impl std::io::Write,
     mouse_capture: bool,
@@ -178,21 +179,36 @@ pub(crate) fn reapply_terminal_modes_to(
     writer.flush()
 }
 
-pub(crate) fn reapply_configured_terminal_modes() {
+pub(crate) fn reapply_configured_terminal_modes_after_focus() {
     let policy = crate::perf::tui_policy();
-    if let Err(error) = reapply_terminal_modes_to(
+    if let Err(error) = reapply_terminal_modes_after_focus_to(
         &mut std::io::stdout(),
         policy.enable_mouse_capture,
         policy.enable_keyboard_enhancement,
-        policy.enable_focus_change,
     ) {
         crate::logging::warn(&format!("failed to reapply terminal modes: {error}"));
     }
 }
 
+fn reapply_terminal_modes_after_focus_to(
+    writer: &mut impl std::io::Write,
+    mouse_capture: bool,
+    keyboard_enhanced: bool,
+) -> std::io::Result<()> {
+    reapply_terminal_modes_to(
+        writer,
+        mouse_capture,
+        keyboard_enhanced,
+        // Ghostty reports its current focus when mode 1004 is enabled. Re-arming
+        // it from FocusGained would feed that reply back into this handler forever.
+        // Startup and resume-after-editor still enable focus reporting normally.
+        false,
+    )
+}
+
 #[cfg(test)]
 mod terminal_mode_tests {
-    use super::reapply_terminal_modes_to;
+    use super::{reapply_terminal_modes_after_focus_to, reapply_terminal_modes_to};
 
     #[test]
     fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
@@ -219,6 +235,38 @@ mod terminal_mode_tests {
             !output.contains("\x1b[>"),
             "must not push the Kitty keyboard stack"
         );
+    }
+
+    #[test]
+    fn focus_reapply_preserves_other_modes_without_rearming_focus_reporting() {
+        for mouse_capture in [false, true] {
+            for keyboard_enhanced in [false, true] {
+                let mut output = Vec::new();
+                reapply_terminal_modes_after_focus_to(
+                    &mut output,
+                    mouse_capture,
+                    keyboard_enhanced,
+                )
+                .unwrap();
+
+                let output = String::from_utf8(output).unwrap();
+                assert!(output.starts_with("\x1b[?2004h"));
+                assert!(
+                    !output.contains("\x1b[?1004h"),
+                    "must not trigger a focus reply"
+                );
+                assert!(
+                    !output.contains("\x1b[?1004l"),
+                    "must keep focus reporting enabled"
+                );
+                assert_eq!(output.contains("\x1b[?1000h"), mouse_capture);
+                assert_eq!(output.contains("\x1b[=7u"), keyboard_enhanced);
+                assert!(
+                    !output.contains("\x1b[>"),
+                    "must not push the keyboard stack"
+                );
+            }
+        }
     }
 }
 

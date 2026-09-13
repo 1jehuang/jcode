@@ -153,6 +153,7 @@ impl Tool for McpCallTool {
                 "tool": {"type": "string", "description": "Raw MCP tool name."},
                 "arguments": {
                     "type": "object",
+                    "additionalProperties": true,
                     "description": "Arguments matching the input schema returned by mcp_search."
                 }
             },
@@ -777,6 +778,46 @@ mod tests {
         assert!(schema["properties"]["action"].is_object());
         assert!(schema["properties"]["server"].is_object());
         assert!(schema["properties"]["command"].is_object());
+    }
+
+    #[test]
+    fn mcp_call_allows_dynamic_argument_keys_in_provider_schemas() {
+        let tool = McpCallTool::new(Arc::clone(create_test_tool().manager()));
+        let schema = tool.parameters_schema();
+        assert_eq!(
+            schema["properties"]["arguments"]["additionalProperties"],
+            true
+        );
+
+        for spec in [
+            &jcode_schema_dialect::registry::OPENROUTER,
+            &jcode_schema_dialect::registry::OPENAI,
+            &jcode_schema_dialect::registry::ANTHROPIC,
+        ] {
+            let normalized = jcode_schema_dialect::dialect::apply(&schema, spec);
+            let arguments = &normalized["properties"]["arguments"];
+            assert_eq!(arguments["type"], "object", "{}", spec.id);
+            assert_eq!(arguments["additionalProperties"], true, "{}", spec.id);
+            if spec.transforms.require_properties_on_objects {
+                // Empty declared properties must not close the dynamic payload (#1214).
+                assert_eq!(arguments["properties"], json!({}), "{}", spec.id);
+            }
+            assert_eq!(normalized["required"], schema["required"], "{}", spec.id);
+        }
+    }
+
+    #[test]
+    fn mcp_call_dynamic_arguments_remain_ineligible_for_openai_strict_mode() {
+        let tool = McpCallTool::new(Arc::clone(create_test_tool().manager()));
+        let compatible =
+            jcode_provider_core::openai_schema::openai_compatible_schema(&tool.parameters_schema());
+        assert!(!jcode_provider_core::openai_schema::schema_supports_strict(
+            &compatible
+        ));
+        assert_eq!(
+            compatible["properties"]["arguments"]["additionalProperties"],
+            true
+        );
     }
 
     #[tokio::test]
