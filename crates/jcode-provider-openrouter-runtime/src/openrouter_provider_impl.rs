@@ -363,6 +363,19 @@ impl Provider for OpenRouterProvider {
         if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
             return *supports_images;
         }
+        // The direct DeepSeek Flash aliases accept image_url parts (#1221).
+        // Keep Pro and unverified models text-only, and let explicit per-model
+        // input configuration above override this narrow built-in allowlist.
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("deepseek"))
+        {
+            return matches!(
+                model_id.as_str(),
+                "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+            );
+        }
         if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
             return false;
         }
