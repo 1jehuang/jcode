@@ -459,7 +459,7 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub fn write_text_secret(path: &Path, content: &str) -> Result<()> {
-    write_bytes_inner(path, content.as_bytes(), true, true)
+    write_bytes_inner(path, content.as_bytes(), true, true, true)
 }
 
 pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) -> Result<()> {
@@ -503,25 +503,41 @@ pub fn upsert_env_file_value(path: &Path, env_key: &str, value: Option<&str>) ->
 }
 
 pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, false)
+    write_json_inner(path, value, true, false, true)
 }
 
 pub fn write_json_secret<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, true, true)
+    write_json_inner(path, value, true, true, true)
+}
+
+/// Atomically write secret JSON without retaining a plaintext `.bak` copy.
+///
+/// This is intended for credential stores where recovery backups would create
+/// an additional durable copy of access or refresh tokens. The write remains
+/// fsync'd and owner-protected, but a corrupt primary cannot be recovered from
+/// the previous version automatically.
+pub fn write_json_secret_without_backup<T: Serialize + ?Sized>(
+    path: &Path,
+    value: &T,
+) -> Result<()> {
+    // Remove a backup left by an older writer before publishing the new
+    // credential snapshot. Otherwise opting into this safer path would leave
+    // the legacy plaintext copy behind indefinitely.
+    write_json_inner(path, value, true, true, false)
 }
 
 /// Fast JSON write: atomic rename but no fsync. Good for frequent saves where
 /// durability on power loss is not critical (e.g., session saves during tool execution).
 /// Data is still safe against process crashes (atomic rename protects against partial writes).
 pub fn write_json_fast<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    write_json_inner(path, value, false, false)
+    write_json_inner(path, value, false, false, true)
 }
 
 /// Atomically write raw bytes to `path` (temp file + rename), fsync'd for
 /// durability. Used for editing user config files where a torn write would be
 /// catastrophic.
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
-    write_bytes_inner(path, bytes, true, false)
+    write_bytes_inner(path, bytes, true, false, true)
 }
 
 fn write_json_inner<T: Serialize + ?Sized>(
@@ -529,12 +545,19 @@ fn write_json_inner<T: Serialize + ?Sized>(
     value: &T,
     durable: bool,
     secret: bool,
+    preserve_backup: bool,
 ) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    write_bytes_inner(path, &bytes, durable, secret)
+    write_bytes_inner(path, &bytes, durable, secret, preserve_backup)
 }
 
-fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> Result<()> {
+fn write_bytes_inner(
+    path: &Path,
+    bytes: &[u8],
+    durable: bool,
+    secret: bool,
+    preserve_backup: bool,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_dir(parent)?;
         if secret {
@@ -565,7 +588,7 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> 
             file.sync_all()?;
         }
 
-        if path.exists() {
+        if preserve_backup && path.exists() {
             let bak_path = path.with_extension("bak");
             if secret {
                 jcode_core::fs::set_permissions_owner_only(path)?;
@@ -593,6 +616,11 @@ fn write_bytes_inner(path: &Path, bytes: &[u8], durable: bool, secret: bool) -> 
             }
             if secret && bak_path.exists() {
                 jcode_core::fs::set_permissions_owner_only(&bak_path)?;
+            }
+        } else if !preserve_backup {
+            let bak_path = path.with_extension("bak");
+            if bak_path.exists() {
+                std::fs::remove_file(&bak_path)?;
             }
         }
 
@@ -785,5 +813,29 @@ mod env_file_tests {
             std::fs::read_to_string(&path).expect("unchanged env"),
             "SAFE_KEY=safe-value\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod secret_write_tests {
+    use super::*;
+
+    #[test]
+    fn secret_without_backup_removes_legacy_plaintext_backup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("accounts.json");
+
+        write_json_secret(&path, &serde_json::json!({"token": "old"})).expect("first write");
+        write_json_secret(&path, &serde_json::json!({"token": "new"})).expect("backup write");
+        assert!(path.with_extension("bak").exists());
+
+        write_json_secret_without_backup(&path, &serde_json::json!({"token": "latest"}))
+            .expect("no-backup write");
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read primary"))
+                .expect("parse primary");
+        assert_eq!(saved["token"], "latest");
+        assert!(!path.with_extension("bak").exists());
     }
 }

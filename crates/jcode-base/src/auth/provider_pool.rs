@@ -398,7 +398,9 @@ fn write(provider: &str, file: &AccountFile) -> Result<()> {
 
 fn write_unlocked(provider: &str, file: &AccountFile) -> Result<()> {
     let file_path = accounts_path(provider)?;
-    crate::storage::write_json_secret(&file_path, file)
+    // Managed account files contain OAuth access and refresh tokens. Avoid the
+    // generic recovery backup because it would retain a second plaintext copy.
+    crate::storage::write_json_secret_without_backup(&file_path, file)
 }
 
 pub fn list_accounts(provider: &str) -> Result<Vec<ManagedProviderAccount>> {
