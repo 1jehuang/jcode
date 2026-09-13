@@ -313,11 +313,22 @@ pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
         &format!("No managed {provider} account named '{{}}'"),
         |account| account.label.as_str(),
     )?;
-    write(provider, &file)
+    write(provider, &file)?;
+    set_runtime_active_override_for_provider(provider, Some(label.to_string()));
+    Ok(())
 }
 
 pub fn set_runtime_active_override(provider: &'static str, label: Option<String>) {
     crate::auth::account_store::set_runtime_active_override(provider, label);
+}
+
+fn set_runtime_active_override_for_provider(provider: &str, label: Option<String>) {
+    let provider: &'static str = match provider {
+        "antigravity" => "antigravity",
+        "cursor" => "cursor",
+        _ => return,
+    };
+    set_runtime_active_override(provider, label);
 }
 
 fn health_path() -> Result<PathBuf> {
@@ -865,6 +876,52 @@ mod tests {
             "cursor-Work-Email"
         );
         assert_eq!(label("cursor", 0, None, "id/unsafe"), "cursor-id-unsafe");
+    }
+
+    #[test]
+    fn persisted_managed_switch_updates_runtime_override() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        set_runtime_active_override("cursor", Some("cursor-one".to_string()));
+
+        let account = |label: &str| ManagedProviderAccount {
+            id: label.to_string(),
+            label: label.to_string(),
+            access_token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: 0,
+            email: None,
+            project_id: None,
+        };
+        write(
+            "cursor",
+            &AccountFile {
+                active_account: Some("cursor-one".to_string()),
+                accounts: vec![account("cursor-one"), account("cursor-two")],
+            },
+        )
+        .expect("write managed accounts");
+
+        set_active_account("cursor", "cursor-two").expect("switch managed account");
+        assert_eq!(
+            crate::auth::account_store::runtime_active_override("cursor").as_deref(),
+            Some("cursor-two")
+        );
+        assert_eq!(
+            active_account("cursor")
+                .expect("read active managed account")
+                .expect("active account")
+                .label,
+            "cursor-two"
+        );
+
+        set_runtime_active_override("cursor", None);
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
     }
 
     #[test]
