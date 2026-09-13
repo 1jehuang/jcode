@@ -11,6 +11,7 @@ use crate::ambient::{
     self, AmbientCycleResult, AmbientLock, AmbientManager, AmbientState, AmbientStatus,
     CycleStatus, ScheduleTarget, ScheduledItem,
 };
+use super::auto_dream;
 use crate::ambient_scheduler::{AdaptiveScheduler, AmbientSchedulerConfig};
 use crate::config::config;
 use crate::logging;

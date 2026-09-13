@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use jcode_message_types::{ContentBlock, Message, Role, ToolCall};
+pub use jcode_message_types::ContentBlock;
+use jcode_message_types::{Message, Role, ToolCall};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 

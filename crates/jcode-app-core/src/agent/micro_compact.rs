@@ -54,6 +54,7 @@ pub fn maybe_compact(session: &mut crate::session::Session, trigger: &mut TimeBa
 /// Returns the number of blocks that were compacted.
 fn compact_messages(messages: &mut [StoredMessage]) -> usize {
     // Build tool_use_id -> tool_name map from assistant ToolUse blocks.
+    // Use owned Strings to avoid lifetime issues with the mutable iterator below.
     let mut tool_map: HashMap<String, String> = HashMap::new();
     for msg in messages.iter() {
         for block in &msg.content {
