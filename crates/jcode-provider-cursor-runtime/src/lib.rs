@@ -25,6 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 mod agent_transport;
 
 const MODELS_API_URL: &str = "https://api.cursor.com/v0/models";
+const MAX_AGENT_MODELS_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PROMPT_CHARS: usize = 120_000;
 
 fn build_cli_prompt(system: &str, messages: &[Message]) -> String {
@@ -112,6 +113,126 @@ struct CursorModelsResponse {
     models: Vec<String>,
 }
 
+/// Decode the model ids returned by Cursor's native
+/// `agent.v1.AgentService/GetUsableModels` endpoint.
+///
+/// Cursor's CLI uses a raw protobuf unary response rather than the Connect
+/// streaming envelope used by `Run`. The response contains repeated
+/// `ModelDetails` messages in field 1, and `ModelDetails.model_id` is field 1.
+/// Keep this parser deliberately small and forward-compatible: unknown fields
+/// are skipped, while malformed/truncated input is rejected.
+fn decode_agent_models(mut payload: &[u8]) -> Result<Vec<String>> {
+    if payload.len() >= 5 && (payload[0] == 0 || payload[0] == 1) {
+        let framed_len =
+            u32::from_be_bytes([payload[1], payload[2], payload[3], payload[4]]) as usize;
+        if framed_len == payload.len().saturating_sub(5) {
+            payload = &payload[5..];
+        }
+    }
+
+    let mut models = Vec::new();
+    for field in protobuf_fields(payload)? {
+        if field.number != 1 || field.wire_type != 2 {
+            continue;
+        }
+        let model_id = protobuf_fields(field.data)?
+            .into_iter()
+            .find(|nested| nested.number == 1 && nested.wire_type == 2)
+            .and_then(|nested| std::str::from_utf8(nested.data).ok())
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+        if let Some(model) = model_id
+            && !models.iter().any(|known| known == model)
+        {
+            models.push(model.to_string());
+        }
+    }
+    Ok(models)
+}
+
+#[derive(Debug)]
+struct ProtobufField<'a> {
+    number: u64,
+    wire_type: u8,
+    data: &'a [u8],
+}
+
+fn protobuf_fields(mut payload: &[u8]) -> Result<Vec<ProtobufField<'_>>> {
+    let mut fields = Vec::new();
+    while !payload.is_empty() {
+        let (tag, rest) = read_protobuf_varint(payload)?;
+        payload = rest;
+        let number = tag >> 3;
+        let wire_type = (tag & 7) as u8;
+        if number == 0 {
+            anyhow::bail!("Cursor model catalog contained an invalid protobuf field number");
+        }
+        match wire_type {
+            0 => {
+                let (_, rest) = read_protobuf_varint(payload)?;
+                payload = rest;
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            1 => {
+                if payload.len() < 8 {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                payload = &payload[8..];
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            2 => {
+                let (length, rest) = read_protobuf_varint(payload)?;
+                let length = usize::try_from(length)
+                    .context("Cursor model catalog protobuf length overflowed")?;
+                if rest.len() < length {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &rest[..length],
+                });
+                payload = &rest[length..];
+            }
+            5 => {
+                if payload.len() < 4 {
+                    anyhow::bail!("Cursor model catalog protobuf was truncated");
+                }
+                payload = &payload[4..];
+                fields.push(ProtobufField {
+                    number,
+                    wire_type,
+                    data: &[],
+                });
+            }
+            _ => anyhow::bail!("Cursor model catalog used unsupported protobuf wire type"),
+        }
+    }
+    Ok(fields)
+}
+
+fn read_protobuf_varint(payload: &[u8]) -> Result<(u64, &[u8])> {
+    let mut value = 0u64;
+    for (index, byte) in payload.iter().copied().enumerate() {
+        if index >= 10 {
+            anyhow::bail!("Cursor model catalog protobuf varint overflowed");
+        }
+        value |= u64::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            return Ok((value, &payload[index + 1..]));
+        }
+    }
+    anyhow::bail!("Cursor model catalog protobuf varint was truncated")
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct PersistedCatalog {
     models: Vec<String>,
@@ -143,10 +264,21 @@ fn merge_cursor_models(dynamic: &[String], current: &str) -> Vec<String> {
     merged
 }
 
-async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Result<Vec<String>> {
-    let response = client
-        .get(MODELS_API_URL)
-        .basic_auth(api_key, Some(""))
+enum CursorModelsAuth<'a> {
+    ApiKey(&'a str),
+    Bearer(&'a str),
+}
+
+async fn fetch_available_models(
+    client: &reqwest::Client,
+    auth: CursorModelsAuth<'_>,
+) -> Result<Vec<String>> {
+    let request = client.get(MODELS_API_URL);
+    let request = match auth {
+        CursorModelsAuth::ApiKey(api_key) => request.basic_auth(api_key, Some("")),
+        CursorModelsAuth::Bearer(access_token) => request.bearer_auth(access_token),
+    };
+    let response = request
         .send()
         .await
         .context("Failed to fetch Cursor model catalog")?;
@@ -171,6 +303,59 @@ async fn fetch_available_models(client: &reqwest::Client, api_key: &str) -> Resu
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .collect())
+}
+
+async fn fetch_agent_models(client: &reqwest::Client, access_token: &str) -> Result<Vec<String>> {
+    let host = agent_transport::agent_host();
+    let url = format!("https://{host}/agent.v1.AgentService/GetUsableModels");
+    let response = client
+        .post(url)
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("content-type", "application/proto")
+        .header("connect-protocol-version", "1")
+        .header("x-ghost-mode", "true")
+        .header("x-cursor-client-type", "cli")
+        .header(
+            "x-cursor-client-version",
+            agent_transport::cli_client_version(),
+        )
+        .header(
+            "x-session-id",
+            cursor_auth::session_id_for_access_token(access_token),
+        )
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .context("Failed to fetch Cursor AgentService model catalog")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        anyhow::bail!(
+            "Cursor AgentService model catalog request failed ({}): {}",
+            status,
+            body.trim()
+        );
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AGENT_MODELS_RESPONSE_BYTES)
+    {
+        anyhow::bail!("Cursor AgentService model catalog response exceeded 4 MiB");
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("Failed to read Cursor AgentService model catalog")?
+    {
+        if body.len() as u64 + chunk.len() as u64 > MAX_AGENT_MODELS_RESPONSE_BYTES {
+            anyhow::bail!("Cursor AgentService model catalog response exceeded 4 MiB");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    decode_agent_models(&body)
 }
 
 fn runtime_cursor_api_key() -> Option<String> {
@@ -349,11 +534,37 @@ impl Provider for CursorCliProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let Some(api_key) = runtime_cursor_api_key() else {
-            return Ok(());
+        // Prefer the API key endpoint for backwards compatibility. When no
+        // key is configured, use the same managed/IDE OAuth resolution as the
+        // native AgentService transport. This is read-only and failures retain
+        // the static and persisted fallback catalog.
+        let fetched = if let Some(api_key) = runtime_cursor_api_key() {
+            fetch_available_models(&self.client, CursorModelsAuth::ApiKey(&api_key)).await
+        } else {
+            match cursor_auth::resolve_direct_tokens(&self.client).await {
+                Ok(tokens) => match fetch_agent_models(&self.client, &tokens.access_token).await {
+                    Ok(models) if !models.is_empty() => Ok(models),
+                    Ok(_) => {
+                        fetch_available_models(
+                            &self.client,
+                            CursorModelsAuth::Bearer(&tokens.access_token),
+                        )
+                        .await
+                    }
+                    Err(agent_error) => fetch_available_models(
+                        &self.client,
+                        CursorModelsAuth::Bearer(&tokens.access_token),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!("AgentService discovery also failed: {agent_error:#}")
+                    }),
+                },
+                Err(error) => Err(error).context("no Cursor API key or OAuth credentials"),
+            }
         };
 
-        match fetch_available_models(&self.client, &api_key).await {
+        match fetched {
             Ok(models) => {
                 if !models.is_empty() {
                     jcode_base::logging::info(&format!(

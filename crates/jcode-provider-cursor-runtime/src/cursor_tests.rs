@@ -6,6 +6,41 @@ fn available_models_include_composer_models() {
     let models = provider.available_models();
     assert!(models.contains(&"composer-2"));
     assert!(models.contains(&"composer-2.5"));
+    assert!(models.contains(&"grok-4.6"));
+    assert!(models.contains(&"kimi-k3"));
+}
+
+#[test]
+fn decode_agent_models_reads_raw_and_connect_framed_payloads() {
+    let model = |id: &str| {
+        let mut nested = Vec::new();
+        nested.extend([0x0a, id.len() as u8]);
+        nested.extend(id.as_bytes());
+        let mut entry = vec![0x0a, nested.len() as u8];
+        entry.extend(nested);
+        entry
+    };
+    let mut payload = model("grok-4.6");
+    payload.extend(model("kimi-k3"));
+
+    assert_eq!(
+        decode_agent_models(&payload).unwrap(),
+        vec!["grok-4.6", "kimi-k3"]
+    );
+
+    let mut framed = vec![0];
+    framed.extend((payload.len() as u32).to_be_bytes());
+    framed.extend(payload);
+    assert_eq!(
+        decode_agent_models(&framed).unwrap(),
+        vec!["grok-4.6", "kimi-k3"]
+    );
+}
+
+#[test]
+fn decode_agent_models_rejects_truncated_payloads() {
+    assert!(decode_agent_models(&[0x0a, 0x05, 0x0a]).is_err());
+    assert!(decode_agent_models(&[0x80]).is_err());
 }
 
 #[test]
