@@ -622,6 +622,14 @@ fn write_bytes_inner(
             if bak_path.exists() {
                 std::fs::remove_file(&bak_path)?;
             }
+            // Windows cannot atomically replace an existing destination with
+            // `rename`. Without a recovery backup, remove the old primary
+            // before publishing the new one. The brief gap is limited to this
+            // platform and matches the existing non-Unix backup path.
+            #[cfg(not(unix))]
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
         }
 
         std::fs::rename(&tmp_path, path)?;
