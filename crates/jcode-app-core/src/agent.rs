@@ -29,7 +29,7 @@ pub(crate) use turn_ownership::{
 mod turn_streaming_mpsc;
 mod cache_vectors;
 mod micro_compact;
-mod permission_bubble;
+pub(crate) mod permission_bubble;
 mod utils;
 
 use self::streaming::{send_stream_keepalive_mpsc, stream_keepalive_ticker};
@@ -380,6 +380,8 @@ pub struct Agent {
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
+    /// Time-based trigger controlling when micro-compaction runs.
+    micro_compact_trigger: jcode_micro_compact::TimeBasedTrigger,
 }
 
 impl Agent {
@@ -509,6 +511,7 @@ impl Agent {
             transcript_telemetry_sent: false,
             telemetry_session_deferred: false,
             concurrency_session: None,
+            micro_compact_trigger: micro_compact::new_trigger(),
         };
         let t = Instant::now();
         agent.refresh_prompt_skills_snapshot();
