@@ -70,6 +70,7 @@ impl CacheVectorsTracker {
     }
 
     /// Total cache breaks observed across the session.
+    #[allow(dead_code)]
     pub fn total_breaks(&self) -> u64 {
         self.total_breaks
     }

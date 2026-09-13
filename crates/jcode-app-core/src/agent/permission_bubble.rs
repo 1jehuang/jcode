@@ -17,6 +17,7 @@ pub(crate) struct PermissionBubbleResult {
     /// Messages to use in the child session (forked with prefix integrity).
     pub messages: Vec<StoredMessage>,
     /// Child's initial system prompt (with the 10-rule boilerplate).
+    #[allow(dead_code)]
     pub system_prompt: String,
     /// Whether the fork was denied due to depth limits.
     pub denied: bool,
@@ -70,6 +71,7 @@ pub(crate) fn create_root_fork_guard() -> ForkDepthGuard {
 }
 
 /// Create a `ForkDepthGuard` with a custom max depth.
+#[allow(dead_code)]
 pub(crate) fn create_fork_guard(max_depth: usize) -> ForkDepthGuard {
     ForkDepthGuard::with_max_depth(max_depth)
 }

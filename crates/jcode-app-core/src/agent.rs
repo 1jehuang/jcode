@@ -1093,6 +1093,7 @@ impl Agent {
     }
 
     /// Reset the cache vectors tracker (called on compaction, model switch, etc.).
+    #[allow(dead_code)]
     fn reset_cache_vectors(&mut self) {
         self.cache_vectors.reset();
     }
