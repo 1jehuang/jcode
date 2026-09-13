@@ -548,6 +548,20 @@ fn test_selfdev_prompt_prefers_publish_flow_for_active_builds() {
 }
 
 #[test]
+fn test_selfdev_prompt_welcomes_outside_contributions() {
+    let full = build_system_prompt_with_selfdev(None, &[], true);
+    let (split, _) = build_system_prompt_split(None, &[], true, None, None);
+
+    for prompt in [&full, &split.static_part] {
+        assert!(prompt.contains("Pull requests from everyone are welcome"));
+        assert!(prompt.contains("Good PRs can be merged directly after review and validation"));
+        assert!(prompt.contains("Do not require a maintainer-authored rewrite"));
+        assert!(prompt.contains("preserve unrelated changes"));
+        assert!(prompt.contains("merge a PR without user authorization"));
+    }
+}
+
+#[test]
 fn test_selfdev_prompt_template_placeholders_are_resolved() {
     let static_prompt = build_selfdev_prompt_static();
     let dynamic_prompt = build_selfdev_prompt();
