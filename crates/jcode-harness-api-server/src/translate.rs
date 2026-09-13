@@ -2032,6 +2032,9 @@ impl BridgeState {
                     .then_some((id, path))
             })
             .collect();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
         // `stat` is the dominant cost with 100k+ sessions. Match the TUI picker
         // by doing those independent filesystem calls concurrently rather than
         // serially blocking the API reply long enough for clients to time out.
