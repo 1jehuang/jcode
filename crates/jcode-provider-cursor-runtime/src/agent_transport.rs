@@ -225,12 +225,17 @@ fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
 
 /// Build the request frames for a single-shot prompt turn.
 ///
-/// Returns the ordered list of Connect frames that constitute the streamed
-/// `RunInput`: `RunRequest`, environment context, then marker frames.
+/// Returns the initial Connect frame for the streamed `RunInput`.
+///
+/// The current connect-es client sends only `AgentRunRequest` up front. The
+/// server requests environment context and other execution messages on the
+/// same bidirectional stream later. Sending the old captured context and marker
+/// frames proactively is tolerated for plain chat but causes current Cursor
+/// tool turns to remain in an unacknowledged state.
 fn build_run_frames(
     prompt: &str,
     model: &str,
-    cwd: &str,
+    _cwd: &str,
     tools: &[jcode_message_types::ToolDefinition],
     request_id: &str,
 ) -> Vec<Vec<u8>> {
@@ -264,35 +269,7 @@ fn build_run_frames(
     req.extend(field_str(25, request_id));
     let frame0 = connect_frame(&field_ld(1, &req));
 
-    // frame 1: field 2 = environment context (env block only, no tools/skills)
-    let mut env = field_str(1, "linux");
-    env.extend(field_str(2, cwd));
-    env.extend(field_str(3, "bash"));
-    env.extend(field_str(10, "UTC"));
-    env.extend(field_str(11, cwd));
-    env.extend(field_varint(14, 1));
-    env.extend(field_varint(16, 1));
-    env.extend(field_varint(19, 0));
-    env.extend(field_varint(20, 0));
-    env.extend(field_str(21, cwd));
-    env.extend(field_varint(22, 0));
-    let ctx_payload = field_ld(
-        2,
-        &field_ld(10, &field_ld(1, &field_ld(1, &field_ld(4, &env)))),
-    );
-    let frame1 = connect_frame(&ctx_payload);
-
-    // marker frames streamed after the context.
-    let mut frames = vec![frame0, frame1];
-    frames.push(connect_frame(&field_ld(5, &field_str(1, "")))); // f5{f1:''}
-    frames.push(connect_frame(&field_ld(3, &field_str(3, "")))); // f3{f3:''}
-    for n in 1..=8u64 {
-        // f3{f1:N, f3:''}
-        let mut m = field_varint(1, n);
-        m.extend(field_str(3, ""));
-        frames.push(connect_frame(&field_ld(3, &m)));
-    }
-    frames
+    vec![frame0]
 }
 
 /// A single `f7:''` heartbeat frame.
@@ -1123,7 +1100,7 @@ mod tests {
 
     #[test]
     fn frames_are_well_formed_connect_frames() {
-        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[]);
+        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[], "req");
         assert!(frames.len() >= 4);
         for frame in &frames {
             assert!(frame.len() >= 5);
@@ -1139,7 +1116,7 @@ mod tests {
 
     #[test]
     fn frame0_contains_prompt_and_model() {
-        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp", &[]);
+        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp", &[], "req");
         let frame0 = &frames[0];
         let hay = String::from_utf8_lossy(frame0);
         assert!(hay.contains("PROMPT_MARKER"));
@@ -1153,7 +1130,7 @@ mod tests {
             description: "Read a file".to_string(),
             input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
         };
-        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[tool]);
+        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[tool], "req");
         let frame0 = &frames[0];
         let hay = String::from_utf8_lossy(frame0);
         assert!(hay.contains("read_file"));
