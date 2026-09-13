@@ -4,8 +4,11 @@
 //! Conforms to OpenCodex `agent_pb.ts` and `native-exec.ts` specifications.
 
 use anyhow::{Context, Result, bail};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use jcode_message_types::ToolDefinition;
 use serde_json::{Map, Value};
+use std::io::Write;
 
 /// Maximum recursion depth allowed during google.protobuf.Value encoding and decoding.
 pub const MAX_VALUE_DEPTH: usize = 32;
@@ -832,18 +835,21 @@ pub fn encode_agent_client_stream_close(id: u32) -> Vec<u8> {
 }
 
 pub fn encode_request_context_result(
-    id: u32,
-    exec_id: &str,
+    _id: u32,
+    _exec_id: &str,
     request_context_bytes: &[u8],
 ) -> Vec<u8> {
     let request_context_success = field_ld(1, request_context_bytes);
     let result = field_ld(1, &request_context_success);
-    encode_exec_client_message(id, exec_id, 10, &result)
+    // Cursor's request_context_args carries neither id nor exec_id. The
+    // connect-es client consequently omits both proto3-default fields in the
+    // acknowledgement. Echoing synthetic zero values makes the message
+    // malformed on current AgentService servers.
+    field_ld(2, &field_ld(10, &result))
 }
 
 pub fn encode_request_context(
     system_prompt: &str,
-    tools: &[ToolDefinition],
     cwd: &str,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
@@ -860,10 +866,6 @@ pub fn encode_request_context(
     env.extend(field_str(3, "bash"));
     env.extend(field_str(10, "UTC"));
     out.extend(field_ld(4, &env));
-    for tool in tools {
-        let def_bytes = encode_mcp_tool_definition(tool)?;
-        out.extend(field_ld(7, &def_bytes));
-    }
     Ok(out)
 }
 
@@ -888,11 +890,48 @@ pub fn extract_checkpoint_used_tokens(payload: &[u8]) -> Option<u64> {
 
 /// Wrap an uncompressed payload in a Connect data frame (flag 0).
 pub fn connect_frame(payload: &[u8]) -> Vec<u8> {
+    const COMPRESS_MIN_BYTES: usize = 1024;
+    let (flag, framed_payload) = if payload.len() >= COMPRESS_MIN_BYTES {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        if encoder.write_all(payload).is_ok()
+            && let Ok(compressed) = encoder.finish()
+        {
+            (1u8, compressed)
+        } else {
+            (0u8, payload.to_vec())
+        }
+    } else {
+        (0u8, payload.to_vec())
+    };
     let mut out = Vec::with_capacity(payload.len() + 5);
-    out.push(0);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    out.push(flag);
+    out.extend_from_slice(&(framed_payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(&framed_payload);
     out
+}
+
+/// Encode an `AgentClientMessage.kv_client_message` acknowledgement for a
+/// server-side blob write. Cursor sends these KV messages even for turns that
+/// do not use tools, and leaving them unanswered eventually stalls the stream.
+pub fn encode_kv_set_blob_ack(kv_id: u32) -> Vec<u8> {
+    let mut client = Vec::new();
+    if kv_id != 0 {
+        client.extend(field_varint(1, kv_id as u64));
+    }
+    client.extend(field_ld(3, &[]));
+    field_ld(3, &client)
+}
+
+/// Encode an `AgentClientMessage.kv_client_message` response for a server-side
+/// blob read. The blob id is intentionally opaque and is never interpreted.
+pub fn encode_kv_get_blob_result(kv_id: u32, data: &[u8]) -> Vec<u8> {
+    let mut result = field_ld(1, data);
+    let mut client = Vec::new();
+    if kv_id != 0 {
+        client.extend(field_varint(1, kv_id as u64));
+    }
+    client.extend(field_ld(2, &result));
+    field_ld(3, &client)
 }
 
 // --------------------------------------------------------------------------

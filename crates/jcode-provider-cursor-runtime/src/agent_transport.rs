@@ -27,6 +27,7 @@
 //! `f1.f4.f1` chunks (reasoning). A trailing flag-`0x02` frame closes the turn.
 
 use std::io::Read;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,13 +207,11 @@ fn field_str(field: u64, s: &str) -> Vec<u8> {
     field_ld(field, s.as_bytes())
 }
 
-/// Wrap a protobuf message payload in a Connect data frame (flag 0, uncompressed).
+/// Wrap a protobuf message payload in a Connect data frame using the same
+/// threshold as connect-es. Large tool results and context messages must carry
+/// the gzip flag when the request advertises gzip content encoding.
 fn connect_frame(payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(payload.len() + 5);
-    out.push(0);
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
-    out
+    crate::wire::connect_frame(payload)
 }
 
 /// `{f1: name, f3: {f1:'fast', f2:'true'|'false'}}` model descriptor.
@@ -233,6 +232,7 @@ fn build_run_frames(
     model: &str,
     cwd: &str,
     tools: &[jcode_message_types::ToolDefinition],
+    request_id: &str,
 ) -> Vec<Vec<u8>> {
     let conv = Uuid::new_v4().to_string();
     let msg = Uuid::new_v4().to_string();
@@ -261,6 +261,7 @@ fn build_run_frames(
     req.extend(field_ld(14, &field_str(1, "default")));
     req.extend(field_ld(14, &encode_model_meta(model, false)));
     req.extend(field_str(16, &conv));
+    req.extend(field_str(25, request_id));
     let frame0 = connect_frame(&field_ld(1, &req));
 
     // frame 1: field 2 = environment context (env block only, no tools/skills)
@@ -542,15 +543,25 @@ pub async fn run_agent_turn(
         .map(|id| Uuid::new_v5(&Uuid::NAMESPACE_DNS, id.as_bytes()))
         .unwrap_or_else(Uuid::new_v4)
         .to_string();
+    let traceparent = format!(
+        "00-{}-{}-01",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple().to_string()[..16].to_string()
+    );
+    let blob_encryption_key = Uuid::new_v4().simple().to_string();
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("https://{host}{AGENT_PATH}"))
         .header("authorization", format!("Bearer {access_token}"))
         .header("connect-accept-encoding", "gzip,br")
+        .header("connect-content-encoding", "gzip")
         .header("connect-protocol-version", "1")
         .header("te", "trailers")
         .header("content-type", "application/connect+proto")
+        .header("backend-traceparent", &traceparent)
+        .header("traceparent", &traceparent)
         .header("user-agent", "connect-es/1.6.1")
+        .header("x-blob-encryption-key", blob_encryption_key)
         .header("x-cursor-client-type", "cli")
         .header("x-cursor-client-version", cli_client_version())
         .header("x-ghost-mode", "true")
@@ -569,7 +580,7 @@ pub async fn run_agent_turn(
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let frames = build_run_frames(prompt, model, &cwd, tools);
+    let frames = build_run_frames(prompt, model, &cwd, tools, &request_id);
     let sender = tokio::spawn(async move {
         for (idx, frame) in frames.into_iter().enumerate() {
             if send_stream.send_data(Bytes::from(frame), false).is_err() {
@@ -628,6 +639,7 @@ pub async fn run_agent_turn(
     let mut got_text = false;
     let mut in_thinking = false;
     let mut active_tool_calls: usize = 0;
+    let mut blob_store: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
 
     // Idle timeouts guard against the server holding the stream open. Cursor
     // keeps the response side open after the assistant message when it expects
@@ -728,6 +740,64 @@ pub async fn run_agent_turn(
                     .await;
                 continue;
             }
+            // KV server messages are emitted throughout a turn, including
+            // ordinary chat. They must be acknowledged or Cursor keeps the
+            // bidirectional stream alive indefinitely.
+            let mut kv_server_data: Option<&[u8]> = None;
+            for f in crate::wire::iter_fields(&payload) {
+                if f.field == 4 && f.wire == 2 {
+                    kv_server_data = Some(f.data);
+                    break;
+                }
+            }
+            if let Some(data) = kv_server_data {
+                let mut kv_id = 0u32;
+                let mut get_blob_id: Option<Vec<u8>> = None;
+                let mut set_blob: Option<(Vec<u8>, Vec<u8>)> = None;
+                for field in crate::wire::iter_fields(data) {
+                    match field.field {
+                        1 if field.wire == 0 => kv_id = field.varint as u32,
+                        2 if field.wire == 2 => {
+                            let id = crate::wire::iter_fields(field.data)
+                                .find(|f| f.field == 1 && f.wire == 2)
+                                .map(|f| f.data.to_vec());
+                            get_blob_id = id;
+                        }
+                        3 if field.wire == 2 => {
+                            let mut id = None;
+                            let mut blob = None;
+                            for f in crate::wire::iter_fields(field.data) {
+                                if f.field == 1 && f.wire == 2 {
+                                    id = Some(f.data.to_vec());
+                                } else if f.field == 2 && f.wire == 2 {
+                                    blob = Some(f.data.to_vec());
+                                }
+                            }
+                            if let (Some(id), Some(blob)) = (id, blob) {
+                                set_blob = Some((id, blob));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((id, blob)) = set_blob {
+                    blob_store.insert(id, blob);
+                    let _ = outbound_tx
+                        .send(crate::wire::connect_frame(
+                            &crate::wire::encode_kv_set_blob_ack(kv_id),
+                        ))
+                        .await;
+                } else if let Some(id) = get_blob_id {
+                    let blob = blob_store.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+                    let _ = outbound_tx
+                        .send(crate::wire::connect_frame(
+                            &crate::wire::encode_kv_get_blob_result(kv_id, blob),
+                        ))
+                        .await;
+                }
+                continue;
+            }
+
             // Check for ExecServerMessage (field 2 of AgentServerMessage)
             let mut exec_server_data: Option<&[u8]> = None;
             for f in crate::wire::iter_fields(&payload) {
@@ -762,7 +832,7 @@ pub async fn run_agent_turn(
                             }
                         }
                         ExecServerMessageVariant::RequestContext(_) => {
-                            let rc_bytes = crate::wire::encode_request_context(system, tools, &cwd)
+                            let rc_bytes = crate::wire::encode_request_context(system, &cwd)
                                 .unwrap_or_default();
                             let res_bytes = crate::wire::encode_request_context_result(
                                 msg.id,

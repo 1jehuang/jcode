@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 
 #[test]
 fn available_models_include_composer_models() {
@@ -575,6 +576,53 @@ fn request_context_result_has_required_success_wrapper() {
         .find(|field| field.field == 1)
         .expect("request context wrapper");
     assert_eq!(request_context.data, context);
+}
+
+#[test]
+fn request_context_result_omits_synthetic_ids() {
+    let encoded = wire::encode_request_context_result(7, "exec", &[]);
+    let fields: Vec<_> = wire::iter_fields(&encoded).collect();
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].field, 2);
+    let exec_fields: Vec<_> = wire::iter_fields(fields[0].data).collect();
+    assert_eq!(exec_fields.len(), 1);
+    assert_eq!(exec_fields[0].field, 10);
+}
+
+#[test]
+fn large_connect_frames_use_gzip_and_round_trip() {
+    let payload = vec![b'x'; 1024];
+    let framed = wire::connect_frame(&payload);
+    assert_eq!(framed[0], 1, "connect-es compresses payloads at 1024 bytes");
+    let length = u32::from_be_bytes(framed[1..5].try_into().unwrap()) as usize;
+    assert_eq!(length, framed.len() - 5);
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(&framed[5..])
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, payload);
+}
+
+#[test]
+fn kv_ack_codecs_match_agent_client_message_shape() {
+    let set = wire::encode_kv_set_blob_ack(9);
+    let set_fields: Vec<_> = wire::iter_fields(&set).collect();
+    assert_eq!(set_fields.len(), 1);
+    assert_eq!(set_fields[0].field, 3);
+    assert!(wire::iter_fields(set_fields[0].data).any(|f| f.field == 1 && f.varint == 9));
+    assert!(wire::iter_fields(set_fields[0].data).any(|f| f.field == 3));
+
+    let get = wire::encode_kv_get_blob_result(10, b"blob");
+    let get_fields: Vec<_> = wire::iter_fields(&get).collect();
+    assert_eq!(get_fields.len(), 1);
+    assert_eq!(get_fields[0].field, 3);
+    let result = wire::iter_fields(get_fields[0].data)
+        .find(|f| f.field == 2)
+        .expect("get blob result");
+    let blob = wire::iter_fields(result.data)
+        .find(|f| f.field == 1)
+        .expect("blob data");
+    assert_eq!(blob.data, b"blob");
 }
 
 #[test]
