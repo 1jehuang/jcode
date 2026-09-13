@@ -34,6 +34,20 @@ fn smoke_timeout(default_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Whether `api_base` is an OpenCode host, which requires the
+/// `x-opencode-session` header on inference requests (issue #1167). Mirrors
+/// `jcode_provider_openrouter_runtime::request_headers::is_opencode_api_base`
+/// without depending on that crate's internal helper.
+fn is_opencode_api_base(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return false;
+    };
+    matches!(
+        url.host_str(),
+        Some(host) if host == "opencode.ai" || host.ends_with(".opencode.ai")
+    )
+}
+
 /// Apply the right auth headers for a resolved OpenAI-compatible profile.
 ///
 /// Most providers use `Authorization: Bearer <key>`. Anthropic's
@@ -46,11 +60,18 @@ fn apply_provider_auth(
     resolved: &ResolvedOpenAiCompatibleProfile,
     api_key: &str,
 ) -> reqwest::RequestBuilder {
-    jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
+    let req = jcode_base::provider_catalog::apply_openai_compatible_catalog_auth(
         request,
         &resolved.api_base,
         api_key,
-    )
+    );
+    // OpenCode Go/Zen require a stable per-conversation x-opencode-session
+    // header. Use a fixed session ID for smoke tests (uniqueness not needed).
+    if is_opencode_api_base(&resolved.api_base) {
+        req.header("x-opencode-session", "doctor-smoke-test")
+    } else {
+        req
+    }
 }
 
 /// Set an output-token cap on a chat-completions body using the parameter name
@@ -156,6 +177,40 @@ fn normalize_openai_compatible_model_id(
     model.to_string()
 }
 
+/// Models that require the Responses API endpoint (`/responses`) instead of
+/// `/chat/completions` when served through OpenCode Go. These models reject
+/// chat-completions format with `input_text is not valid on assistant messages`.
+///
+/// Keep in sync with `jcode_provider_openrouter_runtime`'s Responses adapter,
+/// which is the source of truth for the runtime's per-model protocol choice.
+const OPENCODE_GO_RESPONSES_MODELS: &[&str] = &[
+    "grok-4.6",
+    "grok-4.7",
+    "gpt-5.6-luna",
+    "gpt-6-luna",
+    "muse-spark-1.3-contributor",
+    "muse-spark-1.2-contributor",
+];
+
+/// Whether this profile/model pair must be probed over `/responses`.
+///
+/// Only OpenCode Go is multi-protocol: the same model id served by another
+/// aggregator keeps the chat-completions route its profile is configured for.
+fn needs_responses_api(resolved: &ResolvedOpenAiCompatibleProfile, model: &str) -> bool {
+    let is_go_profile = resolved.id.eq_ignore_ascii_case("opencode-go");
+    let is_go_endpoint = resolved
+        .api_base
+        .to_ascii_lowercase()
+        .contains("opencode.ai/zen/go/");
+    if !(is_go_profile || is_go_endpoint) {
+        return false;
+    }
+    let model = model.trim();
+    OPENCODE_GO_RESPONSES_MODELS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(model))
+}
+
 pub async fn run_live_openai_compatible_smoke(
     profile: OpenAiCompatibleProfile,
     api_key: &str,
@@ -163,17 +218,34 @@ pub async fn run_live_openai_compatible_smoke(
 ) -> anyhow::Result<jcode_base::live_tests::LiveVerificationStage> {
     let started = std::time::Instant::now();
     let resolved = jcode_base::provider_catalog::resolve_openai_compatible_profile(profile);
-    let url = format!(
-        "{}/chat/completions",
-        resolved.api_base.trim_end_matches('/')
-    );
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "user", "content": "Reply with exactly AUTH_TEST_OK and nothing else."}
-        ],
-        "stream": false
-    });
+    let use_responses = needs_responses_api(&resolved, model);
+    let (url, body) = if use_responses {
+        let url = format!(
+            "{}/responses",
+            resolved.api_base.trim_end_matches('/')
+        );
+        let body = serde_json::json!({
+            "model": model,
+            "input": [
+                {"role": "user", "content": "Reply with exactly AUTH_TEST_OK and nothing else."}
+            ],
+            "stream": false
+        });
+        (url, body)
+    } else {
+        let url = format!(
+            "{}/chat/completions",
+            resolved.api_base.trim_end_matches('/')
+        );
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "user", "content": "Reply with exactly AUTH_TEST_OK and nothing else."}
+            ],
+            "stream": false
+        });
+        (url, body)
+    };
     let request = jcode_base::provider::shared_http_client()
         .post(&url)
         .json(&body);
@@ -193,14 +265,27 @@ pub async fn run_live_openai_compatible_smoke(
     );
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parse live {} smoke response", resolved.display_name))?;
-    let content = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .unwrap_or_default()
-        .trim();
+    // Responses API returns output[0].content[0].text; chat completions returns choices[0].message.content
+    let content = if use_responses {
+        parsed
+            .get("output")
+            .and_then(|o| o.get(0))
+            .and_then(|item| item.get("content"))
+            .and_then(|c| c.get(0))
+            .and_then(|part| part.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .trim()
+    } else {
+        parsed
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .unwrap_or_default()
+            .trim()
+    };
     ensure!(
         content.contains("AUTH_TEST_OK"),
         "{} live smoke returned unexpected content: {:?}",

@@ -146,3 +146,47 @@ fn parallel_tool_use_replays_every_signature_in_one_assistant_message() {
         .collect();
     assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
 }
+
+fn resolved_go_profile(api_base: &str) -> ResolvedOpenAiCompatibleProfile {
+    ResolvedOpenAiCompatibleProfile {
+        id: "opencode-go".to_string(),
+        display_name: "OpenCode Go".to_string(),
+        api_base: api_base.to_string(),
+        api_key_env: "OPENCODE_GO_API_KEY".to_string(),
+        env_file: "opencode-go.env".to_string(),
+        setup_url: "https://opencode.ai/docs/go/".to_string(),
+        default_model: None,
+        requires_api_key: true,
+    }
+}
+
+/// Issue #1224: the doctor must probe the endpoint each OpenCode Go model
+/// family actually serves, and leave every other profile untouched.
+#[test]
+fn opencode_go_models_are_probed_on_the_responses_route() {
+    let go = resolved_go_profile("https://opencode.ai/zen/go/v1");
+    assert!(needs_responses_api(&go, "grok-4.6"));
+    assert!(needs_responses_api(&go, "gpt-5.6-luna"));
+    assert!(needs_responses_api(&go, "muse-spark-1.3-contributor"));
+    // Claude/Gemini-style models on the same gateway keep chat completions.
+    assert!(!needs_responses_api(&go, "claude-sonnet-4.6"));
+    assert!(!needs_responses_api(&go, "minimax-m2.7"));
+}
+
+/// A model id from the OpenCode Go allowlist served by another aggregator must
+/// keep the chat-completions route that profile is configured for.
+#[test]
+fn responses_route_is_scoped_to_the_opencode_go_gateway() {
+    let openrouter = resolved_go_profile("https://openrouter.ai/api/v1");
+    assert!(!needs_responses_api(&openrouter, "grok-4.6"));
+}
+
+/// OpenCode hosts need the per-conversation session header; others must not
+/// receive it.
+#[test]
+fn opencode_session_header_is_host_scoped() {
+    assert!(is_opencode_api_base("https://opencode.ai/zen/go/v1"));
+    assert!(is_opencode_api_base("https://api.opencode.ai/v1"));
+    assert!(!is_opencode_api_base("https://openrouter.ai/api/v1"));
+    assert!(!is_opencode_api_base("https://notopencode.ai.example/v1"));
+}
