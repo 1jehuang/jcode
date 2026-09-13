@@ -42,10 +42,7 @@ pub fn maybe_compact(session: &mut crate::session::Session, trigger: &mut TimeBa
 
     if compacted > 0 {
         session.replace_messages(messages);
-        logging::info(&format!(
-            "Micro-compacted {} tool results",
-            compacted
-        ));
+        logging::info(&format!("Micro-compacted {} tool results", compacted));
     }
 
     // Always record the compaction point so we don't re-check every turn.
@@ -70,7 +67,9 @@ fn compact_messages(messages: &mut [StoredMessage]) -> usize {
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
             if let ContentBlock::ToolResult {
-                tool_use_id, content, ..
+                tool_use_id,
+                content,
+                ..
             } = block
             {
                 let tool_name = match tool_map.get(tool_use_id.as_str()) {
@@ -156,10 +155,7 @@ mod tests {
     #[test]
     fn skips_short_content() {
         let short = "short";
-        let mut messages = vec![
-            tool_use_msg("t1", "Read"),
-            tool_result_msg("t1", short),
-        ];
+        let mut messages = vec![tool_use_msg("t1", "Read"), tool_result_msg("t1", short)];
         let compacted = compact_messages(&mut messages);
         assert_eq!(compacted, 0);
     }
@@ -167,10 +163,7 @@ mod tests {
     #[test]
     fn skips_non_compactable_tool() {
         let long = "y".repeat(500);
-        let mut messages = vec![
-            tool_use_msg("t1", "Agent"),
-            tool_result_msg("t1", &long),
-        ];
+        let mut messages = vec![tool_use_msg("t1", "Agent"), tool_result_msg("t1", &long)];
         let compacted = compact_messages(&mut messages);
         assert_eq!(compacted, 0);
     }

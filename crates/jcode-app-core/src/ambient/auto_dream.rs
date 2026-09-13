@@ -50,10 +50,7 @@ pub fn maybe_dream(data_dir: PathBuf, session_count: u64) {
                         logging::info("Auto-dream: consolidation complete");
                     }
                     Err(e) => {
-                        logging::error(&format!(
-                            "Auto-dream: failed to acquire lock: {}",
-                            e
-                        ));
+                        logging::error(&format!("Auto-dream: failed to acquire lock: {}", e));
                     }
                 }
             });
@@ -72,7 +69,10 @@ fn evaluate_time_gate(coordinator: &DreamCoordinator) -> bool {
     use std::time::{Duration, SystemTime};
 
     let lock_path = coordinator.lock.lock_path();
-    let mtime = match std::fs::metadata(lock_path).ok().and_then(|m| m.modified().ok()) {
+    let mtime = match std::fs::metadata(lock_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+    {
         Some(t) => t,
         None => return true, // No lock file = first run = gate open
     };
