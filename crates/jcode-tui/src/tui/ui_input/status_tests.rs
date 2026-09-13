@@ -921,7 +921,7 @@ fn truncate_line_for_narrow_long_text_truncated_with_ellipsis() {
 #[test]
 fn truncate_line_for_narrow_multiple_spans() {
     let line = Line::from(vec![
-        Span::styled("⧖ ", Style::default()),
+        Span::styled("⏳ ", Style::default()),
         Span::styled("[sending] 4.2s", Style::default()),
     ]);
     let truncated = truncate_line_for_narrow(line, 8);
@@ -930,8 +930,13 @@ fn truncate_line_for_narrow_multiple_spans() {
         .iter()
         .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
         .sum();
-    // Span 1 uses 2 cols, span 2 is truncated to the remaining 6 cols.
-    assert_eq!(total_width, 8, "exact cumulative width: got {total_width}");
+    // The second span is clipped to what the first span left minus one column
+    // for the ellipsis, so the total is max_cols - 1 regardless of the split.
+    assert_eq!(total_width, 7, "exact cumulative width: got {total_width}");
+    assert!(
+        truncated.spans.last().unwrap().content.ends_with('…'),
+        "clipped span must end with an ellipsis"
+    );
 }
 
 #[test]

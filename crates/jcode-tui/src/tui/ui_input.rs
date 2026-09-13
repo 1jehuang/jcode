@@ -1238,19 +1238,21 @@ fn truncate_line_for_narrow(line: Line<'static>, max_cols: usize) -> Line<'stati
                 remaining -= w;
                 Some(Span::styled(s.to_string(), span.style))
             } else {
-                // Truncate with ellipsis if there is room.
+                // Truncate with ellipsis.  Stop one character early so the
+                // ellipsis fits within `remaining` when it is appended.
                 let mut out = String::with_capacity(remaining);
                 let mut used = 0;
                 for ch in s.chars() {
                     let cw = UnicodeWidthStr::width(ch.to_string().as_str());
+                    // Would this char leave room for the ellipsis?
                     if used + cw + 1 > remaining {
-                        if used + 1 <= remaining {
-                            out.push('…');
-                        }
                         break;
                     }
                     out.push(ch);
                     used += cw;
+                }
+                if used < remaining {
+                    out.push('…');
                 }
                 remaining = 0;
                 Some(Span::styled(out, span.style))
