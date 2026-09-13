@@ -4,21 +4,23 @@ Thanks for contributing.
 
 ## Issues vs pull requests
 
-If the problem is easy for me to reproduce, please prefer opening a GitHub issue. A clear issue with reproduction steps, expected behavior, actual behavior, logs, screenshots, or traces is usually the fastest path to a fix.
+Both issues and pull requests are welcome. Open an issue to report a bug or discuss an idea, or send a focused PR if you have a fix or improvement ready. For large changes, discuss the approach in an issue first to avoid spending time on work that may not fit the project.
 
-Pull requests are more useful when the problem depends on an environment I may not have, such as macOS-specific behavior, Windows-specific behavior, unusual shells, terminal emulators, filesystems, GPU/display setups, provider accounts, or other local configuration. In those cases, a PR can be a useful reference because it captures the behavior in the environment where the problem actually occurs.
+A clear issue or PR includes reproduction steps, expected behavior, actual behavior, and relevant logs, screenshots, or traces. Environment-specific fixes are especially helpful when they cover systems the maintainers may not have, such as macOS, Windows, unusual shells, terminal emulators, filesystems, GPU/display setups, or provider accounts.
+
+Every PR must link to an existing GitHub issue in this repository. If there is no issue yet, open one and reference it in the PR description, for example with `Closes #123`.
 
 ## Pull request policy
 
-Pull requests are welcome and encouraged.
+Pull requests from everyone are welcome and encouraged, including first-time contributors and people who are not maintainers or existing contributors.
 
-That said, most PRs should be treated as proposals or references, not as changes that are likely to be merged directly. This project is developed with heavy use of code generation, and generated code can be deceptively plausible: it may fix the visible problem while introducing subtle correctness, lifecycle, architecture, or maintenance issues.
+PRs are reviewed as changes that can be merged directly, not merely as proposals or references for a maintainer-authored rewrite. Review is based on correctness, tests, security, architecture, maintainability, and fit with the project, not the author's contributor status.
 
-Because of that, I will often use PRs to understand the bug, feature request, test case, design direction, or proposed implementation, then write my own version of the change. The submitted code may still be extremely valuable as a reference, reproduction, or proof of concept, even if the final committed code is different.
+AI-assisted and generated contributions are welcome and held to the same standards as handwritten code. Understand the changes you submit, explain their assumptions and tradeoffs, and validate them. This applies equally to maintainer and community contributions.
 
-This is not a judgment that maintainer-generated code is inherently better than contributor-generated code. It is a practical ownership rule: if I am going to maintain the resulting code, I need to understand its assumptions, tradeoffs, and failure modes.
+Maintainers may request revisions, help refine an implementation, or decline a change that does not fit the project. A rewrite is not required just because a PR comes from an outside contributor.
 
-The best PRs therefore include:
+The best PRs include:
 
 - a clear description of the problem being solved
 - a minimal reproduction or failing test when possible
@@ -26,6 +28,4 @@ The best PRs therefore include:
 - focused changes that are easy to review independently
 - any relevant logs, screenshots, traces, or benchmarks
 
-Large, generated, or highly invasive PRs may be closed even when the underlying idea is good. In those cases, the issue or PR may still be used as a reference for a maintainer-authored change.
-
-Handwritten by author: My clanker slop may or may not be better than your clanker slop. I know how to work with my clanker slop though.
+Keep changes focused and split large changes into independently reviewable pieces when possible. Passing checks does not guarantee a merge, but author status or use of code generation is not, by itself, a reason to reject a contribution.
