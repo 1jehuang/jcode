@@ -48,6 +48,7 @@ static HEALTH_STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()))
 pub struct AccountLease {
     key: (String, String),
     id: u64,
+    _file_lock: Option<AccountLeaseFileLock>,
 }
 
 impl Drop for AccountLease {
@@ -72,8 +73,68 @@ pub fn try_acquire_account_lease(
     if leases.get(&key).is_some_and(|(until, _)| *until > now) {
         return None;
     }
+    let file_lock = AccountLeaseFileLock::acquire(provider, label)?;
     leases.insert(key.clone(), (now + duration, id));
-    Some(AccountLease { key, id })
+    Some(AccountLease {
+        key,
+        id,
+        _file_lock: Some(file_lock),
+    })
+}
+
+/// The in-memory lease prevents stampedes within one process. This companion
+/// lock extends the same admission boundary to independent jcode processes
+/// sharing `JCODE_HOME`. The descriptor is held for the complete request or
+/// stream lifetime and released by `AccountLease`'s drop implementation.
+#[derive(Debug)]
+struct AccountLeaseFileLock {
+    file: File,
+}
+
+fn lease_path_component(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl AccountLeaseFileLock {
+    fn acquire(provider: &str, label: &str) -> Option<Self> {
+        let directory = crate::storage::jcode_dir()
+            .ok()?
+            .join("provider_pool_leases");
+        std::fs::create_dir_all(&directory).ok()?;
+        let path = directory.join(format!(
+            "{}-{}.lock",
+            lease_path_component(provider),
+            lease_path_component(label)
+        ));
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+
+        #[cfg(unix)]
+        {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return None;
+            }
+        }
+
+        Some(Self { file })
+    }
+}
+
+impl Drop for AccountLeaseFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
 }
 
 /// Providers whose credentials are selected through the process-local account
