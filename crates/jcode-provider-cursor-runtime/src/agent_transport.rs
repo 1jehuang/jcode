@@ -45,7 +45,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// Client version advertised to Cursor's agent service. Must track a currently
 /// served `cursor-agent` CLI build; override at runtime with
 /// `JCODE_CURSOR_CLI_VERSION` if Cursor moves the floor.
-const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.07.08-0c04a8a";
+const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.08.25-3e8eec8";
 
 fn cli_client_version() -> String {
     std::env::var("JCODE_CURSOR_CLI_VERSION")
@@ -228,7 +228,12 @@ fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
 ///
 /// Returns the ordered list of Connect frames that constitute the streamed
 /// `RunInput`: `RunRequest`, environment context, then marker frames.
-fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Vec<u8>> {
+fn build_run_frames(
+    prompt: &str,
+    model: &str,
+    cwd: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+) -> Vec<Vec<u8>> {
     let conv = Uuid::new_v4().to_string();
     let msg = Uuid::new_v4().to_string();
 
@@ -242,7 +247,13 @@ fn build_run_frames(prompt: &str, model: &str, cwd: &str) -> Vec<Vec<u8>> {
 
     let mut req = field_str(1, "");
     req.extend(messages);
-    req.extend(field_str(4, ""));
+    if !tools.is_empty() {
+        if let Ok(mcp_tools_bytes) = crate::wire::encode_mcp_tools(tools) {
+            req.extend(field_ld(4, &mcp_tools_bytes));
+        }
+    } else {
+        req.extend(field_str(4, ""));
+    }
     req.extend(field_str(5, &conv));
     req.extend(field_ld(9, &encode_model_meta(model, false)));
     req.extend(field_varint(12, 0));
@@ -427,6 +438,31 @@ fn extract_answer_text(payload: &[u8]) -> Option<String> {
     None
 }
 
+/// Extract reasoning delta (thinking text) from one response message payload.
+/// The reasoning chunk shape is `f1 { f4 { f1: <str> } }`.
+pub(crate) fn extract_thinking_text(payload: &[u8]) -> Option<String> {
+    for f1 in iter_fields(payload) {
+        if f1.field != 1 || f1.wire != 2 {
+            continue;
+        }
+        for f4 in iter_fields(f1.data) {
+            if f4.field != 4 || f4.wire != 2 {
+                continue;
+            }
+            for leaf in iter_fields(f4.data) {
+                if leaf.field == 1
+                    && leaf.wire == 2
+                    && let Ok(s) = std::str::from_utf8(leaf.data)
+                    && !s.is_empty()
+                {
+                    return Some(s.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 // --------------------------------------------------------------------------
 // TLS + HTTP/2 bidirectional client
 // --------------------------------------------------------------------------
@@ -441,11 +477,26 @@ fn tls_config() -> Arc<tokio_rustls::rustls::ClientConfig> {
     Arc::new(config)
 }
 
+pub(crate) fn parse_tool_request_id(request_id: &str) -> (u32, &str) {
+    let mut parts = request_id.splitn(3, ':');
+    let _stream_uuid = parts.next();
+    let id = parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .unwrap_or(1);
+    (id, parts.next().unwrap_or(""))
+}
+
 /// Run one Cursor agent turn and forward assistant text as [`StreamEvent`]s.
 pub async fn run_agent_turn(
     access_token: &str,
     prompt: &str,
     model: &str,
+    logical_session_id: Option<&str>,
+    stream_uuid: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+    system: &str,
+    tool_result_rx: &mut mpsc::Receiver<jcode_provider_core::NativeToolResult>,
     tx: mpsc::Sender<Result<StreamEvent>>,
 ) -> Result<()> {
     use h2::client;
@@ -487,12 +538,17 @@ pub async fn run_agent_turn(
     let mut h2 = h2.ready().await.context("HTTP/2 connection not ready")?;
 
     let request_id = Uuid::new_v4().to_string();
+    let session_id = logical_session_id
+        .map(|id| Uuid::new_v5(&Uuid::NAMESPACE_DNS, id.as_bytes()))
+        .unwrap_or_else(Uuid::new_v4)
+        .to_string();
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("https://{host}{AGENT_PATH}"))
         .header("authorization", format!("Bearer {access_token}"))
         .header("connect-accept-encoding", "gzip,br")
         .header("connect-protocol-version", "1")
+        .header("te", "trailers")
         .header("content-type", "application/connect+proto")
         .header("user-agent", "connect-es/1.6.1")
         .header("x-cursor-client-type", "cli")
@@ -500,6 +556,7 @@ pub async fn run_agent_turn(
         .header("x-ghost-mode", "true")
         .header("x-request-id", &request_id)
         .header("x-original-request-id", &request_id)
+        .header("x-session-id", &session_id)
         .body(())
         .context("Failed to build Cursor agent request")?;
 
@@ -507,33 +564,49 @@ pub async fn run_agent_turn(
         .send_request(request, false)
         .context("Failed to send Cursor agent request headers")?;
 
-    let session_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, access_token.as_bytes()).to_string();
     let _ = tx.send(Ok(StreamEvent::SessionId(session_id))).await;
 
-    // Sender task: stream the request frames paced like the real client, then
-    // heartbeat until the response completes. The pacing is load-bearing: the
-    // server treats the marker frames as end-of-input and returns
-    // `internal: No exec result` if they arrive before it has begun streaming.
-    let frames = build_run_frames(prompt, model, &cwd);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let frames = build_run_frames(prompt, model, &cwd, tools);
     let sender = tokio::spawn(async move {
         for (idx, frame) in frames.into_iter().enumerate() {
             if send_stream.send_data(Bytes::from(frame), false).is_err() {
                 return;
             }
-            // frame 0 (RunRequest) and frame 1 (context) need the most settle
-            // time before the marker frames follow.
+            // Drain any pending outbound frames between initial pace delays
+            while let Ok(outbound_frame) = outbound_rx.try_recv() {
+                if send_stream
+                    .send_data(Bytes::from(outbound_frame), false)
+                    .is_err()
+                {
+                    return;
+                }
+            }
             let pace = match idx {
                 0 => Duration::from_millis(1500),
                 1 => Duration::from_millis(800),
                 _ => Duration::from_millis(400),
             };
-            tokio::time::sleep(pace).await;
+            tokio::select! {
+                _ = tokio::time::sleep(pace) => {}
+                Some(outbound_frame) = outbound_rx.recv() => {
+                    if send_stream.send_data(Bytes::from(outbound_frame), false).is_err() {
+                        return;
+                    }
+                }
+            }
         }
         let mut ticker = interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
         loop {
             tokio::select! {
                 _ = &mut stop_rx => break,
+                Some(frame) = outbound_rx.recv() => {
+                    if send_stream.send_data(Bytes::from(frame), false).is_err() {
+                        return;
+                    }
+                }
                 _ = ticker.tick() => {
                     if send_stream.send_data(Bytes::from(heartbeat_frame()), false).is_err() {
                         return;
@@ -553,26 +626,56 @@ pub async fn run_agent_turn(
     let mut pending: Vec<u8> = Vec::new();
     let mut error_message: Option<String> = None;
     let mut got_text = false;
+    let mut in_thinking = false;
+    let mut active_tool_calls: usize = 0;
 
     // Idle timeouts guard against the server holding the stream open. Cursor
     // keeps the response side open after the assistant message when it expects
-    // a tool exec-result (which this text-only transport never sends), so we
+    // a tool exec-result, so we
     // finish the turn once output goes quiet. The first-byte budget is longer
     // because generation can take a few seconds to start.
     let first_byte_timeout = Duration::from_secs(60);
     let idle_timeout = Duration::from_secs(4);
+    let tool_exec_timeout = Duration::from_secs(300);
 
     'read: loop {
-        let budget = if got_text {
+        let budget = if active_tool_calls > 0 {
+            tool_exec_timeout
+        } else if got_text {
             idle_timeout
         } else {
             first_byte_timeout
         };
-        let next = match tokio::time::timeout(budget, body.data()).await {
-            Ok(Some(chunk)) => chunk,
-            // Stream closed cleanly, or idle (server likely waiting for a tool
-            // exec-result we never send): finish the turn either way.
-            Ok(None) | Err(_) => break 'read,
+        let next = tokio::select! {
+            res = tokio::time::timeout(budget, body.data()) => {
+                match res {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) | Err(_) => break 'read,
+                }
+            }
+            Some(tool_res) = tool_result_rx.recv() => {
+                let (id_u32, exec_id) = parse_tool_request_id(&tool_res.request_id);
+                let raw_content = if tool_res.is_error {
+                    tool_res.result.error.unwrap_or_default()
+                } else {
+                    tool_res.result.output.unwrap_or_default()
+                };
+                let redacted = jcode_base::message::redact_secrets(&raw_content);
+                let mcp_res_bytes = crate::wire::encode_mcp_success_result(
+                    id_u32,
+                    exec_id,
+                    &redacted,
+                    tool_res.is_error,
+                );
+                let agent_client_bytes = crate::wire::encode_agent_client_exec_message(&mcp_res_bytes);
+                let connect_bytes = crate::wire::connect_frame(&agent_client_bytes);
+                let _ = outbound_tx.send(connect_bytes).await;
+                if active_tool_calls > 0 {
+                    active_tool_calls -= 1;
+                }
+                got_text = false;
+                continue 'read;
+            }
         };
         let chunk = next.context("Cursor agent response stream error")?;
         let _ = body.flow_control().release_capacity(chunk.len());
@@ -590,9 +693,250 @@ pub async fn run_agent_turn(
                 break 'read;
             }
             if let Some(text) = extract_answer_text(&payload) {
+                if in_thinking {
+                    let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+                    in_thinking = false;
+                }
                 got_text = true;
                 if tx.send(Ok(StreamEvent::TextDelta(text))).await.is_err() {
                     break 'read;
+                }
+                continue;
+            }
+            if let Some(thinking) = extract_thinking_text(&payload) {
+                if !in_thinking {
+                    let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
+                    in_thinking = true;
+                }
+                if tx
+                    .send(Ok(StreamEvent::ThinkingDelta(thinking)))
+                    .await
+                    .is_err()
+                {
+                    break 'read;
+                }
+                continue;
+            }
+            if let Some(used_tokens) = crate::wire::extract_checkpoint_used_tokens(&payload) {
+                let _ = tx
+                    .send(Ok(StreamEvent::TokenUsage {
+                        input_tokens: Some(used_tokens),
+                        output_tokens: Some(0),
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                    }))
+                    .await;
+                continue;
+            }
+            // Check for ExecServerMessage (field 2 of AgentServerMessage)
+            let mut exec_server_data: Option<&[u8]> = None;
+            for f in crate::wire::iter_fields(&payload) {
+                if f.field == 2 && f.wire == 2 {
+                    exec_server_data = Some(f.data);
+                    break;
+                }
+            }
+            if let Some(data) = exec_server_data {
+                if let Ok(msg) = crate::wire::decode_exec_server_message(data) {
+                    use crate::wire::ExecServerMessageVariant;
+                    match msg.variant {
+                        ExecServerMessageVariant::Mcp(mcp_args) => {
+                            if in_thinking {
+                                let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+                                in_thinking = false;
+                            }
+                            let bare_tool_name = crate::wire::mcp_bare_name(&mcp_args.name);
+                            let corr_request_id =
+                                format!("{}:{}:{}", stream_uuid, msg.id, msg.exec_id);
+                            active_tool_calls += 1;
+                            if tx
+                                .send(Ok(StreamEvent::NativeToolCall {
+                                    request_id: corr_request_id,
+                                    tool_name: bare_tool_name.to_string(),
+                                    input: mcp_args.args,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                break 'read;
+                            }
+                        }
+                        ExecServerMessageVariant::RequestContext(_) => {
+                            let rc_bytes = crate::wire::encode_request_context(system, tools, &cwd)
+                                .unwrap_or_default();
+                            let res_bytes = crate::wire::encode_request_context_result(
+                                msg.id,
+                                &msg.exec_id,
+                                &rc_bytes,
+                            );
+                            let agent_bytes =
+                                crate::wire::encode_agent_client_exec_message(&res_bytes);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Shell(args) => {
+                            let rej = crate::wire::reject_shell_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.command,
+                                &args.working_directory,
+                                crate::wire::native_shell_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Write(args) => {
+                            let rej = crate::wire::reject_write_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.path,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Delete(args) => {
+                            let rej = crate::wire::reject_delete_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.path,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Grep(_) => {
+                            let rej = crate::wire::reject_grep_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Read(args) => {
+                            let rej = crate::wire::reject_read_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.path,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Ls(args) => {
+                            let rej = crate::wire::reject_ls_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.path,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Diagnostics(args) => {
+                            let rej = crate::wire::reject_diagnostics_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.path,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::ShellStream(_) => {
+                            let rej = crate::wire::reject_shell_stream_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_shell_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::BackgroundShellSpawn(args) => {
+                            let rej = crate::wire::reject_background_shell_spawn_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.command,
+                                &args.working_directory,
+                                crate::wire::native_shell_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::ListMcpResources(_) => {
+                            let rej = crate::wire::reject_list_mcp_resources_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::ReadMcpResource(args) => {
+                            let rej = crate::wire::reject_read_mcp_resource_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.uri,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Fetch(args) => {
+                            let rej = crate::wire::reject_fetch_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                &args.url,
+                                crate::wire::native_fetch_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::RecordScreen(_) => {
+                            let rej = crate::wire::reject_record_screen_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::ComputerUse(_) => {
+                            let rej = crate::wire::reject_computer_use_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_local_exec_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::WriteShellStdin(_) => {
+                            let rej = crate::wire::reject_write_shell_stdin_exec(
+                                msg.id,
+                                &msg.exec_id,
+                                crate::wire::native_shell_disabled_message(false),
+                            );
+                            let agent_bytes = crate::wire::encode_agent_client_exec_message(&rej);
+                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            let _ = outbound_tx.send(connect_bytes).await;
+                        }
+                        ExecServerMessageVariant::Unknown(_, _) => {}
+                    }
                 }
             }
         }
@@ -601,6 +945,10 @@ pub async fn run_agent_turn(
     let _ = stop_tx.send(());
     let _ = sender.await;
     conn_task.abort();
+
+    if in_thinking {
+        let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
+    }
 
     if let Some(err) = error_message {
         anyhow::bail!("Cursor agent stream error: {err}");
@@ -621,6 +969,18 @@ pub async fn run_agent_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usable_model_decoder_reads_wire_ids_and_deduplicates() {
+        let response = ["composer-2.5", "gpt-5.4-high", "composer-2.5"]
+            .into_iter()
+            .flat_map(|model| field_ld(1, &field_str(1, model)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crate::decode_agent_models(&response).unwrap(),
+            vec!["composer-2.5", "gpt-5.4-high"]
+        );
+    }
 
     /// Regression test for issue #637: teams routed to a region reject the
     /// hardcoded `global` agent host, so a regional endpoint expressed as a full
@@ -693,7 +1053,7 @@ mod tests {
 
     #[test]
     fn frames_are_well_formed_connect_frames() {
-        let frames = build_run_frames("hi", "composer-2.5", "/tmp");
+        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[]);
         assert!(frames.len() >= 4);
         for frame in &frames {
             assert!(frame.len() >= 5);
@@ -709,11 +1069,25 @@ mod tests {
 
     #[test]
     fn frame0_contains_prompt_and_model() {
-        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp");
+        let frames = build_run_frames("PROMPT_MARKER", "composer-2.5", "/tmp", &[]);
         let frame0 = &frames[0];
         let hay = String::from_utf8_lossy(frame0);
         assert!(hay.contains("PROMPT_MARKER"));
         assert!(hay.contains("composer-2.5"));
+    }
+
+    #[test]
+    fn frame0_advertises_mcp_tools() {
+        let tool = jcode_message_types::ToolDefinition {
+            name: "read_file".to_string(),
+            description: "Read a file".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        };
+        let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[tool]);
+        let frame0 = &frames[0];
+        let hay = String::from_utf8_lossy(frame0);
+        assert!(hay.contains("read_file"));
+        assert!(hay.contains("Read a file"));
     }
 
     #[test]
@@ -732,6 +1106,7 @@ mod tests {
         let f4 = field_ld(4, &leaf);
         let top = field_ld(1, &f4);
         assert_eq!(extract_answer_text(&top), None);
+        assert_eq!(extract_thinking_text(&top).as_deref(), Some("thinking"));
     }
 
     #[test]
