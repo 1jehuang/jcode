@@ -296,12 +296,115 @@ pub struct ManagedProviderAccount {
     pub project_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default)]
 struct AccountFile {
+    active_account: Option<String>,
+    accounts: Vec<ManagedProviderAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedAccountFile {
     #[serde(default)]
     active_account: Option<String>,
     #[serde(default)]
-    accounts: Vec<ManagedProviderAccount>,
+    accounts: Vec<PersistedAccount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedAccount {
+    id: String,
+    label: String,
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    credential_key: Option<String>,
+    expires_at: i64,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+fn native_account_key(provider: &str, account_id: &str, kind: &str) -> String {
+    format!("{provider}/{account_id}/{kind}")
+}
+
+impl PersistedAccount {
+    fn from_managed(provider: &str, account: &ManagedProviderAccount) -> Result<Self> {
+        let access_key = native_account_key(provider, &account.id, "access");
+        let refresh_key = native_account_key(provider, &account.id, "refresh");
+        crate::storage::set_native_credential(&access_key, &account.access_token)?;
+        if let Err(error) =
+            crate::storage::set_native_credential(&refresh_key, &account.refresh_token)
+        {
+            let _ = crate::storage::delete_native_credential(&access_key);
+            return Err(error);
+        }
+        Ok(Self {
+            id: account.id.clone(),
+            label: account.label.clone(),
+            access_token: None,
+            refresh_token: None,
+            credential_key: Some(native_account_key(provider, &account.id, "")),
+            expires_at: account.expires_at,
+            email: account.email.clone(),
+            project_id: account.project_id.clone(),
+        })
+    }
+
+    fn into_managed(self, provider: &str) -> Result<ManagedProviderAccount> {
+        let (access_token, refresh_token) = match self.credential_key {
+            Some(_) => (
+                crate::storage::get_native_credential(&native_account_key(
+                    provider, &self.id, "access",
+                ))?,
+                crate::storage::get_native_credential(&native_account_key(
+                    provider, &self.id, "refresh",
+                ))?,
+            ),
+            None => (
+                self.access_token
+                    .context("managed account is missing access token")?,
+                self.refresh_token
+                    .context("managed account is missing refresh token")?,
+            ),
+        };
+        Ok(ManagedProviderAccount {
+            id: self.id,
+            label: self.label,
+            access_token,
+            refresh_token,
+            expires_at: self.expires_at,
+            email: self.email,
+            project_id: self.project_id,
+        })
+    }
+}
+
+impl PersistedAccountFile {
+    fn from_managed(provider: &str, file: &AccountFile) -> Result<Self> {
+        Ok(Self {
+            active_account: file.active_account.clone(),
+            accounts: file
+                .accounts
+                .iter()
+                .map(|account| PersistedAccount::from_managed(provider, account))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
+
+    fn into_managed(self, provider: &str) -> Result<AccountFile> {
+        Ok(AccountFile {
+            active_account: self.active_account,
+            accounts: self
+                .accounts
+                .into_iter()
+                .map(|account| account.into_managed(provider))
+                .collect::<Result<Vec<_>>>()?,
+        })
+    }
 }
 
 pub fn accounts_path(provider: &str) -> Result<PathBuf> {
@@ -314,15 +417,15 @@ pub fn accounts_path(provider: &str) -> Result<PathBuf> {
 }
 
 fn read(provider: &str) -> Result<AccountFile> {
-    let _file_lock = AccountFileLock::acquire(provider, true)
+    let _file_lock = AccountFileLock::acquire(provider, false)
         .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
     read_unlocked(provider)
 }
 
 /// Coordinate managed-account reads and read-modify-write mutations across
-/// independent processes sharing the same JCODE_HOME. The account JSON remains
-/// plaintext owner-protected, but concurrent refreshes and imports cannot
-/// overwrite one another's updates.
+/// independent processes sharing the same JCODE_HOME. Account metadata is
+/// owner-protected and credentials live in the OS-native secret store, while
+/// concurrent refreshes and imports cannot overwrite one another's updates.
 struct AccountFileLock {
     file: File,
 }
@@ -373,8 +476,13 @@ fn read_unlocked(provider: &str) -> Result<AccountFile> {
         return Ok(AccountFile::default());
     }
     crate::storage::harden_secret_file_permissions(&file_path);
-    let file: AccountFile = crate::storage::read_json(&file_path)
+    let persisted: PersistedAccountFile = crate::storage::read_json(&file_path)
         .with_context(|| format!("failed to read managed {provider} account store"))?;
+    let legacy = persisted
+        .accounts
+        .iter()
+        .any(|account| account.credential_key.is_none());
+    let file = persisted.into_managed(provider)?;
     if file.accounts.len() > MAX_ACCOUNTS {
         anyhow::bail!("managed {provider} account store exceeds the {MAX_ACCOUNTS} account limit");
     }
@@ -385,6 +493,19 @@ fn read_unlocked(provider: &str) -> Result<AccountFile> {
             || account.refresh_token.trim().is_empty()
     }) {
         anyhow::bail!("managed {provider} account store contains an incomplete account");
+    }
+    if legacy {
+        // Migrate opportunistically while the caller owns the exclusive file
+        // lock. If the native store is unavailable, keep the legacy file intact
+        // and continue reading it for compatibility. Any later write is still
+        // strict and will never publish another plaintext snapshot.
+        if let Ok(migrated) = PersistedAccountFile::from_managed(provider, &file) {
+            if let Err(error) = write_persisted_unlocked(provider, &migrated) {
+                crate::logging::warn(&format!(
+                    "Could not migrate managed {provider} credentials to the native store: {error}"
+                ));
+            }
+        }
     }
     Ok(file)
 }
@@ -397,9 +518,15 @@ fn write(provider: &str, file: &AccountFile) -> Result<()> {
 }
 
 fn write_unlocked(provider: &str, file: &AccountFile) -> Result<()> {
+    let persisted = PersistedAccountFile::from_managed(provider, file)?;
+    write_persisted_unlocked(provider, &persisted)
+}
+
+fn write_persisted_unlocked(provider: &str, file: &PersistedAccountFile) -> Result<()> {
     let file_path = accounts_path(provider)?;
-    // Managed account files contain OAuth access and refresh tokens. Avoid the
-    // generic recovery backup because it would retain a second plaintext copy.
+    // The metadata file contains no credentials. The token values are held by
+    // the operating system's native credential store under provider/account
+    // keys, so no plaintext recovery backup can contain OAuth secrets.
     crate::storage::write_json_secret_without_backup(&file_path, file)
 }
 
@@ -1115,6 +1242,42 @@ mod tests {
         );
 
         set_runtime_active_override("cursor", None);
+        match previous_home {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn managed_account_file_contains_metadata_only() {
+        let _lock = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("create isolated JCODE_HOME");
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        write(
+            "cursor",
+            &AccountFile {
+                active_account: Some("cursor-secret-free".to_string()),
+                accounts: vec![ManagedProviderAccount {
+                    id: "cursor-secret-free".to_string(),
+                    label: "cursor-secret-free".to_string(),
+                    access_token: "access-token-must-not-be-on-disk".to_string(),
+                    refresh_token: "refresh-token-must-not-be-on-disk".to_string(),
+                    expires_at: 0,
+                    email: None,
+                    project_id: None,
+                }],
+            },
+        )
+        .expect("write managed account");
+
+        let contents = std::fs::read_to_string(accounts_path("cursor").expect("account path"))
+            .expect("read account metadata");
+        assert!(!contents.contains("access-token-must-not-be-on-disk"));
+        assert!(!contents.contains("refresh-token-must-not-be-on-disk"));
+        assert!(contents.contains("credential_key"));
+
         match previous_home {
             Some(previous) => crate::env::set_var("JCODE_HOME", previous),
             None => crate::env::remove_var("JCODE_HOME"),

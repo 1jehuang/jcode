@@ -728,6 +728,7 @@ impl MultiProvider {
                         system,
                         resume_session_id,
                         account_lease,
+                        None,
                     )
                     .await
                 }
@@ -743,6 +744,7 @@ impl MultiProvider {
                         system_dynamic,
                         resume_session_id,
                         account_lease,
+                        None,
                     )
                     .await
                 }

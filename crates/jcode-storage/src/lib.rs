@@ -1,11 +1,13 @@
 use anyhow::Result;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(windows)]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 #[cfg(windows)]
 use std::sync::{LazyLock, Mutex};
 #[cfg(windows)]
@@ -524,6 +526,83 @@ pub fn write_json_secret_without_backup<T: Serialize + ?Sized>(
     // credential snapshot. Otherwise opting into this safer path would leave
     // the legacy plaintext copy behind indefinitely.
     write_json_inner(path, value, true, true, false)
+}
+
+const NATIVE_CREDENTIAL_SERVICE: &str = "jcode.provider-accounts";
+
+static TEST_NATIVE_CREDENTIALS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+fn test_native_credentials() -> Option<&'static Mutex<HashMap<String, String>>> {
+    (std::env::var("JCODE_TEST_NATIVE_CREDENTIALS")
+        .ok()
+        .as_deref()
+        == Some("memory"))
+    .then(|| TEST_NATIVE_CREDENTIALS.get_or_init(|| Mutex::new(HashMap::new())))
+}
+
+fn native_credential_key_for_test(key: &str) -> String {
+    let home = std::env::var("JCODE_HOME").unwrap_or_default();
+    format!("{home}\0{key}")
+}
+
+fn native_credential_entry(key: &str) -> anyhow::Result<keyring::Entry> {
+    let key = key.trim();
+    if key.is_empty() || key.len() > 256 || key.chars().any(|ch| ch.is_control()) {
+        anyhow::bail!("invalid native credential key");
+    }
+    keyring::Entry::new(NATIVE_CREDENTIAL_SERVICE, key)
+        .map_err(|error| anyhow::anyhow!("native credential store unavailable: {error}"))
+}
+
+/// Store one credential in the operating system's native secret store.
+///
+/// The account metadata file should contain only the key returned by the
+/// caller, never the secret itself. This API is intentionally synchronous:
+/// callers perform it from the existing short read-modify-write boundaries.
+pub fn set_native_credential(key: &str, secret: &str) -> anyhow::Result<()> {
+    if secret.is_empty() {
+        anyhow::bail!("native credential cannot be empty");
+    }
+    if let Some(credentials) = test_native_credentials() {
+        credentials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(native_credential_key_for_test(key), secret.to_string());
+        return Ok(());
+    }
+    native_credential_entry(key)?
+        .set_password(secret)
+        .map_err(|error| anyhow::anyhow!("failed to store native credential: {error}"))
+}
+
+/// Read one credential from the operating system's native secret store.
+pub fn get_native_credential(key: &str) -> anyhow::Result<String> {
+    if let Some(credentials) = test_native_credentials() {
+        return credentials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&native_credential_key_for_test(key))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("native credential not found"));
+    }
+    native_credential_entry(key)?
+        .get_password()
+        .map_err(|error| anyhow::anyhow!("failed to read native credential: {error}"))
+}
+
+/// Delete a credential only after the caller has successfully migrated or
+/// removed its owning account record.
+pub fn delete_native_credential(key: &str) -> anyhow::Result<()> {
+    if let Some(credentials) = test_native_credentials() {
+        credentials
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&native_credential_key_for_test(key));
+        return Ok(());
+    }
+    native_credential_entry(key)?
+        .delete_credential()
+        .map_err(|error| anyhow::anyhow!("failed to delete native credential: {error}"))
 }
 
 /// Fast JSON write: atomic rename but no fsync. Good for frequent saves where

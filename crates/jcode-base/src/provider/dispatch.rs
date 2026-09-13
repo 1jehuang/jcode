@@ -94,6 +94,7 @@ impl MultiProvider {
         system: &str,
         resume_session_id: Option<&str>,
         account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+        account_label: Option<&str>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
         let attempt = match provider {
@@ -142,9 +143,24 @@ impl MultiProvider {
             ActiveProvider::Antigravity => {
                 let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
-                    antigravity
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            antigravity
+                                .complete_for_account(
+                                    messages,
+                                    tools,
+                                    system,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            antigravity
+                                .complete(messages, tools, system, resume_session_id)
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Antigravity is not available. Run `jcode login --provider antigravity`."
@@ -174,9 +190,24 @@ impl MultiProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone();
                 if let Some(cursor) = cursor {
-                    cursor
-                        .complete(messages, tools, system, resume_session_id)
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            cursor
+                                .complete_for_account(
+                                    messages,
+                                    tools,
+                                    system,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            cursor
+                                .complete(messages, tools, system, resume_session_id)
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Cursor is not available. Run `jcode login --provider cursor`."
@@ -219,6 +250,7 @@ impl MultiProvider {
         system_dynamic: &str,
         resume_session_id: Option<&str>,
         account_lease: Option<crate::auth::provider_pool::AccountRequestLease>,
+        account_label: Option<&str>,
     ) -> Result<EventStream> {
         self.reconcile_auth_if_provider_missing(provider);
         let attempt = match provider {
@@ -291,15 +323,31 @@ impl MultiProvider {
             ActiveProvider::Antigravity => {
                 let antigravity = self.antigravity_provider();
                 if let Some(antigravity) = antigravity {
-                    antigravity
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            antigravity
+                                .complete_split_for_account(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            antigravity
+                                .complete_split(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                )
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Antigravity is not available. Run `jcode login --provider antigravity`."
@@ -335,15 +383,31 @@ impl MultiProvider {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .clone();
                 if let Some(cursor) = cursor {
-                    cursor
-                        .complete_split(
-                            messages,
-                            tools,
-                            system_static,
-                            system_dynamic,
-                            resume_session_id,
-                        )
-                        .await
+                    match account_label {
+                        Some(label) => {
+                            cursor
+                                .complete_split_for_account(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                    label,
+                                )
+                                .await
+                        }
+                        None => {
+                            cursor
+                                .complete_split(
+                                    messages,
+                                    tools,
+                                    system_static,
+                                    system_dynamic,
+                                    resume_session_id,
+                                )
+                                .await
+                        }
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Cursor is not available. Run `jcode login --provider cursor`."

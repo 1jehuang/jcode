@@ -14,8 +14,8 @@ pub mod retry_after;
 pub mod selection;
 pub mod transport;
 
-pub use transport::is_transient_transport_error;
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
+pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
@@ -91,6 +91,24 @@ pub trait Provider: Send + Sync {
         resume_session_id: Option<&str>,
     ) -> Result<EventStream>;
 
+    /// Send a request using one explicitly selected managed account.
+    ///
+    /// Providers that can bind credentials to a request should override this
+    /// instead of consulting a process-global active-account override. The
+    /// default preserves compatibility for providers whose runtime already
+    /// owns account selection (or which do not support account pools).
+    async fn complete_for_account(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        _account_label: &str,
+    ) -> Result<EventStream> {
+        self.complete(messages, tools, system, resume_session_id)
+            .await
+    }
+
     /// Send messages with split system prompt for better caching.
     async fn complete_split(
         &self,
@@ -103,6 +121,33 @@ pub trait Provider: Send + Sync {
         let dynamic_messages = messages_with_dynamic_system_context(messages, system_dynamic);
         self.complete(&dynamic_messages, tools, system_static, resume_session_id)
             .await
+    }
+
+    /// Split-system variant of [`Provider::complete_for_account`].
+    async fn complete_split_for_account(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_static: &str,
+        system_dynamic: &str,
+        resume_session_id: Option<&str>,
+        account_label: &str,
+    ) -> Result<EventStream> {
+        let dynamic_messages = messages_with_dynamic_system_context(messages, system_dynamic);
+        self.complete_for_account(
+            &dynamic_messages,
+            tools,
+            system_static,
+            resume_session_id,
+            account_label,
+        )
+        .await
+    }
+
+    /// Whether `complete_for_account` is implemented with request-local
+    /// credentials and therefore does not require mutating a global override.
+    fn supports_request_scoped_accounts(&self) -> bool {
+        false
     }
 
     /// Get the provider name.

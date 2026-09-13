@@ -32,9 +32,11 @@ pub fn test_env_lock() -> &'static Mutex<()> {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn lock_test_env() -> MutexGuard<'static, ()> {
-    test_env_lock()
+    let guard = test_env_lock()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::env::set_var("JCODE_TEST_NATIVE_CREDENTIALS", "memory");
+    guard
 }
 
 #[cfg(test)]

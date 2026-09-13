@@ -466,7 +466,7 @@ impl Provider for CursorCliProvider {
         let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
 
         tokio::spawn(async move {
-            let result = run_native_text_command(client, tx.clone(), &prompt, &model).await;
+            let result = run_native_text_command(client, tx.clone(), &prompt, &model, None).await;
 
             if let Err(err) = result {
                 let _ = tx.send(Err(err)).await;
@@ -474,6 +474,41 @@ impl Provider for CursorCliProvider {
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    async fn complete_for_account(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        system: &str,
+        _resume_session_id: Option<&str>,
+        account_label: &str,
+    ) -> Result<EventStream> {
+        let prompt = build_cli_prompt(system, messages);
+        let model = self
+            .model
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let client = self.client.clone();
+        let account_label = account_label.to_string();
+        let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
+
+        tokio::spawn(async move {
+            let result =
+                run_native_text_command(client, tx.clone(), &prompt, &model, Some(&account_label))
+                    .await;
+
+            if let Err(err) = result {
+                let _ = tx.send(Err(err)).await;
+            }
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn supports_request_scoped_accounts(&self) -> bool {
+        true
     }
 
     fn name(&self) -> &'static str {
@@ -611,8 +646,16 @@ async fn run_native_text_command(
     tx: mpsc::Sender<Result<StreamEvent>>,
     prompt: &str,
     model: &str,
+    account_label: Option<&str>,
 ) -> Result<()> {
-    let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
+    let tokens = match account_label {
+        Some(label) => {
+            let account = jcode_base::auth::provider_pool::account("cursor", label)?
+                .with_context(|| format!("No Cursor account with label '{label}'"))?;
+            cursor_auth::resolve_direct_tokens_for_account(&client, &account).await?
+        }
+        None => cursor_auth::resolve_direct_tokens(&client).await?,
+    };
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old

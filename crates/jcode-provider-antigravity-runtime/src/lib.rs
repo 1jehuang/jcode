@@ -39,6 +39,8 @@ pub struct AntigravityProvider {
     /// Backend-advertised default agent model id (from `fetchAvailableModels`).
     /// Used to resolve the `"default"` alias to a real model for inference.
     backend_default_model: Arc<RwLock<Option<String>>>,
+    /// Account label bound to this request-local provider clone, if any.
+    request_account: Option<String>,
 }
 
 impl Clone for AntigravityProvider {
@@ -48,6 +50,7 @@ impl Clone for AntigravityProvider {
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            request_account: self.request_account.clone(),
         }
     }
 }
@@ -188,6 +191,7 @@ impl AntigravityProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
             backend_default_model: Arc::new(RwLock::new(None)),
+            request_account: None,
         };
         provider.seed_cached_catalog();
         provider
@@ -406,7 +410,7 @@ impl AntigravityProvider {
             resume_session_id,
             force_function_call,
             signature_policy,
-            None,
+            self.request_account.as_deref(),
         )
         .await
     }
@@ -912,6 +916,25 @@ impl Provider for AntigravityProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
+    async fn complete_for_account(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        account_label: &str,
+    ) -> Result<EventStream> {
+        let mut provider = self.clone();
+        provider.request_account = Some(account_label.to_string());
+        provider
+            .complete(messages, tools, system, resume_session_id)
+            .await
+    }
+
+    fn supports_request_scoped_accounts(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "antigravity"
     }
@@ -1052,6 +1075,7 @@ impl Provider for AntigravityProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            request_account: self.request_account.clone(),
         })
     }
 }

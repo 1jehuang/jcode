@@ -80,7 +80,13 @@ impl MultiProvider {
                 alternative_label
             ));
 
-            set_account_override_for_provider(provider, Some(alternative_label.clone()));
+            let request_scoped_account = matches!(
+                provider,
+                ActiveProvider::Antigravity | ActiveProvider::Cursor
+            );
+            if !request_scoped_account {
+                set_account_override_for_provider(provider, Some(alternative_label.clone()));
+            }
             clear_provider_unavailable_for_account(provider_key);
             if provider == ActiveProvider::OpenAI {
                 clear_all_model_unavailability_for_account();
@@ -97,6 +103,7 @@ impl MultiProvider {
                         system,
                         None,
                         Some(request_lease.clone()),
+                        Some(alternative_label),
                     )
                     .await
                 }
@@ -112,6 +119,7 @@ impl MultiProvider {
                         system_dynamic,
                         None,
                         Some(request_lease.clone()),
+                        Some(alternative_label),
                     )
                     .await
                 }
@@ -184,11 +192,16 @@ impl MultiProvider {
             }
         }
 
-        set_account_override_for_provider(provider, Some(original_label));
-        self.invalidate_provider_credentials_for_account_switch(provider)
-            .await;
-        if provider == ActiveProvider::OpenAI {
-            clear_all_model_unavailability_for_account();
+        if !matches!(
+            provider,
+            ActiveProvider::Antigravity | ActiveProvider::Cursor
+        ) {
+            set_account_override_for_provider(provider, Some(original_label));
+            self.invalidate_provider_credentials_for_account_switch(provider)
+                .await;
+            if provider == ActiveProvider::OpenAI {
+                clear_all_model_unavailability_for_account();
+            }
         }
 
         crate::logging::info(&format!(
