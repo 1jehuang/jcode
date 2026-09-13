@@ -860,10 +860,22 @@ pub fn encode_request_context(system_prompt: &str, cwd: &str) -> Result<Vec<u8>>
         rule.extend(field_ld(4, &rule_type));
         out.extend(field_ld(2, &rule));
     }
-    let mut env = field_str(1, "linux");
+    let mut env = field_str(1, std::env::consts::OS);
     env.extend(field_str(2, cwd));
-    env.extend(field_str(3, "bash"));
+    env.extend(field_str(
+        3,
+        std::env::var("SHELL").ok().as_deref().unwrap_or("bash"),
+    ));
     env.extend(field_str(10, "UTC"));
+    // These fields are emitted by the official cursor-agent client. They are
+    // proto defaults for local execution, but omitting them makes some Agent
+    // Service deployments keep the stream alive with heartbeats after the ack.
+    env.extend(field_varint(14, 0));
+    env.extend(field_varint(16, 1));
+    env.extend(field_varint(19, 0));
+    env.extend(field_varint(20, 0));
+    env.extend(field_str(21, cwd));
+    env.extend(field_varint(22, 0));
     out.extend(field_ld(4, &env));
     Ok(out)
 }

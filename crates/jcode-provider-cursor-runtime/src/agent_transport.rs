@@ -236,15 +236,6 @@ fn connect_frame(payload: &[u8]) -> Vec<u8> {
     crate::wire::connect_frame(payload)
 }
 
-/// `{f1: name, f3: {f1:'fast', f2:'true'|'false'}}` model descriptor.
-fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
-    let mut out = field_str(1, name);
-    let mut kv = field_str(1, "fast");
-    kv.extend(field_str(2, if fast { "true" } else { "false" }));
-    out.extend(field_ld(3, &kv));
-    out
-}
-
 /// Build the request frames for a single-shot prompt turn.
 ///
 /// Returns the initial Connect frame for the streamed `RunInput`.
@@ -282,11 +273,16 @@ fn build_run_frames(
         req.extend(field_str(4, ""));
     }
     req.extend(field_str(5, &conv));
-    req.extend(field_ld(9, &encode_model_meta(model, false)));
+    // AgentRunRequest.f9 is a ModelEntry, not the older model metadata shape:
+    // f1 is the model id, f2 is the optional max-mode flag, and f3 is repeated
+    // parameter entries. Sending the legacy f3 {fast=...} map makes the server
+    // accept the HTTP request but leaves the bidirectional run at heartbeats.
+    req.extend(field_ld(9, &field_str(1, model)));
     req.extend(field_varint(12, 0));
-    // minimal catalog: a "default" entry plus the target model
-    req.extend(field_ld(14, &field_str(1, "default")));
-    req.extend(field_ld(14, &encode_model_meta(model, false)));
+    // Keep the catalog entry in the same ModelEntry shape. A fabricated
+    // "default" model is not part of Cursor's catalog and can cause the
+    // service to keep the run pending while resolving models.
+    req.extend(field_ld(14, &field_str(1, model)));
     req.extend(field_str(16, &conv));
     req.extend(field_str(25, request_id));
     let frame0 = connect_frame(&field_ld(1, &req));
@@ -547,7 +543,7 @@ pub async fn run_agent_turn(
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple().to_string()[..16].to_string()
     );
-    let blob_encryption_key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let blob_encryption_key = Uuid::new_v4().simple().to_string();
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("https://{host}{AGENT_PATH}"))
@@ -661,8 +657,18 @@ pub async fn run_agent_turn(
         let next = tokio::select! {
             res = tokio::time::timeout(budget, body.data()) => {
                 match res {
-                    Ok(Some(chunk)) => chunk,
-                    Ok(None) | Err(_) => break 'read,
+                    Ok(Some(Ok(chunk))) => {
+                        chunk
+                    }
+                    Ok(Some(Err(error))) => {
+                        return Err(error).context("Cursor agent response stream error");
+                    }
+                    Ok(None) => {
+                        break 'read;
+                    }
+                    Err(_) => {
+                        break 'read;
+                    }
                 }
             }
             Some(tool_res) = tool_result_rx.recv() => {
@@ -689,7 +695,7 @@ pub async fn run_agent_turn(
                 continue 'read;
             }
         };
-        let chunk = next.context("Cursor agent response stream error")?;
+        let chunk = next;
         let _ = body.flow_control().release_capacity(chunk.len());
         pending.extend_from_slice(&chunk);
         while let Some((flag, payload, consumed)) = next_frame(&pending)? {
@@ -1050,6 +1056,40 @@ mod tests {
             crate::decode_agent_models(&response).unwrap(),
             vec!["composer-2.5", "gpt-5.4-high"]
         );
+    }
+
+    #[test]
+    fn run_request_uses_model_entry_shape_without_legacy_fast_metadata() {
+        let frame = build_run_frames("hello", "composer-2.5", "/tmp", &[], "request-id")
+            .into_iter()
+            .next()
+            .unwrap();
+        let (_, payload, _) = next_frame(&frame).unwrap().unwrap();
+        let run_request = iter_fields(&payload)
+            .find(|field| field.field == 1 && field.wire == 2)
+            .unwrap();
+
+        let requested_model = iter_fields(run_request.data)
+            .find(|field| field.field == 9 && field.wire == 2)
+            .unwrap();
+        assert_eq!(
+            iter_fields(requested_model.data)
+                .find(|field| field.field == 1 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("composer-2.5")
+        );
+        assert!(iter_fields(requested_model.data).all(|field| field.field != 3));
+
+        let catalog_ids = iter_fields(run_request.data)
+            .filter(|field| field.field == 14 && field.wire == 2)
+            .map(|field| {
+                iter_fields(field.data)
+                    .find(|nested| nested.field == 1 && nested.wire == 2)
+                    .and_then(|nested| std::str::from_utf8(nested.data).ok())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_ids, vec!["composer-2.5"]);
     }
 
     /// Regression test for issue #637: teams routed to a region reject the
