@@ -265,10 +265,13 @@ pub fn check_for_updates() -> Option<bool> {
     }
     // When the fetch slot was claimed by another recent process, still answer
     // from the (fresh enough) local refs instead of skipping the check.
+    source_update_available(&repo_dir)
+}
 
+pub(super) fn source_update_available(repo_dir: &std::path::Path) -> Option<bool> {
     let behind = ProcessCommand::new("git")
         .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(&repo_dir)
+        .current_dir(repo_dir)
         .output()
         .ok()?;
 
