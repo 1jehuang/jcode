@@ -1,8 +1,8 @@
 //! Managed provider-account storage and safe import from OpenCodeX.
 //!
 //! This module deliberately stores credentials separately from provider runtime
-//! state. Selection is process-local, while the account file is an encrypted-at-
-//! rest boundary only in the sense that it is protected as a secret file. Never
+//! state. Selection is process-local, while the account file is stored as a
+//! plaintext owner-protected secret file. It is not encrypted at rest. Never
 //! include its contents in logs, quota snapshots, or diagnostics.
 
 use anyhow::{Context, Result};
@@ -37,8 +37,8 @@ static ACCOUNT_REQUEST_GATES: LazyLock<Mutex<HashMap<String, Arc<AccountRequestG
 static ACCOUNT_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 // Quota and cooldown updates are performed by concurrent provider requests.
 // Serialize the read-modify-write cycle so one account's update cannot erase
-// another account's freshly recorded state. This is process-local by design,
-// matching the daemon-owned provider pool state boundary.
+// another account's freshly recorded state. HealthFileLock extends this
+// protection across independent processes sharing the same JCODE_HOME.
 static HEALTH_STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// A short-lived admission lease prevents concurrent failover attempts from
@@ -253,6 +253,60 @@ pub fn accounts_path(provider: &str) -> Result<PathBuf> {
 }
 
 fn read(provider: &str) -> Result<AccountFile> {
+    let _file_lock = AccountFileLock::acquire(provider, true)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    read_unlocked(provider)
+}
+
+/// Coordinate managed-account reads and read-modify-write mutations across
+/// independent processes sharing the same JCODE_HOME. The account JSON remains
+/// plaintext owner-protected, but concurrent refreshes and imports cannot
+/// overwrite one another's updates.
+struct AccountFileLock {
+    file: File,
+}
+
+impl AccountFileLock {
+    fn acquire(provider: &str, shared: bool) -> Option<Self> {
+        let path = accounts_path(provider).ok().map(|path| {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("accounts");
+            path.with_file_name(format!("{file_name}.lock"))
+        })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+
+        #[cfg(unix)]
+        {
+            let operation = if shared { libc::LOCK_SH } else { libc::LOCK_EX };
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                return None;
+            }
+        }
+
+        Some(Self { file })
+    }
+}
+
+impl Drop for AccountFileLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+fn read_unlocked(provider: &str) -> Result<AccountFile> {
     let file_path = accounts_path(provider)?;
     if !file_path.exists() {
         return Ok(AccountFile::default());
@@ -274,7 +328,14 @@ fn read(provider: &str) -> Result<AccountFile> {
     Ok(file)
 }
 
+#[cfg(test)]
 fn write(provider: &str, file: &AccountFile) -> Result<()> {
+    let _file_lock = AccountFileLock::acquire(provider, false)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    write_unlocked(provider, file)
+}
+
+fn write_unlocked(provider: &str, file: &AccountFile) -> Result<()> {
     let file_path = accounts_path(provider)?;
     crate::storage::write_json_secret(&file_path, file)
 }
@@ -305,7 +366,9 @@ pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
     let _guard = ACCOUNT_STORE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut file = read(provider)?;
+    let _file_lock = AccountFileLock::acquire(provider, false)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    let mut file = read_unlocked(provider)?;
     crate::auth::account_store::set_active_account(
         label,
         &file.accounts,
@@ -313,7 +376,7 @@ pub fn set_active_account(provider: &str, label: &str) -> Result<()> {
         &format!("No managed {provider} account named '{{}}'"),
         |account| account.label.as_str(),
     )?;
-    write(provider, &file)?;
+    write_unlocked(provider, &file)?;
     set_runtime_active_override_for_provider(provider, Some(label.to_string()));
     Ok(())
 }
@@ -659,7 +722,9 @@ pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result
     let _guard = ACCOUNT_STORE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut file = read(provider)?;
+    let _file_lock = AccountFileLock::acquire(provider, false)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    let mut file = read_unlocked(provider)?;
     let id = account.id.clone();
     if let Some(existing) = file.accounts.iter_mut().find(|existing| existing.id == id) {
         let label = existing.label.clone();
@@ -679,7 +744,7 @@ pub fn upsert_account(provider: &str, account: ManagedProviderAccount) -> Result
         .find(|account| account.id == id)
         .map(|account| account.label.clone())
         .context("managed account disappeared while importing")?;
-    write(provider, &file)?;
+    write_unlocked(provider, &file)?;
     Ok(label)
 }
 
@@ -695,7 +760,9 @@ pub fn update_tokens_for_refresh(
     let _guard = ACCOUNT_STORE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mut file = read(provider)?;
+    let _file_lock = AccountFileLock::acquire(provider, false)
+        .ok_or_else(|| anyhow::anyhow!("could not lock managed {provider} account store"))?;
+    let mut file = read_unlocked(provider)?;
     let Some(account) = file
         .accounts
         .iter_mut()
@@ -712,7 +779,7 @@ pub fn update_tokens_for_refresh(
     if project_id.is_some() {
         account.project_id = project_id;
     }
-    write(provider, &file)?;
+    write_unlocked(provider, &file)?;
     Ok(true)
 }
 
