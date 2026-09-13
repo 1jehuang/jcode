@@ -405,6 +405,17 @@ pub fn list_accounts(provider: &str) -> Result<Vec<ManagedProviderAccount>> {
     Ok(read(provider)?.accounts)
 }
 
+/// Load one managed account by label without consulting or changing the
+/// process-local active-account override. Provider runtimes use this for
+/// request-local failover and background probes so an alternate account cannot
+/// redirect an unrelated request.
+pub fn account(provider: &str, label: &str) -> Result<Option<ManagedProviderAccount>> {
+    Ok(read(provider)?
+        .accounts
+        .into_iter()
+        .find(|account| account.label == label))
+}
+
 pub fn active_account(provider: &str) -> Result<Option<ManagedProviderAccount>> {
     let file = read(provider)?;
     let label = crate::auth::account_store::active_account_label(

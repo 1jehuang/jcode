@@ -112,12 +112,8 @@ impl AntigravityProvider {
                 &original,
                 cooldown,
             );
-            jcode_base::auth::provider_pool::set_runtime_active_override(
-                "antigravity",
-                Some(account.label.clone()),
-            );
             match self
-                .generate_content(
+                .generate_content_for_account(
                     model,
                     messages,
                     tools,
@@ -125,6 +121,7 @@ impl AntigravityProvider {
                     resume_session_id,
                     force_function_call,
                     signature_policy,
+                    Some(&account.label),
                 )
                 .await
             {
@@ -139,10 +136,6 @@ impl AntigravityProvider {
                     if !jcode_provider_core::classify_failover_error_message(&error.to_string())
                         .should_failover()
                     {
-                        jcode_base::auth::provider_pool::set_runtime_active_override(
-                            "antigravity",
-                            Some(original.clone()),
-                        );
                         return Err(error);
                     }
                     jcode_base::auth::provider_pool::mark_account_cooldown(
@@ -156,7 +149,6 @@ impl AntigravityProvider {
                 }
             }
         }
-        jcode_base::auth::provider_pool::set_runtime_active_override("antigravity", Some(original));
         Err(first_error)
     }
 
@@ -406,7 +398,38 @@ impl AntigravityProvider {
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
     ) -> Result<CodeAssistGenerateResponse> {
-        let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
+        self.generate_content_for_account(
+            model,
+            messages,
+            tools,
+            system,
+            resume_session_id,
+            force_function_call,
+            signature_policy,
+            None,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Code Assist call threads explicit per-request settings and an optional account context"
+    )]
+    async fn generate_content_for_account(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+        account_label: Option<&str>,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let mut tokens = match account_label {
+            Some(label) => antigravity_auth::load_or_refresh_tokens_for_account(label).await?,
+            None => antigravity_auth::load_or_refresh_tokens().await?,
+        };
         let project = match tokens
             .project_id
             .as_deref()
@@ -416,7 +439,19 @@ impl AntigravityProvider {
             None => {
                 let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
                 tokens.project_id = Some(project_id.clone());
-                let _ = antigravity_auth::save_tokens(&tokens);
+                if account_label.is_some() {
+                    let _ = jcode_base::auth::provider_pool::update_tokens_for_refresh(
+                        "antigravity",
+                        &tokens.refresh_token,
+                        tokens.access_token.clone(),
+                        tokens.refresh_token.clone(),
+                        tokens.expires_at,
+                        tokens.email.clone(),
+                        Some(project_id.clone()),
+                    );
+                } else {
+                    let _ = antigravity_auth::save_tokens(&tokens);
+                }
                 project_id
             }
         };

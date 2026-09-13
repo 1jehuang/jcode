@@ -156,6 +156,25 @@ pub fn load_tokens() -> Result<AntigravityTokens> {
     anyhow::bail!("No Antigravity tokens found. Run `jcode login --provider antigravity`.");
 }
 
+fn tokens_from_managed_account(label: &str) -> Result<AntigravityTokens> {
+    let account = crate::auth::provider_pool::account("antigravity", label)?
+        .with_context(|| format!("No Antigravity account with label '{label}'"))?;
+    Ok(AntigravityTokens {
+        access_token: account.access_token,
+        refresh_token: account.refresh_token,
+        expires_at: account.expires_at,
+        email: account.email,
+        project_id: account.project_id,
+    })
+}
+
+/// Load one managed Antigravity account without consulting or changing the
+/// process-global active-account override. Provider-local failover uses this
+/// path so an alternate account cannot redirect another request.
+pub fn load_tokens_for_account(label: &str) -> Result<AntigravityTokens> {
+    tokens_from_managed_account(label)
+}
+
 pub fn save_tokens(tokens: &AntigravityTokens) -> Result<()> {
     let path = tokens_path()?;
     crate::storage::write_json_secret(&path, tokens)
@@ -174,6 +193,15 @@ pub async fn load_or_refresh_tokens() -> Result<AntigravityTokens> {
     }
 }
 
+pub async fn load_or_refresh_tokens_for_account(label: &str) -> Result<AntigravityTokens> {
+    let tokens = load_tokens_for_account(label)?;
+    if tokens.is_expired() {
+        refresh_tokens_for_account(label, &tokens).await
+    } else {
+        Ok(tokens)
+    }
+}
+
 /// Refresh Antigravity OAuth tokens, serialized via the refresh coordinator
 /// so concurrent callers do not race the token endpoint and the stored file.
 pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTokens> {
@@ -187,6 +215,23 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
                 let source = stored.unwrap_or(observed);
                 refresh_tokens_uncoordinated(&source).await
             }
+        },
+    )
+    .await
+}
+
+pub async fn refresh_tokens_for_account(
+    label: &str,
+    tokens: &AntigravityTokens,
+) -> Result<AntigravityTokens> {
+    let key = format!("antigravity:{label}");
+    let observed = tokens.clone();
+    crate::auth::refresh_coordinator::single_flight(
+        key,
+        || load_tokens_for_account(label).ok(),
+        |stored: &AntigravityTokens| !stored.is_expired(),
+        move |stored: Option<AntigravityTokens>| async move {
+            refresh_tokens_uncoordinated(&stored.unwrap_or(observed)).await
         },
     )
     .await
