@@ -2,6 +2,20 @@ use super::*;
 use std::io::Read;
 
 #[test]
+fn routed_prompt_includes_system_and_namespaced_tool_directive() {
+    let tools = vec![ToolDefinition {
+        name: "read".to_string(),
+        description: "Read a file".to_string(),
+        input_schema: serde_json::json!({"type": "object"}),
+    }];
+    let prompt = agent_transport::routed_prompt("Read notes.txt", "Be precise.", &tools);
+    assert!(prompt.contains("Be precise."));
+    assert!(prompt.contains("cc_read"));
+    assert!(prompt.contains("no built-in tools"));
+    assert!(prompt.ends_with("Read notes.txt"));
+}
+
+#[test]
 fn available_models_include_composer_models() {
     let provider = CursorCliProvider::new();
     let models = provider.available_models();
@@ -179,18 +193,18 @@ fn test_encode_mcp_tools() {
 
     // Verify tool 1: bash
     let (name, desc, schema, prov, bare) = &definitions[0];
-    assert_eq!(name.as_deref(), Some("mcp_jcode__bash"));
+    assert_eq!(name.as_deref(), Some("cc_bash"));
     assert_eq!(desc.as_deref(), Some("Execute a shell command in bash"));
-    assert_eq!(prov.as_deref(), Some("jcode"));
+    assert_eq!(prov.as_deref(), Some("ccbridge"));
     assert_eq!(bare.as_deref(), Some("bash"));
     assert_eq!(schema.as_ref().unwrap()["type"], "object");
     assert_eq!(schema.as_ref().unwrap()["required"][0], "command");
 
     // Verify tool 2: read_file
     let (name, desc, schema, prov, bare) = &definitions[1];
-    assert_eq!(name.as_deref(), Some("mcp_jcode__read_file"));
+    assert_eq!(name.as_deref(), Some("cc_read_file"));
     assert_eq!(desc.as_deref(), Some("Read contents of a local file"));
-    assert_eq!(prov.as_deref(), Some("jcode"));
+    assert_eq!(prov.as_deref(), Some("ccbridge"));
     assert_eq!(bare.as_deref(), Some("read_file"));
     assert_eq!(
         schema.as_ref().unwrap()["properties"]["path"]["type"],
@@ -566,7 +580,10 @@ fn test_rejection_encoders() {
 fn request_context_result_has_required_success_wrapper() {
     let context = wire::field_str(1, "sentinel");
     let encoded = wire::encode_request_context_result(7, "exec", &context);
-    let result = wire::iter_fields(&encoded)
+    let outer = wire::iter_fields(&encoded)
+        .find(|field| field.field == 2)
+        .expect("agent client message");
+    let result = wire::iter_fields(outer.data)
         .find(|field| field.field == 10)
         .expect("request context result");
     let success = wire::iter_fields(result.data)

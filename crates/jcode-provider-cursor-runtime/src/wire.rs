@@ -16,8 +16,10 @@ pub const MAX_VALUE_DEPTH: usize = 32;
 /// Maximum payload size allowed for google.protobuf.Value bytes (10 MiB).
 pub const MAX_VALUE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Canonical provider identifier for jcode tools advertised to Cursor.
-pub const JCODE_TOOL_PROVIDER: &str = "jcode";
+/// Cursor's AgentService rejects MCP names that collide with its builtins.
+/// `cc_` is the namespace used by the proven public bridge implementation.
+pub const JCODE_TOOL_PROVIDER: &str = "ccbridge";
+pub const JCODE_TOOL_PREFIX: &str = "cc_";
 
 // --------------------------------------------------------------------------
 // Protobuf Wire Primitives
@@ -276,18 +278,18 @@ pub fn decode_google_protobuf_value(bytes: &[u8], depth: usize) -> Result<Value>
 // McpToolDefinition & McpTools
 // --------------------------------------------------------------------------
 
-/// Derive standard wire name for an advertised tool (e.g. `mcp_jcode__bash`).
+/// Derive the `cc_` namespaced wire name used by Cursor's AgentService.
 pub fn mcp_wire_name(tool_name: &str) -> String {
-    if tool_name.starts_with("mcp_") {
+    if tool_name.starts_with(JCODE_TOOL_PREFIX) {
         tool_name.to_string()
     } else {
-        format!("mcp_{JCODE_TOOL_PROVIDER}__{tool_name}")
+        format!("{JCODE_TOOL_PREFIX}{tool_name}")
     }
 }
 
 /// Extract bare tool name from an advertised or inbound wire name.
 pub fn mcp_bare_name(wire_name: &str) -> &str {
-    if let Some(rest) = wire_name.strip_prefix(&format!("mcp_{JCODE_TOOL_PROVIDER}__")) {
+    if let Some(rest) = wire_name.strip_prefix(JCODE_TOOL_PREFIX) {
         rest
     } else if let Some((_, rest)) = wire_name.split_once("__") {
         rest
@@ -300,7 +302,7 @@ pub fn mcp_bare_name(wire_name: &str) -> &str {
 /// - field 1: name (string)
 /// - field 2: description (string)
 /// - field 3: input_schema (bytes, serialized google.protobuf.Value)
-/// - field 4: provider_identifier (string, "jcode")
+/// - field 4: provider_identifier (string, `ccbridge`)
 /// - field 5: tool_name (string, bare name)
 pub fn encode_mcp_tool_definition(def: &ToolDefinition) -> Result<Vec<u8>> {
     let wire_name = mcp_wire_name(&def.name);
@@ -848,10 +850,7 @@ pub fn encode_request_context_result(
     field_ld(2, &field_ld(10, &result))
 }
 
-pub fn encode_request_context(
-    system_prompt: &str,
-    cwd: &str,
-) -> Result<Vec<u8>> {
+pub fn encode_request_context(system_prompt: &str, cwd: &str) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     if !system_prompt.trim().is_empty() {
         let mut rule = field_str(1, "/jcode/system-prompt/0.mdc");
@@ -925,7 +924,7 @@ pub fn encode_kv_set_blob_ack(kv_id: u32) -> Vec<u8> {
 /// Encode an `AgentClientMessage.kv_client_message` response for a server-side
 /// blob read. The blob id is intentionally opaque and is never interpreted.
 pub fn encode_kv_get_blob_result(kv_id: u32, data: &[u8]) -> Vec<u8> {
-    let mut result = field_ld(1, data);
+    let result = field_ld(1, data);
     let mut client = Vec::new();
     if kv_id != 0 {
         client.extend(field_varint(1, kv_id as u64));

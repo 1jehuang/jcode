@@ -12,22 +12,18 @@
 //! * Connect streaming framing: each message is `[1 flag byte][4-byte BE len]
 //!   [payload]`. Flag `0x01` = payload gzip-compressed, `0x02` = end-of-stream
 //!   trailer (JSON, `{}` on success or `{"error":...}`).
-//! * The logical `RunInput` is split across several request frames, each
-//!   carrying a different top-level protobuf field:
-//!   - frame 0 = field 1 (`RunRequest`: prompt, model, model catalog),
-//!   - frame 1 = field 2 (environment/tool context),
-//!   - then a short sequence of small field-3/5/7 marker frames.
+//! * frame 0 = field 1 (`RunRequest`: prompt, model, MCP tools, catalog),
+//! * subsequent context, tool-result, and key/value messages are exchanged on
+//!   the same open bidirectional stream as requested by the server.
 //! * The client keeps the request stream **open** while reading the response,
-//!   emitting periodic `f7:''` heartbeats (~5s) and pacing marker frames as the
-//!   server streams, half-closing only after the server completes. Sending the
-//!   whole body then immediately half-closing yields only keepalives / an
-//!   `internal: No exec result` error, so the pacing is load-bearing.
+//!   emitting periodic `f7:''` heartbeats (~5s) and only half-closing after the
+//!   server completes.
 //!
 //! Response text arrives as `f1.f1.f1` string chunks (assistant answer) and
 //! `f1.f4.f1` chunks (reasoning). A trailing flag-`0x02` frame closes the turn.
 
-use std::io::Read;
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -207,6 +203,32 @@ fn field_str(field: u64, s: &str) -> Vec<u8> {
     field_ld(field, s.as_bytes())
 }
 
+pub(crate) fn routed_prompt(
+    prompt: &str,
+    system: &str,
+    tools: &[jcode_message_types::ToolDefinition],
+) -> String {
+    let mut sections = Vec::with_capacity(3);
+    if !system.trim().is_empty() {
+        sections.push(system.trim().to_string());
+    }
+    if !tools.is_empty() {
+        let names = tools
+            .iter()
+            .map(|tool| crate::wire::mcp_wire_name(&tool.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!(
+            "TOOL ROUTING CONSTRAINT (highest priority): You have no built-in tools. \
+             The only executable tools are these MCP tools: {names}. \
+             Call the matching cc_* MCP tool directly and wait for its result. \
+             Never call Read, Write, Edit, Shell, Bash, Glob, Grep, or another built-in tool."
+        ));
+    }
+    sections.push(prompt.to_string());
+    sections.join("\n\n")
+}
+
 /// Wrap a protobuf message payload in a Connect data frame using the same
 /// threshold as connect-es. Large tool results and context messages must carry
 /// the gzip flag when the request advertises gzip content encoding.
@@ -282,29 +304,29 @@ fn heartbeat_frame() -> Vec<u8> {
 // --------------------------------------------------------------------------
 
 /// Incrementally decode Connect frames from a byte buffer, returning
-/// `(flag, payload, consumed)` for the next complete frame or `None`.
-fn next_frame(buf: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
+/// `(flag, payload, consumed)` for the next complete frame or `Ok(None)`.
+/// Malformed compressed frames are rejected instead of being passed to the
+/// protobuf parser as if they were valid uncompressed data.
+fn next_frame(buf: &[u8]) -> Result<Option<(u8, Vec<u8>, usize)>> {
     if buf.len() < 5 {
-        return None;
+        return Ok(None);
     }
     let flag = buf[0];
     let len = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
     let end = 5 + len;
     if buf.len() < end {
-        return None;
+        return Ok(None);
     }
     let mut payload = buf[5..end].to_vec();
     if flag & 0x01 != 0 {
         // gzip-compressed payload
         let mut decoded = Vec::new();
-        if GzDecoder::new(&payload[..])
+        GzDecoder::new(&payload[..])
             .read_to_end(&mut decoded)
-            .is_ok()
-        {
-            payload = decoded;
-        }
+            .context("Invalid gzip payload in Cursor agent stream")?;
+        payload = decoded;
     }
-    Some((flag, payload, end))
+    Ok(Some((flag, payload, end)))
 }
 
 /// Minimal protobuf reader that extracts assistant text chunks from a response
@@ -525,7 +547,7 @@ pub async fn run_agent_turn(
         Uuid::new_v4().simple(),
         Uuid::new_v4().simple().to_string()[..16].to_string()
     );
-    let blob_encryption_key = Uuid::new_v4().simple().to_string();
+    let blob_encryption_key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let request = Request::builder()
         .method(Method::POST)
         .uri(format!("https://{host}{AGENT_PATH}"))
@@ -557,7 +579,8 @@ pub async fn run_agent_turn(
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<Vec<u8>>(32);
     let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let frames = build_run_frames(prompt, model, &cwd, tools, &request_id);
+    let prompt = routed_prompt(prompt, system, tools);
+    let frames = build_run_frames(&prompt, model, &cwd, tools, &request_id);
     let sender = tokio::spawn(async move {
         for (idx, frame) in frames.into_iter().enumerate() {
             if send_stream.send_data(Bytes::from(frame), false).is_err() {
@@ -669,7 +692,7 @@ pub async fn run_agent_turn(
         let chunk = next.context("Cursor agent response stream error")?;
         let _ = body.flow_control().release_capacity(chunk.len());
         pending.extend_from_slice(&chunk);
-        while let Some((flag, payload, consumed)) = next_frame(&pending) {
+        while let Some((flag, payload, consumed)) = next_frame(&pending)? {
             pending.drain(..consumed);
             if flag & 0x02 != 0 {
                 // end-of-stream trailer (JSON). Detect errors, then finish.
@@ -1101,7 +1124,7 @@ mod tests {
     #[test]
     fn frames_are_well_formed_connect_frames() {
         let frames = build_run_frames("hi", "composer-2.5", "/tmp", &[], "req");
-        assert!(frames.len() >= 4);
+        assert!(!frames.is_empty());
         for frame in &frames {
             assert!(frame.len() >= 5);
             let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
@@ -1160,7 +1183,7 @@ mod tests {
     fn next_frame_parses_uncompressed() {
         let payload = field_str(1, "hello");
         let frame = connect_frame(&payload);
-        let (flag, out, consumed) = next_frame(&frame).unwrap();
+        let (flag, out, consumed) = next_frame(&frame).unwrap().unwrap();
         assert_eq!(flag, 0);
         assert_eq!(consumed, frame.len());
         assert_eq!(out, payload);
