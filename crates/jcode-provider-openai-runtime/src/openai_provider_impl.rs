@@ -41,11 +41,13 @@ async fn try_rotate_openai_account(
         return None;
     }
 
-    jcode_base::auth::codex::set_active_account_override(Some(candidate.clone()));
-    let next = match jcode_base::auth::codex::load_oauth_credentials() {
+    // Load the alternate account directly. The stream already owns the
+    // request-scoped account gate, but changing the process-global override
+    // here would still affect provider probes or any caller that bypasses the
+    // MultiProvider guard.
+    let next = match jcode_base::auth::codex::load_credentials_for_account(&candidate) {
         Ok(next) => next,
         Err(error) => {
-            jcode_base::auth::codex::set_active_account_override(Some(current));
             jcode_base::logging::info(&format!(
                 "OpenAI stream account rotation could not load '{}': {}",
                 candidate, error
