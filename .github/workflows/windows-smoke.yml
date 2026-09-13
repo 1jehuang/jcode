@@ -1,8 +1,5 @@
 name: Windows Smoke
 
-env:
-  JCODE_CI: "1"
-
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  JCODE_CI: "1"
   CARGO_TERM_COLOR: always
   SCCACHE_GHA_ENABLED: "true"
 
