@@ -50,6 +50,7 @@ members = [
     "crates/jcode-provider-core",
     "crates/jcode-provider-protocol",
     "crates/jcode-provider-subprocess",
+    "crates/jcode-provider-extensions",
     "crates/jcode-schema-dialect",
     "crates/jcode-provider-bedrock",
     "crates/jcode-provider-anthropic",

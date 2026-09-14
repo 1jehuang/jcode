@@ -3705,6 +3705,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-extensions"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "jcode-provider-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "jcode-provider-gemini"
 version = "0.1.0"
 dependencies = [
@@ -3852,16 +3865,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "jcode-provider-subprocess"
-version = "0.1.0"
-dependencies = [
- "jcode-provider-protocol",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
