@@ -2,6 +2,9 @@
 name = "jcode-provider-protocol"
 version = "0.1.0"
 edition = "2024"
+description = "Versioned JSONL wire protocol for external jcode providers"
+license = "MIT"
+repository = "https://github.com/1jehuang/jcode"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
