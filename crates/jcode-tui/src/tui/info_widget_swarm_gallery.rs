@@ -309,7 +309,6 @@ pub(crate) fn render_swarm_plan_dag(
     topo_order.extend(remaining);
 
     // Build tree from topological order.
-    let mut root_nodes: Vec<DagNode> = Vec::new();
     let mut node_map: HashMap<&str, DagNode> = HashMap::new();
 
     for id in &topo_order {
@@ -380,15 +379,12 @@ pub(crate) fn render_swarm_plan_dag(
         if *line_count >= max_height {
             return;
         }
-        let connector = if node.item_id != prefix.trim_end_matches(['│', '├', '└', ' ']) && !prefix.is_empty()
-        {
-            if is_last {
-                format!("{prefix}└─ ")
-            } else {
-                format!("{prefix}├─ ")
-            }
-        } else {
+        let connector = if prefix.is_empty() {
             String::new()
+        } else if is_last {
+            format!("{prefix}└─ ")
+        } else {
+            format!("{prefix}├─ ")
         };
 
         let (color, bold) = if node.completed {
@@ -421,7 +417,7 @@ pub(crate) fn render_swarm_plan_dag(
         out.push(Line::from(spans));
         *line_count += 1;
 
-        let child_prefix = if node.item_id.is_empty() || prefix.is_empty() {
+        let child_prefix = if prefix.is_empty() {
             String::new()
         } else if is_last {
             format!("{prefix}   ")
