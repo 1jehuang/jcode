@@ -7,7 +7,8 @@
 use jcode_provider_protocol::{Frame, PROTOCOL_VERSION};
 use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MANIFEST_VERSION: u32 = 1;
 pub const REGISTRY_VERSION: u32 = 1;
 pub const DEFAULT_REGISTRY_FILE: &str = "providers.json";
+pub const PROVIDER_MANIFEST_FILE: &str = "provider.toml";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
@@ -58,6 +60,27 @@ pub enum ExtensionError {
     UntrustedProvider(String),
     #[error("provider process failed: {0}")]
     Process(#[from] AdapterError),
+    #[error("provider '{provider}' requests denied permission '{permission:?}'")]
+    PermissionDenied {
+        provider: String,
+        permission: Permission,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PermissionPolicy {
+    allowed: BTreeSet<Permission>,
+}
+
+impl PermissionPolicy {
+    pub fn allow(mut self, permission: Permission) -> Self {
+        self.allowed.insert(permission);
+        self
+    }
+
+    pub fn allows(&self, permission: &Permission) -> bool {
+        self.allowed.contains(permission)
+    }
 }
 
 /// A registered provider process with its completed protocol handshake.
@@ -73,6 +96,14 @@ pub struct ExternalProviderProcess {
 
 impl ExternalProviderProcess {
     pub async fn start(record: &ProviderRecord, client: &str) -> Result<Self, ExtensionError> {
+        Self::start_with_policy(record, client, &PermissionPolicy::default()).await
+    }
+
+    pub async fn start_with_policy(
+        record: &ProviderRecord,
+        client: &str,
+        policy: &PermissionPolicy,
+    ) -> Result<Self, ExtensionError> {
         if !record.enabled {
             return Err(ExtensionError::DisabledProvider(record.manifest.id.clone()));
         }
@@ -82,11 +113,23 @@ impl ExternalProviderProcess {
             ));
         }
         record.manifest.validate()?;
-        let transport = SubprocessProvider::spawn(
+        for permission in &record.manifest.permissions {
+            if !policy.allows(permission) {
+                return Err(ExtensionError::PermissionDenied {
+                    provider: record.manifest.id.clone(),
+                    permission: permission.clone(),
+                });
+            }
+        }
+        let transport = SubprocessProvider::spawn_with_config(
             &record.manifest.executable,
             &record.manifest.args,
             client,
             record.manifest.capabilities.clone(),
+            jcode_provider_subprocess::SubprocessConfig {
+                environment: Some(minimal_environment()),
+                ..Default::default()
+            },
         )
         .await?;
         let handshake = transport.handshake().await?;
@@ -124,6 +167,75 @@ impl ExternalProviderProcess {
     pub async fn kill(&self) -> Result<(), ExtensionError> {
         Ok(self.transport.kill().await?)
     }
+}
+
+fn minimal_environment() -> Vec<(OsString, OsString)> {
+    let mut environment = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        environment.push((OsString::from("PATH"), path));
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        environment.push((OsString::from("SystemRoot"), system_root));
+    }
+    environment
+}
+
+/// Return deterministic user and project discovery locations. Discovery is
+/// explicit and never executes a provider by itself.
+pub fn provider_directories() -> Result<Vec<PathBuf>, ExtensionError> {
+    let user_root = if let Some(home) = std::env::var_os("JCODE_HOME") {
+        PathBuf::from(home).join("providers")
+    } else {
+        let config = dirs::config_dir()
+            .ok_or_else(|| ExtensionError::Path("no platform config directory".to_string()))?;
+        config.join("jcode").join("providers")
+    };
+    let project_root = std::env::current_dir()
+        .map_err(|error| {
+            ExtensionError::Path(format!("cannot resolve current directory: {error}"))
+        })?
+        .join(".jcode")
+        .join("providers");
+    Ok(vec![user_root, project_root])
+}
+
+/// Find provider manifests in the standard directories without loading or
+/// executing them. Results are sorted for stable CLI and doctor output.
+pub fn discover_manifest_files() -> Result<Vec<PathBuf>, ExtensionError> {
+    discover_manifest_files_in(&provider_directories()?)
+}
+
+fn discover_manifest_files_in(directories: &[PathBuf]) -> Result<Vec<PathBuf>, ExtensionError> {
+    let mut manifests = Vec::new();
+    for directory in directories {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(ExtensionError::Read {
+                    path: directory.to_path_buf(),
+                    source,
+                });
+            }
+        };
+        for entry in entries {
+            let entry = entry.map_err(|source| ExtensionError::Read {
+                path: directory.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                let manifest = path.join(PROVIDER_MANIFEST_FILE);
+                if manifest.is_file() {
+                    manifests.push(manifest);
+                }
+            }
+        }
+    }
+    manifests.sort();
+    manifests.dedup();
+    Ok(manifests)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -499,6 +611,25 @@ permissions = ["network"]
         assert_eq!(registry.list().count(), 0);
     }
 
+    #[test]
+    fn discovery_is_sorted_and_does_not_require_registration() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("z-provider");
+        let second = dir.path().join("a-provider");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::write(first.join(PROVIDER_MANIFEST_FILE), "id = 'z'").unwrap();
+        fs::write(second.join(PROVIDER_MANIFEST_FILE), "id = 'a'").unwrap();
+        let discovered = discover_manifest_files_in(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            discovered,
+            vec![
+                second.join(PROVIDER_MANIFEST_FILE),
+                first.join(PROVIDER_MANIFEST_FILE)
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn trusted_enabled_record_starts_and_collects_a_request() {
         let script = concat!(
@@ -513,6 +644,7 @@ permissions = ["network"]
         let mut provider = manifest("fixture");
         provider.executable = PathBuf::from("python3");
         provider.args = vec!["-c".to_string(), script.to_string()];
+        provider.permissions.clear();
         let record = ProviderRecord {
             manifest: provider,
             source: None,
@@ -533,5 +665,32 @@ permissions = ["network"]
             Some(Frame::Response { id, ok: true, .. }) if id == "request-1"
         ));
         process.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_untrusted_and_denied_records_do_not_start() {
+        let mut record = ProviderRecord {
+            manifest: manifest("fixture"),
+            source: None,
+            trusted: false,
+            enabled: true,
+            registered_at: 0,
+        };
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::UntrustedProvider(_))
+        ));
+        record.trusted = true;
+        record.enabled = false;
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::DisabledProvider(_))
+        ));
+        record.enabled = true;
+        record.manifest.permissions = vec![Permission::Network];
+        assert!(matches!(
+            ExternalProviderProcess::start(&record, "jcode-test").await,
+            Err(ExtensionError::PermissionDenied { .. })
+        ));
     }
 }

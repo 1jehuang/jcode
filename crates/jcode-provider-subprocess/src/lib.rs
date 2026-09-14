@@ -3,9 +3,7 @@ use jcode_provider_protocol::{
     negotiate_capabilities,
 };
 use serde_json::Value;
-use std::ffi::OsStr;
-#[cfg(test)]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -20,6 +18,9 @@ pub struct SubprocessConfig {
     pub max_frame_size: usize,
     pub handshake_timeout: Duration,
     pub request_timeout: Duration,
+    /// When set, replace the inherited environment with exactly these values.
+    /// `None` preserves the legacy behavior for direct adapter callers.
+    pub environment: Option<Vec<(OsString, OsString)>>,
 }
 
 impl Default for SubprocessConfig {
@@ -28,6 +29,7 @@ impl Default for SubprocessConfig {
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            environment: None,
         }
     }
 }
@@ -105,6 +107,10 @@ impl SubprocessProvider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(environment) = &config.environment {
+            command.env_clear();
+            command.envs(environment.iter().map(|(key, value)| (key, value)));
+        }
         let mut child = command.spawn()?;
         let stdin = child
             .stdin
@@ -382,5 +388,47 @@ mod tests {
             provider.next().await,
             Err(AdapterError::Protocol(ProtocolError::TooLarge))
         ));
+    }
+
+    #[tokio::test]
+    async fn explicit_environment_does_not_leak_parent_variables() {
+        let script = concat!(
+            "import json,os,sys\n",
+            "for line in sys.stdin:\n",
+            " f=json.loads(line)\n",
+            " if f['kind']=='hello':\n",
+            "  print(json.dumps({'kind':'hello_ok','protocol_version':'0.1','provider':{'id':'env','name':'Env','version':'1'},'capabilities':[]}),flush=True)\n",
+            " elif f['kind']=='request':\n",
+            "  print(json.dumps({'kind':'response','protocol_version':'0.1','id':f['id'],'ok':True,'result':{'has_home':'HOME' in os.environ,'has_path':'PATH' in os.environ}}),flush=True)\n",
+        );
+        let environment = std::env::var_os("PATH")
+            .map(|path| vec![(OsString::from("PATH"), path)])
+            .unwrap_or_default();
+        let provider = SubprocessProvider::spawn_with_config(
+            "python3",
+            &["-c", script],
+            "test",
+            vec![],
+            SubprocessConfig {
+                environment: Some(environment),
+                ..SubprocessConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        provider.handshake().await.unwrap();
+        let frames = provider
+            .request_and_collect("env-check", "complete", serde_json::json!({}))
+            .await
+            .unwrap();
+        let Some(Frame::Response {
+            result: Some(result),
+            ..
+        }) = frames.last()
+        else {
+            panic!("expected response result");
+        };
+        assert_eq!(result["has_home"], false);
+        assert_eq!(result["has_path"], true);
     }
 }

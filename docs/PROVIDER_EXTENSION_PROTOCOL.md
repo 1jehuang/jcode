@@ -40,9 +40,23 @@ Unknown capabilities are ignored for forward compatibility.
   partially read stream.
 - Kill the child when the adapter is dropped or a session is cancelled by the
   application.
-- Never put secrets in frame payloads or logs unless the provider contract
-  explicitly requires them.
+- The extension runtime starts providers with a minimal environment containing
+  `PATH` (and `SystemRoot` on Windows), rather than forwarding the parent
+  process environment. Future credentials must be passed through an explicit,
+  reviewed mechanism instead of inheriting secrets.
 
+The repository also includes a small reference executable at
+`crates/jcode-provider-protocol/examples/fixture_provider.rs`. It is useful for
+smoke testing a non-Rust provider boundary and demonstrates the required
+handshake, streaming event, response, and cancellation exchange:
+
+```sh
+cargo run -p jcode-provider-protocol --example fixture_provider
+```
+
+The fixture uses only the public protocol crate and never links to application
+internals. External providers can use it as a conformance reference without
+adopting jcode's implementation details.
 ## Reference adapter
 
 `jcode-provider-subprocess::SubprocessProvider` launches a provider, sends the
