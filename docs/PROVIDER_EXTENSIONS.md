@@ -73,7 +73,17 @@ Discovery helpers recognize these locations without executing anything:
 Explicit registration is preferred during the initial rollout. Automatic
 discovery must not silently trust or start a provider.
 
-## Upgrade and compatibility policy
+## Application integration boundary
+
+The initial release keeps external IDs out of the built-in `--provider` enum and
+uses `provider extension run` as an explicit, permission-gated routing seam.
+This avoids coupling the stable CLI provider catalog to third-party manifests.
+A future first-class session integration should add a capability-based adapter
+registry that resolves external IDs separately, preserves the existing built-in
+provider enum, and maps protocol events into the common provider event stream.
+That work should land behind compatibility tests for handshake, streaming,
+tool events, cancellation, and provider replacement.
+
 
 Provider identity is the manifest `id`, not the executable path or version.
 Changing the executable version while preserving the ID keeps user selection
