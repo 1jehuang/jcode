@@ -377,19 +377,12 @@ impl App {
     /// `/usage` can show per-login spend (today / month / all-time). Only ever
     /// called from the billed-per-token paths, so every dollar recorded here
     /// is real API-key spend rather than subscription usage.
+    ///
+    /// The cost is recorded in the currency its rate card is denominated in:
+    /// the ledger keeps one bucket per currency, so a CNY call lands in a CNY
+    /// bucket rather than being mislabelled as USD.
     fn record_api_key_spend(&self, call_cost: f32, currency: &Currency) {
         if !call_cost.is_finite() || call_cost <= 0.0 {
-            return;
-        }
-        if !currency.is_usd() {
-            // The activity ledger still keeps a single USD bucket per window
-            // (multi-currency buckets land with the ledger work). Writing an
-            // amount in another currency into that bucket would misstate both
-            // and could not be untangled afterwards, so the spend is left out
-            // of the ledger until it can be recorded as its own currency.
-            crate::logging::debug(&format!(
-                "not recording {call_cost} {currency}: the activity ledger is USD-only"
-            ));
             return;
         }
         use crate::tui::TuiState;
@@ -398,9 +391,10 @@ impl App {
         let source_key =
             crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref());
         let cost = call_cost as f64;
+        let currency = currency.clone();
         // Ledger writes hit the filesystem; never block the render/input loop.
         std::thread::spawn(move || {
-            crate::provider_activity::record_spend(&source_key, cost);
+            crate::provider_activity::record_spend(&source_key, cost, &currency);
         });
     }
 
