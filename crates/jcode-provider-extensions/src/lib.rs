@@ -507,9 +507,12 @@ impl ProviderRegistry {
         let mut encoded = bytes;
         encoded.push(b'\n');
 
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
         let temp = self
             .path
-            .with_extension(format!("json.tmp.{}", std::process::id()));
+            .with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
         fs::write(&temp, encoded).map_err(|source| ExtensionError::Write {
             path: temp.clone(),
             source,
