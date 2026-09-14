@@ -99,7 +99,8 @@ fn compact_messages(messages: &mut [StoredMessage]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jcode_session_types::{Role, StoredMessage};
+    use jcode_message_types::Role;
+    use jcode_session_types::StoredMessage;
 
     fn tool_use_msg(id: &str, name: &str) -> StoredMessage {
         StoredMessage {

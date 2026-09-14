@@ -788,9 +788,17 @@ impl AmbientRunnerHandle {
                     // Auto-dream: evaluate memory consolidation gates (fire-and-forget)
                     {
                         let total_cycles = s.total_cycles;
-                        if let Ok(data_dir) = crate::storage::jcode_dir() {
-                            ambient::auto_dream::maybe_dream(data_dir, total_cycles);
-                        }
+                        let dream_provider = provider.clone();
+                        tokio::spawn(async move {
+                            if let Ok(data_dir) = crate::storage::jcode_dir() {
+                                ambient::auto_dream::maybe_dream(
+                                    data_dir,
+                                    total_cycles,
+                                    dream_provider,
+                                )
+                                .await;
+                            }
+                        });
                     }
                 }
                 Err(e) => {
