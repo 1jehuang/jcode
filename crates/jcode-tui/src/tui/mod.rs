@@ -1056,6 +1056,14 @@ pub trait TuiState {
     fn swarm_filter_query(&self) -> &str {
         ""
     }
+    /// Whether the swarm panel rename input is active (user pressed `r`).
+    fn swarm_rename_active(&self) -> bool {
+        false
+    }
+    /// The current rename buffer typed into the swarm panel.
+    fn swarm_rename_buffer(&self) -> &str {
+        ""
+    }
     /// Indices of agents selected for batch operations (multi-select via Space).
     fn swarm_selected_set(&self) -> &std::collections::HashSet<usize> {
         // Return a static empty set as default; overridden by App impl.

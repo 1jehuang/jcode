@@ -1485,6 +1485,10 @@ pub struct App {
     swarm_batch_mode: bool,
     // Indices of agents selected in batch mode.
     swarm_selected_agents: std::collections::HashSet<usize>,
+    // Whether the swarm panel rename input is active (user pressed `r`).
+    swarm_rename_active: bool,
+    // Text typed into the swarm panel rename input.
+    swarm_rename_buffer: String,
     // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)

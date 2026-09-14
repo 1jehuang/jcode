@@ -172,15 +172,15 @@ fn main() {
     ];
     print_lines(
         "PANEL: 4 agents, selected #1 (implementer), focused @ width 70 h 14",
-        &render_swarm_panel(&panel_members, 1, true, 70, 14),
+        &render_swarm_panel(&panel_members, 1, true, 70, 14, None),
     );
     print_lines(
         "PANEL: 4 agents, selected #0, unfocused @ width 70 h 14",
-        &render_swarm_panel(&panel_members, 0, false, 70, 14),
+        &render_swarm_panel(&panel_members, 0, false, 70, 14, None),
     );
     print_lines(
         "PANEL: narrow @ width 44 h 12",
-        &render_swarm_panel(&panel_members, 2, true, 44, 12),
+        &render_swarm_panel(&panel_members, 2, true, 44, 12, None),
     );
 
     // ---- New compact strip (above status line) ----

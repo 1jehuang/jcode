@@ -145,7 +145,7 @@ fn panel_never_panics_across_degenerate_inputs() {
             for max_height in 0..=16 {
                 for selected in [0usize, 1, 5, usize::MAX] {
                     for focused in [false, true] {
-                        let _ = render_swarm_panel(&members, selected, focused, width, max_height);
+                        let _ = render_swarm_panel(&members, selected, focused, width, max_height, None);
                     }
                 }
             }
@@ -162,7 +162,7 @@ fn panel_lines_respect_width_bound() {
         }
         for width in 8..=60 {
             for max_height in 3..=16 {
-                let lines = render_swarm_panel(&members, 0, true, width, max_height);
+                let lines = render_swarm_panel(&members, 0, true, width, max_height, None);
                 for line in &lines {
                     let text = plain(line);
                     let w = text.as_str().width();
@@ -322,8 +322,8 @@ fn panel_focused_vs_unfocused() {
     let width = 60;
     let max_height = 14;
 
-    let focused = render_swarm_panel(&members, 0, true, width, max_height);
-    let unfocused = render_swarm_panel(&members, 0, false, width, max_height);
+    let focused = render_swarm_panel(&members, 0, true, width, max_height, None);
+    let unfocused = render_swarm_panel(&members, 0, false, width, max_height, None);
 
     // Both should produce lines
     assert!(!focused.is_empty(), "focused panel must produce lines");
@@ -347,11 +347,11 @@ fn panel_focused_vs_unfocused() {
     );
 
     // Panel with no members returns empty
-    assert!(render_swarm_panel(&[], 0, true, 60, 14).is_empty());
+    assert!(render_swarm_panel(&[], 0, true, 60, 14, None).is_empty());
     // Panel with width < 8 returns empty
-    assert!(render_swarm_panel(&members, 0, true, 4, 14).is_empty());
+    assert!(render_swarm_panel(&members, 0, true, 4, 14, None).is_empty());
     // Panel with max_height < 3 returns empty
-    assert!(render_swarm_panel(&members, 0, true, 60, 2).is_empty());
+    assert!(render_swarm_panel(&members, 0, true, 60, 2, None).is_empty());
 }
 
 #[test]

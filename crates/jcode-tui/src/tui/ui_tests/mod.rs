@@ -171,6 +171,8 @@ struct TestState {
     swarm_panel_full_page: bool,
     swarm_filter_active: bool,
     swarm_filter_query: String,
+    swarm_rename_active: bool,
+    swarm_rename_buffer: String,
 }
 
 impl crate::tui::TuiState for TestState {
@@ -366,6 +368,12 @@ impl crate::tui::TuiState for TestState {
     }
     fn swarm_filter_query(&self) -> &str {
         &self.swarm_filter_query
+    }
+    fn swarm_rename_active(&self) -> bool {
+        self.swarm_rename_active
+    }
+    fn swarm_rename_buffer(&self) -> &str {
+        &self.swarm_rename_buffer
     }
     fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         let members = self.swarm_members.clone();

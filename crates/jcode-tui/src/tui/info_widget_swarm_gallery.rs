@@ -822,6 +822,7 @@ pub(crate) fn render_swarm_panel_lines(
     focused: bool,
     width: usize,
     max_height: usize,
+    rename_hint: Option<&str>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() {
         return Vec::new();
@@ -832,6 +833,7 @@ pub(crate) fn render_swarm_panel_lines(
         focused,
         width,
         max_height,
+        rename_hint,
     )
 }
 
@@ -848,33 +850,40 @@ pub(crate) fn render_swarm_panel_lines(
 /// focused strip (chips + expanded hovered-agent detail + hints).
 /// Summary line with optional batch mode info appended.
 fn summary_line_with_batch(
-    total: usize,
-    active: usize,
-    todos_done: u32,
-    todos_total: u32,
-    max_elapsed: u64,
+    members: &[GalleryMember],
     width: usize,
     batch_info: &str,
 ) -> Line<'static> {
-    let elapsed_text = if max_elapsed < 60 {
-        format!("{}s", max_elapsed)
-    } else {
-        format!("{}m {}s", max_elapsed / 60, max_elapsed % 60)
-    };
-    let tasks_text = format!("{}/{} tasks", todos_done, todos_total);
-    let body = format!(
-        "{total}{} agents · {active} active · {tasks_text} · {elapsed_text}{}",
-        if total == 1 { "" } else { "s" },
-        batch_info,
-    );
-    // Use unicode-width for display width (available via ratatui re-exports).
-    let body_w = unicode_width::UnicodeWidthStr::width(body.as_str());
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if body_w < width {
-        spans.push(Span::raw(" ".repeat(width - body_w)));
+    let total = members.len();
+    let active = members
+        .iter()
+        .filter(|m| is_active_status(&m.status))
+        .count();
+    let mut todos_done = 0u32;
+    let mut todos_total = 0u32;
+    let mut max_elapsed = 0u64;
+    for member in members {
+        if let Some((done, tot)) = member.todo {
+            todos_done = todos_done.saturating_add(done);
+            todos_total = todos_total.saturating_add(tot);
+        }
+        max_elapsed = max_elapsed.max(member.elapsed_secs.unwrap_or(0));
     }
+    let inner = jcode_tui_render::swarm_gallery::summary_line(
+        total,
+        active,
+        todos_done,
+        todos_total,
+        max_elapsed,
+        width,
+    );
+    if batch_info.is_empty() {
+        return inner;
+    }
+    // Append batch info after the right-aligned summary.
+    let mut spans = inner.spans;
     spans.push(Span::styled(
-        body,
+        batch_info.to_string(),
         Style::default().fg(jcode_tui_style::color::rgb(105, 105, 120)),
     ));
     Line::from(spans)
@@ -1001,24 +1010,6 @@ pub(crate) fn render_swarm_strip_lines(
     };
     // ---- Aggregate summary bar (focused only) ----
     if focused {
-        let total = members.len();
-        let active = members
-            .iter()
-            .filter(|m| is_active_status(&m.status))
-            .count();
-        let mut todos_done: u32 = 0;
-        let mut todos_total: u32 = 0;
-        for m in members {
-            if let Some((done, total)) = m.todo_progress {
-                todos_done += done;
-                todos_total += total;
-            }
-        }
-        let max_elapsed = members
-            .iter()
-            .filter_map(|m| m.runtime.elapsed_secs)
-            .max()
-            .unwrap_or(0);
         // Insert summary before the last line (hint) so it sits between the
         // detail viewport and the keybinding hints.
         let pos = out.len().saturating_sub(1);
@@ -1029,7 +1020,8 @@ pub(crate) fn render_swarm_strip_lines(
         } else {
             String::new()
         };
-        out.insert(pos, summary_line_with_batch(total, active, todos_done, todos_total, max_elapsed, width, &batch_info));
+        let gallery = members_to_gallery(members);
+        out.insert(pos, summary_line_with_batch(&gallery, width, &batch_info));
     }
     out
 }

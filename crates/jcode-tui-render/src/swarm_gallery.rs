@@ -604,6 +604,7 @@ pub fn render_swarm_panel(
     focused: bool,
     width: usize,
     max_height: usize,
+    rename_hint: Option<&str>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 || max_height < 3 {
         return Vec::new();
@@ -622,12 +623,17 @@ pub fn render_swarm_panel(
     out.push(panel_header(members.len(), active, focused));
 
     // Reserve at least 3 lines for the detail viewport when there is room.
+    // The rename input line, when active, takes one row out of the budget.
+    let rename_budget = if rename_hint.is_some() { 1 } else { 0 };
     let detail_budget = if max_height >= 7 {
-        (max_height / 2).max(3)
+        ((max_height.saturating_sub(rename_budget)) / 2).max(3)
     } else {
         0
     };
-    let list_budget = max_height.saturating_sub(1).saturating_sub(detail_budget);
+    let list_budget = max_height
+        .saturating_sub(1)
+        .saturating_sub(detail_budget)
+        .saturating_sub(rename_budget);
 
     // ---- Agent list ----
     let list_rows = list_budget.min(ordered.len());
@@ -652,6 +658,25 @@ pub fn render_swarm_panel(
     {
         let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget, focused);
         out.extend(detail);
+    }
+
+    // ---- Rename input line ----
+    if let Some(buffer) = rename_hint {
+        let cursor = "▌";
+        let label = format!("Rename: {buffer}{cursor}");
+        let label_w = unicode_width::UnicodeWidthStr::width(label.as_str());
+        let mut spans = vec![Span::styled(
+            label,
+            Style::default().fg(rgb(200, 200, 210)),
+        )];
+        // Pad to the panel width so the row reads as an input field.
+        if label_w < width {
+            spans.push(Span::styled(
+                " ".repeat(width - label_w),
+                Style::default().fg(rgb(60, 60, 70)),
+            ));
+        }
+        out.push(Line::from(spans));
     }
 
     // Hard bound: the header carries a fixed hint and list rows budget by

@@ -2140,6 +2140,12 @@ impl crate::tui::TuiState for App {
     fn swarm_filter_query(&self) -> &str {
         &self.swarm_filter_query
     }
+    fn swarm_rename_active(&self) -> bool {
+        self.swarm_rename_active
+    }
+    fn swarm_rename_buffer(&self) -> &str {
+        &self.swarm_rename_buffer
+    }
     fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
         let members = self.inline_swarm_members();
         if self.swarm_filter_query.is_empty() {
@@ -2499,7 +2505,7 @@ impl App {
         if !self.swarm_panel_focused || !self.inline_swarm_gallery_active() {
             return false;
         }
-        match swarm_panel_action_for_key(code, modifiers, self.swarm_filter_active, self.swarm_batch_mode) {
+        match swarm_panel_action_for_key(code, modifiers, self.swarm_filter_active, self.swarm_batch_mode, self.swarm_rename_active) {
             Some(SwarmPanelAction::SelectNext) => {
                 self.move_swarm_panel_selection(1);
                 true
@@ -2601,6 +2607,48 @@ impl App {
                     self.swarm_selected_agents.clear();
                     true
                 }
+            }
+            Some(SwarmPanelAction::StartRename) => {
+                let members = self.filtered_swarm_members();
+                if !members.is_empty() {
+                    self.swarm_rename_active = true;
+                    self.swarm_rename_buffer.clear();
+                    // Pre-fill with current label
+                    let ordered = crate::tui::info_widget::swarm_gallery::members_display_order(&members);
+                    let idx = self.swarm_panel_selected.min(ordered.len().saturating_sub(1));
+                    if let Some(session_id) = ordered.get(idx) {
+                        if let Some(member) = members.iter().find(|m| &m.session_id == session_id) {
+                            self.swarm_rename_buffer = member
+                                .friendly_name
+                                .clone()
+                                .unwrap_or_else(|| member.session_id.chars().take(8).collect());
+                        }
+                    }
+                }
+                true
+            }
+            Some(SwarmPanelAction::RenameChar(c)) => {
+                self.swarm_rename_buffer.push(c);
+                true
+            }
+            Some(SwarmPanelAction::RenameBackspace) => {
+                self.swarm_rename_buffer.pop();
+                true
+            }
+            Some(SwarmPanelAction::RenameConfirm) => {
+                let new_label = self.swarm_rename_buffer.clone();
+                self.swarm_rename_active = false;
+                self.swarm_rename_buffer.clear();
+                // TODO: Send rename command to swarm coordinator
+                // SwarmCommand::RenameAgent { session_id, new_label }
+                let _ = new_label;
+                self.set_status_notice("Rename sent (TODO: wire to swarm coordinator)");
+                true
+            }
+            Some(SwarmPanelAction::RenameEscape) => {
+                self.swarm_rename_active = false;
+                self.swarm_rename_buffer.clear();
+                true
             }
             Some(SwarmPanelAction::Exit) => {
                 self.swarm_panel_focused = false;
@@ -2879,6 +2927,12 @@ pub(crate) enum SwarmPanelAction {
     FilterBackspace,
     FilterConfirm,
     FilterEscape,
+    /// Start renaming the selected agent's label (r, not in batch mode).
+    StartRename,
+    RenameChar(char),
+    RenameBackspace,
+    RenameConfirm,
+    RenameEscape,
 }
 
 /// Map a key to a focused-swarm-panel action.
@@ -2889,6 +2943,7 @@ pub(crate) enum SwarmPanelAction {
 /// - Space: toggle multi-select on the focused agent
 /// - Shift+Tab: toggle batch mode
 /// - In batch mode: s=stop, r=restart, p=prompt for all selected agents
+/// - r (not batch): start renaming the selected agent
 /// - Alt+↑ / Alt+↓ (also Alt+k / Alt+j): move the selection
 /// - Alt+o / Alt+Enter: pop the selected agent out to a terminal
 /// - Alt+Shift+p: open the active swarm routing prompt in the editor
@@ -2898,6 +2953,7 @@ pub(crate) fn swarm_panel_action_for_key(
     modifiers: crossterm::event::KeyModifiers,
     filter_active: bool,
     batch_mode: bool,
+    rename_active: bool,
 ) -> Option<SwarmPanelAction> {
     use crossterm::event::{KeyCode, KeyModifiers};
     if filter_active {
@@ -2909,6 +2965,19 @@ pub(crate) fn swarm_panel_action_for_key(
                 && !modifiers.contains(KeyModifiers::ALT) =>
             {
                 Some(SwarmPanelAction::FilterChar(c))
+            }
+            _ => None,
+        };
+    }
+    if rename_active {
+        return match code {
+            KeyCode::Esc if modifiers.is_empty() => Some(SwarmPanelAction::RenameEscape),
+            KeyCode::Enter if modifiers.is_empty() => Some(SwarmPanelAction::RenameConfirm),
+            KeyCode::Backspace => Some(SwarmPanelAction::RenameBackspace),
+            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                Some(SwarmPanelAction::RenameChar(c))
             }
             _ => None,
         };
@@ -2935,6 +3004,10 @@ pub(crate) fn swarm_panel_action_for_key(
             KeyCode::Char('p') if modifiers.is_empty() => Some(SwarmPanelAction::BatchPrompt),
             _ => None,
         };
+    }
+    // r (not batch mode) starts renaming the selected agent's label.
+    if code == KeyCode::Char('r') && modifiers.is_empty() {
+        return Some(SwarmPanelAction::StartRename);
     }
     let alt = modifiers.contains(KeyModifiers::ALT);
     // macOS Option+letter often arrives as a transformed glyph with no ALT

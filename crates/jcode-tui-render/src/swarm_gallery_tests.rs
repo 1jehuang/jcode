@@ -150,7 +150,7 @@ fn plain_line(line: &Line<'_>) -> String {
 
 #[test]
 fn panel_empty_renders_nothing() {
-    assert!(render_swarm_panel(&[], 0, true, 60, 12).is_empty());
+    assert!(render_swarm_panel(&[], 0, true, 60, 12, None).is_empty());
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn panel_lists_all_agents_and_is_width_bounded() {
         member("implementer", "running", None, &["building", "· 3s ago"]),
         member("reviewer", "done", None, &["LGTM", "· 1m ago"]),
     ];
-    let lines = render_swarm_panel(&members, 0, true, 70, 14);
+    let lines = render_swarm_panel(&members, 0, true, 70, 14, None);
     assert!(!lines.is_empty());
     for line in &lines {
         assert!(line.width() <= 70, "line too wide: {}", plain_line(line));
@@ -182,7 +182,7 @@ fn panel_marks_selected_row() {
         member("b", "running", None, &[]),
     ];
     // After sort, coordinator "a" is index 0; selecting 1 marks "b".
-    let lines = render_swarm_panel(&members, 1, true, 60, 14);
+    let lines = render_swarm_panel(&members, 1, true, 60, 14, None);
     let selected_row = lines
         .iter()
         .map(plain_line)
@@ -197,7 +197,7 @@ fn panel_detail_shows_selected_agent_body() {
         member("a", "running", Some("coordinator"), &["alpha work"]),
         member("b", "running", None, &["beta output here"]),
     ];
-    let lines = render_swarm_panel(&members, 1, true, 60, 14);
+    let lines = render_swarm_panel(&members, 1, true, 60, 14, None);
     let joined: String = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
     // The detail viewport (bordered box) shows the selected agent's tail.
     assert!(joined.contains("beta output here"), "got:\n{joined}");
@@ -212,15 +212,15 @@ fn panel_detail_shows_selected_agent_body() {
 fn panel_clamps_out_of_range_selection() {
     let members = vec![member("only", "running", None, &["x"])];
     // selected far beyond range must not panic and still render.
-    let lines = render_swarm_panel(&members, 99, true, 40, 12);
+    let lines = render_swarm_panel(&members, 99, true, 40, 12, None);
     assert!(!lines.is_empty());
 }
 
 #[test]
 fn panel_focus_hint_only_when_focused() {
     let members = vec![member("a", "running", None, &[])];
-    let focused = plain_line(&render_swarm_panel(&members, 0, true, 60, 12)[0]);
-    let unfocused = plain_line(&render_swarm_panel(&members, 0, false, 60, 12)[0]);
+    let focused = plain_line(&render_swarm_panel(&members, 0, true, 60, 12, None)[0]);
+    let unfocused = plain_line(&render_swarm_panel(&members, 0, false, 60, 12, None)[0]);
     assert!(focused.contains("pop out"), "got: {focused}");
     assert!(!unfocused.contains("pop out"), "got: {unfocused}");
 }
@@ -923,7 +923,7 @@ fn panel_is_display_width_bounded_with_wide_labels() {
     for width in 8..=80 {
         for focused in [false, true] {
             for lines in [
-                render_swarm_panel(&members, 0, focused, width, 14),
+                render_swarm_panel(&members, 0, focused, width, 14, None),
                 render_gallery(&members, width, 12, None),
             ] {
                 for line in &lines {
@@ -965,7 +965,7 @@ fn degenerate_sizes_and_large_member_counts_do_not_panic() {
         for width in [0usize, 1, 2, 7, 8, 9, 40] {
             for height in [0usize, 1, 2, 3, 7, 20] {
                 let _ = render_gallery(&members, width, height, None);
-                let _ = render_swarm_panel(&members, count + 5, true, width, height);
+                let _ = render_swarm_panel(&members, count + 5, true, width, height, None);
                 let _ = render_swarm_strip(
                     &members,
                     count + 5,
