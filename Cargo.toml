@@ -33,6 +33,8 @@ members = [
     "crates/jcode-permission-bubble",
     "crates/jcode-session-memory",
     "crates/jcode-tool-search",
+    "crates/jcode-terminal-detect",
+    "crates/jcode-shell-integration",
     "crates/jcode-core",
     "crates/jcode-fuzzy",
     "crates/jcode-harness-api",

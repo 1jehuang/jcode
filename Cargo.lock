@@ -3703,8 +3703,10 @@ dependencies = [
  "jcode-session-memory",
  "jcode-session-types",
  "jcode-setup-hints",
+ "jcode-shell-integration",
  "jcode-swarm-core",
  "jcode-task-types",
+ "jcode-terminal-detect",
  "jcode-tool-core",
  "jcode-tool-search",
  "jcode-tool-types",
@@ -4595,6 +4597,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-shell-integration"
+version = "0.1.0"
+
+[[package]]
 name = "jcode-side-panel-types"
 version = "0.1.0"
 dependencies = [
@@ -4653,6 +4659,10 @@ dependencies = [
  "uuid",
  "walkdir",
 ]
+
+[[package]]
+name = "jcode-terminal-detect"
+version = "0.1.0"
 
 [[package]]
 name = "jcode-terminal-image"
