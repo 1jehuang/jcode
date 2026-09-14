@@ -794,12 +794,15 @@ pub(in crate::tui::app) fn handle_server_event(
                     .saturating_add(output);
                 // The server only reports tokens, never a dollar cost, so the
                 // remote client prices each completed call itself. This is the
-                // first usage snapshot for this call, so bill the full counts.
+                // first usage snapshot for this call, so bill the full counts
+                // and let this instant decide the call's tariff (F15); later
+                // deltas of the same call reuse the card pinned here (F16).
                 app.accrue_remote_call_cost(
                     input,
                     output,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+                    std::time::SystemTime::now(),
                 );
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
@@ -837,6 +840,8 @@ pub(in crate::tui::app) fn handle_server_event(
                         .streaming_cache_creation_tokens
                         .unwrap_or(0)
                         .saturating_sub(previous_cache_creation.unwrap_or(0)),
+                    // Ignored: this call's card was pinned by its first snapshot.
+                    std::time::SystemTime::now(),
                 );
 
                 let had_cache_telemetry =
@@ -1796,8 +1801,10 @@ pub(in crate::tui::app) fn handle_server_event(
                 // Token totals are restored from history above, but the dollar
                 // cost was never reconstructed, so resumed sessions showed `$0`
                 // in the cost widget until a new call happened. Price the
-                // restored totals once to seed the displayed cost.
-                app.seed_cost_from_history_totals(&totals);
+                // restored totals once to seed the displayed cost, at the
+                // instant the snapshot arrives: history carries no per-call
+                // instant of its own (F15).
+                app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
             }
             if let Some(totals) = token_usage_totals {
                 crate::logging::info(&format!(

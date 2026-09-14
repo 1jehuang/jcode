@@ -22,11 +22,16 @@
 //! entry points, the refresh scheduler, and the resolver that puts hand-written
 //! `[pricing]` rules ahead of every derived source.
 
+mod call_rates;
 mod catalog;
 mod entry;
 mod rules;
 mod sources;
 
+/// The per-model rate fields an entry carries, re-exported here so the billing
+/// call sites can read a card without reaching into `config`.
+pub use crate::config::CostFields;
+pub use call_rates::{CallRateCard, ConfigCallRates, config_call_rates};
 pub use catalog::ModelCost;
 pub use entry::ModelPricingEntry;
 
@@ -36,6 +41,9 @@ use catalog::parse_api_response;
 use catalog::{CACHE_TTL_SECS, REFRESH_IN_FLIGHT, load_cache, now_unix_secs, refresh_now};
 #[cfg(test)]
 pub(crate) use catalog::{clear_memory_cache_for_tests, save_test_cache};
+#[cfg(test)]
+#[path = "call_rates_tests.rs"]
+mod call_rates_tests;
 
 use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, Currency, Money,
@@ -139,7 +147,12 @@ fn ensure_cache_fresh() -> Option<Arc<PricingCache>> {
 /// is dropped and the next layer prices the model instead; peak/off-peak
 /// selection happens in `rules`, driven by `sources::config_price`, so the
 /// `cost` returned here is already the tariff in effect at `at`.
-fn effective_entry(
+///
+/// This is the rate-level entry point: unlike [`effective_cost`] it hands back
+/// input/output/cache rates instead of one scalar, which is what a billing call
+/// site needs. Config rules are resolved at `at`, so tariff selection (peak vs
+/// off-peak) follows the instant the caller passes, not the wall clock.
+pub fn effective_entry(
     provider: &str,
     model: &str,
     at: SystemTime,

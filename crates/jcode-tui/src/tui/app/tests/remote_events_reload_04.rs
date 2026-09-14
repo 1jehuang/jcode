@@ -1737,7 +1737,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
         cache_read_input_tokens: 40_000,
         cache_creation_input_tokens: 100_000,
     };
-    app.seed_cost_from_history_totals(&totals);
+    app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
 
     // Same split-accounting math as the live-call test above.
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
@@ -1748,7 +1748,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     );
 
     // Idempotent: a repeated history snapshot must not double the cost.
-    app.seed_cost_from_history_totals(&totals);
+    app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
     assert!(
         (app.cost.total_cost - expected).abs() < 1e-4,
         "re-seeding must overwrite (not accrue), got ${:.4}",
@@ -1761,7 +1761,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     oauth_app.remote_provider_name = Some("Claude".to_string());
     oauth_app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
     oauth_app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
-    oauth_app.seed_cost_from_history_totals(&totals);
+    oauth_app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
     assert_eq!(oauth_app.cost.total_cost, 0.0);
 }
 
@@ -1781,9 +1781,11 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::ApiKey);
 
     // Each TokenUsage below simulates a separate completed API call, so reset
-    // the per-call usage bookkeeping between them (a real session does this at
-    // call start).
+    // the per-call usage bookkeeping between them. A real session does this at
+    // call start, which is also what drops the rate card pinned to the previous
+    // call (F16) and lets the new tier price the new call.
     let reset_call_state = |app: &mut App| {
+        app.begin_api_call_accounting();
         app.kv_cache.current_api_usage_recorded = false;
         app.streaming.streaming_input_tokens = 0;
         app.streaming.streaming_output_tokens = 0;

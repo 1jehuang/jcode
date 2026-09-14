@@ -187,11 +187,14 @@ fn rate_to_micros(rate: f64) -> u64 {
 /// the curated static tables, OpenRouter's caches, and models.dev.
 ///
 /// `at` gates the card's validity window *and* selects its tariff, so the rates
-/// below are the peak/off-peak tier in effect at that instant. The instant is
-/// still the wall clock here; the billing call sites thread the call's own
-/// time through in a later task.
-fn config_price_estimate(source_key: &str, model: &str) -> Option<RouteCheapnessEstimate> {
-    let at = std::time::SystemTime::now();
+/// below are the peak/off-peak tier in effect at that instant. Route-catalog
+/// callers pass the wall clock; the billing call sites pass the instant of the
+/// API call they are pricing.
+fn config_price_estimate(
+    source_key: &str,
+    model: &str,
+    at: std::time::SystemTime,
+) -> Option<RouteCheapnessEstimate> {
     let (entry, currency) = crate::model_pricing::configured_entry(source_key, model, at)?;
     let input = entry.cost.input?;
     let output = entry.cost.output?;
@@ -235,12 +238,47 @@ pub fn metered_pricing_for_source_with_tier(
     model: &str,
     service_tier: Option<&str>,
 ) -> Option<RouteCheapnessEstimate> {
+    // The route catalog prices "right now"; billing call sites that know when
+    // the call happened use [`metered_pricing_for_source_at`] instead.
+    metered_pricing_for_source_at(
+        source_key,
+        model,
+        service_tier,
+        std::time::SystemTime::now(),
+    )
+}
+
+/// [`metered_pricing_for_source_with_tier`] with the instant made explicit, so
+/// a call that started an hour ago is priced with the tariff it started in
+/// (F15/F16).
+pub fn metered_pricing_for_source_at(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    at: std::time::SystemTime,
+) -> Option<RouteCheapnessEstimate> {
     // 1. Config is authoritative: a hand-written card outranks every derived
     //    source, including the curated tables below.
-    if let Some(estimate) = config_price_estimate(source_key, model) {
+    if let Some(estimate) = config_price_estimate(source_key, model, at) {
         return Some(estimate);
     }
 
+    derived_pricing_for_source(source_key, model, service_tier)
+}
+
+/// The derived (time-independent) layers of the chain, without the config
+/// layer: curated static tables, then OpenRouter's own caches, then models.dev.
+///
+/// Billing resolves the config layer itself, at the call's own instant, and
+/// only falls back here when no hand-written card claims the pair. Keeping the
+/// hand-written layer out of this function means a memoized derived rate can
+/// never serve a stale tariff, and a config rate can never be reported as a
+/// catalog rate.
+pub fn derived_pricing_for_source(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+) -> Option<RouteCheapnessEstimate> {
     // 2. Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),
@@ -330,7 +368,7 @@ pub(crate) fn cheapness_for_route(
             };
             // Config is authoritative here too, ahead of OpenRouter's own
             // per-endpoint caches.
-            config_price_estimate("openrouter", &model_id)
+            config_price_estimate("openrouter", &model_id, std::time::SystemTime::now())
                 .or_else(|| openrouter_route_pricing(&model_id, provider))
                 .or_else(|| metered_pricing_for_source("openrouter", &model_id))
         }
@@ -709,6 +747,50 @@ output = 9.0
                 Some(prev) => crate::env::set_var(key, prev),
                 None => crate::env::remove_var(key),
             }
+        }
+    }
+
+    #[test]
+    fn derived_pricing_ignores_hand_written_config_cards() {
+        // The billing path resolves config at the call's own instant, so the
+        // time-independent derived layers must not consult it again: a
+        // memoized config rate must never masquerade as a catalog rate.
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::model_pricing::clear_memory_cache_for_tests();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[pricing.providers."claude:api-key"]
+currency = "EUR"
+
+[pricing.providers."claude:api-key".models."claude-sonnet-4-6".cost]
+input = 99.0
+output = 99.0
+"#,
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        // The full resolver honors the card...
+        let configured = metered_pricing_for_source("claude:api-key", "claude-sonnet-4-6")
+            .expect("config prices the route");
+        assert_eq!(configured.source, RouteCostSource::ConfigPriceSheet);
+
+        // ...while the derived-only resolver reaches the curated static table.
+        let derived = derived_pricing_for_source("claude:api-key", "claude-sonnet-4-6", None)
+            .expect("the curated static table prices it");
+        assert_eq!(derived.source, RouteCostSource::PublicApiPricing);
+        assert_eq!(derived.input_price_per_mtok_micros, Some(3_000_000));
+
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
         }
     }
 }

@@ -37,8 +37,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
+
+use jcode_provider_core::Currency;
+use misc_ui::PinnedCallPricing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppRuntimeMode {
@@ -830,8 +833,18 @@ struct CostState {
     cached_completion_price: Option<f32>,
     // Cached cache-read pricing ($/1M tokens), when known for the active model.
     cached_cache_read_price: Option<f32>,
+    // Currency the cached_*_price values are denominated in.
+    cached_price_currency: Option<Currency>,
     // Model the cached_*_price values were resolved for, so we re-resolve on switch.
     cached_price_model: Option<String>,
+    /// Instant the API call currently being accounted for started (F15). The
+    /// local billing path prices its call at this instant.
+    call_started_at: Option<SystemTime>,
+    /// Rate card pinned to the current API call (F16). It is resolved once, at
+    /// the call's own instant, so a call that straddles a peak/off-peak
+    /// boundary keeps the tier it started in. `None` until that call is first
+    /// priced.
+    pinned_call_pricing: Option<PinnedCallPricing>,
 }
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
@@ -1788,7 +1801,7 @@ impl App {
         );
         self.pause_streaming_tps(false);
         self.kv_cache.current_api_usage_recorded = false;
-        self.mark_stream_usage_call_boundary();
+        self.begin_api_call_accounting();
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
@@ -1840,7 +1853,7 @@ impl App {
         );
         self.pause_streaming_tps(false);
         self.kv_cache.current_api_usage_recorded = false;
-        self.mark_stream_usage_call_boundary();
+        self.begin_api_call_accounting();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
