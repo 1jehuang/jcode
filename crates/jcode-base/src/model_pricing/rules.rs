@@ -191,6 +191,7 @@ fn previous_weekday(day: Weekday) -> Weekday {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_pricing::RuleOutOfEffect;
     use crate::model_pricing::sources::{self, ConfigPrice};
     use chrono::TimeZone;
     use jcode_provider_core::Currency;
@@ -660,7 +661,7 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
     fn hit(price: ConfigPrice) -> Option<(ModelPricingEntry, Currency)> {
         match price {
             ConfigPrice::Hit { entry, currency } => Some((*entry, currency)),
-            ConfigPrice::Absent | ConfigPrice::NoPrice => None,
+            ConfigPrice::Absent | ConfigPrice::NoPrice | ConfigPrice::OutOfEffect(_) => None,
         }
     }
 
@@ -722,9 +723,10 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
             assert!(
                 matches!(
                     sources::config_price("deepseek", "deepseek-v4-pro", at(2026, 9, 14, 3, 0, 0)),
-                    ConfigPrice::Absent
+                    ConfigPrice::OutOfEffect(RuleOutOfEffect::Expired)
                 ),
-                "`fallback` drops the expired card so the next layer prices it"
+                "`fallback` hands the model to the next layer and reports why, \
+                 so the display can label the fallback price (F8/F20)"
             );
         });
 

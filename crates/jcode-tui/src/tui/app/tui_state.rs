@@ -431,8 +431,17 @@ impl App {
             seven_day_resets_at: None,
             spark: None,
             spark_resets_at: None,
-            cost_rows: crate::money_display::DisplayTarget::from_config()
-                .resolve_totals(&self.cost.total_cost_by_currency),
+            cost_rows: {
+                let mut rows = crate::money_display::DisplayTarget::from_config()
+                    .resolve_totals(&self.cost.total_cost_by_currency);
+                // F8/F20: when the last priced call fell back because the
+                // user's own rule was out of effect, the figure above is the
+                // fallback layer's, and the widget has to say so.
+                if let Some(reason) = self.cost.rule_out_of_effect {
+                    crate::money_display::note_primary(&mut rows, reason.label());
+                }
+                rows
+            },
             input_tokens: display_input_tokens,
             output_tokens: display_output_tokens,
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,

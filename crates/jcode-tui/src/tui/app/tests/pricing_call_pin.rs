@@ -286,3 +286,113 @@ fn session_total_keeps_one_bucket_per_currency() {
         );
     });
 }
+
+// F8/F20: a `[pricing]` rule that is out of effect falls back to the next layer
+// when `on_rule_expiry = "fallback"` (the default). Falling back silently is
+// exactly the silent-wrong-price class this feature exists to remove, so the
+// display has to say the user's own rule stopped applying.
+
+/// A rule whose validity window ended in 2020, with the default
+/// `on_rule_expiry = "fallback"` (the field is not written on purpose).
+const EXPIRED_RULE_CONFIG: &str = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_until = "2020-01-01T00:00:00Z"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 7.0
+output = 8.0
+"#;
+
+/// The same rule, but refusing to price the call once it is out of effect.
+const EXPIRED_RULE_NO_PRICE_CONFIG: &str = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_until = "2020-01-01T00:00:00Z"
+on_rule_expiry = "no_price"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 7.0
+output = 8.0
+"#;
+
+/// A rule that only starts in 2030, so it is not in effect yet.
+const FUTURE_RULE_CONFIG: &str = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_from = "2030-01-01T00:00:00Z"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 7.0
+output = 8.0
+"#;
+
+/// Bill one remote call on the active model and return the session cost plus
+/// the cost line the info widget shows for it, i.e. what the user reads.
+fn widget_cost_line() -> (f32, String) {
+    let mut app = remote_deepseek_app();
+    app.accrue_remote_call_cost(1_000_000, 1_000_000, 0, 0, std::time::SystemTime::now());
+    let data = crate::tui::TuiState::info_widget_data(&app);
+    let usage = data
+        .usage_info
+        .as_ref()
+        .expect("a cost-based provider shows a cost widget");
+    (
+        session_cost_usd(&app),
+        crate::money_display::summarize(&usage.cost_rows, 4),
+    )
+}
+
+#[test]
+fn expired_rule_is_labelled_where_the_user_reads_the_price() {
+    with_temp_jcode_home(|| {
+        // No config at all: the number the fallback layer produces for this
+        // model, which the expired rule must fall back to unchanged.
+        let (fallback_cost, unlabelled) = widget_cost_line();
+
+        write_pricing_config(EXPIRED_RULE_CONFIG);
+        let (expired_cost, labelled) = widget_cost_line();
+
+        assert!(
+            (expired_cost - fallback_cost).abs() < 1e-4,
+            "an expired rule with on_rule_expiry = fallback prices like the next layer: \
+             {expired_cost} vs {fallback_cost}"
+        );
+        assert!(
+            !unlabelled.contains("expired"),
+            "sanity: nothing is labelled without a rule: {unlabelled}"
+        );
+        assert!(
+            labelled.contains("(rule expired)"),
+            "the widget must say the hand-written rule stopped applying: {labelled}"
+        );
+    });
+}
+
+#[test]
+fn a_rule_that_only_starts_later_is_labelled_as_not_in_effect() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(FUTURE_RULE_CONFIG);
+        let (cost, line) = widget_cost_line();
+
+        assert!(cost > 0.0, "the fallback layer prices the call: {line}");
+        assert!(
+            line.contains("(rule not in effect yet)"),
+            "a rule whose window has not opened yet is not 'expired': {line}"
+        );
+    });
+}
+
+#[test]
+fn a_rule_that_refuses_to_price_is_never_labelled_expired_but_priced() {
+    // `on_rule_expiry = "no_price"` bills nothing, so the display must not
+    // carry a "the rule expired, this is the fallback price" marker: there is
+    // no fallback price to explain.
+    with_temp_jcode_home(|| {
+        write_pricing_config(EXPIRED_RULE_NO_PRICE_CONFIG);
+        let (cost, line) = widget_cost_line();
+
+        assert_eq!(cost, 0.0, "no_price refuses to price the call: {line}");
+        assert!(
+            !line.contains("expired"),
+            "an unpriced call must not be labelled as an expired rule that was priced: {line}"
+        );
+    });
+}

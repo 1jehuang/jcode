@@ -6,7 +6,7 @@
 //! size ratchet tracks production files only, and this file is excluded.
 
 use super::call_rates::{ConfigCallRates, config_call_rates};
-use super::{ModelCost, clear_memory_cache_for_tests, save_test_cache};
+use super::{ModelCost, RuleOutOfEffect, clear_memory_cache_for_tests, save_test_cache};
 use jcode_provider_core::Currency;
 use std::time::SystemTime;
 
@@ -195,5 +195,51 @@ output = 13.5
             config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
             ConfigCallRates::ConfiguredWithoutPrice
         ));
+    });
+}
+
+#[test]
+fn expired_rule_that_falls_back_reports_the_reason() {
+    // The default `on_rule_expiry` is `fallback` (F20): the next layer prices
+    // the call, and the caller is told *why* it was not the config card, so the
+    // display can label the fallback price (F8). Reporting plain `Absent` here
+    // is what leaves the user reading a models.dev number without ever learning
+    // their own rule stopped applying.
+    let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_until = "2020-01-01T00:00:00Z"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+    with_pricing_env(config, DEEPSEEK_CATALOG, || {
+        assert_eq!(
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            ConfigCallRates::OutOfEffect(RuleOutOfEffect::Expired)
+        );
+    });
+}
+
+#[test]
+fn rule_that_starts_later_reports_not_yet_effective() {
+    // The other direction of the same window: a rule that has not opened yet is
+    // not "expired", and saying so would misdescribe the user's own config.
+    let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_from = "2100-01-01T00:00:00Z"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+    with_pricing_env(config, DEEPSEEK_CATALOG, || {
+        assert_eq!(
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            ConfigCallRates::OutOfEffect(RuleOutOfEffect::NotYetEffective)
+        );
     });
 }

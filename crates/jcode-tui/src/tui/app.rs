@@ -40,6 +40,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
+use crate::model_pricing::RuleOutOfEffect;
 use jcode_provider_core::Currency;
 use misc_ui::PinnedCallPricing;
 
@@ -848,6 +849,23 @@ struct CostState {
     /// boundary keeps the tier it started in. `None` until that call is first
     /// priced.
     pinned_call_pricing: Option<PinnedCallPricing>,
+    /// Why the *last priced call* was not priced by the user's own
+    /// `[pricing.providers]` rule, when that rule was out of its validity
+    /// window and `on_rule_expiry = "fallback"` sent the call to the next layer
+    /// (F8/F20).
+    ///
+    /// The amount the widget shows is therefore a fallback price, and this is
+    /// what lets the display say so: without it a user sees a models.dev number
+    /// where their hand-written rule should apply and never learns the rule
+    /// stopped. It describes the most recent pricing decision (the widget's
+    /// amount is the whole session) and is cleared by every pricing decision
+    /// that is not a fallback, so a fixed or in-window rule stops being
+    /// labelled. `on_rule_expiry = "no_price"` never sets it: that variant
+    /// refuses to price, so there is no fallback price to explain.
+    ///
+    /// Set at billing time, never at render time: the resolver logs a warning
+    /// when it detects the expiry, and the render path runs every frame.
+    rule_out_of_effect: Option<RuleOutOfEffect>,
 }
 
 impl CostState {

@@ -15,7 +15,7 @@
 
 use crate::config::PricingConfig;
 use crate::config::pricing::{ProviderPricing, validate};
-use crate::model_pricing::entry::ModelPricingEntry;
+use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::rules;
 use crate::model_pricing::{ModelCost, models_dev_provider_id, normalize_model_id};
 use jcode_provider_core::Currency;
@@ -34,6 +34,12 @@ pub(super) enum ConfigPrice {
     /// A rule claims it but is out of effect with `on_rule_expiry = "no_price"`:
     /// refuse to price rather than fall back to a worse estimate (spec 4.4).
     NoPrice,
+    /// A rule claims it but its validity window does not cover `at`, and
+    /// `on_rule_expiry = "fallback"` sends the call to the next layer. That
+    /// layer prices it, and callers must label *that* price as the fallback
+    /// (spec F8/F20): the user wrote the rule and has to learn it stopped
+    /// applying, otherwise a models.dev number silently replaces their own.
+    OutOfEffect(RuleOutOfEffect),
 }
 
 /// Validated `[pricing]` snapshot, memoized against the loaded config instance.
@@ -114,14 +120,14 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
     // effective base card, so scaling before models.dev fills in the fields a
     // partial card leaves out would scale the written fields and leave the
     // merged ones behind.
-    if !entry.is_active_at(at) {
+    if let Some(reason) = entry.out_of_effect_reason(at) {
         return match entry.on_rule_expiry {
             crate::config::OnRuleExpiry::Fallback => {
                 crate::logging::warn(&format!(
                     "pricing rule for {source_key}/{model} is out of effect; \
                      falling back to the next price source"
                 ));
-                ConfigPrice::Absent
+                ConfigPrice::OutOfEffect(reason)
             }
             crate::config::OnRuleExpiry::NoPrice => ConfigPrice::NoPrice,
         };

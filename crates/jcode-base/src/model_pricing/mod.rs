@@ -35,7 +35,7 @@ mod sources;
 pub use crate::config::CostFields;
 pub use call_rates::{CallRateCard, ConfigCallRates, config_call_rates};
 pub use catalog::ModelCost;
-pub use entry::ModelPricingEntry;
+pub use entry::{ModelPricingEntry, RuleOutOfEffect};
 pub use fx::{FxTable, convert};
 pub use generation::pricing_generation;
 pub use sources::pricing_config;
@@ -168,7 +168,13 @@ pub fn effective_entry(
             let resolved = sources::resolve_card(*entry, currency, provider, model, at);
             Some((resolved.entry, resolved.currency))
         }
-        sources::ConfigPrice::Absent => models_dev_entry(provider, model),
+        // A rule that is out of effect is not this layer's answer either: the
+        // next layer prices the model, exactly as if the rule had not been
+        // written for this instant (the expiry itself is reported by
+        // `config_call_rates`, which is the side that has to label it).
+        sources::ConfigPrice::OutOfEffect(_) | sources::ConfigPrice::Absent => {
+            models_dev_entry(provider, model)
+        }
     }
 }
 
@@ -196,7 +202,9 @@ pub(crate) fn configured_entry(
                 .from_config
                 .then_some((resolved.entry, resolved.currency))
         }
-        sources::ConfigPrice::Absent | sources::ConfigPrice::NoPrice => None,
+        sources::ConfigPrice::Absent
+        | sources::ConfigPrice::OutOfEffect(_)
+        | sources::ConfigPrice::NoPrice => None,
     }
 }
 
