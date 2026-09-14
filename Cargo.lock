@@ -3709,6 +3709,7 @@ dependencies = [
 name = "jcode-provider-extensions"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dirs",
  "jcode-provider-protocol",
  "jcode-provider-subprocess",

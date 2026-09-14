@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/1jehuang/jcode"
 
 [dependencies]
+async-trait = "0.1"
 jcode-provider-protocol = { path = "../jcode-provider-protocol", version = "0.1.0" }
 jcode-provider-subprocess = { path = "../jcode-provider-subprocess", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }

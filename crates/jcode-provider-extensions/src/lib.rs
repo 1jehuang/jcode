@@ -5,10 +5,15 @@
 //! deadlines, cancellation, and frame limits outside the persistence layer.
 
 mod bundle;
+mod runtime;
 
 pub use bundle::{
     BundleComponents, BundleError, PLUGIN_MANIFEST_VERSION, PluginBundle, PluginManifest,
     SkillMetadata,
+};
+pub use runtime::{
+    EmbeddedExtension, EmbeddedExtensionManifest, ExtensionBackend, ExtensionEvent,
+    ExtensionInvocation, ExtensionRequest, ExtensionRuntimeRegistry,
 };
 
 pub use jcode_provider_protocol::Frame;
@@ -73,6 +78,14 @@ pub enum ExtensionError {
         provider: String,
         permission: Permission,
     },
+    #[error("embedded extension '{0}' is already registered")]
+    DuplicateEmbeddedExtension(String),
+    #[error("extension '{0}' is not registered")]
+    MissingExtension(String),
+    #[error("extension request failed: {0}")]
+    RequestFailed(String),
+    #[error("extension cancellation is not supported by '{0}'")]
+    CancellationUnsupported(String),
 }
 
 #[derive(Debug, Clone, Default)]

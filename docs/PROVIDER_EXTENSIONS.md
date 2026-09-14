@@ -6,6 +6,44 @@ Jcode using the versioned JSONL contract in
 than linking to Jcode's Rust implementation or loading an in-process dynamic
 library.
 
+## Two runtime tiers
+
+Jcode has two extension runtime tiers with the same request and event model:
+
+1. **Embedded Rust extensions** are statically linked into the Jcode binary and
+   registered with `ExtensionRuntimeRegistry::register_embedded`. They receive
+   decoded Rust values directly and avoid subprocess and JSONL overhead. This is
+   a source-level API, not a stable dynamic-library ABI, so the extension must be
+   rebuilt with the compatible Jcode version.
+2. **External extensions** run as persistent child processes through
+   `jcode-provider-subprocess`. They use the versioned JSONL protocol, retain
+   process isolation, support independent upgrades, and can be written in any
+   language. `ExtensionRuntimeRegistry::register_external` adapts them to the
+   same invocation result and event types.
+
+The embedded tier is for trusted, performance-sensitive functionality. The
+external tier remains the default for third-party extensions. Jcode does not
+load arbitrary Rust traits or Rust structs from dynamic libraries because Rust's
+ABI is not stable across compiler or dependency updates.
+
+An embedded extension is registered by application code, for example:
+
+```rust,no_run
+let mut extensions = ExtensionRuntimeRegistry::new();
+extensions.register_embedded(MyExtension::new())?;
+let output = extensions
+    .invoke("my-extension", request)
+    .await?;
+```
+
+Both tiers expose the same invocation and cancellation surface. External
+providers forward cancellation through the protocol and retain the existing
+handshake, frame-size, deadline, and child cleanup protections. Embedded
+extensions must implement cancellation when their work is cancellable. The
+default embedded implementation rejects cancellation, and embedded extensions
+must provide their own internal resource limits because they execute inside the
+Jcode process.
+
 ## Manifest
 
 Each provider is described by a `provider.toml` file:
