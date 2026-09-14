@@ -11,10 +11,22 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use super::entry::ModelPricingEntry;
+
 pub(super) const API_URL: &str = "https://models.dev/api.json";
 pub(super) const CACHE_FILE: &str = "models_dev_pricing.json";
 pub(super) const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Current on-disk cache shape. Version 1 (every binary before this change)
+/// had no `schema_version` field and stored bare `ModelCost` objects; version 2
+/// stores [ModelPricingEntry] objects that can carry tariffs/schedule/validity.
+pub(super) const SCHEMA_VERSION: u32 = 2;
+
+/// A cache file without a `schema_version` was written by a v1 binary.
+fn v1_schema_version() -> u32 {
+    1
+}
 
 /// Per-model USD prices per million tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -27,12 +39,25 @@ pub struct ModelCost {
     pub cache_write_usd_per_mtok: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct PricingCache {
+    /// Absent in files written before the entry model existed; those are v1.
+    #[serde(default = "v1_schema_version")]
+    pub(super) schema_version: u32,
     pub(super) cached_at_unix_secs: u64,
-    /// provider id -> model id -> cost. Provider ids are models.dev ids
+    /// provider id -> model id -> entry. Provider ids are models.dev ids
     /// (e.g. `anthropic`, `openai`, `deepseek`, `moonshotai`).
-    pub(super) providers: HashMap<String, HashMap<String, ModelCost>>,
+    pub(super) providers: HashMap<String, HashMap<String, ModelPricingEntry>>,
+}
+
+impl Default for PricingCache {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            cached_at_unix_secs: 0,
+            providers: HashMap::new(),
+        }
+    }
 }
 
 /// In-memory pricing cache keyed by the on-disk cache path it was loaded
@@ -114,13 +139,16 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("expected top-level provider object"))?;
 
-    let mut providers: HashMap<String, HashMap<String, ModelCost>> = HashMap::new();
+    let mut providers: HashMap<String, HashMap<String, ModelPricingEntry>> = HashMap::new();
     for (provider_id, provider) in top {
         let Some(models) = provider.get("models").and_then(|m| m.as_object()) else {
             continue;
         };
         let mut parsed_models = HashMap::new();
         for (model_id, model) in models {
+            // models.dev nests rates under a `cost` object; the entry keeps that
+            // wrapped shape so tariffs/schedule from custom sources (a later
+            // task) can be attached without another cache migration.
             let Some(cost) = model.get("cost") else {
                 continue;
             };
@@ -132,12 +160,12 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
             };
             parsed_models.insert(
                 model_id.clone(),
-                ModelCost {
+                ModelPricingEntry::from_model_cost(ModelCost {
                     input_usd_per_mtok: input,
                     output_usd_per_mtok: output,
                     cache_read_usd_per_mtok: cost.get("cache_read").and_then(|v| v.as_f64()),
                     cache_write_usd_per_mtok: cost.get("cache_write").and_then(|v| v.as_f64()),
-                },
+                }),
             );
         }
         if !parsed_models.is_empty() {
@@ -149,6 +177,7 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         anyhow::bail!("no priced models in models.dev response");
     }
     Ok(PricingCache {
+        schema_version: SCHEMA_VERSION,
         cached_at_unix_secs: now_unix_secs(),
         providers,
     })
@@ -156,14 +185,18 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
 
 #[cfg(test)]
 pub(crate) fn save_test_cache(entries: &[(&str, &str, ModelCost)]) {
-    let mut providers: HashMap<String, HashMap<String, ModelCost>> = HashMap::new();
+    let mut providers: HashMap<String, HashMap<String, ModelPricingEntry>> = HashMap::new();
     for (provider, model, cost) in entries {
         providers
             .entry((*provider).to_string())
             .or_default()
-            .insert((*model).to_string(), *cost);
+            .insert(
+                (*model).to_string(),
+                ModelPricingEntry::from_model_cost(*cost),
+            );
     }
     save_cache(&PricingCache {
+        schema_version: SCHEMA_VERSION,
         cached_at_unix_secs: now_unix_secs(),
         providers,
     });

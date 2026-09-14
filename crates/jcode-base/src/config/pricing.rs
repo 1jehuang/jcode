@@ -8,11 +8,14 @@
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use jcode_config_types::{
-    CostFile, ModelPricingRuleFile, OnRuleExpiry, PricingConfigFile, ScheduleRuleFile, TariffFile,
+    CostFile, ModelPricingRuleFile, PricingConfigFile, ScheduleRuleFile, TariffFile,
 };
 use jcode_provider_core::Currency;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+
+pub use jcode_config_types::OnRuleExpiry;
 
 /// A validation failure, carrying the config path that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,16 +42,22 @@ impl fmt::Display for PricingConfigError {
 impl std::error::Error for PricingConfigError {}
 
 /// Price fields for one rate card. All optional so layers can merge per field.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CostFields {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_read: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write: Option<f64>,
 }
 
 /// A named rate card: absolute prices, or a multiplier on the base cost.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Tariff {
     Absolute(CostFields),
     Multiplier(f64),
@@ -56,7 +65,7 @@ pub enum Tariff {
 
 /// One window in local (offset-shifted) time. `[start, end)`; `start > end`
 /// means the window wraps past midnight and belongs to the start day.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeWindow {
     pub start: NaiveTime,
     pub end: NaiveTime,
@@ -70,7 +79,7 @@ impl TimeWindow {
 }
 
 /// A validated `schedule` entry.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScheduleRule {
     pub tariff: String,
     pub utc_offset_minutes: i32,
