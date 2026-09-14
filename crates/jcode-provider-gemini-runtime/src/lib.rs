@@ -374,33 +374,55 @@ impl GeminiProvider {
         let url = format!("{}:{method}", Self::base_url());
         let body_value =
             serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
-        let resp = self
-            .send_with_retry(
-                |client| {
-                    client
-                        .post(&url)
-                        .bearer_auth(&tokens.access_token)
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(&body_value)
-                },
-                &url,
-            )
-            .await?;
+        // Code Assist enforces a short-window burst limiter that returns 429
+        // RESOURCE_EXHAUSTED with "quota will reset after 0s" even when the
+        // daily bucket has plenty left. Those clear within seconds, so retry
+        // them with backoff instead of failing the turn.
+        const MAX_429_RETRIES: u32 = 5;
+        let mut attempt: u32 = 0;
+        loop {
+            let resp = self
+                .send_with_retry(
+                    |client| {
+                        client
+                            .post(&url)
+                            .bearer_auth(&tokens.access_token)
+                            .header(reqwest::header::CONTENT_TYPE, "application/json")
+                            .json(&body_value)
+                    },
+                    &url,
+                )
+                .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
-            anyhow::bail!(
-                "Gemini request {} failed (HTTP {}): {}",
-                method,
-                status,
-                body.trim()
-            );
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_429_RETRIES {
+                    let delay = Duration::from_millis(1500u64.saturating_mul(1u64 << attempt));
+                    jcode_base::logging::warn(&format!(
+                        "Gemini {} hit burst 429 (attempt {}/{}); retrying in {:?}",
+                        method,
+                        attempt + 1,
+                        MAX_429_RETRIES,
+                        delay
+                    ));
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                anyhow::bail!(
+                    "Gemini request {} failed (HTTP {}): {}",
+                    method,
+                    status,
+                    body.trim()
+                );
+            }
+
+            return resp
+                .json()
+                .await
+                .with_context(|| format!("Failed to parse Gemini {} response", method));
         }
-
-        resp.json()
-            .await
-            .with_context(|| format!("Failed to parse Gemini {} response", method))
     }
 
     /// POST a JSON body to the official Gemini Developer API, authenticating
