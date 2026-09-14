@@ -109,7 +109,7 @@ fn renders_header_and_is_width_bounded() {
         member("alpha", "running", None, &["editing config.rs"]),
         member("beta", "done", None, &["reviewed"]),
     ];
-    let lines = render_gallery(&members, 80, 12);
+    let lines = render_gallery(&members, 80, 12, None);
     assert!(!lines.is_empty());
     let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(header.contains("🐝 2 agents · 1 active"), "got: {header}");
@@ -126,14 +126,14 @@ fn active_count_in_header() {
         member("b", "thinking", None, &[]),
         member("c", "done", None, &[]),
     ];
-    let lines = render_gallery(&members, 100, 12);
+    let lines = render_gallery(&members, 100, 12, None);
     let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(header.contains("2 active"), "got: {header}");
 }
 
 #[test]
 fn empty_members_render_nothing() {
-    assert!(render_gallery(&[], 80, 12).is_empty());
+    assert!(render_gallery(&[], 80, 12, None).is_empty());
 }
 
 #[test]
@@ -924,7 +924,7 @@ fn panel_is_display_width_bounded_with_wide_labels() {
         for focused in [false, true] {
             for lines in [
                 render_swarm_panel(&members, 0, focused, width, 14),
-                render_gallery(&members, width, 12),
+                render_gallery(&members, width, 12, None),
             ] {
                 for line in &lines {
                     let text = plain_line(line);
@@ -964,7 +964,7 @@ fn degenerate_sizes_and_large_member_counts_do_not_panic() {
             .collect();
         for width in [0usize, 1, 2, 7, 8, 9, 40] {
             for height in [0usize, 1, 2, 3, 7, 20] {
-                let _ = render_gallery(&members, width, height);
+                let _ = render_gallery(&members, width, height, None);
                 let _ = render_swarm_panel(&members, count + 5, true, width, height);
                 let _ = render_swarm_strip(
                     &members,

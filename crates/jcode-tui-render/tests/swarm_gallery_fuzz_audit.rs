@@ -101,7 +101,7 @@ fn gallery_never_panics_and_stays_width_bounded() {
     for members in member_sets() {
         for width in 0..=60 {
             for max_height in 0..=20 {
-                let lines = render_gallery(&members, width, max_height);
+                let lines = render_gallery(&members, width, max_height, None);
                 for line in &lines {
                     let w = plain(line).as_str().width();
                     assert!(
@@ -115,7 +115,7 @@ fn gallery_never_panics_and_stays_width_bounded() {
         }
         // A couple of large widths too.
         for width in [80usize, 200, 500] {
-            let _ = render_gallery(&members, width, 16);
+            let _ = render_gallery(&members, width, 16, None);
         }
     }
 }

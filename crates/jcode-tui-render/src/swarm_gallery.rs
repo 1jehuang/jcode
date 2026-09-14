@@ -2109,4 +2109,3 @@ pub(super) use labels::{count_digits, disp_w, truncate_label};
 #[cfg(test)]
 #[path = "swarm_gallery_tests.rs"]
 mod tests;
->>>>>>> 9861b1e23 (feat(tui): per-role border colors for swarm gallery tiles)

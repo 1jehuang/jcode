@@ -508,16 +508,20 @@ fn clamp_line_to_width(line: &mut Line<'static>, width: usize) {
 }
 
 /// Render the inline swarm gallery for the given members into `area`-width lines.
+///
+/// When `selected` is `Some(idx)`, the tile at that index gets a brighter border
+/// and dimmed inactive tiles for visual differentiation (gallery-grid focus).
 #[allow(dead_code)]
 pub(crate) fn render_swarm_gallery_lines(
     members: &[SwarmMemberStatus],
+    selected: Option<usize>,
     width: usize,
     max_height: usize,
 ) -> Vec<Line<'static>> {
     if members.is_empty() {
         return Vec::new();
     }
-    render_gallery(&badged_gallery(members), width, max_height)
+    render_gallery(&badged_gallery(members), width, max_height, selected)
 }
 
 /// Render the list+detail swarm panel: a compact list of managed agents plus a
@@ -782,7 +786,7 @@ mod tests {
             member("alpha", "running", Some("editing config.rs"), None),
             member("beta", "done", Some("reviewed"), None),
         ];
-        let lines = render_swarm_gallery_lines(&members, 80, 12);
+        let lines = render_swarm_gallery_lines(&members, None, 80, 12);
         assert!(!lines.is_empty());
         let header: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header.contains("🐝 2 agents · 1 active"), "got: {header}");
@@ -794,7 +798,7 @@ mod tests {
 
     #[test]
     fn empty_members_render_nothing() {
-        assert!(render_swarm_gallery_lines(&[], 80, 12).is_empty());
+        assert!(render_swarm_gallery_lines(&[], None, 80, 12).is_empty());
     }
 
     #[test]

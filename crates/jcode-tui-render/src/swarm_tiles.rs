@@ -31,6 +31,8 @@ pub struct SwarmTile {
     pub accent: Color,
     /// Optional role/prefix glyph drawn before the title (e.g. "★").
     pub role_glyph: Option<String>,
+    /// Optional role-based accent color for the border, overriding `accent`.
+    pub role_color: Option<Color>,
     /// The agent's recent output, oldest first. The renderer shows the tail.
     pub body: Vec<String>,
 }
@@ -42,12 +44,18 @@ impl SwarmTile {
             status: status.into(),
             accent,
             role_glyph: None,
+            role_color: None,
             body: Vec::new(),
         }
     }
 
     pub fn with_role_glyph(mut self, glyph: impl Into<String>) -> Self {
         self.role_glyph = Some(glyph.into());
+        self
+    }
+
+    pub fn with_role_color(mut self, color: Color) -> Self {
+        self.role_color = Some(color);
         self
     }
 
@@ -162,11 +170,12 @@ fn choose_grid(
 /// are the content area (excluding borders).
 fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize, selected: bool) -> Vec<Line<'static>> {
     // --- Color palette based on selection state ---
+    let tile_accent = tile.role_color.unwrap_or(tile.accent);
     let (border_color, title_color, badge_color, text_color) = if selected {
         (
-            tile.accent,                                       // bright accent border
-            tile.accent,                                       // full brightness title
-            tile.accent,                                       // accent badge
+            tile_accent,                                       // bright accent border
+            tile_accent,                                       // full brightness title
+            tile_accent,                                       // accent badge
             Color::Rgb(170, 172, 180),                         // normal body text
         )
     } else {
