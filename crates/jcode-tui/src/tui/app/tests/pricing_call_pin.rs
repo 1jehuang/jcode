@@ -396,3 +396,130 @@ fn a_rule_that_refuses_to_price_is_never_labelled_expired_but_priced() {
         );
     });
 }
+
+// I-1: a configured `cache_write` rate has to be the rate the call is billed
+// at. The billing site used to apply Anthropic's `input x 1.25/2.0` cache-write
+// premium for every card, so the value the user wrote (and the config layer
+// validated and carried) was silently replaced by a heuristic.
+
+/// A card that states the cache-write rate, so the heuristic cannot be the
+/// answer: 0.9 is neither `3.0 x 1.25` nor `3.0 x 2.0`.
+fn cache_write_card_config() -> String {
+    format!(
+        r#"
+[pricing.providers."claude:api-key".models."{MEMO_ONLY_MODEL}".cost]
+input = 3.0
+output = 15.0
+cache_write = 0.9
+"#
+    )
+}
+
+/// The premium the billing heuristic applies to the input rate when the user
+/// configured no cache-write rate (Anthropic: 1.25x for the 5-minute TTL, 2x
+/// for the 1-hour one).
+fn anthropic_cache_write_multiplier() -> f32 {
+    if crate::provider::anthropic::is_cache_ttl_1h() {
+        2.0
+    } else {
+        1.25
+    }
+}
+
+#[test]
+fn a_configured_cache_write_rate_is_honoured_instead_of_the_heuristic() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(&cache_write_card_config());
+        let mut app = remote_anthropic_app();
+        // 1M fresh input plus 1M cache creation: cache writes dominate the call,
+        // so the configured rate and the heuristic cannot be confused.
+        app.accrue_remote_call_cost(1_000_000, 0, 0, 1_000_000, std::time::SystemTime::now());
+
+        let billed = session_cost_usd(&app);
+        let expected = 3.0 + 0.9;
+        let heuristic = 3.0 + 3.0 * anthropic_cache_write_multiplier();
+        assert!(
+            (billed - expected).abs() < 1e-4,
+            "a configured cache_write must be billed: expected ${expected:.4}, got ${billed:.4} \
+             (the input x{} heuristic would be ${heuristic:.4})",
+            anthropic_cache_write_multiplier()
+        );
+    });
+}
+
+#[test]
+fn an_unconfigured_cache_write_keeps_the_anthropic_split_accounting_premium() {
+    // Parity constraint: with no `[pricing]` rule for this model the pre-feature
+    // behaviour stands, so cache creation costs the input rate times the
+    // Anthropic premium and nothing else.
+    with_temp_jcode_home(|| {
+        let mut app = remote_anthropic_app();
+        app.accrue_remote_call_cost(1_000_000, 0, 0, 0, std::time::SystemTime::now());
+        let input_only = session_cost_usd(&app);
+        assert!(
+            input_only > 0.0,
+            "the fallback layer prices the input tokens"
+        );
+
+        app.begin_api_call_accounting();
+        app.accrue_remote_call_cost(0, 0, 0, 1_000_000, std::time::SystemTime::now());
+        let creation = session_cost_usd(&app) - input_only;
+
+        let multiplier = anthropic_cache_write_multiplier();
+        let expected = input_only * multiplier;
+        assert!(
+            (creation - expected).abs() < 1e-4,
+            "an unconfigured cache write bills at {multiplier}x the input rate: \
+             expected ${expected:.4}, got ${creation:.4}"
+        );
+    });
+}
+
+// I-2: a `[pricing]` section that fails validation is dropped whole, so every
+// hand-written rule in it stops applying and prices revert to models.dev. That
+// is the same silent-wrong-price class as an expired rule, and it has to be
+// visible where the amount is read.
+
+/// A section with one invalid FX rate. `validate` stops at the first error, so
+/// the DeepSeek card below it is dropped too, even though it is fine.
+const INVALID_PRICING_SECTION_CONFIG: &str = r#"
+[pricing.fx_rates]
+CNY = -7.2
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+
+#[test]
+fn a_rejected_pricing_section_is_labelled_where_the_user_reads_the_price() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(COMPLETE_CNY_CARD_CONFIG);
+        let (_, valid) = widget_cost_line();
+        assert!(
+            !valid.contains("invalid [pricing]"),
+            "a valid section needs no note: {valid}"
+        );
+
+        write_pricing_config(INVALID_PRICING_SECTION_CONFIG);
+        let (_, labelled) = widget_cost_line();
+        assert_eq!(
+            labelled.matches("invalid [pricing]").count(),
+            1,
+            "the rejected section is labelled once per render, not once per note: {labelled}"
+        );
+        assert!(
+            labelled.contains("(invalid [pricing]: pricing.fx_rates.CNY)"),
+            "the note names the config path that was rejected: {labelled}"
+        );
+
+        // The note describes the section in force, not a fact about the
+        // process: fixing the config has to clear it.
+        write_pricing_config(COMPLETE_CNY_CARD_CONFIG);
+        let (_, recovered) = widget_cost_line();
+        assert!(
+            !recovered.contains("invalid [pricing]"),
+            "the note clears when the section validates again: {recovered}"
+        );
+    });
+}

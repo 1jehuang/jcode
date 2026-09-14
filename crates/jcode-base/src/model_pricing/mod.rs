@@ -38,7 +38,7 @@ pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
 pub use fx::{FxTable, convert};
 pub use generation::pricing_generation;
-pub use sources::pricing_config;
+pub use sources::{pricing_config, pricing_config_error, unmatchable_provider_keys};
 
 use catalog::PricingCache;
 #[cfg(test)]

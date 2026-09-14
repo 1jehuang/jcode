@@ -1,4 +1,9 @@
-//! A counter that changes exactly when the loaded `[pricing]` config changes.
+//! A counter that changes when the loaded config instance changes.
+//!
+//! Not only when `[pricing]` itself changes: the trigger is the identity of the
+//! config in force (see below), so a `[display]` edit or a changed env override
+//! bumps it too. Over-invalidating a price memo costs a re-resolve; missing an
+//! edit serves a stale price, which is the failure this counter exists to stop.
 //!
 //! Two memos outside this module cache prices and neither key can see a
 //! hand-edited `config.toml`:
