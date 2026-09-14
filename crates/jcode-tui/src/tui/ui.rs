@@ -3293,7 +3293,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         && (app.swarm_panel_focused()
             || (!workers_in_todos && !super::info_widget::swarm_strip_stands_down_for_dock()))
     {
-        let members = app.inline_swarm_members();
+        let members = app.filtered_swarm_members();
         if chat_area.width >= 24 {
             let focus_key = crate::tui::keybind::swarm_panel_focus_key_label();
             // Use the same smooth cadence as the primary status spinner.
@@ -3304,7 +3304,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             // never more than a third of the chat column so the transcript
             // stays usable on short terminals.
             let focused_budget = ((chat_area.height as usize) / 3).clamp(3, 16);
-            super::info_widget::swarm_gallery::render_swarm_strip_lines(
+            let mut strip_lines = super::info_widget::swarm_gallery::render_swarm_strip_lines(
                 &members,
                 app.swarm_panel_selected(),
                 app.swarm_panel_focused(),
@@ -3312,7 +3312,29 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 spinner_frame,
                 chat_area.width as usize,
                 focused_budget,
-            )
+                app.swarm_selected_set(),
+                app.is_swarm_batch_mode(),
+            );
+            if app.swarm_filter_active() {
+                let filter_line = Line::from(vec![
+                    Span::styled(
+                        "/",
+                        Style::default().fg(Color::Rgb(100, 180, 255)),
+                    ),
+                    Span::styled(
+                        app.swarm_filter_query().to_string(),
+                        Style::default().fg(Color::Rgb(100, 180, 255)),
+                    ),
+                    Span::styled(
+                        "█",
+                        Style::default()
+                            .fg(Color::Rgb(100, 180, 255))
+                            .add_modifier(Modifier::SLOW_BLINK),
+                    ),
+                ]);
+                strip_lines.insert(0, filter_line);
+            }
+            strip_lines
         } else {
             Vec::new()
         }
@@ -3727,16 +3749,36 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             ..Default::default()
         }
     } else if swarm_page_active {
-        let members = app.inline_swarm_members();
+        let members = app.filtered_swarm_members();
         let spinner_frame =
             (app.animation_elapsed() * jcode_tui_render::swarm_gallery::STRIP_SPINNER_FPS) as usize;
-        let lines = super::info_widget::swarm_gallery::render_swarm_page_lines(
+        let mut lines = super::info_widget::swarm_gallery::render_swarm_page_lines(
             &members,
             app.swarm_panel_selected(),
             spinner_frame,
             messages_area.width as usize,
             messages_area.height as usize,
+            &[],
         );
+        if app.swarm_filter_active() {
+            let filter_line = Line::from(vec![
+                Span::styled(
+                    "/",
+                    Style::default().fg(Color::Rgb(100, 180, 255)),
+                ),
+                Span::styled(
+                    app.swarm_filter_query().to_string(),
+                    Style::default().fg(Color::Rgb(100, 180, 255)),
+                ),
+                Span::styled(
+                    "█",
+                    Style::default()
+                        .fg(Color::Rgb(100, 180, 255))
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
+            ]);
+            lines.insert(0, filter_line);
+        }
         clear_area(frame, messages_area);
         frame.render_widget(Paragraph::new(lines), messages_area);
         info_widget::Margins {

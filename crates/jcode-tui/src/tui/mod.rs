@@ -1048,6 +1048,29 @@ pub trait TuiState {
     fn swarm_panel_full_page(&self) -> bool {
         false
     }
+    /// Whether the swarm panel filter input is active (user pressed `/`).
+    fn swarm_filter_active(&self) -> bool {
+        false
+    }
+    /// The current filter query typed into the swarm panel.
+    fn swarm_filter_query(&self) -> &str {
+        ""
+    }
+    /// Indices of agents selected for batch operations (multi-select via Space).
+    fn swarm_selected_set(&self) -> &std::collections::HashSet<usize> {
+        // Return a static empty set as default; overridden by App impl.
+        // Using a const/static would require lazy_static; the caller never
+        // calls this on the trait default so a leaked empty set is fine.
+        Box::leak(Box::new(std::collections::HashSet::new()))
+    }
+    /// Whether batch mode is active (Shift+Tab toggle).
+    fn is_swarm_batch_mode(&self) -> bool {
+        false
+    }
+    /// Members filtered by the current swarm filter query.
+    fn filtered_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
+        self.inline_swarm_members()
+    }
 
     // ---- Workspace ----
     /// Whether workspace mode is enabled for this client.

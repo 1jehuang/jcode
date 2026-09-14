@@ -1477,7 +1477,15 @@ pub struct App {
     swarm_panel_focused: bool,
     // Whether the focused swarm panel owns the main transcript viewport.
     swarm_panel_full_page: bool,
-    // Diff display mode (cycle with /diff)
+    // Whether the swarm panel filter input mode is active.
+    swarm_filter_active: bool,
+    // Text typed into the swarm panel filter (case-insensitive substring match).
+    swarm_filter_query: String,
+    // Whether the swarm panel is in batch mode (multi-select actions).
+    swarm_batch_mode: bool,
+    // Indices of agents selected in batch mode.
+    swarm_selected_agents: std::collections::HashSet<usize>,
+    // Diff display mode (toggle with Alt+G)
     diff_mode: crate::config::DiffDisplayMode,
     // Center all content (from config)
     pub(crate) centered: bool,

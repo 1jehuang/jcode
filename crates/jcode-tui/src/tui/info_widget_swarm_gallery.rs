@@ -13,10 +13,10 @@ use jcode_tui_core::keybind::alt_chord_lower;
 use jcode_tui_render::swarm_gallery::{
     GalleryMember, SwarmStripHint, display_order, humanize_age, is_active_status, render_gallery,
     render_swarm_compact, render_swarm_dock, render_swarm_live_card, render_swarm_panel,
-    render_swarm_strip, render_swarm_strip_vertical, status_accent, status_glyph, summary_line,
+    render_swarm_strip, render_swarm_strip_vertical, status_accent, status_glyph,
 };
 use ratatui::prelude::*;
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::{HashMap, HashSet};
 
 fn member_label(member: &SwarmMemberStatus) -> String {
     member
@@ -279,7 +279,7 @@ pub(crate) fn render_swarm_plan_dag(
     let mut topo_order: Vec<&str> = Vec::new();
     let mut queue: Vec<&str> = in_degree
         .iter()
-        .filter(|(_, &d)| d == 0)
+        .filter(|&(_, &d)| d == 0)
         .map(|(&id, _)| id)
         .collect();
     queue.sort();
@@ -846,6 +846,40 @@ pub(crate) fn render_swarm_panel_lines(
 /// used for the unfocused enter-hint.
 /// `spinner_frame` animates active agents' glyphs. `max_height` bounds the
 /// focused strip (chips + expanded hovered-agent detail + hints).
+/// Summary line with optional batch mode info appended.
+fn summary_line_with_batch(
+    total: usize,
+    active: usize,
+    todos_done: u32,
+    todos_total: u32,
+    max_elapsed: u64,
+    width: usize,
+    batch_info: &str,
+) -> Line<'static> {
+    let elapsed_text = if max_elapsed < 60 {
+        format!("{}s", max_elapsed)
+    } else {
+        format!("{}m {}s", max_elapsed / 60, max_elapsed % 60)
+    };
+    let tasks_text = format!("{}/{} tasks", todos_done, todos_total);
+    let body = format!(
+        "{total}{} agents · {active} active · {tasks_text} · {elapsed_text}{}",
+        if total == 1 { "" } else { "s" },
+        batch_info,
+    );
+    // Use unicode-width for display width (available via ratatui re-exports).
+    let body_w = unicode_width::UnicodeWidthStr::width(body.as_str());
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if body_w < width {
+        spans.push(Span::raw(" ".repeat(width - body_w)));
+    }
+    spans.push(Span::styled(
+        body,
+        Style::default().fg(jcode_tui_style::color::rgb(105, 105, 120)),
+    ));
+    Line::from(spans)
+}
+
 pub(crate) fn render_swarm_strip_lines(
     members: &[SwarmMemberStatus],
     selected: usize,
@@ -854,6 +888,8 @@ pub(crate) fn render_swarm_strip_lines(
     spinner_frame: usize,
     width: usize,
     max_height: usize,
+    selected_agents: &std::collections::HashSet<usize>,
+    batch_mode: bool,
 ) -> Vec<Line<'static>> {
     if members.is_empty() {
         return Vec::new();
@@ -861,7 +897,7 @@ pub(crate) fn render_swarm_strip_lines(
     let enter_hint = format!("{focus_key} controls · {} open all", alt_chord_lower("p"));
     // Focused hints: only Alt-chords (plus esc) are claimed so plain typing
     // keeps flowing to the chat input while the panel is focused.
-    let hints = vec![
+    let mut hints = vec![
         SwarmStripHint {
             key: alt_chord_lower("n").into(),
             label: "page".into(),
@@ -887,6 +923,51 @@ pub(crate) fn render_swarm_strip_lines(
             label: "exit".into(),
         },
     ];
+    if batch_mode {
+        hints.insert(
+            0,
+            SwarmStripHint {
+                key: "space".into(),
+                label: "toggle".into(),
+            },
+        );
+        hints.insert(
+            2,
+            SwarmStripHint {
+                key: "s".into(),
+                label: "stop".into(),
+            },
+        );
+        hints.insert(
+            3,
+            SwarmStripHint {
+                key: "r".into(),
+                label: "restart".into(),
+            },
+        );
+        hints.insert(
+            4,
+            SwarmStripHint {
+                key: "p".into(),
+                label: "prompt".into(),
+            },
+        );
+    } else {
+        hints.insert(
+            0,
+            SwarmStripHint {
+                key: "space".into(),
+                label: "select".into(),
+            },
+        );
+        hints.insert(
+            1,
+            SwarmStripHint {
+                key: "shift+tab".into(),
+                label: "batch".into(),
+            },
+        );
+    }
     let mut out = match crate::config::config().agents.swarm_strip_layout {
         crate::config::SwarmStripLayout::Vertical => render_swarm_strip_vertical(
             &badged_gallery(members),
@@ -941,7 +1022,14 @@ pub(crate) fn render_swarm_strip_lines(
         // Insert summary before the last line (hint) so it sits between the
         // detail viewport and the keybinding hints.
         let pos = out.len().saturating_sub(1);
-        out.insert(pos, summary_line(total, active, todos_done, todos_total, max_elapsed, width));
+        let batch_info = if batch_mode && !selected_agents.is_empty() {
+            format!(" · batch: {} selected", selected_agents.len())
+        } else if batch_mode {
+            " · batch mode".to_string()
+        } else {
+            String::new()
+        };
+        out.insert(pos, summary_line_with_batch(total, active, todos_done, todos_total, max_elapsed, width, &batch_info));
     }
     out
 }
