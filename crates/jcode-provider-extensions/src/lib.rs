@@ -4,6 +4,13 @@
 //! executed by `jcode-provider-subprocess`, which keeps executable lifecycle,
 //! deadlines, cancellation, and frame limits outside the persistence layer.
 
+mod bundle;
+
+pub use bundle::{
+    BundleComponents, BundleError, PLUGIN_MANIFEST_VERSION, PluginBundle, PluginManifest,
+    SkillMetadata,
+};
+
 pub use jcode_provider_protocol::Frame;
 use jcode_provider_protocol::PROTOCOL_VERSION;
 use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};

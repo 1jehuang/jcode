@@ -1,7 +1,7 @@
 use anyhow::Result;
 use jcode_provider_extensions::{
-    ExternalProviderProcess, Permission, PermissionPolicy, ProviderRecord, ProviderRegistry,
-    load_manifest_file,
+    ExternalProviderProcess, Permission, PermissionPolicy, PluginBundle, ProviderRecord,
+    ProviderRegistry, load_manifest_file,
 };
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -52,13 +52,23 @@ pub(crate) fn run_provider_extension_add_command(
     json: bool,
 ) -> Result<()> {
     let path = PathBuf::from(manifest_path);
-    let manifest = load_manifest_file(&path)?;
+    let (manifest, source) = if path.is_dir() {
+        let bundle = PluginBundle::load(&path)?;
+        let mut manifest = bundle.provider_manifest.ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin bundle '{}' has no provider.toml; inspect-only bundles cannot be registered",
+                path.display()
+            )
+        })?;
+        if manifest.executable.is_relative() {
+            manifest.executable = bundle.root.join(manifest.executable);
+        }
+        (manifest, bundle.root)
+    } else {
+        (load_manifest_file(&path)?, canonical_source_path(&path)?)
+    };
     let mut registry = registry()?;
-    registry.register(
-        manifest.clone(),
-        Some(canonical_source_path(&path)?),
-        trusted,
-    )?;
+    registry.register(manifest.clone(), Some(source), trusted)?;
     registry.save()?;
     let record = registry
         .get(&manifest.id)
@@ -73,7 +83,7 @@ pub(crate) fn run_provider_extension_add_command(
         );
     } else {
         println!("Registered external provider '{}'.", manifest.id);
-        println!("  manifest: {}", path.display());
+        println!("  source:   {}", path.display());
         println!(
             "  trust:    {}",
             if trusted { "trusted" } else { "untrusted" }
@@ -175,6 +185,47 @@ pub(crate) fn run_provider_extension_doctor_command(id: Option<&str>, json: bool
     }
     if failed {
         anyhow::bail!("one or more external provider checks failed")
+    }
+    Ok(())
+}
+
+pub(crate) fn run_provider_extension_inspect_command(path: &str, json: bool) -> Result<()> {
+    let bundle = PluginBundle::load(path)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&bundle)?);
+        return Ok(());
+    }
+
+    println!("{} v{}", bundle.manifest.name, bundle.manifest.version);
+    println!("  root:     {}", bundle.root.display());
+    println!("  manifest: {}", bundle.manifest_path.display());
+    if let Some(description) = &bundle.manifest.description {
+        println!("  description: {description}");
+    }
+    println!(
+        "  provider: {}",
+        if bundle.components.provider {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    if bundle.skills.is_empty() {
+        println!("  skills:   none");
+    } else {
+        println!("  skills:");
+        for skill in &bundle.skills {
+            match &skill.description {
+                Some(description) => println!("    - {}: {description}", skill.name),
+                None => println!("    - {}", skill.name),
+            }
+        }
+    }
+    let unsupported = bundle.unsupported_components();
+    if unsupported.is_empty() {
+        println!("  unsupported components: none");
+    } else {
+        println!("  unsupported components: {}", unsupported.join(", "));
     }
     Ok(())
 }

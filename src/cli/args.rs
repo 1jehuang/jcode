@@ -1059,9 +1059,9 @@ pub(crate) enum ProviderExtensionCommand {
         json: bool,
     },
 
-    /// Register a provider.toml manifest
+    /// Register a provider.toml manifest or a portable plugin bundle directory
     Add {
-        /// Path to the provider manifest
+        /// Path to provider.toml or a plugin bundle directory containing provider.toml
         manifest: String,
 
         /// Mark the provider trusted without an interactive prompt
@@ -1142,6 +1142,16 @@ pub(crate) enum ProviderExtensionCommand {
         allow_native_tools: bool,
 
         /// Emit the complete protocol exchange as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a Claude/Codex-style plugin bundle without executing it
+    Inspect {
+        /// Path to the plugin bundle directory
+        path: String,
+
+        /// Emit the complete bundle metadata as JSON
         #[arg(long)]
         json: bool,
     },

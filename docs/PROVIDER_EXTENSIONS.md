@@ -46,6 +46,7 @@ The public CLI exposes the initial local lifecycle:
 
 ```text
 jcode provider extension add ./provider.toml
+jcode provider extension add ./plugin --trusted
 jcode provider extension list
 jcode provider extension enable example-provider
 jcode provider extension disable example-provider
@@ -59,10 +60,55 @@ requires the record to be trusted and enabled. Each declared permission must be
 approved for that invocation with its matching `--allow-*` flag. No permission
 flag grants undeclared permissions.
 
+## Portable plugin bundles
+
+Jcode can inspect the common metadata and skill layout used by Claude Code and
+Codex-style plugin bundles without executing any bundle component:
+
+```text
+plugin/
+  plugin.json
+  provider.toml                 # optional Jcode provider adapter
+  skills/<name>/SKILL.md        # optional reusable workflow metadata
+  agents/                        # reported, not executed yet
+  hooks/hooks.json               # reported, not executed yet
+  .mcp.json                      # reported, not executed yet
+  .lsp.json                      # reported, not executed yet
+  monitors/monitors.json         # reported, not executed yet
+```
+
+The metadata file may be `plugin.json`, `.codex-plugin/plugin.json`, or
+`.claude-plugin/plugin.json`. Exactly one must exist. The initial supported
+metadata fields are `name`, `version`, `description`, `author`, `homepage`,
+`repository`, `license`, and `keywords`. Unknown fields are ignored so newer
+Claude or Codex metadata can be inspected without breaking older Jcode builds.
+
+Inspect a bundle with:
+
+```text
+jcode provider extension inspect ./plugin --json
+```
+
+Inspection is bounded to 256 KiB for the plugin manifest and 64 KiB per
+`SKILL.md`. It reads metadata only, never starts executables, never runs hook
+commands, and never grants permissions. Skills are sorted deterministically and
+duplicate or unsafe names are rejected. Components that Jcode does not execute
+yet are reported explicitly rather than silently ignored.
+
+The current bundle layer is intentionally an inspection and compatibility
+foundation. `provider extension run` remains the only execution path until each
+additional component has its own permission model, lifecycle tests, and failure
+containment.
+
 Use `--trusted` on `add` only after reviewing the executable, arguments,
 permissions, and source. Use `--json` for automation. The registry is stored
 under the Jcode configuration directory and is written with a temporary file
 followed by an atomic rename.
+
+When `add` receives a bundle directory, it requires a root-level `provider.toml`
+and registers that provider while retaining the bundle root as its source. A
+bundle containing only skills or metadata can be inspected, but cannot be
+registered as an executable provider.
 
 Discovery helpers recognize these locations without executing anything:
 
@@ -112,6 +158,15 @@ are intentionally deferred until a distribution design exists.
 - Native tools and filesystem access require separate permission decisions.
 - A provider manifest is metadata and is never proof that an executable is
   trustworthy.
+- Plugin bundle inspection is metadata-only, size-bounded, deterministic, and
+  does not execute skills, hooks, agents, MCP servers, LSP servers, monitors, or
+  scripts.
+
+The bundle inspection path adds no work to normal built-in provider sessions.
+It performs a bounded directory scan only when explicitly requested through the
+`provider extension inspect` command. Performance equivalence with full Claude
+or Codex plugin runtimes is not claimed until those optional execution surfaces
+are implemented and benchmarked separately.
 
 The current CLI registry records trust and permissions. The provider runtime
 must continue to enforce those fields at process start and must not treat a

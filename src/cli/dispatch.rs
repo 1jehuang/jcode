@@ -479,6 +479,9 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     )
                     .await?;
                 }
+                ProviderExtensionCommand::Inspect { path, json } => {
+                    commands::run_provider_extension_inspect_command(&path, json)?;
+                }
             },
         },
         Some(Command::Memory(subcmd)) => {
