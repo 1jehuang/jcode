@@ -7,7 +7,10 @@
 
 use super::call_rates::{ConfigCallRates, config_call_rates};
 use super::{ModelCost, RuleOutOfEffect, clear_memory_cache_for_tests, save_test_cache};
+use crate::config::PricingConfig;
+use crate::config::pricing::ProviderPricing;
 use jcode_provider_core::Currency;
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 /// DeepSeek's peak windows: peak is UTC 01:00-04:00 on weekdays, 10x off-peak.
@@ -242,4 +245,142 @@ output = 13.5
             ConfigCallRates::OutOfEffect(RuleOutOfEffect::NotYetEffective)
         );
     });
+}
+
+/// A catalog entry that states a `cache_write` rate, which is what models.dev
+/// publishes for Anthropic models (its own 1.25x figure).
+const CACHE_WRITE_CATALOG: &[(&str, &str, ModelCost)] = &[(
+    "anthropic",
+    "claude-sonnet-4-6",
+    ModelCost {
+        input_usd_per_mtok: 3.0,
+        output_usd_per_mtok: 15.0,
+        cache_read_usd_per_mtok: Some(0.3),
+        cache_write_usd_per_mtok: Some(3.75),
+    },
+)];
+
+#[test]
+fn a_configured_cache_write_rate_is_reported_by_the_billing_card() {
+    // I-1: the rate the user wrote must reach the billing path. Otherwise
+    // `cache_write` is validated, carried into the card, and silently ignored:
+    // the cost site applies Anthropic's `input x 1.25/2.0` premium instead and
+    // the user is billed a number they never configured.
+    let config = r#"
+[pricing.providers."claude:api-key".models."claude-sonnet-4-6".cost]
+input = 1.0
+output = 2.0
+cache_write = 0.9
+"#;
+    with_pricing_env(config, &[], || {
+        let ConfigCallRates::Priced(card) =
+            config_call_rates("claude:api-key", "claude-sonnet-4-6", SystemTime::now())
+        else {
+            panic!("a complete card must price the call");
+        };
+        assert_eq!(card.input_per_mtok, 1.0);
+        assert_eq!(card.cache_write_per_mtok, Some(0.9));
+    });
+}
+
+#[test]
+fn a_cache_write_rate_that_only_the_fallback_layer_states_is_not_honoured() {
+    // Parity constraint for I-1: only a rate the user's own card states may
+    // replace the billing premium. A `cache_write` that arrived by merging
+    // models.dev into a USD card belongs to the *fallback* layer, and the
+    // pre-feature heuristic has to keep owning that case: otherwise writing an
+    // unrelated card (input/output only) would quietly change what every
+    // Anthropic cache write costs.
+    let config = r#"
+[pricing.providers."claude:api-key".models."claude-sonnet-4-6".cost]
+input = 1.0
+output = 2.0
+"#;
+    with_pricing_env(config, CACHE_WRITE_CATALOG, || {
+        let ConfigCallRates::Priced(card) =
+            config_call_rates("claude:api-key", "claude-sonnet-4-6", SystemTime::now())
+        else {
+            panic!("a complete card must price the call");
+        };
+        assert_eq!(
+            card.cache_read_per_mtok,
+            Some(0.3),
+            "the USD card still merges the fallback field by field"
+        );
+        assert_eq!(
+            card.cache_write_per_mtok, None,
+            "models.dev's cache-write figure must not read as a configured rate"
+        );
+    });
+}
+
+#[test]
+fn an_invalid_pricing_section_is_ignored_and_the_reason_is_reported() {
+    // Task 8 F-3 / I-2: `validate` stops at the first error, so one bad line
+    // drops the *whole* section and every hand-written rule in it silently
+    // stops applying. The rejection has to be reportable next to the number the
+    // user reads, not only in a log file.
+    let config = r#"
+[pricing.fx_rates]
+CNY = -7.2
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+    with_pricing_env(config, DEEPSEEK_CATALOG, || {
+        assert!(
+            matches!(
+                config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+                ConfigCallRates::Absent
+            ),
+            "the whole section is dropped, including the providers that were fine"
+        );
+
+        let error = crate::model_pricing::pricing_config_error()
+            .expect("a rejected [pricing] section must be reportable, not log-only");
+        assert_eq!(error.field_path, "pricing.fx_rates.CNY");
+        assert!(
+            error.message.contains("positive"),
+            "the message says what was wrong: {error}"
+        );
+
+        // Memoized against the loaded config: the render path reads this every
+        // frame, so it must not re-validate (or re-log) per frame.
+        let again = crate::model_pricing::pricing_config_error().expect("still reported");
+        assert!(
+            std::sync::Arc::ptr_eq(&error, &again),
+            "the rejected section is parsed once per loaded config, not once per read"
+        );
+    });
+}
+
+#[test]
+fn a_provider_key_that_can_never_match_is_named() {
+    // Task 5a deferred / I-2: a typo'd `[pricing.providers]` key produced no
+    // card, no warning and no signal anywhere, so the user saw models.dev prices
+    // and no reason why. The keys that cannot match any identity form are named
+    // once, when the validated view is built.
+    let config = PricingConfig {
+        providers: BTreeMap::from([
+            ("anthropic".to_string(), ProviderPricing::default()),
+            ("claude:api-key".to_string(), ProviderPricing::default()),
+            ("deepsek".to_string(), ProviderPricing::default()),
+            ("deepseek".to_string(), ProviderPricing::default()),
+            ("jcode".to_string(), ProviderPricing::default()),
+            (
+                "openai-compatible:deepseek".to_string(),
+                ProviderPricing::default(),
+            ),
+            (
+                "openai-compatible:nope".to_string(),
+                ProviderPricing::default(),
+            ),
+        ]),
+        ..PricingConfig::default()
+    };
+    assert_eq!(
+        crate::model_pricing::unmatchable_provider_keys(&config),
+        vec!["deepsek".to_string(), "openai-compatible:nope".to_string()],
+    );
 }

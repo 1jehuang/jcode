@@ -1,4 +1,5 @@
 use super::*;
+use crate::money_display::note_pricing_problems;
 use crate::tui::TuiState as _;
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -434,12 +435,9 @@ impl App {
             cost_rows: {
                 let mut rows = crate::money_display::DisplayTarget::from_config()
                     .resolve_totals(&self.cost.total_cost_by_currency);
-                // F8/F20: when the last priced call fell back because the
-                // user's own rule was out of effect, the figure above is the
-                // fallback layer's, and the widget has to say so.
-                if let Some(reason) = self.cost.rule_out_of_effect {
-                    crate::money_display::note_primary(&mut rows, reason.label());
-                }
+                // F8/F20 and I-2: an out-of-effect rule and a rejected
+                // `[pricing]` section both mean this figure is not the user's own.
+                note_pricing_problems(&mut rows, self.cost.rule_out_of_effect);
                 rows
             },
             input_tokens: display_input_tokens,

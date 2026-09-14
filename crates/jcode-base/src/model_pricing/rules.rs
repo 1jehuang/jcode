@@ -419,12 +419,6 @@ mod tests {
                 "off-peak amount {} must equal the hand calculation {hand}",
                 money.amount
             );
-
-            // The peak amount is exactly twice the off-peak one for this card,
-            // which is what a 2.0x multiplier over the same base must produce.
-            let peak_hand: f64 = (9.0 * 25_000.0 + 27.0 * 5_000.0) / 1_000_000.0;
-            let off_peak_hand: f64 = (4.5 * 25_000.0 + 13.5 * 5_000.0) / 1_000_000.0;
-            assert!((peak_hand / off_peak_hand - 2.0).abs() < 1e-12);
         });
     }
 

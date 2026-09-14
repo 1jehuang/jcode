@@ -73,10 +73,13 @@ const LAST_USED_WRITE_THROTTLE_SECS: u64 = 30;
 /// `ProviderSpend::migrate_legacy_usd_figures`).
 ///
 /// A summed mirror can only be exact when a window holds one currency. With
-/// mixed currencies it is an *approximation*: it is not a converted total, and
-/// the per-currency split does not survive a rollback (the totals do). That is
-/// inherent to keeping the file readable by a USD-only reader, and it is why
-/// the buckets, not the mirror, are the written source of truth.
+/// mixed currencies it is an *approximation*: it is not a converted total, so a
+/// rollback does more than lose the split — it re-labels the amounts. After an
+/// older binary writes the file back, `{CNY 30, USD 5}` comes back as a single
+/// `USD 35` bucket: money spent in CNY is then shown as USD, which is the one
+/// thing this ledger promises never to do. That is inherent to keeping the file
+/// readable by a USD-only reader, and it is why the buckets, not the mirror, are
+/// the written source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderSpend {
     /// `YYYY-MM-DD` the `day` buckets belong to.
@@ -332,6 +335,13 @@ pub fn spend_snapshot(source_key: &str) -> Option<ProviderSpend> {
 }
 
 /// `/usage` label for locally tracked per-machine spend.
+///
+/// Next touch: this label and the row composition in [`spend_summary_rows_for`]
+/// are `/usage` report text, not ledger logic, and they are what took this file
+/// from 493 to 1163 lines. The repository's budget is 1200, so further growth
+/// here lands in the last few percent of it: split them out (a
+/// `provider_activity_*` sibling, the shape this file already uses for the OAuth
+/// sidecar, or the display layer) rather than growing the ledger past it.
 const LOCAL_SPEND_LABEL: &str = "Local spend (this machine)";
 
 /// `/usage` rows for locally tracked spend, one per currency.

@@ -14,7 +14,7 @@
 //!   next layer's never inherits that layer's numbers.
 
 use crate::config::PricingConfig;
-use crate::config::pricing::{ProviderPricing, validate};
+use crate::config::pricing::{PricingConfigError, ProviderPricing, validate};
 use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::rules;
 use crate::model_pricing::{ModelCost, models_dev_provider_id, normalize_model_id};
@@ -42,13 +42,21 @@ pub(super) enum ConfigPrice {
     OutOfEffect(RuleOutOfEffect),
 }
 
+/// What the memo stores: the config identity the view was built from, the
+/// validated view, and the reason validation rejected the section (if it did).
+type PricingConfigMemo = (usize, Arc<PricingConfig>, Option<Arc<PricingConfigError>>);
+
 /// Validated `[pricing]` snapshot, memoized against the loaded config instance.
 ///
 /// Validation is pure but allocation-heavy, and the route catalog asks for a
 /// price once per route, so the parsed view is cached and invalidated whenever
 /// `config()` reloads (a reload leaks a brand-new `Config`, so its address is a
 /// stable identity for "the config the user currently has").
-static PRICING_CONFIG: Mutex<Option<(usize, Arc<PricingConfig>)>> = Mutex::new(None);
+///
+/// The rejection error is part of the memo, not recomputed per read: the display
+/// asks for it every frame, and neither the validation nor its warning line may
+/// happen more than once per loaded config.
+static PRICING_CONFIG: Mutex<Option<PricingConfigMemo>> = Mutex::new(None);
 
 /// The validated `[pricing]` view of the loaded config.
 ///
@@ -59,18 +67,29 @@ pub fn pricing_config() -> Arc<PricingConfig> {
     let config = crate::config::config();
     let identity = std::ptr::from_ref(config) as usize;
     if let Ok(memo) = PRICING_CONFIG.lock()
-        && let Some((cached, parsed)) = memo.as_ref()
+        && let Some((cached, parsed, _)) = memo.as_ref()
         && *cached == identity
     {
         return Arc::clone(parsed);
     }
 
-    let parsed = match validate(&config.pricing) {
+    let (parsed, error) = match validate(&config.pricing) {
         Ok((parsed, warnings)) => {
             for warning in warnings {
                 crate::logging::warn(&format!("pricing config: {warning}"));
             }
-            parsed
+            // A key that matches no provider identity is a rule that can never
+            // take effect, and it used to say nothing at all: no card, no
+            // warning, no signal, so the user saw models.dev prices and no
+            // reason why (Task 5a deferred). Say it once per loaded config.
+            for key in unmatchable_provider_keys(&parsed) {
+                crate::logging::warn(&format!(
+                    "pricing config: pricing.providers.{key}: no provider identity matches this \
+                     key, so its rules apply only if a provider reports exactly this activity key \
+                     (check for a typo)"
+                ));
+            }
+            (parsed, None)
         }
         Err(error) => {
             // An invalid `[pricing]` section must never take pricing down with
@@ -78,7 +97,11 @@ pub fn pricing_config() -> Arc<PricingConfig> {
             crate::logging::warn(&format!(
                 "ignoring invalid [pricing] config ({error}); falling back to models.dev"
             ));
-            PricingConfig::default()
+            // `validate` stops at the first error, so *every* rule in the
+            // section is dead, including the providers that were fine. The
+            // error is kept in the memo because a log file is not a user-facing
+            // signal: the display renders it next to the amount it changed (I-2).
+            (PricingConfig::default(), Some(Arc::new(error)))
         }
     };
     let parsed = Arc::new(parsed);
@@ -87,8 +110,8 @@ pub fn pricing_config() -> Arc<PricingConfig> {
         // against the entry being replaced: when two threads race the same
         // reload the loser sees the winner's identity already stored and does
         // not bump a second time.
-        let changed = memo.as_ref().map(|(cached, _)| *cached) != Some(identity);
-        *memo = Some((identity, Arc::clone(&parsed)));
+        let changed = memo.as_ref().map(|(cached, _, _)| *cached) != Some(identity);
+        *memo = Some((identity, Arc::clone(&parsed), error));
         drop(memo);
         if changed {
             // This is the one place that observes "the config in force is not
@@ -98,6 +121,69 @@ pub fn pricing_config() -> Arc<PricingConfig> {
         }
     }
     parsed
+}
+
+/// Why the loaded `[pricing]` section was rejected, if it was.
+///
+/// A rejected section is dropped whole (see [`pricing_config`]), so every
+/// hand-written rule in it stopped applying and prices fall back to models.dev.
+/// That is the same silent-wrong-price class as an expired rule, and it used to
+/// be log-only; the error carries the config path that caused it so the display
+/// can say which line to fix.
+///
+/// Cheap and idempotent: `pricing_config` memoizes the parsed view *and* this
+/// error against the loaded config instance, so reading it on the render path
+/// re-validates nothing and logs nothing.
+pub fn pricing_config_error() -> Option<Arc<PricingConfigError>> {
+    // Refresh first: the memo is only in step with the *loaded* config after
+    // this call, and a stale memo would report the previous section's rejection
+    // (or none at all).
+    pricing_config();
+    let Ok(memo) = PRICING_CONFIG.lock() else {
+        return None;
+    };
+    memo.as_ref().and_then(|(_, _, error)| error.clone())
+}
+
+/// The `[pricing.providers]` keys that cannot match any provider identity jcode
+/// reports, i.e. rules that can never take effect.
+///
+/// This is the mirror of [`provider_key_matches`]'s three forms (spec 4.2.1)
+/// asked about a key on its own, and it exists so a typo is not a silent no-op.
+/// `provider_activity` buckets a provider no other table knows under a slug of
+/// its display name, so this is "no *known* provider" rather than a proof.
+pub fn unmatchable_provider_keys(config: &PricingConfig) -> Vec<String> {
+    config
+        .providers
+        .keys()
+        .filter(|key| !provider_key_is_known(key))
+        .cloned()
+        .collect()
+}
+
+/// Whether `key` can be an identity form a billing path would report.
+fn provider_key_is_known(key: &str) -> bool {
+    let key = key.trim();
+    if key.is_empty() {
+        return false;
+    }
+    // The jcode slugs and api-key routes models.dev knows.
+    if models_dev_provider_id(key).is_some() {
+        return true;
+    }
+    // `openai-compatible:<profile>`, or the profile's id / display name alone.
+    let profile = key.strip_prefix("openai-compatible:").unwrap_or(key);
+    if crate::provider_catalog::openai_compatible_profile_by_id(profile).is_some()
+        || crate::provider_catalog::openai_compatible_profile_id_for_display_name(profile).is_some()
+    {
+        return true;
+    }
+    // The source keys the activity ledger produces for the providers no other
+    // table knows (`provider_activity::source_key_for_provider_label`).
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "jcode" | "copilot" | "cursor" | "antigravity"
+    )
 }
 
 /// The config-authoritative card for `(source_key, model)`, if the user wrote
@@ -155,6 +241,12 @@ pub(super) fn resolve_card(
 ) -> ResolvedCard {
     let fallback = crate::model_pricing::lookup(provider, model);
     let mut from_config = true;
+    // What the `[pricing]` card states for cache writes *on its own*, asked
+    // before the merge below can fill the field from the next layer. Only a rate
+    // the user wrote may replace the billing premium (see
+    // `CallRateCard::cache_write_per_mtok`); a figure that arrived from
+    // models.dev belongs to that layer and must keep the pre-feature behaviour.
+    let declared_cache_write = declared_cache_write(&entry, at);
 
     if currency.is_usd() {
         // Same currency as the next layer, so missing fields merge per field.
@@ -195,10 +287,26 @@ pub(super) fn resolve_card(
         entry.cost = selected.cost;
     }
 
+    // A card that states its own cache-write rate keeps it through the merge
+    // (`or` never overwrites) and through the tariff (which scales or overrides
+    // that same card), so the effective rate is the one to honour.
+    let config_cache_write = declared_cache_write.and(entry.cost.cache_write);
+
     ResolvedCard {
         entry,
         currency,
         from_config,
+        config_cache_write,
+    }
+}
+
+/// The cache-write rate the `[pricing]` entry states on its own, with the tariff
+/// it selects already applied, or `None` when the card leaves the field to the
+/// layer below.
+fn declared_cache_write(entry: &ModelPricingEntry, at: SystemTime) -> Option<f64> {
+    match rules::resolve_tier(entry, at) {
+        Some(selected) => selected.cost.cache_write,
+        None => entry.cost.cache_write,
     }
 }
 
@@ -209,6 +317,11 @@ pub(super) struct ResolvedCard {
     /// `false` when the config card could not price the model and the rates are
     /// the next layer's, so callers can keep labelling sources truthfully.
     pub(super) from_config: bool,
+    /// The cache-write rate the `[pricing]` card itself states, when it states
+    /// one. `None` also covers "the merge filled the field from models.dev":
+    /// billing may only override its cache-write premium with a configured rate
+    /// (parity constraint, see `CallRateCard::cache_write_per_mtok`).
+    pub(super) config_cache_write: Option<f64>,
 }
 
 /// Fill unset fields from a fallback layer that is known to use the same

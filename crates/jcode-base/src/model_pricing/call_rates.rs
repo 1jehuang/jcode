@@ -28,7 +28,15 @@ pub struct CallRateCard {
     pub output_per_mtok: f64,
     /// Cache-read rate when the card states one.
     pub cache_read_per_mtok: Option<f64>,
-    /// Cache-write rate when the card states one.
+    /// Cache-write rate when the *user's own* card states one, directly or
+    /// through the tariff it selects.
+    ///
+    /// A `cache_write` that only arrived by merging the fallback layer is
+    /// deliberately absent here, even though the merged rate card in `entry`
+    /// does carry it: the cost site's cache-write premium (Anthropic's
+    /// `input x 1.25/2.0`) owns that case, exactly as it did before `[pricing]`
+    /// existed. Honouring a models.dev figure here would change what a cache
+    /// write costs for a card that never mentioned one.
     pub cache_write_per_mtok: Option<f64>,
     /// Currency the rates above are denominated in. Never inherited across
     /// layers (F1).
@@ -41,13 +49,22 @@ impl CallRateCard {
     /// Input and output are both required: a call's cost is dominated by the
     /// output rate, so pricing without it would silently bill the missing half
     /// at whatever the caller's fallback is.
-    pub fn from_entry(entry: &ModelPricingEntry, currency: Currency) -> Option<Self> {
+    ///
+    /// `cache_write_per_mtok` is passed in rather than read off `entry`: only a
+    /// rate the config layer states may replace the billing premium, and `entry`
+    /// is the card *after* the field-level merge with the next layer. The caller
+    /// reads the distinction from `sources::ResolvedCard::config_cache_write`.
+    pub fn from_entry(
+        entry: &ModelPricingEntry,
+        cache_write_per_mtok: Option<f64>,
+        currency: Currency,
+    ) -> Option<Self> {
         let cost: &CostFields = &entry.cost;
         Some(Self {
             input_per_mtok: cost.input?,
             output_per_mtok: cost.output?,
             cache_read_per_mtok: cost.cache_read,
-            cache_write_per_mtok: cost.cache_write,
+            cache_write_per_mtok,
             currency,
         })
     }
@@ -94,7 +111,11 @@ pub fn config_call_rates(provider: &str, model: &str, at: SystemTime) -> ConfigC
                 // let the derived layers price the call and label it.
                 return ConfigCallRates::Absent;
             }
-            match CallRateCard::from_entry(&resolved.entry, resolved.currency) {
+            match CallRateCard::from_entry(
+                &resolved.entry,
+                resolved.config_cache_write,
+                resolved.currency,
+            ) {
                 Some(card) => ConfigCallRates::Priced(card),
                 None => ConfigCallRates::ConfiguredWithoutPrice,
             }

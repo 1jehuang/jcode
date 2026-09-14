@@ -181,6 +181,34 @@ pub fn note_primary(rows: &mut [DisplayAmount], note: &str) {
     }
 }
 
+/// Say, on the amount itself, why the session cost is not what the user's own
+/// `[pricing]` config asked for.
+///
+/// Two pricing problems silently change what the displayed figure *means*, and
+/// both used to be invisible in the UI:
+///
+/// * a rule that is out of effect, where the figure is the next layer's
+///   (F8/F20), and
+/// * a `[pricing]` section that failed validation, where the resolver dropped
+///   every rule in it and the figure may be models.dev's (I-2).
+///
+/// The note belongs on the amount the user reads. The second case is read here
+/// rather than stored per call: the resolver memoizes the rejection against the
+/// loaded config, so this costs one lock (the same read `from_config` already
+/// does on this path) and the rejection is logged once per config instance, not
+/// once per frame.
+pub fn note_pricing_problems(
+    rows: &mut [DisplayAmount],
+    rule_out_of_effect: Option<crate::model_pricing::RuleOutOfEffect>,
+) {
+    if let Some(reason) = rule_out_of_effect {
+        note_primary(rows, reason.label());
+    }
+    if let Some(error) = crate::model_pricing::pricing_config_error() {
+        note_primary(rows, &format!("invalid [pricing]: {}", error.field_path));
+    }
+}
+
 /// Format one amount with the currency it is actually in.
 ///
 /// USD keeps the familiar `$` (and the pre-existing rendering); every other
