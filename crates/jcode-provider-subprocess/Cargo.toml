@@ -1,0 +1,13 @@
+[package]
+name = "jcode-provider-subprocess"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+jcode-provider-protocol = { path = "../jcode-provider-protocol" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "process", "sync"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
