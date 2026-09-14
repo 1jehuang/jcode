@@ -13,6 +13,7 @@
 //   node scripts/sync-model-prices.mjs            # apply to remote D1
 //   node scripts/sync-model-prices.mjs --dry-run  # print the SQL and a report
 //   node scripts/sync-model-prices.mjs --days=90  # widen the observed window
+//   node scripts/sync-model-prices.mjs --dry-run --report-json=unpriced.json
 //
 // Safe to re-run: it is an upsert keyed on the telemetry model label, and it
 // never deletes rows.
@@ -21,12 +22,19 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildModelPriceReport } from "./model-price-report.mjs";
 
 const CATALOG_URL = "https://models.dev/api.json";
 const DB = "jcode-telemetry";
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
+const reportArg = args.find((a) => a.startsWith("--report-json="));
+const reportPath = reportArg?.slice("--report-json=".length);
+if (reportArg && !reportPath) {
+  console.error("--report-json requires a file path");
+  process.exit(1);
+}
 const daysArg = args.find((a) => a.startsWith("--days="));
 const days = daysArg ? Number.parseInt(daysArg.slice("--days=".length), 10) : 30;
 if (!Number.isFinite(days) || days <= 0) {
@@ -293,18 +301,26 @@ async function main() {
       `INSERT INTO model_prices (model, source_model, source_provider, input_usd_per_mtok, output_usd_per_mtok, cache_read_usd_per_mtok, cache_write_usd_per_mtok, input_includes_cache_read, price_kind, updated_at) VALUES (${sqlStr(r.model)}, ${sqlStr(r.sourceModel)}, ${sqlStr(r.sourceProvider)}, ${sqlNum(r.input)}, ${sqlNum(r.output)}, ${sqlNum(r.cacheRead)}, ${sqlNum(r.cacheWrite)}, ${r.cacheInclusive}, ${sqlStr(r.kind)}, datetime('now')) ON CONFLICT(model) DO UPDATE SET source_model=excluded.source_model, source_provider=excluded.source_provider, input_usd_per_mtok=excluded.input_usd_per_mtok, output_usd_per_mtok=excluded.output_usd_per_mtok, cache_read_usd_per_mtok=excluded.cache_read_usd_per_mtok, cache_write_usd_per_mtok=excluded.cache_write_usd_per_mtok, input_includes_cache_read=excluded.input_includes_cache_read, price_kind=excluded.price_kind, updated_at=datetime('now');`,
   );
 
-  const totalTokens = observed.reduce((sum, r) => sum + Number(r.tokens ?? 0), 0);
-  const unpricedTokens = unpriced.reduce((sum, r) => sum + Number(r.tokens ?? 0), 0);
-  const coverage = totalTokens ? (1 - unpricedTokens / totalTokens) * 100 : 100;
+  // A label can occur under multiple providers. Pricing is keyed by label, but
+  // coverage must count every observed pair, not just its first occurrence.
+  const report = buildModelPriceReport(observed, rows);
+  const coverage = report.matched_token_pct;
   console.log(
     `Priced ${rows.size - unpriced.length}/${rows.size} labels; ` +
-      `token coverage ${coverage.toFixed(2)}%.`,
+      `reported-token coverage ${coverage === null ? "n/a" : coverage.toFixed(2) + "%"}.`,
   );
-  if (unpriced.length) {
+  if (report.unpriced.length) {
     console.log("Top unpriced labels by tokens:");
-    for (const u of unpriced.sort((a, b) => Number(b.tokens) - Number(a.tokens)).slice(0, 15)) {
-      console.log(`  ${u.label}  ${Number(u.tokens).toLocaleString()} tokens`);
+    for (const u of report.unpriced.slice(0, 15)) {
+      console.log(`  ${u.model}  ${u.reported_tokens.toLocaleString()} tokens (${u.providers.join(", ")})`);
     }
+  }
+  if (reportPath) {
+    writeFileSync(reportPath, JSON.stringify({
+      ...report, catalog_url: CATALOG_URL, generated_at: new Date().toISOString(),
+      observed_days: days, dry_run: dryRun,
+    }, null, 2) + "\n");
+    console.log(`Wrote pricing coverage report to ${reportPath}`);
   }
 
   if (dryRun) {
