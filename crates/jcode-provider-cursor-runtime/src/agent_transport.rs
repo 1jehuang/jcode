@@ -27,7 +27,7 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use flate2::read::GzDecoder;
 use tokio::sync::mpsc;
@@ -39,12 +39,18 @@ use jcode_message_types::StreamEvent;
 const AGENT_HOST: &str = "agentn.global.api5.cursor.sh";
 const AGENT_PATH: &str = "/agent.v1.AgentService/Run";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-/// Client version advertised to Cursor's agent service. Must track a currently
-/// served `cursor-agent` CLI build; override at runtime with
-/// `JCODE_CURSOR_CLI_VERSION` if Cursor moves the floor.
-const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.08.25-3e8eec8";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const AGENT_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Fallback client build advertised to Cursor's agent service when no local
+/// `cursor-agent` installation is available. Prefer the installed build below:
+/// Cursor gates AgentService features on this value and rejects stale clients.
+const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.08.25-3e8eec8";
+
+fn stream_debug(message: impl std::fmt::Display) {
+    if std::env::var_os("CURSOR_STREAM_DEBUG").is_some() {
+        eprintln!("cursor-stream: {message}");
+    }
+}
 
 fn valid_cli_build_id(value: &str) -> bool {
     let Some((date, commit)) = value.split_once('-') else {
@@ -251,9 +257,11 @@ pub(crate) fn routed_prompt(
         sections.push(system.trim().to_string());
     }
     if !tools.is_empty() {
+        let aliases = crate::wire::mcp_wire_aliases(tools);
         let names = tools
             .iter()
-            .map(|tool| crate::wire::mcp_wire_name(&tool.name))
+            .filter_map(|tool| aliases.get(&tool.name))
+            .cloned()
             .collect::<Vec<_>>()
             .join(", ");
         sections.push(format!(
@@ -272,6 +280,20 @@ pub(crate) fn routed_prompt(
 /// the gzip flag when the request advertises gzip content encoding.
 fn connect_frame(payload: &[u8]) -> Vec<u8> {
     crate::wire::connect_frame(payload)
+}
+
+/// Encode the model descriptor used by the current Cursor AgentService.
+///
+/// The service expects the selected model in both the requested-model field and
+/// the catalog field. The `fast` value is represented as the string-valued
+/// metadata entry used by the official CLI, rather than as the legacy boolean
+/// field that older bridges emitted.
+fn encode_model_meta(name: &str, fast: bool) -> Vec<u8> {
+    let mut out = field_str(1, name);
+    let mut fast_entry = field_str(1, "fast");
+    fast_entry.extend(field_str(2, if fast { "true" } else { "false" }));
+    out.extend(field_ld(3, &fast_entry));
+    out
 }
 
 /// Build the request frames for a single-shot prompt turn.
@@ -311,11 +333,10 @@ fn build_run_frames(
         req.extend(field_str(4, ""));
     }
     req.extend(field_str(5, &conv));
-    // AgentRunRequest.f9 is a ModelEntry. Mark the selected model as a built-in
-    // model explicitly. Omitting this metadata can leave AgentService at HTTP 200
-    // with only heartbeats instead of starting the turn.
-    let mut selected_model = field_str(1, model);
-    selected_model.extend(field_varint(7, 1));
+    // AgentRunRequest.f9 is a model descriptor. Omitting the `fast` metadata can
+    // leave AgentService at HTTP 200 with only heartbeats instead of starting
+    // the turn.
+    let selected_model = encode_model_meta(model, false);
     // ModelDetails (f3) carries the canonical/display model identity used by the
     // current AgentService model resolver. The server accepts the request without
     // it, but may leave the stream pending while resolving the model.
@@ -325,10 +346,10 @@ fn build_run_frames(
     req.extend(field_ld(3, &model_details));
     req.extend(field_ld(9, &selected_model));
     req.extend(field_varint(12, 0));
-    // Keep the catalog entry in the same ModelEntry shape. A fabricated
-    // "default" model is not part of Cursor's catalog and can cause the
-    // service to keep the run pending while resolving models.
-    req.extend(field_ld(14, &field_str(1, model)));
+    // The catalog contains the default entry followed by the selected model.
+    // Both entries use the same `{name, fast}` metadata shape as cursor-agent.
+    req.extend(field_ld(14, &encode_model_meta("default", false)));
+    req.extend(field_ld(14, &encode_model_meta(model, false)));
     req.extend(field_str(16, &conv));
     req.extend(field_str(25, request_id));
     let frame0 = connect_frame(&field_ld(1, &req));
@@ -584,26 +605,34 @@ pub async fn run_agent_turn(
         .await;
 
     // Establish TLS + HTTP/2.
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), 443))
-        .await
-        .with_context(|| format!("Failed to connect to {host}:443"))?;
+    let tcp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect((host.as_str(), 443)),
+    )
+    .await
+    .with_context(|| format!("Timed out connecting to {host}:443"))?
+    .with_context(|| format!("Failed to connect to {host}:443"))?;
     tcp.set_nodelay(true).ok();
     let connector = TlsConnector::from(tls_config());
     let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.clone())
         .context("Invalid Cursor agent host name")?;
-    let tls = connector
-        .connect(server_name, tcp)
+    let tls = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(server_name, tcp))
         .await
+        .context("Timed out during TLS handshake with Cursor agent host")?
         .context("TLS handshake with Cursor agent host failed")?;
 
-    let (h2, connection) = client::handshake(tls)
+    let (h2, connection) = tokio::time::timeout(CONNECT_TIMEOUT, client::handshake(tls))
         .await
+        .context("Timed out during HTTP/2 handshake with Cursor agent host")?
         .context("HTTP/2 handshake with Cursor agent host failed")?;
     // Drive the connection in the background.
     let conn_task = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let mut h2 = h2.ready().await.context("HTTP/2 connection not ready")?;
+    let mut h2 = tokio::time::timeout(CONNECT_TIMEOUT, h2.ready())
+        .await
+        .context("Timed out waiting for HTTP/2 connection readiness")?
+        .context("HTTP/2 connection not ready")?;
 
     let request_id = Uuid::new_v4().to_string();
     let session_id = logical_session_id
@@ -697,10 +726,25 @@ pub async fn run_agent_turn(
     });
 
     // Receiver: read response body frames and forward assistant text.
-    let response = response
-        .await
-        .context("Cursor agent request failed before response headers")?;
+    let response = match tokio::time::timeout(CONNECT_TIMEOUT, response).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            let _ = stop_tx.send(());
+            sender.abort();
+            conn_task.abort();
+            return Err(error).context("Cursor agent request failed before response headers");
+        }
+        Err(_) => {
+            let _ = stop_tx.send(());
+            sender.abort();
+            conn_task.abort();
+            return Err(anyhow!(
+                "Timed out waiting for Cursor agent response headers"
+            ));
+        }
+    };
     let status = response.status();
+    stream_debug(format_args!("response status={status}"));
     let mut body = response.into_body();
     let mut pending: Vec<u8> = Vec::new();
     let mut error_message: Option<String> = None;
@@ -708,6 +752,8 @@ pub async fn run_agent_turn(
     let mut in_thinking = false;
     let mut active_tool_calls: usize = 0;
     let mut blob_store: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+    let mut terminal_frame = false;
+    let mut stream_error: Option<anyhow::Error> = None;
 
     // Idle timeouts guard against the server holding the stream open. Cursor
     // keeps the response side open after the assistant message when it expects
@@ -717,14 +763,19 @@ pub async fn run_agent_turn(
     let first_byte_timeout = Duration::from_secs(60);
     let idle_timeout = Duration::from_secs(4);
     let tool_exec_timeout = Duration::from_secs(300);
+    // Heartbeat, KV, and acknowledgement frames are transport activity, not
+    // model progress. Keep a phase deadline so a server that only emits those
+    // frames cannot keep a user-facing turn alive forever.
+    let mut phase_started = Instant::now();
+    let mut last_meaningful = phase_started;
 
     'read: loop {
         let budget = if active_tool_calls > 0 {
-            tool_exec_timeout
+            tool_exec_timeout.saturating_sub(last_meaningful.elapsed())
         } else if got_text {
-            idle_timeout
+            idle_timeout.saturating_sub(last_meaningful.elapsed())
         } else {
-            first_byte_timeout
+            first_byte_timeout.saturating_sub(phase_started.elapsed())
         };
         let next = tokio::select! {
             res = tokio::time::timeout(budget, body.data()) => {
@@ -733,12 +784,21 @@ pub async fn run_agent_turn(
                         chunk
                     }
                     Ok(Some(Err(error))) => {
-                        return Err(error).context("Cursor agent response stream error");
+                        stream_error = Some(error.into());
+                        break 'read;
                     }
                     Ok(None) => {
+                        if !terminal_frame {
+                            stream_error = Some(anyhow!(
+                                "Cursor agent stream ended before an authoritative terminal frame"
+                            ));
+                        }
                         break 'read;
                     }
                     Err(_) => {
+                        stream_error = Some(anyhow!(
+                            "Cursor agent stream timed out waiting for meaningful progress"
+                        ));
                         break 'read;
                     }
                 }
@@ -763,23 +823,41 @@ pub async fn run_agent_turn(
                 if active_tool_calls > 0 {
                     active_tool_calls -= 1;
                 }
+                phase_started = Instant::now();
+                last_meaningful = phase_started;
                 got_text = false;
                 continue 'read;
             }
         };
         let chunk = next;
         let _ = body.flow_control().release_capacity(chunk.len());
+        stream_debug(format_args!("response chunk={}", chunk.len()));
         pending.extend_from_slice(&chunk);
-        while let Some((flag, payload, consumed)) = next_frame(&pending)? {
+        loop {
+            let frame = match next_frame(&pending) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(error) => {
+                    stream_error = Some(error);
+                    break 'read;
+                }
+            };
+            let (flag, payload, consumed) = frame;
+            stream_debug(format_args!(
+                "frame flag={flag:#04x} payload_len={}",
+                payload.len()
+            ));
             pending.drain(..consumed);
             if flag & 0x02 != 0 {
                 // end-of-stream trailer (JSON). Detect errors, then finish.
-                if let Ok(text) = std::str::from_utf8(&payload)
-                    && let Ok(json) = serde_json::from_str::<serde_json::Value>(text)
-                    && let Some(err) = json.get("error")
-                {
-                    error_message = Some(err.to_string());
+                if let Ok(text) = std::str::from_utf8(&payload) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+                        if let Some(err) = json.get("error") {
+                            error_message = Some(err.to_string());
+                        }
+                    }
                 }
+                terminal_frame = true;
                 break 'read;
             }
             if let Some(text) = extract_answer_text(&payload) {
@@ -788,6 +866,7 @@ pub async fn run_agent_turn(
                     in_thinking = false;
                 }
                 got_text = true;
+                last_meaningful = Instant::now();
                 if tx.send(Ok(StreamEvent::TextDelta(text))).await.is_err() {
                     break 'read;
                 }
@@ -798,6 +877,7 @@ pub async fn run_agent_turn(
                     let _ = tx.send(Ok(StreamEvent::ThinkingStart)).await;
                     in_thinking = true;
                 }
+                last_meaningful = Instant::now();
                 if tx
                     .send(Ok(StreamEvent::ThinkingDelta(thinking)))
                     .await
@@ -808,6 +888,7 @@ pub async fn run_agent_turn(
                 continue;
             }
             if let Some(used_tokens) = crate::wire::extract_checkpoint_used_tokens(&payload) {
+                last_meaningful = Instant::now();
                 let _ = tx
                     .send(Ok(StreamEvent::TokenUsage {
                         input_tokens: Some(used_tokens),
@@ -906,6 +987,7 @@ pub async fn run_agent_turn(
                             let corr_request_id =
                                 format!("{}:{}:{}", stream_uuid, msg.id, msg.exec_id);
                             active_tool_calls += 1;
+                            last_meaningful = Instant::now();
                             if tx
                                 .send(Ok(StreamEvent::NativeToolCall {
                                     request_id: corr_request_id,
@@ -928,9 +1010,11 @@ pub async fn run_agent_turn(
                                 &msg.exec_id,
                                 &[],
                             );
-                            let agent_bytes =
-                                crate::wire::encode_agent_client_exec_message(&res_bytes);
-                            let connect_bytes = crate::wire::connect_frame(&agent_bytes);
+                            // `encode_request_context_result` already returns
+                            // the AgentClientMessage wrapper (field 2). Do not
+                            // wrap it a second time, or AgentService keeps the
+                            // stream open and emits only heartbeats.
+                            let connect_bytes = crate::wire::connect_frame(&res_bytes);
                             let _ = outbound_tx.send(connect_bytes).await;
                         }
                         ExecServerMessageVariant::Shell(args) => {
@@ -1109,13 +1193,21 @@ pub async fn run_agent_turn(
         let _ = tx.send(Ok(StreamEvent::ThinkingEnd)).await;
     }
 
+    if let Some(err) = stream_error {
+        anyhow::bail!("{err}");
+    }
     if let Some(err) = error_message {
         anyhow::bail!("Cursor agent stream error: {err}");
     }
     if !status.is_success() {
         anyhow::bail!("Cursor agent request failed with HTTP {status}");
     }
-    let _ = got_text;
+    if !terminal_frame {
+        anyhow::bail!(
+            "Cursor agent stream ended without a terminal frame{}",
+            if got_text { " after text output" } else { "" }
+        );
+    }
 
     let _ = tx
         .send(Ok(StreamEvent::MessageEnd {
@@ -1142,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn run_request_uses_model_entry_shape_without_legacy_fast_metadata() {
+    fn run_request_uses_current_model_metadata_shape() {
         let frame = build_run_frames("hello", "composer-2.5", "/tmp", &[], "request-id")
             .into_iter()
             .next()
@@ -1161,12 +1253,28 @@ mod tests {
                 .and_then(|field| std::str::from_utf8(field.data).ok()),
             Some("composer-2.5")
         );
-        assert!(iter_fields(requested_model.data).any(|field| field.field == 7 && field.wire == 0));
+        let fast_metadata = iter_fields(requested_model.data)
+            .find(|field| field.field == 3 && field.wire == 2)
+            .unwrap();
+        assert_eq!(
+            iter_fields(fast_metadata.data)
+                .find(|field| field.field == 1 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("fast")
+        );
+        assert_eq!(
+            iter_fields(fast_metadata.data)
+                .find(|field| field.field == 2 && field.wire == 2)
+                .and_then(|field| std::str::from_utf8(field.data).ok()),
+            Some("false")
+        );
         assert!(iter_fields(run_request.data).any(|field| field.field == 3 && field.wire == 2));
-        assert!(iter_fields(requested_model.data).all(|field| field.field != 3));
 
-        let catalog_ids = iter_fields(run_request.data)
+        let catalog_entries = iter_fields(run_request.data)
             .filter(|field| field.field == 14 && field.wire == 2)
+            .collect::<Vec<_>>();
+        let catalog_ids = catalog_entries
+            .iter()
             .map(|field| {
                 iter_fields(field.data)
                     .find(|nested| nested.field == 1 && nested.wire == 2)
@@ -1174,7 +1282,18 @@ mod tests {
                     .unwrap()
             })
             .collect::<Vec<_>>();
-        assert_eq!(catalog_ids, vec!["composer-2.5"]);
+        assert_eq!(catalog_ids, vec!["default", "composer-2.5"]);
+        for entry in catalog_entries {
+            let metadata = iter_fields(entry.data)
+                .find(|field| field.field == 3 && field.wire == 2)
+                .unwrap();
+            assert_eq!(
+                iter_fields(metadata.data)
+                    .find(|field| field.field == 1 && field.wire == 2)
+                    .and_then(|field| std::str::from_utf8(field.data).ok()),
+                Some("fast")
+            );
+        }
     }
 
     /// Regression test for issue #637: teams routed to a region reject the
@@ -1283,6 +1402,29 @@ mod tests {
         let hay = String::from_utf8_lossy(frame0);
         assert!(hay.contains("read_file"));
         assert!(hay.contains("Read a file"));
+    }
+
+    #[test]
+    fn routed_prompt_uses_the_same_collision_safe_aliases_as_wire_tools() {
+        let tools = vec![
+            jcode_message_types::ToolDefinition {
+                name: "mcp__server-a__tool.name".to_string(),
+                description: "First".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            jcode_message_types::ToolDefinition {
+                name: "mcp__server_a__tool_name".to_string(),
+                description: "Second".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ];
+        let prompt = routed_prompt("Do the task", "", &tools);
+        let aliases = crate::wire::mcp_wire_aliases(&tools);
+        for tool in &tools {
+            assert!(prompt.contains(aliases.get(&tool.name).unwrap()));
+        }
+        assert!(prompt.contains("__"));
+        assert!(!prompt.contains("mcp__server-a__tool.name"));
     }
 
     #[test]
