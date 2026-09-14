@@ -144,6 +144,18 @@ impl ProviderSpend {
             self.all_time.insert(Currency::usd(), self.all_time_usd);
         }
     }
+
+    /// Whether every bucket in every window holds USD.
+    ///
+    /// Only then is a window's `*_usd` mirror an exact dollar figure. Any other
+    /// currency — even alongside USD — makes it a cross-currency sum, which is
+    /// an approximation for the rollback path above and must never be shown to
+    /// a user as a dollar amount.
+    fn is_usd_only(&self) -> bool {
+        [&self.day, &self.month_spend, &self.all_time]
+            .iter()
+            .all(|window| window.keys().all(Currency::is_usd))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -328,6 +340,23 @@ pub fn spend_snapshot(source_key: &str) -> Option<ProviderSpend> {
     let mut spend = snapshot_entry(source_key)?.spend?;
     roll_spend(&mut spend);
     Some(spend)
+}
+
+/// The `/usage` spend summary for `spend`, or `None` when it must not be shown.
+///
+/// The `*_usd` mirrors are exact only for a USD-only window; with any other
+/// currency present they are a cross-currency sum (see [`ProviderSpend`]), so
+/// this returns `None` and the caller omits the row rather than printing a
+/// curated-looking wrong number behind a `$`. A per-currency breakdown is
+/// separate work.
+pub(crate) fn usd_only_spend_summary(spend: &ProviderSpend) -> Option<String> {
+    if !spend.is_usd_only() {
+        return None;
+    }
+    Some(format!(
+        "${:.2} today · ${:.2} this month · ${:.2} all-time",
+        spend.day_usd, spend.month_usd, spend.all_time_usd
+    ))
 }
 
 /// All ledger entries (source key -> activity), with spend buckets rolled.
@@ -711,6 +740,132 @@ mod tests {
         assert_eq!(spend.month_spend, expected);
         assert_eq!(spend.all_time, expected);
         assert!((spend.day_usd - 37.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn roll_clears_stale_windows_but_keeps_all_time() {
+        // The migration gate reads "empty bucket map next to a non-zero mirror"
+        // as a legacy USD figure, so the roll has to keep the invariant
+        // "empty map <=> zero mirror" for every window it clears. A stale day
+        // or month window that is only half cleared either loses money for the
+        // older reader (map cleared, mirror left) or re-seeds last period's
+        // money into the new window (map cleared, stale mirror).
+        let _env_lock = lock_env();
+        clear_ledger_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+
+        // A ledger last written on another day and in another month.
+        let stale = serde_json::json!({
+            "schema_version": PROVIDER_ACTIVITY_SCHEMA_VERSION,
+            "entries": {
+                "openai-compatible:deepseek": {
+                    "spend": {
+                        "day_date": "2000-01-01",
+                        "day": {"CNY": 7.0},
+                        "day_usd": 7.0,
+                        "month": "2000-01",
+                        "month_spend": {"CNY": 20.0},
+                        "month_usd": 20.0,
+                        "all_time": {"CNY": 42.0},
+                        "all_time_usd": 42.0,
+                    }
+                }
+            }
+        });
+        std::fs::write(
+            ledger_path(),
+            serde_json::to_string(&stale).expect("serialize stale ledger"),
+        )
+        .expect("write stale ledger");
+        clear_ledger_cache();
+
+        // Spending on a later day rolls the day and month windows; only the
+        // all-time window is cumulative.
+        let key = "openai-compatible:deepseek";
+        record_spend(key, 1.0, &Currency::usd());
+
+        let spend = spend_snapshot(key).expect("spend recorded");
+        assert_eq!(
+            spend.day,
+            BTreeMap::from([(Currency::usd(), 1.0)]),
+            "the day window holds only today's spend"
+        );
+        assert!((spend.day_usd - 1.0).abs() < 1e-9, "the day mirror follows");
+        assert_eq!(
+            spend.month_spend,
+            BTreeMap::from([(Currency::usd(), 1.0)]),
+            "the month window holds only this month's spend"
+        );
+        assert!(
+            (spend.month_usd - 1.0).abs() < 1e-9,
+            "the month mirror follows"
+        );
+        assert_eq!(
+            spend.all_time,
+            BTreeMap::from([(Currency::new("CNY"), 42.0), (Currency::usd(), 1.0)]),
+            "all-time keeps the rolled-away money and adds to it"
+        );
+        assert!((spend.all_time_usd - 43.0).abs() < 1e-9);
+
+        // ...and that is what lands on disk, mirror included.
+        clear_ledger_cache();
+        let entry = &read_ledger_json()["entries"][key]["spend"];
+        assert_eq!(entry["day"], serde_json::json!({"USD": 1.0}));
+        assert_eq!(entry["day_usd"], 1.0);
+        assert_eq!(entry["month_spend"], serde_json::json!({"USD": 1.0}));
+        assert_eq!(entry["month_usd"], 1.0);
+        assert_eq!(
+            entry["all_time"],
+            serde_json::json!({"CNY": 42.0, "USD": 1.0})
+        );
+        assert_eq!(entry["all_time_usd"], 43.0);
+
+        // A reload must not resurrect the cleared windows: the migration gate
+        // sees non-empty maps (and zeroed-out mirrors), never a stale figure.
+        clear_ledger_cache();
+        let reloaded = spend_snapshot(key).expect("reload after the roll");
+        assert_eq!(reloaded.day, BTreeMap::from([(Currency::usd(), 1.0)]));
+        assert!((reloaded.day_usd - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn roll_spend_empties_buckets_and_mirrors_together() {
+        // Direct pin on the invariant itself, independent of `record_spend`:
+        // after a roll, a cleared window is *both* empty and zero, and the
+        // untouched all-time window keeps its buckets and its mirror.
+        let mut spend = ProviderSpend {
+            day_date: "2000-01-01".to_string(),
+            day: BTreeMap::from([(Currency::new("CNY"), 7.0)]),
+            day_usd: 7.0,
+            month: "2000-01".to_string(),
+            month_spend: BTreeMap::from([(Currency::new("CNY"), 20.0)]),
+            month_usd: 20.0,
+            all_time: BTreeMap::from([(Currency::new("CNY"), 42.0)]),
+            all_time_usd: 42.0,
+        };
+
+        roll_spend(&mut spend);
+
+        assert_eq!(spend.day_date, Utc::now().format("%Y-%m-%d").to_string());
+        assert_eq!(
+            spend.month,
+            format!("{}-{:02}", Utc::now().year(), Utc::now().month())
+        );
+        assert!(
+            spend.day.is_empty() && spend.day_usd == 0.0,
+            "day clears its map and mirror together: {spend:?}"
+        );
+        assert!(
+            spend.month_spend.is_empty() && spend.month_usd == 0.0,
+            "month clears its map and mirror together: {spend:?}"
+        );
+        assert_eq!(
+            spend.all_time,
+            BTreeMap::from([(Currency::new("CNY"), 42.0)]),
+            "all-time is not rolled"
+        );
+        assert!((spend.all_time_usd - 42.0).abs() < 1e-9);
     }
 
     #[test]

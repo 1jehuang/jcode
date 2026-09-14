@@ -19,15 +19,15 @@ fn configured_key(env_key: &str, env_file: &str) -> Option<String> {
 }
 
 /// Append locally tracked spend ("$ today / month / all-time") when present.
+///
+/// Only a USD-only window is appended: the `*_usd` mirrors are a cross-currency
+/// sum otherwise, and must not be printed as dollars.
 fn push_local_spend(extra_info: &mut Vec<(String, String)>, source_key: &str) {
-    if let Some(spend) = provider_activity::spend_snapshot(source_key) {
-        extra_info.push((
-            "Local spend (this machine)".to_string(),
-            format!(
-                "${:.2} today · ${:.2} this month · ${:.2} all-time",
-                spend.day_usd, spend.month_usd, spend.all_time_usd
-            ),
-        ));
+    let Some(spend) = provider_activity::spend_snapshot(source_key) else {
+        return;
+    };
+    if let Some(summary) = provider_activity::usd_only_spend_summary(&spend) {
+        extra_info.push(("Local spend (this machine)".to_string(), summary));
     }
 }
 
