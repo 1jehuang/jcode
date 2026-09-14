@@ -1624,6 +1624,21 @@ async fn test_single_output_ceiling_is_absolute_not_only_proportional() {
     }
 }
 
+#[tokio::test]
+async fn initiative_is_not_registered_or_advertised() {
+    let registry = Registry::new(Arc::new(MockProvider)).await;
+    let names = registry.tool_names().await;
+    assert!(names.iter().any(|name| name == "todo"));
+    assert!(!names.iter().any(|name| name == "initiative"));
+    assert!(
+        registry
+            .definitions(None)
+            .await
+            .iter()
+            .all(|definition| definition.name != "initiative")
+    );
+}
+
 /// Every built-in tool, normalized for every provider dialect, must be
 /// sendable.
 ///
@@ -1726,17 +1741,17 @@ fn the_dialect_sweep_catches_the_issue_754_schema() {
 /// own tools their strict mode, since that would drop the structured-output
 /// guarantees on every OpenAI-route tool call with nothing to notice.
 ///
-/// The four tools listed below were already non-strict before that change, for
+/// The tools listed below were already non-strict before that change, for
 /// reasons unrelated to it (`batch` declares `additionalProperties: true` so its
 /// sub-call payloads stay open-world; the others carry open maps or untyped
 /// action payloads). Pinning the exact set is what makes this a regression
-/// detector: a fifth name appearing means a stricter rule went too far, and a
+/// detector: a new name appearing means a stricter rule went too far, and a
 /// name disappearing means a tool became strict-eligible and the list is stale.
 #[tokio::test]
 async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode() {
     /// Built-ins that legitimately cannot be strict. Verified against master
     /// before the #711/#713 eligibility changes, so this is pre-existing.
-    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "initiative", "swarm"];
+    const KNOWN_OPEN_WORLD_TOOLS: &[&str] = &["batch", "browser", "swarm"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;

@@ -389,12 +389,8 @@ impl Registry {
                 session_search::SessionSearchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "initiative",
-                goal::InitiativeTool::new,
-            );
+            // Initiative is temporarily unavailable. Keep its implementation and
+            // saved data intact so it can be restored without a migration.
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "schedule", ambient::ScheduleTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "selfdev", selfdev::SelfDevTool::new);

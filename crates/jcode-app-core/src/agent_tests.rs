@@ -912,6 +912,60 @@ async fn gmail_is_exposed_by_default_and_can_be_explicitly_disabled() {
         .validate_tool_allowed(tool_name)
         .expect("gmail must be executable by default");
 
+    agent
+        .validate_tool_allowed("jcode_docs")
+        .expect("jcode_docs must be executable in regular sessions");
+    agent.set_canary("docs-tool-regression");
+    let definitions = agent.tool_definitions().await;
+    assert!(definitions.iter().any(|tool| tool.name == "selfdev"));
+    assert!(
+        !definitions.iter().any(|tool| tool.name == "jcode_docs"),
+        "jcode_docs must not be model-visible in self-dev sessions"
+    );
+    assert!(
+        !agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|tool| tool.name == "jcode_docs"),
+        "cached provider definitions must also exclude bundled docs"
+    );
+    assert!(
+        !agent
+            .tool_names()
+            .await
+            .iter()
+            .any(|name| name == "jcode_docs"),
+        "debug tool introspection must agree with provider definitions"
+    );
+    assert!(
+        agent
+            .execute_tool("jcode_docs", serde_json::json!({"action": "list"}))
+            .await
+            .is_err(),
+        "direct execution must reject bundled docs in self-dev mode"
+    );
+    assert!(
+        agent
+            .validate_tool_allowed("jcode_docs")
+            .expect_err("jcode_docs must not be executable in self-dev sessions")
+            .to_string()
+            .contains("disabled in self-development mode")
+    );
+    agent.session.is_canary = false;
+    agent.unlock_tools();
+    assert!(
+        agent
+            .tool_definitions()
+            .await
+            .iter()
+            .any(|tool| tool.name == "jcode_docs"),
+        "jcode_docs must remain available after leaving self-dev mode"
+    );
+    agent
+        .validate_tool_allowed("jcode_docs")
+        .expect("jcode_docs must be executable again outside self-dev mode");
+
     crate::env::set_var("JCODE_DISABLED_TOOLS", tool_name);
     crate::config::Config::invalidate_cache();
 
