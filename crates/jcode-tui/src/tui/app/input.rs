@@ -2931,7 +2931,10 @@ fn paste_placeholder(content: &str) -> String {
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
-            if matches!(event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat) {
+            if matches!(
+                event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
                 let _ = self.handle_key_press_event(event);
             }
             return;
