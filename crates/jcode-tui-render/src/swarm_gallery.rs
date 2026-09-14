@@ -209,6 +209,15 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
+/// Format a cost in cents: three decimals below a dollar, two above.
+fn format_cost(cents: u64) -> String {
+    if cents >= 100 {
+        format!("${:.2}", cents as f64 / 100.0)
+    } else {
+        format!("${:.3}", cents as f64 / 100.0)
+    }
+}
+
 /// Combine provider display name and credential route into one metadata piece,
 /// e.g. "OpenAI oauth". Returns `None` when both are blank.
 fn format_route(provider: Option<&str>, auth_method: Option<&str>) -> Option<String> {
@@ -450,6 +459,12 @@ pub struct GalleryMember {
     pub context_limit: Option<u64>,
     /// Cumulative output tokens produced by the member.
     pub output_tokens: Option<u64>,
+    /// Total input tokens consumed by the member.
+    pub input_tokens: Option<u64>,
+    /// Number of tasks queued behind the member (auto-scaling signal).
+    pub queue_depth: Option<u32>,
+    /// Estimated cost in USD cents for the member's session.
+    pub cost_cents: Option<u64>,
 }
 
 /// One compact todo entry shown in the focused swarm detail view.
@@ -2092,6 +2107,7 @@ fn hovered_detail_body(
                 }
             }
         }
+        push_metric_lines(m, &mut out, budget, show_member_rail);
         return out;
     }
 
@@ -2137,8 +2153,58 @@ fn hovered_detail_body(
         }
     }
 
+    push_metric_lines(m, &mut out, budget, show_member_rail);
     out
 }
+
+/// Append the per-agent performance metrics (token counts, queue depth, cost)
+/// to a detail viewport, one row each, while there is budget left.
+fn push_metric_lines(
+    m: &GalleryMember,
+    out: &mut Vec<Line<'static>>,
+    budget: usize,
+    show_member_rail: bool,
+) {
+    let detail_fg = rgb(190, 190, 200);
+    let gutter_fg = rgb(80, 80, 90);
+    const GUTTER: &str = "   ";
+    const BAR: &str = "│   ";
+
+    let mut push = |icon: &str, text: String, color: Color| {
+        if out.len() >= budget {
+            return;
+        }
+        out.push(Line::from(vec![
+            Span::raw(GUTTER),
+            Span::styled(
+                if show_member_rail { BAR } else { "    " },
+                Style::default().fg(gutter_fg),
+            ),
+            Span::styled(format!("  {icon} "), Style::default().fg(color)),
+            Span::raw(text),
+        ]));
+    };
+
+    if let Some(tokens) = m.input_tokens {
+        push("📥", format_tokens(tokens), detail_fg);
+    }
+    if let Some(tokens) = m.output_tokens {
+        push("📤", format_tokens(tokens), detail_fg);
+    }
+    if let Some(depth) = m.queue_depth
+        && depth > 0
+    {
+        push(
+            "⚠️ ",
+            format!("{depth} tasks queued"),
+            rgb(255, 180, 50),
+        );
+    }
+    if let Some(cents) = m.cost_cents {
+        push("💰", format_cost(cents), detail_fg);
+    }
+}
+
 fn panel_header(total: usize, active: usize, focused: bool) -> Line<'static> {
     let agent_color = if focused {
         rgb(220, 220, 230) // bright white when focused

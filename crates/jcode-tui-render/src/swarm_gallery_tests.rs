@@ -19,6 +19,9 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
         context_tokens: None,
         context_limit: None,
         output_tokens: None,
+        input_tokens: None,
+        queue_depth: None,
+        cost_cents: None,
     }
 }
 
@@ -275,7 +278,7 @@ fn vertical_strip_lists_one_agent_per_row_with_icon_and_task() {
         90,
         4,
         12,
-    , None);
+    None);
     assert_eq!(lines.len(), 2, "one row per agent");
     let row0 = plain_line(&lines[0]);
     let row1 = plain_line(&lines[1]);
@@ -567,7 +570,7 @@ fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
         100,
         4,
         16,
-    , None);
+    None);
     let all = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
     assert_eq!(lines.len(), 1, "unfocused strip stays compact: {all}");
     assert!(
@@ -652,7 +655,7 @@ fn vertical_strip_is_display_width_bounded_at_all_widths() {
                 width,
                 4,
                 12,
-            , None);
+            None);
             for line in &lines {
                 assert!(
                     line.width() <= width,
@@ -765,7 +768,7 @@ fn strip_unfocused_shows_enter_controls_hint() {
         0,
         90,
         12,
-    , None);
+    None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("alt+n controls"), "got: {chips}");
 }
@@ -874,7 +877,7 @@ fn strip_is_display_width_bounded_at_all_widths() {
                 0,
                 width,
                 12,
-            , None);
+            None);
             for line in &lines {
                 let text = plain_line(line);
                 let w = text.as_str().width();
@@ -902,7 +905,7 @@ fn strip_drops_hint_before_tally_when_narrow() {
         0,
         60,
         12,
-    , None);
+    None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("6/6 active"), "tally missing: {chips}");
     assert!(!chips.contains("controls"), "hint should drop: {chips}");
@@ -975,7 +978,7 @@ fn degenerate_sizes_and_large_member_counts_do_not_panic() {
                     usize::MAX / 2,
                     width,
                     12,
-                , None);
+                None);
             }
         }
     }
@@ -998,7 +1001,7 @@ fn strip_right_tail_is_right_aligned() {
         0,
         width,
         12,
-    , None);
+    None);
     let chips = plain_line(&lines[0]);
     assert!(
         chips.as_str().width() == width,

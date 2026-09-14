@@ -121,6 +121,9 @@ pub(crate) fn members_to_gallery(members: &[SwarmMemberStatus]) -> Vec<GalleryMe
             context_tokens: member.runtime.context_tokens,
             context_limit: member.runtime.context_limit,
             output_tokens: member.runtime.output_tokens,
+            input_tokens: None,
+            queue_depth: None,
+            cost_cents: None,
             todo_items: member
                 .todo_items
                 .iter()

@@ -114,6 +114,9 @@ fn workers_to_members(workers: &[MockWorker]) -> Vec<GalleryMember> {
                 context_tokens: None,
                 context_limit: None,
                 output_tokens: None,
+                input_tokens: None,
+                queue_depth: None,
+                cost_cents: None,
             }
         })
         .collect()

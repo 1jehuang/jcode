@@ -28,6 +28,9 @@ fn member(id: &str, status: &str, role: Option<&str>, body: &[&str]) -> GalleryM
         context_tokens: None,
         context_limit: None,
         output_tokens: None,
+        input_tokens: None,
+        queue_depth: None,
+        cost_cents: None,
     }
 }
 
@@ -200,7 +203,7 @@ fn strip_never_panics_and_stays_width_bounded() {
                             spinner,
                             width,
                             12,
-                        , None);
+                        None);
                         for line in &lines {
                             let text = plain(line);
                             let w = text.as_str().width();
