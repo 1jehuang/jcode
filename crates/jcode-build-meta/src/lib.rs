@@ -27,6 +27,8 @@ pub const UPDATE_SEMVER: &str = env!("JCODE_UPDATE_SEMVER");
 pub const CHANGELOG: &str = env!("JCODE_CHANGELOG");
 /// Compile-time root crate package version.
 pub const PKG_VERSION: &str = env!("JCODE_PKG_VERSION");
+/// Version of the stable external provider subprocess protocol.
+pub const EXTERNAL_PROVIDER_PROTOCOL_VERSION: &str = "0.1";
 
 static RUNTIME_RELEASE_SEMVER: OnceLock<Option<String>> = OnceLock::new();
 static RUNTIME_VERSION: OnceLock<Option<String>> = OnceLock::new();
@@ -121,6 +123,22 @@ pub fn pkg_version() -> &'static str {
 /// Whether this process should behave as a release build.
 pub fn is_release_build() -> bool {
     option_env!("JCODE_RELEASE_BUILD").is_some() || runtime_release_semver().is_some()
+}
+
+/// Human-readable channel for the running binary.
+///
+/// This is intentionally derived at runtime rather than from the source tree:
+/// a versioned binary can be launched through the self-dev client during a
+/// reload, while release wrappers can override the runtime identity without a
+/// rebuild.
+pub fn build_channel() -> &'static str {
+    if std::env::var_os("JCODE_CLIENT_SELFDEV_MODE").is_some() {
+        "selfdev"
+    } else if is_release_build() {
+        "release"
+    } else {
+        "development"
+    }
 }
 
 #[cfg(test)]
