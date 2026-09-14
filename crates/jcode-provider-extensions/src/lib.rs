@@ -4,7 +4,8 @@
 //! executed by `jcode-provider-subprocess`, which keeps executable lifecycle,
 //! deadlines, cancellation, and frame limits outside the persistence layer.
 
-use jcode_provider_protocol::PROTOCOL_VERSION;
+use jcode_provider_protocol::{Frame, PROTOCOL_VERSION};
+use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -51,6 +52,78 @@ pub enum ExtensionError {
     Encode(#[from] serde_json::Error),
     #[error("failed to resolve provider registry path: {0}")]
     Path(String),
+    #[error("provider '{0}' is disabled")]
+    DisabledProvider(String),
+    #[error("provider '{0}' is not trusted")]
+    UntrustedProvider(String),
+    #[error("provider process failed: {0}")]
+    Process(#[from] AdapterError),
+}
+
+/// A registered provider process with its completed protocol handshake.
+///
+/// The manifest and registry remain independent from process state. Dropping
+/// this value drops the bounded subprocess adapter, which terminates the child
+/// process instead of leaving an orphan behind.
+pub struct ExternalProviderProcess {
+    manifest: ProviderManifest,
+    transport: SubprocessProvider,
+    handshake: Handshake,
+}
+
+impl ExternalProviderProcess {
+    pub async fn start(record: &ProviderRecord, client: &str) -> Result<Self, ExtensionError> {
+        if !record.enabled {
+            return Err(ExtensionError::DisabledProvider(record.manifest.id.clone()));
+        }
+        if !record.trusted {
+            return Err(ExtensionError::UntrustedProvider(
+                record.manifest.id.clone(),
+            ));
+        }
+        record.manifest.validate()?;
+        let transport = SubprocessProvider::spawn(
+            &record.manifest.executable,
+            &record.manifest.args,
+            client,
+            record.manifest.capabilities.clone(),
+        )
+        .await?;
+        let handshake = transport.handshake().await?;
+        Ok(Self {
+            manifest: record.manifest.clone(),
+            transport,
+            handshake,
+        })
+    }
+
+    pub fn manifest(&self) -> &ProviderManifest {
+        &self.manifest
+    }
+
+    pub fn handshake(&self) -> &Handshake {
+        &self.handshake
+    }
+
+    pub async fn request_and_collect(
+        &self,
+        id: impl Into<String>,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<Vec<Frame>, ExtensionError> {
+        Ok(self
+            .transport
+            .request_and_collect(id, method, params)
+            .await?)
+    }
+
+    pub async fn cancel(&self, request_id: impl Into<String>) -> Result<(), ExtensionError> {
+        Ok(self.transport.cancel(request_id).await?)
+    }
+
+    pub async fn kill(&self) -> Result<(), ExtensionError> {
+        Ok(self.transport.kill().await?)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -424,5 +497,41 @@ permissions = ["network"]
         let dir = tempdir().unwrap();
         let registry = ProviderRegistry::open(dir.path().join("missing.json")).unwrap();
         assert_eq!(registry.list().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn trusted_enabled_record_starts_and_collects_a_request() {
+        let script = concat!(
+            "import sys,json\n",
+            "for line in sys.stdin:\n",
+            " f=json.loads(line)\n",
+            " if f['kind']=='hello':\n",
+            "  print(json.dumps({'kind':'hello_ok','protocol_version':'0.1','provider':{'id':'fixture','name':'Fixture','version':'1'},'capabilities':['streaming']}),flush=True)\n",
+            " elif f['kind']=='request':\n",
+            "  print(json.dumps({'kind':'response','protocol_version':'0.1','id':f['id'],'ok':True,'result':{'text':'ok'}}),flush=True)\n",
+        );
+        let mut provider = manifest("fixture");
+        provider.executable = PathBuf::from("python3");
+        provider.args = vec!["-c".to_string(), script.to_string()];
+        let record = ProviderRecord {
+            manifest: provider,
+            source: None,
+            trusted: true,
+            enabled: true,
+            registered_at: 0,
+        };
+        let process = ExternalProviderProcess::start(&record, "jcode-test")
+            .await
+            .unwrap();
+        assert_eq!(process.handshake().provider.id, "fixture");
+        let frames = process
+            .request_and_collect("request-1", "complete", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(
+            frames.last(),
+            Some(Frame::Response { id, ok: true, .. }) if id == "request-1"
+        ));
+        process.kill().await.unwrap();
     }
 }

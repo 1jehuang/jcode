@@ -3054,6 +3054,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
  "jcode-provider-doctor",
+ "jcode-provider-extensions",
  "jcode-provider-gemini-runtime",
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
@@ -3710,10 +3711,12 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "jcode-provider-protocol",
+ "jcode-provider-subprocess",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "toml",
 ]
 
@@ -3865,6 +3868,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "jcode-provider-subprocess"
+version = "0.1.0"
+dependencies = [
+ "jcode-provider-protocol",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]

@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, RestartCommand, ServerCommand, SessionCommand,
-    TranscriptModeArg,
+    ModelCommand, ProviderCommand, ProviderExtensionCommand, RestartCommand, ServerCommand,
+    SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -434,6 +434,30 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                     json,
                 })?;
             }
+            ProviderCommand::Extension(subcmd) => match subcmd {
+                ProviderExtensionCommand::List { json } => {
+                    commands::run_provider_extension_list_command(json)?;
+                }
+                ProviderExtensionCommand::Add {
+                    manifest,
+                    trusted,
+                    json,
+                } => {
+                    commands::run_provider_extension_add_command(&manifest, trusted, json)?;
+                }
+                ProviderExtensionCommand::Remove { id, json } => {
+                    commands::run_provider_extension_remove_command(&id, json)?;
+                }
+                ProviderExtensionCommand::Enable { id, json } => {
+                    commands::run_provider_extension_set_enabled_command(&id, true, json)?;
+                }
+                ProviderExtensionCommand::Disable { id, json } => {
+                    commands::run_provider_extension_set_enabled_command(&id, false, json)?;
+                }
+                ProviderExtensionCommand::Doctor { id, json } => {
+                    commands::run_provider_extension_doctor_command(id.as_deref(), json)?;
+                }
+            },
         },
         Some(Command::Memory(subcmd)) => {
             commands::run_memory_command(map_memory_subcommand(subcmd))?;

@@ -1044,6 +1044,74 @@ pub(crate) enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Manage independently-upgradable external provider extensions
+    #[command(subcommand)]
+    Extension(ProviderExtensionCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProviderExtensionCommand {
+    /// List registered external providers
+    List {
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Register a provider.toml manifest
+    Add {
+        /// Path to the provider manifest
+        manifest: String,
+
+        /// Mark the provider trusted without an interactive prompt
+        #[arg(long)]
+        trusted: bool,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a registered external provider
+    Remove {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Enable a registered external provider
+    Enable {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Disable a registered external provider without removing it
+    Disable {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate registered provider manifests and executable availability
+    Doctor {
+        /// Optional stable provider ID to check
+        id: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
