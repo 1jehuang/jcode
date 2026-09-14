@@ -431,7 +431,8 @@ impl App {
             seven_day_resets_at: None,
             spark: None,
             spark_resets_at: None,
-            total_cost: self.cost.total_cost,
+            cost_rows: crate::money_display::DisplayTarget::from_config()
+                .resolve_totals(&self.cost.total_cost_by_currency),
             input_tokens: display_input_tokens,
             output_tokens: display_output_tokens,
             cache_read_tokens: self.streaming.streaming_cache_read_tokens,
@@ -451,7 +452,7 @@ impl App {
                 seven_day_resets_at: None,
                 spark: None,
                 spark_resets_at: None,
-                total_cost: 0.0,
+                cost_rows: Vec::new(),
                 input_tokens: display_input_tokens,
                 output_tokens: display_output_tokens,
                 cache_read_tokens: None,
@@ -479,7 +480,7 @@ impl App {
                     seven_day_resets_at: usage.seven_day_resets_at.clone(),
                     spark: None,
                     spark_resets_at: None,
-                    total_cost: 0.0,
+                    cost_rows: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,
@@ -531,7 +532,7 @@ impl App {
                         .spark
                         .as_ref()
                         .and_then(|w| w.resets_at.clone()),
-                    total_cost: 0.0,
+                    cost_rows: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
                     cache_read_tokens: None,

@@ -45,7 +45,11 @@ pub(super) enum ConfigPrice {
 static PRICING_CONFIG: Mutex<Option<(usize, Arc<PricingConfig>)>> = Mutex::new(None);
 
 /// The validated `[pricing]` view of the loaded config.
-pub(super) fn pricing_config() -> Arc<PricingConfig> {
+///
+/// This is the one price-related view of the config that callers outside this
+/// module (currency display, for instance) should read: it is validated, memoized
+/// against the loaded config instance, and invalidated on reload.
+pub fn pricing_config() -> Arc<PricingConfig> {
     let config = crate::config::config();
     let identity = std::ptr::from_ref(config) as usize;
     if let Ok(memo) = PRICING_CONFIG.lock()
@@ -161,6 +165,17 @@ pub(super) fn resolve_card(
         entry = ModelPricingEntry::from_model_cost(fallback);
         currency = Currency::usd();
         from_config = false;
+    } else {
+        // Non-USD, incomplete, and nothing underneath it: neither direction may
+        // borrow the other layer's numbers (F1), so this card can never price
+        // the model. Warn rather than let a partial card read as a configured
+        // price (spec 4.4): billing refuses it and display must render
+        // "unknown" instead of a one-sided figure.
+        crate::logging::warn(&format!(
+            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}, \
+             and no fallback price exists; this model cannot be priced until the rule supplies \
+             both input and output"
+        ));
     }
 
     // Peak/off-peak selection runs on the *effective* card, i.e. after any

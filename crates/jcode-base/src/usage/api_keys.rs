@@ -18,17 +18,19 @@ fn configured_key(env_key: &str, env_file: &str) -> Option<String> {
     crate::provider_catalog::load_api_key_from_env_or_config(env_key, env_file)
 }
 
-/// Append locally tracked spend ("$ today / month / all-time") when present.
+/// Append locally tracked spend ("today / month / all-time") when present.
 ///
-/// Only a USD-only window is appended: the `*_usd` mirrors are a cross-currency
-/// sum otherwise, and must not be printed as dollars.
+/// One row per currency in the window: the `*_usd` mirrors are a cross-currency
+/// sum, not a figure to print.
+///
+/// The `$` figures elsewhere in this module (key balance, org cost) are the
+/// provider's own reports, which those APIs state in USD; only locally priced
+/// spend is currency-aware.
 fn push_local_spend(extra_info: &mut Vec<(String, String)>, source_key: &str) {
     let Some(spend) = provider_activity::spend_snapshot(source_key) else {
         return;
     };
-    if let Some(summary) = provider_activity::usd_only_spend_summary(&spend) {
-        extra_info.push(("Local spend (this machine)".to_string(), summary));
-    }
+    extra_info.extend(provider_activity::spend_summary_rows(&spend));
 }
 
 fn key_status_from_response(status: reqwest::StatusCode) -> String {
