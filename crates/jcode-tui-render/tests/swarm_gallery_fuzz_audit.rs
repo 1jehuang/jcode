@@ -200,7 +200,7 @@ fn strip_never_panics_and_stays_width_bounded() {
                             spinner,
                             width,
                             12,
-                        );
+                        , None);
                         for line in &lines {
                             let text = plain(line);
                             let w = text.as_str().width();
@@ -372,7 +372,7 @@ fn strip_selected_indices_no_panic() {
                 5, // spinner_frame
                 width,
                 max_height,
-            );
+            , None);
             for line in &lines {
                 assert!(
                     plain(line).as_str().width() <= width,
@@ -385,7 +385,7 @@ fn strip_selected_indices_no_panic() {
 
     // Empty members returns empty
     assert!(
-        render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 4).is_empty()
+        render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 4, None).is_empty()
     );
 }
 

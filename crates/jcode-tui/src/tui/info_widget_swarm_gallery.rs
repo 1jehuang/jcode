@@ -854,29 +854,7 @@ fn summary_line_with_batch(
     width: usize,
     batch_info: &str,
 ) -> Line<'static> {
-    let total = members.len();
-    let active = members
-        .iter()
-        .filter(|m| is_active_status(&m.status))
-        .count();
-    let mut todos_done = 0u32;
-    let mut todos_total = 0u32;
-    let mut max_elapsed = 0u64;
-    for member in members {
-        if let Some((done, tot)) = member.todo {
-            todos_done = todos_done.saturating_add(done);
-            todos_total = todos_total.saturating_add(tot);
-        }
-        max_elapsed = max_elapsed.max(member.elapsed_secs.unwrap_or(0));
-    }
-    let inner = jcode_tui_render::swarm_gallery::summary_line(
-        total,
-        active,
-        todos_done,
-        todos_total,
-        max_elapsed,
-        width,
-    );
+    let inner = jcode_tui_render::swarm_gallery::summary_line_from_members(members, width);
     if batch_info.is_empty() {
         return inner;
     }
@@ -992,6 +970,11 @@ pub(crate) fn render_swarm_strip_lines(
             width,
             SWARM_STRIP_VERTICAL_MAX_ROWS,
             max_height,
+            if batch_mode {
+                Some(selected_agents)
+            } else {
+                None
+            },
         ),
         crate::config::SwarmStripLayout::Horizontal => render_swarm_strip(
             &badged_gallery(members),
@@ -1006,6 +989,11 @@ pub(crate) fn render_swarm_strip_lines(
             spinner_frame,
             width,
             max_height,
+            if batch_mode {
+                Some(selected_agents)
+            } else {
+                None
+            },
         ),
     };
     // ---- Aggregate summary bar (focused only) ----

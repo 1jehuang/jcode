@@ -313,6 +313,98 @@ pub fn summary_line(
     Line::from(spans)
 }
 
+/// Summary line built directly from a `&[GalleryMember]` slice.
+///
+/// Counts members by status category and formats as:
+/// `Agents: {total} · {running} running · {queued} queued · {idle} idle`
+/// Categories with zero count are omitted. Right-aligned to `width`.
+pub fn summary_line_from_members(members: &[GalleryMember], width: usize) -> Line<'static> {
+    let total = members.len();
+
+    let mut running = 0usize;
+    let mut queued = 0usize;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+    let mut idle = 0usize;
+
+    for m in members {
+        match m.status.as_str() {
+            "running" | "streaming" | "thinking" => running += 1,
+            "queued" | "waiting" => queued += 1,
+            "completed" | "done" => done += 1,
+            "failed" | "error" => failed += 1,
+            _ => idle += 1,
+        }
+    }
+
+    let dim = rgb(105, 105, 120);
+    let accent = rgb(255, 200, 100);
+
+    // Collect non-zero categories as (label, color) pairs.
+    let mut segments: Vec<(String, Color)> = Vec::new();
+    if running > 0 {
+        segments.push((format!("{running} running"), accent));
+    }
+    if queued > 0 {
+        segments.push((format!("{queued} queued"), dim));
+    }
+    if done > 0 {
+        segments.push((format!("{done} done"), dim));
+    }
+    if failed > 0 {
+        segments.push((format!("{failed} failed"), rgb(255, 100, 100)));
+    }
+    if idle > 0 {
+        segments.push((format!("{idle} idle"), dim));
+    }
+
+    let prefix_text = format!("Agents: {total}");
+
+    // Compose the full body text to measure width.
+    let mut body_text = prefix_text.clone();
+    for (label, _) in &segments {
+        body_text.push_str(" · ");
+        body_text.push_str(label);
+    }
+
+    if disp_w(&body_text) > width {
+        let mut w = 0usize;
+        let mut end = body_text.len();
+        for (i, ch) in body_text.char_indices() {
+            w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w > width {
+                end = i;
+                break;
+            }
+        }
+        body_text.truncate(end);
+    }
+
+    let body_w = disp_w(&body_text);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if body_w < width {
+        spans.push(Span::raw(" ".repeat(width - body_w)));
+    }
+
+    // If the full body had to drop trailing segments, render it all dim.
+    let mut full_w = disp_w(&prefix_text);
+    for (label, _) in &segments {
+        full_w += disp_w(label) + 3;
+    }
+    if body_w < full_w {
+        spans.push(Span::styled(body_text, Style::default().fg(dim)));
+    } else {
+        // Render prefix dim, then each colored segment.
+        spans.push(Span::styled(prefix_text, Style::default().fg(dim)));
+        for (label, color) in &segments {
+            spans.push(Span::styled(" · ", Style::default().fg(dim)));
+            spans.push(Span::styled(label.clone(), Style::default().fg(*color)));
+        }
+    }
+
+    Line::from(spans)
+}
+
 /// A renderer-agnostic view of one swarm member, ready for layout.
 ///
 /// Callers are responsible for building the `body` lines (e.g. choosing live
@@ -729,6 +821,7 @@ pub fn render_swarm_strip(
     spinner_frame: usize,
     width: usize,
     max_height: usize,
+    batch_selected: Option<&std::collections::HashSet<usize>>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 {
         return Vec::new();
@@ -770,6 +863,7 @@ pub fn render_swarm_strip(
         color: Color,
         active: bool,
         is_sel: bool,
+        is_batch: bool,
     }
     let chips: Vec<Chip> = ordered
         .iter()
@@ -786,11 +880,13 @@ pub fn render_swarm_strip(
             color: role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)),
             active: is_active_status(&m.status),
             is_sel: idx == selected,
+            is_batch: batch_selected.is_some_and(|set| set.contains(&idx)),
         })
         .collect();
     let chip_w = |c: &Chip| -> usize {
         let prefix = if c.is_sel && focused { 2 } else { 0 }; // '▸ ' width
-        prefix + disp_w(&c.glyph) + 1 + disp_w(&c.name)
+        let batch_pfx = if c.is_batch { 2 } else { 0 }; // '✓ ' width
+        prefix + batch_pfx + disp_w(&c.glyph) + 1 + disp_w(&c.name)
             + c.todo.as_ref().map(|t| disp_w(t) + 1).unwrap_or(0)
     };
 
@@ -884,7 +980,8 @@ pub fn render_swarm_strip(
     let used: usize = if shown == 0 && !chips.is_empty() {
         // Degenerate width: show the first chip truncated.
         let c = &chips[0];
-        let prefix_w = if c.is_sel && focused { 2 } else { 0 }; // '▸ ' width
+        let prefix_w = if c.is_sel && focused { 2 } else { 0 } // '▸ ' width
+            + if c.is_batch { 2 } else { 0 }; // '✓ ' width
         let budget = width.saturating_sub(lead_w + if show_tally { tail_w + gap } else { 0 });
         let avail = budget.saturating_sub(disp_w(&c.glyph) + 1 + prefix_w);
         let name = truncate_label(&c.name, avail.max(1));
@@ -894,8 +991,9 @@ pub fn render_swarm_strip(
             Style::default().fg(rgb(110, 110, 125))
         };
         let prefix = if c.is_sel && focused { "▸ " } else { "" };
+        let batch_prefix = if c.is_batch { "✓ " } else { "" };
         spans.push(Span::styled(
-            format!("{prefix}{} {}", c.glyph, name),
+            format!("{prefix}{batch_prefix}{} {}", c.glyph, name),
             style,
         ));
         prefix_w + disp_w(&c.glyph) + 1 + disp_w(&name)
@@ -916,8 +1014,9 @@ pub fn render_swarm_strip(
                 style = style.add_modifier(Modifier::UNDERLINED);
             }
             let prefix = if chip.is_sel && focused { "▸ " } else { "" };
+            let batch_prefix = if chip.is_batch { "✓ " } else { "" };
             spans.push(Span::styled(
-                format!("{prefix}{} {}", chip.glyph, chip.name),
+                format!("{prefix}{batch_prefix}{} {}", chip.glyph, chip.name),
                 style,
             ));
             if per_task_w > 0
@@ -1084,6 +1183,7 @@ pub fn render_swarm_strip_vertical(
     width: usize,
     max_rows: usize,
     max_height: usize,
+    batch_selected: Option<&std::collections::HashSet<usize>>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() || width < 8 || max_rows == 0 {
         return Vec::new();
@@ -1145,6 +1245,19 @@ pub fn render_swarm_strip_vertical(
             Style::default().fg(rgb(255, 200, 100)),
         )];
 
+        // In batch mode every row carries a checkbox for its selection state.
+        let batch_w = if batch_selected.is_some() { 4 } else { 0 };
+        if let Some(selected_set) = batch_selected {
+            let checked = selected_set.contains(&row);
+            let check = if checked { "[✓] " } else { "[ ] " };
+            let check_color = if checked {
+                rgb(100, 200, 100)
+            } else {
+                rgb(100, 100, 110)
+            };
+            spans.push(Span::styled(check, Style::default().fg(check_color)));
+        }
+
         // Right tail only on the first row; degrade by dropping hint first.
         let (row_tail_w, show_hint) = if first {
             if lead_w + gap + tally_w + hint_w + 16 <= width && hint_w > 0 {
@@ -1160,6 +1273,7 @@ pub fn render_swarm_strip_vertical(
 
         let body_budget = width
             .saturating_sub(lead_w)
+            .saturating_sub(batch_w)
             .saturating_sub(if row_tail_w > 0 { row_tail_w + gap } else { 0 });
 
         // Per-worker status tail, mirroring the main status line: route,

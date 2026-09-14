@@ -248,12 +248,12 @@ fn hints() -> Vec<SwarmStripHint> {
 
 #[test]
 fn strip_empty_renders_nothing() {
-    assert!(render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 12).is_empty());
+    assert!(render_swarm_strip(&[], 0, true, &hints(), None, 0, 80, 12, None).is_empty());
 }
 
 #[test]
 fn vertical_strip_empty_renders_nothing() {
-    assert!(render_swarm_strip_vertical(&[], 0, true, &hints(), None, 0, 80, 4, 12).is_empty());
+    assert!(render_swarm_strip_vertical(&[], 0, true, &hints(), None, 0, 80, 4, 12, None).is_empty());
 }
 
 #[test]
@@ -275,7 +275,7 @@ fn vertical_strip_lists_one_agent_per_row_with_icon_and_task() {
         90,
         4,
         12,
-    );
+    , None);
     assert_eq!(lines.len(), 2, "one row per agent");
     let row0 = plain_line(&lines[0]);
     let row1 = plain_line(&lines[1]);
@@ -311,7 +311,7 @@ fn vertical_strip_lists_one_agent_per_row_with_icon_and_task() {
 #[test]
 fn vertical_strip_falls_back_to_name_without_icon() {
     let members = vec![member("zeta", "running", None, &[])];
-    let lines = render_swarm_strip_vertical(&members, 0, false, &hints(), None, 0, 80, 4, 12);
+    let lines = render_swarm_strip_vertical(&members, 0, false, &hints(), None, 0, 80, 4, 12, None);
     assert!(plain_line(&lines[0]).contains("zeta"));
 }
 
@@ -333,20 +333,20 @@ fn vertical_strip_prefers_active_todo_over_spawn_prompt() {
         todo("wire the renderer", "in_progress"),
         todo("write tests", "pending"),
     ];
-    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12, None);
     let row = plain_line(&lines[0]);
     assert!(row.contains("wire the renderer"), "active todo: {row:?}");
     assert!(!row.contains("spawn prompt"), "prompt hidden: {row:?}");
 
     // Finished agents fall back to what they were spawned for.
     working.status = "completed".to_string();
-    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12);
+    let lines = render_swarm_strip_vertical(&[working.clone()], 0, false, &[], None, 0, 80, 4, 12, None);
     assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
 
     // Agents without a todo list keep showing the spawn label.
     working.status = "running".to_string();
     working.todo_items.clear();
-    let lines = render_swarm_strip_vertical(&[working], 0, false, &[], None, 0, 80, 4, 12);
+    let lines = render_swarm_strip_vertical(&[working], 0, false, &[], None, 0, 80, 4, 12, None);
     assert!(plain_line(&lines[0]).contains("the original spawn prompt"));
 }
 
@@ -355,7 +355,7 @@ fn vertical_strip_caps_rows_and_reports_overflow() {
     let members: Vec<GalleryMember> = (0..7)
         .map(|i| member(&format!("agent{i}"), "running", None, &[]))
         .collect();
-    let lines = render_swarm_strip_vertical(&members, 0, false, &hints(), None, 0, 80, 4, 12);
+    let lines = render_swarm_strip_vertical(&members, 0, false, &hints(), None, 0, 80, 4, 12, None);
     assert_eq!(lines.len(), 4, "capped to max_rows lines");
     let last = plain_line(&lines[3]);
     assert!(last.contains("+4 more"), "overflow marker: {last:?}");
@@ -366,7 +366,7 @@ fn vertical_strip_windows_to_keep_selection_visible() {
     let members: Vec<GalleryMember> = (0..7)
         .map(|i| member(&format!("agent{i}"), "running", None, &[]))
         .collect();
-    let lines = render_swarm_strip_vertical(&members, 6, true, &[], None, 0, 80, 4, 4);
+    let lines = render_swarm_strip_vertical(&members, 6, true, &[], None, 0, 80, 4, 4, None);
     let text: String = lines.iter().map(plain_line).collect();
     assert!(text.contains("agent6"), "selected agent visible: {text:?}");
 }
@@ -377,7 +377,7 @@ fn vertical_strip_focused_expands_accordion_under_selected_row() {
     fox.icon = Some("🦊".to_string());
     let mut bee = member("bee", "ready", None, &["waiting for work"]);
     bee.icon = Some("🐝".to_string());
-    let lines = render_swarm_strip_vertical(&[fox, bee], 1, true, &hints(), None, 0, 80, 4, 14);
+    let lines = render_swarm_strip_vertical(&[fox, bee], 1, true, &hints(), None, 0, 80, 4, 14, None);
     let texts: Vec<String> = lines.iter().map(plain_line).collect();
     let all = texts.join("\n");
     // Selected agent (bee, sorted second: fox is active and sorts first)
@@ -567,7 +567,7 @@ fn vertical_strip_unfocused_keeps_live_card_details_in_chat() {
         100,
         4,
         16,
-    );
+    , None);
     let all = lines.iter().map(plain_line).collect::<Vec<_>>().join("\n");
     assert_eq!(lines.len(), 1, "unfocused strip stays compact: {all}");
     assert!(
@@ -618,7 +618,7 @@ fn vertical_strip_focused_detail_stays_within_height_budget() {
     let members = vec![m, member("bee", "ready", None, &[])];
     for max_height in 3..=14 {
         let lines =
-            render_swarm_strip_vertical(&members, 0, true, &hints(), None, 0, 80, 4, max_height);
+            render_swarm_strip_vertical(&members, 0, true, &hints(), None, 0, 80, 4, max_height, None);
         assert!(
             lines.len() <= max_height,
             "focused vertical strip exceeded max_height {max_height}: {} lines",
@@ -652,7 +652,7 @@ fn vertical_strip_is_display_width_bounded_at_all_widths() {
                 width,
                 4,
                 12,
-            );
+            , None);
             for line in &lines {
                 assert!(
                     line.width() <= width,
@@ -670,7 +670,7 @@ fn strip_one_line_when_unfocused_expands_when_focused() {
         member("researcher", "thinking", Some("coordinator"), &["working"]),
         member("implementer", "running", None, &["building"]),
     ];
-    let unfocused = render_swarm_strip(&members, 0, false, &hints(), None, 0, 80, 12);
+    let unfocused = render_swarm_strip(&members, 0, false, &hints(), None, 0, 80, 12, None);
     assert_eq!(
         unfocused.len(),
         1,
@@ -678,7 +678,7 @@ fn strip_one_line_when_unfocused_expands_when_focused() {
     );
     // Focused: chips line + expanded detail viewport + hint line, bounded
     // by the max_height budget.
-    let focused = render_swarm_strip(&members, 0, true, &hints(), None, 0, 80, 12);
+    let focused = render_swarm_strip(&members, 0, true, &hints(), None, 0, 80, 12, None);
     assert!(
         focused.len() > 3,
         "focused strip should expand into a detail viewport, got {} lines",
@@ -687,7 +687,7 @@ fn strip_one_line_when_unfocused_expands_when_focused() {
     assert!(focused.len() <= 12, "focused strip must respect max_height");
     // With a tiny budget the focused strip degrades to the compact
     // 3-line form (chips + one detail line + hints).
-    let tiny = render_swarm_strip(&members, 0, true, &hints(), None, 0, 80, 3);
+    let tiny = render_swarm_strip(&members, 0, true, &hints(), None, 0, 80, 3, None);
     assert_eq!(tiny.len(), 3, "tiny budget should degrade to 3 lines");
 }
 
@@ -717,7 +717,7 @@ fn strip_focused_detail_prioritizes_todo_names() {
             tool_intents: Vec::new(),
         },
     ];
-    let lines = render_swarm_strip(&[m], 0, true, &hints(), None, 0, 80, 14);
+    let lines = render_swarm_strip(&[m], 0, true, &hints(), None, 0, 80, 14, None);
     let text: Vec<String> = lines.iter().map(plain_line).collect();
     let all = text.join("\n");
     // Todo names replace the less actionable transcript tail when present.
@@ -739,7 +739,7 @@ fn strip_shows_agents_and_tally_and_is_width_bounded() {
         member("implementer", "running", None, &["building"]),
         member("reviewer", "done", None, &["done"]),
     ];
-    let lines = render_swarm_strip(&members, 1, true, &hints(), None, 0, 90, 12);
+    let lines = render_swarm_strip(&members, 1, true, &hints(), None, 0, 90, 12, None);
     for line in &lines {
         assert!(line.width() <= 90, "line too wide: {}", plain_line(line));
     }
@@ -765,7 +765,7 @@ fn strip_unfocused_shows_enter_controls_hint() {
         0,
         90,
         12,
-    );
+    , None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("alt+n controls"), "got: {chips}");
 }
@@ -774,7 +774,7 @@ fn strip_unfocused_shows_enter_controls_hint() {
 fn strip_shows_todo_counter() {
     let mut m = member("worker", "running", None, &["step"]);
     m.todo = Some((8, 16));
-    let lines = render_swarm_strip(&[m], 0, false, &hints(), None, 0, 90, 12);
+    let lines = render_swarm_strip(&[m], 0, false, &hints(), None, 0, 90, 12, None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("8/16"), "todo counter missing: {chips}");
 }
@@ -785,7 +785,7 @@ fn strip_shows_task_label_when_width_allows() {
     a.task = Some("fix parser".to_string());
     let mut b = member("owl", "running", None, &[]);
     b.task = Some("write docs".to_string());
-    let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 100, 12);
+    let lines = render_swarm_strip(&[a, b], 0, false, &hints(), None, 0, 100, 12, None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("fox·fix parser"), "got: {chips}");
     assert!(chips.contains("owl·write docs"), "got: {chips}");
@@ -809,8 +809,8 @@ fn strip_drops_task_labels_before_hiding_agents() {
         .collect();
     for width in [40usize, 60, 90, 120] {
         let plain =
-            plain_line(&render_swarm_strip(&base, 0, false, &hints(), None, 0, width, 12)[0]);
-        let labeled_lines = render_swarm_strip(&with_tasks, 0, false, &hints(), None, 0, width, 12);
+            plain_line(&render_swarm_strip(&base, 0, false, &hints(), None, 0, width, 12, None)[0]);
+        let labeled_lines = render_swarm_strip(&with_tasks, 0, false, &hints(), None, 0, width, 12, None);
         let labeled = plain_line(&labeled_lines[0]);
         assert!(labeled_lines[0].width() <= width);
         let count = |s: &str| (0..8).filter(|i| s.contains(&format!("agent{i}"))).count();
@@ -833,7 +833,7 @@ fn strip_task_labels_never_break_width_bound_across_widths() {
         })
         .collect();
     for width in 8..200 {
-        let lines = render_swarm_strip(&members, 2, false, &hints(), None, 0, width, 12);
+        let lines = render_swarm_strip(&members, 2, false, &hints(), None, 0, width, 12, None);
         for line in &lines {
             assert!(
                 line.width() <= width,
@@ -849,7 +849,7 @@ fn strip_overflow_collapses_to_more_count() {
     let members: Vec<GalleryMember> = (0..12)
         .map(|i| member(&format!("agent-number-{i:02}"), "running", None, &[]))
         .collect();
-    let lines = render_swarm_strip(&members, 0, false, &hints(), None, 0, 50, 12);
+    let lines = render_swarm_strip(&members, 0, false, &hints(), None, 0, 50, 12, None);
     assert!(lines[0].width() <= 50, "too wide");
     let chips = plain_line(&lines[0]);
     assert!(chips.contains('+'), "expected +N overflow marker: {chips}");
@@ -874,7 +874,7 @@ fn strip_is_display_width_bounded_at_all_widths() {
                 0,
                 width,
                 12,
-            );
+            , None);
             for line in &lines {
                 let text = plain_line(line);
                 let w = text.as_str().width();
@@ -902,7 +902,7 @@ fn strip_drops_hint_before_tally_when_narrow() {
         0,
         60,
         12,
-    );
+    , None);
     let chips = plain_line(&lines[0]);
     assert!(chips.contains("6/6 active"), "tally missing: {chips}");
     assert!(!chips.contains("controls"), "hint should drop: {chips}");
@@ -975,7 +975,7 @@ fn degenerate_sizes_and_large_member_counts_do_not_panic() {
                     usize::MAX / 2,
                     width,
                     12,
-                );
+                , None);
             }
         }
     }
@@ -998,7 +998,7 @@ fn strip_right_tail_is_right_aligned() {
         0,
         width,
         12,
-    );
+    , None);
     let chips = plain_line(&lines[0]);
     assert!(
         chips.as_str().width() == width,
