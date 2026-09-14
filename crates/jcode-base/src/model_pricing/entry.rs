@@ -28,12 +28,12 @@ pub struct ModelPricingEntry {
     pub cost: CostFields,
     /// Named rate cards: absolute prices or a multiplier on `cost`.
     ///
-    /// Consumed by `model_pricing::rules` in a later task; the field exists now
-    /// so cache entries, config rules, and extra sources share one shape.
+    /// Selected by `model_pricing::rules`, so cache entries, config rules, and
+    /// extra sources all share one shape.
     pub tariffs: BTreeMap<String, Tariff>,
-    /// Time windows selecting a tariff, first match wins. Parsed from the
-    /// fixed-UTC-offset schema; window matching itself lands with the tier
-    /// resolver (`model_pricing::rules`).
+    /// Time windows selecting a tariff, first match wins. Windows are the
+    /// half-open local interval `[start, end)` of the rule's fixed UTC offset;
+    /// `model_pricing::rules` does the matching.
     pub schedule: Vec<ScheduleRule>,
     pub default_tariff: Option<String>,
     /// Inclusive lower bound; a card is not in effect before it.
@@ -89,8 +89,8 @@ impl ModelPricingEntry {
     /// Whether the card is in effect at `at`.
     ///
     /// Only the validity bounds are checked here: tariff/schedule selection
-    /// (which tariff applies *within* the valid window) is the tier resolver's
-    /// job and lands in a later task.
+    /// (which tariff applies *within* the valid window) is
+    /// `model_pricing::rules`' job.
     pub fn is_active_at(&self, at: SystemTime) -> bool {
         let at: DateTime<Utc> = at.into();
         if let Some(from) = self.effective_from

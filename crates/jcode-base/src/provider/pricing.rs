@@ -186,9 +186,10 @@ fn rate_to_micros(rate: f64) -> u64 {
 /// card. The card is the authoritative source (spec 4.4), so this runs before
 /// the curated static tables, OpenRouter's caches, and models.dev.
 ///
-/// `at` gates the card's validity window. Peak/off-peak tariff selection is not
-/// wired in yet: the tier resolver arrives with a later task, and this call site
-/// is where the current tariff will be selected.
+/// `at` gates the card's validity window *and* selects its tariff, so the rates
+/// below are the peak/off-peak tier in effect at that instant. The instant is
+/// still the wall clock here; the billing call sites thread the call's own
+/// time through in a later task.
 fn config_price_estimate(source_key: &str, model: &str) -> Option<RouteCheapnessEstimate> {
     let at = std::time::SystemTime::now();
     let (entry, currency) = crate::model_pricing::configured_entry(source_key, model, at)?;

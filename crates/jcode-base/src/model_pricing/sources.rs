@@ -16,6 +16,7 @@
 use crate::config::PricingConfig;
 use crate::config::pricing::{ProviderPricing, validate};
 use crate::model_pricing::entry::ModelPricingEntry;
+use crate::model_pricing::rules;
 use crate::model_pricing::{ModelCost, models_dev_provider_id, normalize_model_id};
 use jcode_provider_core::Currency;
 use std::sync::{Arc, Mutex};
@@ -92,7 +93,10 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
     };
 
     let entry = ModelPricingEntry::from_rule(rule);
-    if !entry.is_active_at(at) {
+    // Peak/off-peak selection happens here, on the card this layer hands
+    // downstream: the `cost` it carries is already the tariff in effect at
+    // `at`, so the billing path (spec 4.3, F16) only reads `cost` + `currency`.
+    let Some(selected) = rules::resolve_tier(&entry, at) else {
         return match entry.on_rule_expiry {
             crate::config::OnRuleExpiry::Fallback => {
                 crate::logging::warn(&format!(
@@ -103,14 +107,16 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
             }
             crate::config::OnRuleExpiry::NoPrice => ConfigPrice::NoPrice,
         };
-    }
+    };
+    crate::logging::debug(&format!(
+        "pricing: {source_key}/{model} uses tariff `{}`",
+        selected.tariff.as_deref().unwrap_or("base")
+    ));
 
+    let mut priced = entry;
+    priced.cost = selected.cost;
     ConfigPrice::Hit {
-        // Task 4 hook: once tariffs/schedule land, the card handed out here is
-        // the *currently selected* tariff (`rules::resolve_tier(entry, at)`)
-        // instead of the base card. Window matching is deliberately absent in
-        // this commit; `at` is only used for the validity bounds above.
-        entry: Box::new(entry),
+        entry: Box::new(priced),
         currency: provider.currency.clone().unwrap_or_else(Currency::usd),
     }
 }

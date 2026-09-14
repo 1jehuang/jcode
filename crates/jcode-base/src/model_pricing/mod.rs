@@ -16,13 +16,15 @@
 //! then this catalog, then provider-specific sources (OpenRouter endpoints),
 //! and only then a generic fallback.
 //!
-//! Layout: `catalog` owns the models.dev fetch/parse/cache machinery; this
-//! module owns provider-id mapping, model-id normalization, the lookup entry
-//! points, the refresh scheduler, and the resolver that puts hand-written
+//! Layout: `catalog` owns the models.dev fetch/parse/cache machinery, `rules`
+//! owns tariff selection (peak/off-peak windows, multipliers, validity), and
+//! this module owns provider-id mapping, model-id normalization, the lookup
+//! entry points, the refresh scheduler, and the resolver that puts hand-written
 //! `[pricing]` rules ahead of every derived source.
 
 mod catalog;
 mod entry;
+mod rules;
 mod sources;
 
 pub use catalog::ModelCost;
@@ -133,11 +135,10 @@ fn ensure_cache_fresh() -> Option<Arc<PricingCache>> {
 /// models.dev. Optional `[[pricing.sources]]` extra sources land between the
 /// two later.
 ///
-/// `at` gates the card's validity window only (`effective_from` /
-/// `effective_until`): an out-of-effect card is dropped and the next layer
-/// prices the model instead. Peak/off-peak *window* matching is not here — see
-/// `sources::config_price`, which hands the selected card to the tier resolver
-/// that a later task adds.
+/// A card that is out of effect at `at` (`effective_from` / `effective_until`)
+/// is dropped and the next layer prices the model instead; peak/off-peak
+/// selection happens in `rules`, driven by `sources::config_price`, so the
+/// `cost` returned here is already the tariff in effect at `at`.
 fn effective_entry(
     provider: &str,
     model: &str,
