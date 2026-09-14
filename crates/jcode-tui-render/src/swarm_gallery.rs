@@ -265,6 +265,54 @@ pub fn gallery_header(total: usize, active: usize) -> Line<'static> {
     ])
 }
 
+/// Aggregate stats line shown below agent chips when the swarm strip is focused.
+///
+/// Formats as: "X/Y agents · Z active · A/B tasks · Xm Ys elapsed"
+/// Right-aligned to `width` using dim styling.
+pub fn summary_line(
+    total: usize,
+    active: usize,
+    todos_done: u32,
+    todos_total: u32,
+    max_elapsed: u64,
+    width: usize,
+) -> Line<'static> {
+    let elapsed_text = if max_elapsed < 60 {
+        format!("{}s", max_elapsed)
+    } else {
+        format!("{}m {}s", max_elapsed / 60, max_elapsed % 60)
+    };
+    let tasks_text = format!("{}/{} tasks", todos_done, todos_total);
+    let mut body = format!(
+        "{total} agent{} · {active} active · {tasks_text} · {elapsed_text} elapsed",
+        if total == 1 { "" } else { "s" },
+    );
+    let body_w = disp_w(&body);
+    if body_w > width {
+        // Truncate display-width to fit within the budget.
+        let mut w = 0usize;
+        let mut end = body.len();
+        for (i, ch) in body.char_indices() {
+            w += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if w > width {
+                end = i;
+                break;
+            }
+        }
+        body.truncate(end);
+    }
+    let body_w = disp_w(&body);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if body_w < width {
+        spans.push(Span::raw(" ".repeat(width - body_w)));
+    }
+    spans.push(Span::styled(
+        body,
+        Style::default().fg(rgb(105, 105, 120)),
+    ));
+    Line::from(spans)
+}
+
 /// A renderer-agnostic view of one swarm member, ready for layout.
 ///
 /// Callers are responsible for building the `body` lines (e.g. choosing live
