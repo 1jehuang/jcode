@@ -47,6 +47,12 @@ fn instant(epoch_secs: u64) -> std::time::SystemTime {
 const ONE_SECOND_BEFORE_PEAK: u64 = 1_789_347_599;
 /// 2026-09-14T01:30:00Z (Monday): inside the peak window.
 const INSIDE_PEAK: u64 = 1_789_349_400;
+/// 2030-06-24T02:00:00Z (Monday): inside the peak window, four years away from
+/// the wall clock so "the pinned instant decided" cannot be a coincidence.
+const FAR_FUTURE_PEAK: u64 = 1_908_496_800;
+/// 2030-06-22T02:00:00Z (Saturday): the same clock reading on a weekend, which
+/// the schedule puts off-peak.
+const FAR_FUTURE_OFF_PEAK: u64 = 1_908_324_000;
 
 /// Write `toml` as the user's `config.toml` in the isolated home the test is
 /// already running in, and drop any config loaded before it.
@@ -124,6 +130,40 @@ fn incomplete_config_card_is_not_silently_priced_at_generic_defaults() {
         assert_eq!(
             app.cost.total_cost, 0.0,
             "an incomplete configured card must not be topped up with $15/$60 defaults"
+        );
+    });
+}
+
+#[test]
+fn local_path_uses_call_time() {
+    // F15 for the local path: a turn is billed with the tariff in effect when
+    // its request was *sent*, not the wall clock read when the cost is
+    // computed. Both instants are years away from now and on opposite sides of
+    // the schedule, so resolving at `SystemTime::now()` cannot satisfy both.
+    with_temp_jcode_home(|| {
+        write_pricing_config(PEAK_CARD_CONFIG);
+
+        let local_turn_cost = |at_secs: u64| {
+            let mut app = create_named_provider_test_app("deepseek", "deepseek-v4-pro");
+            app.streaming.streaming_input_tokens = 1_000_000;
+            app.streaming.streaming_output_tokens = 1_000_000;
+            app.begin_call_pricing(instant(at_secs));
+            app.update_cost_impl();
+            app.cost.total_cost
+        };
+
+        // Monday 02:00Z, inside the peak window: 1M in at $10 + 1M out at $20.
+        let peak_cost = local_turn_cost(FAR_FUTURE_PEAK);
+        assert!(
+            (peak_cost - 30.0).abs() < 1e-4,
+            "a turn sent inside the peak window bills 10x, got ${peak_cost:.4}"
+        );
+
+        // Saturday 02:00Z, the same reading on a weekend: the base card.
+        let off_peak_cost = local_turn_cost(FAR_FUTURE_OFF_PEAK);
+        assert!(
+            (off_peak_cost - 3.0).abs() < 1e-4,
+            "a turn sent off-peak bills the base card ($1 + $2), got ${off_peak_cost:.4}"
         );
     });
 }
