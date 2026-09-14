@@ -278,7 +278,7 @@ impl App {
             self.streaming.streaming_cache_read_tokens.unwrap_or(0),
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
-        self.cost.total_cost += call_cost;
+        self.cost.accrue(call_cost, &currency);
         self.record_api_key_spend(call_cost, &currency);
     }
 
@@ -328,11 +328,11 @@ impl App {
             cache_read_delta,
             cache_creation_delta,
         );
-        self.cost.total_cost += call_cost;
+        self.cost.accrue(call_cost, &currency);
         self.record_api_key_spend(call_cost, &currency);
     }
 
-    /// Seed `cost.total_cost` from token totals restored when resuming a
+    /// Seed the session cost from token totals restored when resuming a
     /// session, so the cost widget reflects prior spend instead of showing `$0`
     /// until a new call happens.
     ///
@@ -341,8 +341,9 @@ impl App {
     /// an older session is reopened, its historical token totals are restored
     /// from the server but the dollar cost was never reconstructed, leaving the
     /// widget stuck at `$0`. This prices the restored totals once, the same way
-    /// a single completed call is priced, and overwrites `total_cost` (rather
-    /// than accruing) so it is idempotent across repeated history snapshots.
+    /// a single completed call is priced, and overwrites the session total
+    /// (rather than accruing) so it is idempotent across repeated history
+    /// snapshots.
     pub(super) fn seed_cost_from_history_totals(
         &mut self,
         totals: &crate::protocol::TokenUsageTotals,
@@ -362,14 +363,14 @@ impl App {
         else {
             return;
         };
-        let (cost, _currency) = pricing.cost_for_usage(
+        let (cost, currency) = pricing.cost_for_usage(
             totals.input_tokens,
             totals.output_tokens,
             totals.cache_read_input_tokens,
             totals.cache_creation_input_tokens,
         );
         if cost.is_finite() {
-            self.cost.total_cost = cost;
+            self.cost.set_single_total(cost, &currency);
         }
     }
 

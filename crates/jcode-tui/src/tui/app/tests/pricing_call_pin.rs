@@ -86,29 +86,29 @@ fn same_call_keeps_tier_across_boundary() {
         // First snapshot: 00:59:59Z, one second before the peak window opens.
         app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(ONE_SECOND_BEFORE_PEAK));
         assert!(
-            (app.cost.total_cost - 1.0).abs() < 1e-4,
+            (session_cost_usd(&app) - 1.0).abs() < 1e-4,
             "off-peak input is $1.00/Mtok, got ${:.4}",
-            app.cost.total_cost
+            session_cost_usd(&app)
         );
 
         // Delta snapshot inside the peak window: still the same call, so still
         // the off-peak card. Peak output would be $20.00/Mtok.
         app.accrue_remote_call_cost(0, 1_000_000, 0, 0, instant(INSIDE_PEAK));
         assert!(
-            (app.cost.total_cost - 3.0).abs() < 1e-4,
+            (session_cost_usd(&app) - 3.0).abs() < 1e-4,
             "the whole call bills off-peak ($1.00 + $2.00), got ${:.4}",
-            app.cost.total_cost
+            session_cost_usd(&app)
         );
 
         // A *new* call at the peak instant really does bill peak rates, so the
         // assertion above pins the tier rather than proving the schedule inert.
         app.begin_api_call_accounting();
-        let before = app.cost.total_cost;
+        let before = session_cost_usd(&app);
         app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(INSIDE_PEAK));
         assert!(
-            (app.cost.total_cost - before - 10.0).abs() < 1e-4,
+            (session_cost_usd(&app) - before - 10.0).abs() < 1e-4,
             "a call started inside the peak window bills 10x, got ${:.4}",
-            app.cost.total_cost - before
+            session_cost_usd(&app) - before
         );
     });
 }
@@ -127,8 +127,8 @@ fn incomplete_config_card_is_not_silently_priced_at_generic_defaults() {
 
         app.update_cost_impl();
 
-        assert_eq!(
-            app.cost.total_cost, 0.0,
+        assert!(
+            session_cost_usd(&app).abs() < 1e-9,
             "an incomplete configured card must not be topped up with $15/$60 defaults"
         );
     });
@@ -149,7 +149,7 @@ fn local_path_uses_call_time() {
             app.streaming.streaming_output_tokens = 1_000_000;
             app.begin_call_pricing(instant(at_secs));
             app.update_cost_impl();
-            app.cost.total_cost
+            session_cost_usd(&app)
         };
 
         // Monday 02:00Z, inside the peak window: 1M in at $10 + 1M out at $20.
@@ -181,9 +181,9 @@ fn unconfigured_model_keeps_the_generic_default_fallback() {
         app.update_cost_impl();
 
         assert!(
-            (app.cost.total_cost - 75.0).abs() < 1e-4,
+            (session_cost_usd(&app) - 75.0).abs() < 1e-4,
             "unconfigured unknown models keep the $15/$60 estimate, got ${:.4}",
-            app.cost.total_cost
+            session_cost_usd(&app)
         );
     });
 }
@@ -210,10 +210,19 @@ fn non_usd_spend_lands_in_its_own_ledger_bucket() {
         app.streaming.streaming_input_tokens = 1_000_000;
 
         app.update_cost_impl();
+        let cny = Currency::new("cny");
         assert!(
-            (app.cost.total_cost - 7.0).abs() < 1e-4,
+            (app.cost.total_in(&cny) - 7.0).abs() < 1e-4,
             "1M input tokens on a CNY 7.0/Mtok card is CNY 7.00, got {}",
-            app.cost.total_cost
+            app.cost.total_in(&cny)
+        );
+        assert!(
+            app.cost
+                .total_cost_by_currency
+                .get(&Currency::usd())
+                .is_none(),
+            "a CNY call must not be filed under USD: {:?}",
+            app.cost.total_cost_by_currency
         );
 
         // The ledger write is spawned off the render loop, so wait for the file
@@ -241,6 +250,39 @@ fn non_usd_spend_lands_in_its_own_ledger_bucket() {
         assert_eq!(
             recorded["day_usd"], 7.0,
             "the USD mirror tracks the single CNY bucket"
+        );
+    });
+}
+
+#[test]
+fn session_total_keeps_one_bucket_per_currency() {
+    // F21: a session that bills in two currencies keeps two buckets. The total
+    // is never one scalar labelled with whichever call was priced last.
+    with_temp_jcode_home(|| {
+        let mut app = create_named_provider_test_app("deepseek", "deepseek-v4-pro");
+        app.streaming.streaming_input_tokens = 1_000_000;
+
+        write_pricing_config(COMPLETE_CNY_CARD_CONFIG);
+        app.update_cost_impl();
+        assert!((app.cost.total_in(&Currency::new("CNY")) - 7.0).abs() < 1e-4);
+
+        // Same session, now priced by the USD card (the default when no
+        // `currency` is written).
+        write_pricing_config(PEAK_CARD_CONFIG);
+        app.streaming.streaming_input_tokens = 1_000_000;
+        app.streaming.streaming_output_tokens = 0;
+        app.begin_api_call_accounting();
+        app.update_cost_impl();
+
+        assert!(
+            (app.cost.total_in(&Currency::usd()) - 1.0).abs() < 1e-4,
+            "the USD call lands in the USD bucket: {:?}",
+            app.cost.total_cost_by_currency
+        );
+        assert!(
+            (app.cost.total_in(&Currency::new("CNY")) - 7.0).abs() < 1e-4,
+            "the earlier CNY spend is untouched by the USD call: {:?}",
+            app.cost.total_cost_by_currency
         );
     });
 }

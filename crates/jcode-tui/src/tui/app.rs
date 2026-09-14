@@ -31,7 +31,7 @@ use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -821,13 +821,16 @@ struct StreamingProgress {
 
 /// Accumulated session cost and cached per-model pricing.
 ///
-/// Grouped out of [`App`]. `total_cost` accrues across the session; the cached
-/// price fields memoize the active model's pricing so they are re-resolved only
-/// when `cached_price_model` no longer matches the current model.
+/// Grouped out of [`App`]. Cost accrues per currency (F21): a session that
+/// switches between providers priced in different currencies keeps one bucket
+/// per currency, so the displayed total can never be relabelled as whatever was
+/// billed last. The cached price fields memoize the active model's pricing so
+/// they are re-resolved only when `cached_price_model` no longer matches the
+/// current model.
 #[derive(Clone, Debug, Default)]
 struct CostState {
-    // Total cost in USD (for API-key providers)
-    total_cost: f32,
+    /// Session cost accrued per currency, for API-key providers.
+    total_cost_by_currency: BTreeMap<Currency, f32>,
     // Cached pricing (input $/1M tokens, output $/1M tokens)
     cached_prompt_price: Option<f32>,
     cached_completion_price: Option<f32>,
@@ -845,6 +848,32 @@ struct CostState {
     /// boundary keeps the tier it started in. `None` until that call is first
     /// priced.
     pinned_call_pricing: Option<PinnedCallPricing>,
+}
+
+impl CostState {
+    /// Add `amount`, which the rate card denominated in `currency`.
+    fn accrue(&mut self, amount: f32, currency: &Currency) {
+        *self
+            .total_cost_by_currency
+            .entry(currency.clone())
+            .or_insert(0.0) += amount;
+    }
+
+    /// Replace the session total with a single `amount` in `currency`, used when
+    /// restored history is priced once instead of accrued call by call.
+    fn set_single_total(&mut self, amount: f32, currency: &Currency) {
+        self.total_cost_by_currency.clear();
+        self.total_cost_by_currency.insert(currency.clone(), amount);
+    }
+
+    /// Total accrued in one currency; `0.0` when nothing was billed in it.
+    #[cfg(test)]
+    fn total_in(&self, currency: &Currency) -> f32 {
+        self.total_cost_by_currency
+            .get(currency)
+            .copied()
+            .unwrap_or(0.0)
+    }
 }
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.

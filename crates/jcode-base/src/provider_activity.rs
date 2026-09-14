@@ -30,6 +30,7 @@
 mod oauth_usage;
 pub use oauth_usage::{openai_oauth_usage_summary, record_openai_oauth_usage};
 
+use crate::money_display::{DisplayTarget, format_amount};
 use chrono::{Datelike, Utc};
 use jcode_provider_core::Currency;
 use serde::{Deserialize, Serialize};
@@ -143,18 +144,6 @@ impl ProviderSpend {
         if self.all_time.is_empty() && self.all_time_usd != 0.0 {
             self.all_time.insert(Currency::usd(), self.all_time_usd);
         }
-    }
-
-    /// Whether every bucket in every window holds USD.
-    ///
-    /// Only then is a window's `*_usd` mirror an exact dollar figure. Any other
-    /// currency — even alongside USD — makes it a cross-currency sum, which is
-    /// an approximation for the rollback path above and must never be shown to
-    /// a user as a dollar amount.
-    fn is_usd_only(&self) -> bool {
-        [&self.day, &self.month_spend, &self.all_time]
-            .iter()
-            .all(|window| window.keys().all(Currency::is_usd))
     }
 }
 
@@ -342,21 +331,66 @@ pub fn spend_snapshot(source_key: &str) -> Option<ProviderSpend> {
     Some(spend)
 }
 
-/// The `/usage` spend summary for `spend`, or `None` when it must not be shown.
+/// `/usage` label for locally tracked per-machine spend.
+const LOCAL_SPEND_LABEL: &str = "Local spend (this machine)";
+
+/// `/usage` rows for locally tracked spend, one per currency.
 ///
-/// The `*_usd` mirrors are exact only for a USD-only window; with any other
-/// currency present they are a cross-currency sum (see [`ProviderSpend`]), so
-/// this returns `None` and the caller omits the row rather than printing a
-/// curated-looking wrong number behind a `$`. A per-currency breakdown is
-/// separate work.
-pub(crate) fn usd_only_spend_summary(spend: &ProviderSpend) -> Option<String> {
-    if !spend.is_usd_only() {
-        return None;
+/// The money always comes from the per-currency buckets, never from the
+/// `*_usd` mirrors: those are a naive cross-currency sum kept only so an older
+/// binary can read the file (see [`ProviderSpend`]), and printing one behind a
+/// `$` would relabel whatever else is in the window. Amounts are resolved
+/// through `[display].currency`, so a user who asked to see everything in one
+/// currency gets one converted row, and a currency with no rate keeps its own
+/// label with a note saying why.
+pub(crate) fn spend_summary_rows(spend: &ProviderSpend) -> Vec<(String, String)> {
+    spend_summary_rows_for(spend, &DisplayTarget::from_config())
+}
+
+/// [`spend_summary_rows`] against an explicit display target.
+fn spend_summary_rows_for(spend: &ProviderSpend, target: &DisplayTarget) -> Vec<(String, String)> {
+    let mut by_currency: BTreeMap<Currency, [f64; 3]> = BTreeMap::new();
+    let mut notes: BTreeMap<Currency, String> = BTreeMap::new();
+    for (index, window) in [&spend.day, &spend.month_spend, &spend.all_time]
+        .into_iter()
+        .enumerate()
+    {
+        for row in target.resolve_buckets(window) {
+            by_currency.entry(row.currency.clone()).or_insert([0.0; 3])[index] = row.amount;
+            if let Some(note) = row.note {
+                notes.entry(row.currency).or_insert(note);
+            }
+        }
     }
-    Some(format!(
-        "${:.2} today · ${:.2} this month · ${:.2} all-time",
-        spend.day_usd, spend.month_usd, spend.all_time_usd
-    ))
+
+    let mut windows: Vec<(Currency, [f64; 3])> = by_currency.into_iter().collect();
+    // Biggest all-time spender first, matching the widget's primary order.
+    windows.sort_by(|a, b| b.1[2].total_cmp(&a.1[2]).then_with(|| a.0.cmp(&b.0)));
+    let multiple = windows.len() > 1;
+    windows
+        .into_iter()
+        .map(|(currency, amounts)| {
+            let note = match notes.get(&currency) {
+                Some(note) => format!(" ({note})"),
+                None => String::new(),
+            };
+            // With one row the currency is already in the amounts; with several
+            // the label has to say which bucket this row is.
+            let label = if multiple {
+                format!("{LOCAL_SPEND_LABEL} [{}]", currency.as_str())
+            } else {
+                LOCAL_SPEND_LABEL.to_string()
+            };
+            let value = format!(
+                "{} today · {} this month · {} all-time{}",
+                format_amount(amounts[0], &currency, 2),
+                format_amount(amounts[1], &currency, 2),
+                format_amount(amounts[2], &currency, 2),
+                note
+            );
+            (label, value)
+        })
+        .collect()
 }
 
 /// All ledger entries (source key -> activity), with spend buckets rolled.
@@ -1050,5 +1084,106 @@ mod tests {
         assert_eq!(format_relative_age(now - 120), "2m ago");
         assert_eq!(format_relative_age(now - 3_600), "1h ago");
         assert_eq!(format_relative_age(now - 2 * 86_400), "2d ago");
+    }
+
+    #[test]
+    fn usage_renders_per_currency() {
+        // The `/usage` row for a mixed-currency window must report every
+        // currency in it, each with the code it is actually denominated in.
+        // (The interim USD-only gate rendered nothing at all here.)
+        let mut spend = ProviderSpend::default();
+        spend.accrue(&Currency::new("cny"), 8.0);
+        spend.accrue(&Currency::usd(), 1.5);
+
+        let rows = spend_summary_rows_for(&spend, &DisplayTarget::native());
+        assert_eq!(rows.len(), 2, "one row per currency: {rows:?}");
+
+        assert_eq!(rows[0].0, "Local spend (this machine) [CNY]");
+        assert!(
+            rows[0]
+                .1
+                .starts_with("CNY 8.00 today · CNY 8.00 this month · CNY 8.00 all-time"),
+            "{}",
+            rows[0].1
+        );
+        assert!(
+            !rows[0].1.contains('$'),
+            "a CNY row must not carry a dollar sign: {}",
+            rows[0].1
+        );
+
+        assert_eq!(rows[1].0, "Local spend (this machine) [USD]");
+        assert!(rows[1].1.starts_with("$1.50 today"), "{}", rows[1].1);
+    }
+
+    #[test]
+    fn usage_renders_the_mirror_free_usd_only_window_as_one_row() {
+        // Unchanged shape for the common case: a single-currency window keeps
+        // the plain label and the `$` it always had.
+        let mut spend = ProviderSpend::default();
+        spend.accrue(&Currency::usd(), 1.5);
+
+        let rows = spend_summary_rows_for(&spend, &DisplayTarget::native());
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, "Local spend (this machine)");
+        assert_eq!(rows[0].1, "$1.50 today · $1.50 this month · $1.50 all-time");
+    }
+
+    #[test]
+    fn usage_converts_to_the_configured_display_currency() {
+        // `[display].currency = "CNY"`: both buckets collapse into one CNY row,
+        // through the hand-written `fx_rates` only.
+        let _env_lock = lock_env();
+        clear_ledger_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[display]\ncurrency = \"CNY\"\n\n[pricing]\nfx_base = \"USD\"\n\n[pricing.fx_rates]\nCNY = 7.2\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let mut spend = ProviderSpend::default();
+        spend.accrue(&Currency::new("cny"), 8.0);
+        spend.accrue(&Currency::usd(), 1.5);
+
+        let rows = spend_summary_rows(&spend);
+        assert_eq!(rows.len(), 1, "converted windows merge: {rows:?}");
+        assert_eq!(rows[0].0, "Local spend (this machine)");
+        assert!(
+            rows[0].1.starts_with("CNY 18.80 today"),
+            "1.5 USD = 10.80 CNY, plus the 8.00 CNY bucket: {}",
+            rows[0].1
+        );
+    }
+
+    #[test]
+    fn usage_falls_back_to_native_when_the_display_currency_has_no_rate() {
+        // Asking for EUR without an EUR rate must not invent one: the buckets
+        // stay in their own currencies and the row says why.
+        let _env_lock = lock_env();
+        clear_ledger_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[display]\ncurrency = \"EUR\"\n\n[pricing]\nfx_base = \"USD\"\n",
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let mut spend = ProviderSpend::default();
+        spend.accrue(&Currency::new("cny"), 8.0);
+
+        let rows = spend_summary_rows(&spend);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, "Local spend (this machine)");
+        assert!(rows[0].1.starts_with("CNY 8.00 today"), "{}", rows[0].1);
+        assert!(
+            rows[0].1.ends_with("(no EUR rate)"),
+            "the row must say the conversion was impossible: {}",
+            rows[0].1
+        );
     }
 }

@@ -25,6 +25,7 @@
 mod call_rates;
 mod catalog;
 mod entry;
+mod fx;
 mod generation;
 mod rules;
 mod sources;
@@ -35,7 +36,9 @@ pub use crate::config::CostFields;
 pub use call_rates::{CallRateCard, ConfigCallRates, config_call_rates};
 pub use catalog::ModelCost;
 pub use entry::ModelPricingEntry;
+pub use fx::{FxTable, convert};
 pub use generation::pricing_generation;
+pub use sources::pricing_config;
 
 use catalog::PricingCache;
 #[cfg(test)]
@@ -431,6 +434,38 @@ mod tests {
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+    }
+
+    /// A non-USD card that cannot be completed and has no layer underneath it
+    /// must never be rendered as a price: there is no scalar to show, only
+    /// "unknown" (spec 4.4, and the warning the resolver emits).
+    #[test]
+    fn incomplete_foreign_currency_card_is_never_rendered_as_a_price() {
+        let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            assert!(
+                effective_cost("deepseek", "deepseek-v4-pro", at).is_none(),
+                "a one-sided CNY card has no displayable price"
+            );
+            // The rate-level entry still exists, but it is missing the output
+            // direction, so nothing downstream can render it as a price.
+            let (entry, currency) =
+                effective_entry("deepseek", "deepseek-v4-pro", at).expect("config card");
+            assert_eq!(currency, Currency::new("CNY"));
+            assert_eq!(entry.cost.input, Some(4.5));
+            assert_eq!(entry.cost.output, None, "no direction was invented");
+            assert!(matches!(
+                config_call_rates("deepseek", "deepseek-v4-pro", at),
+                ConfigCallRates::ConfiguredWithoutPrice
+            ));
+        });
     }
 
     /// No `[pricing]` section at all: the resolver must hand back exactly the

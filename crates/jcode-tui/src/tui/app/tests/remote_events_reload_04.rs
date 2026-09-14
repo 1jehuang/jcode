@@ -191,10 +191,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -1267,10 +1268,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1542,7 +1540,7 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         app.update_cost_impl();
 
         assert!(
-            app.cost.total_cost > 0.0,
+            session_cost_usd(&app) > 0.0,
             "{runtime_provider} should accrue token cost"
         );
 
@@ -1558,7 +1556,11 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
         );
         assert_eq!(usage.input_tokens, 12_000);
         assert_eq!(usage.output_tokens, 3_400);
-        assert!(usage.total_cost > 0.0);
+        assert!(
+            usage.cost_rows.iter().any(|row| row.amount > 0.0),
+            "the cost widget shows the priced session spend: {:?}",
+            usage.cost_rows
+        );
     }
 
     crate::env::set_var("JCODE_RUNTIME_PROVIDER", "jcode");
@@ -1569,7 +1571,7 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     app.token_accounting.total_input_tokens = 12_000;
     app.token_accounting.total_output_tokens = 3_400;
     app.update_cost_impl();
-    assert_eq!(app.cost.total_cost, 0.0);
+    assert_eq!(session_cost_usd(&app), 0.0);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
@@ -1586,7 +1588,7 @@ fn test_info_widget_local_direct_api_runtime_shows_cost_based_usage() {
     app.token_accounting.total_input_tokens = 12_000;
     app.token_accounting.total_output_tokens = 3_400;
     app.update_cost_impl();
-    assert_eq!(app.cost.total_cost, 0.0);
+    assert_eq!(session_cost_usd(&app), 0.0);
 
     let data = crate::tui::TuiState::info_widget_data(&app);
     assert_eq!(
@@ -1640,9 +1642,9 @@ fn test_anthropic_api_cost_accounts_for_split_cache_tokens() {
     //   total                                = $0.645
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
     assert!(
-        (app.cost.total_cost - expected).abs() < 1e-4,
+        (session_cost_usd(&app) - expected).abs() < 1e-4,
         "anthropic split-accounting cost should be ~${expected:.4}, got ${:.4}",
-        app.cost.total_cost
+        session_cost_usd(&app)
     );
 
     if let Some(value) = saved_runtime {
@@ -1687,9 +1689,9 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
     //   + write 100_000 * ($3 * 2x) = $0.645
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
     assert!(
-        (app.cost.total_cost - expected).abs() < 1e-4,
+        (session_cost_usd(&app) - expected).abs() < 1e-4,
         "remote anthropic api-key cost should be ~${expected:.4}, got ${:.4}",
-        app.cost.total_cost
+        session_cost_usd(&app)
     );
     assert_eq!(app.token_accounting.total_input_tokens, 1_000);
     assert_eq!(app.token_accounting.total_output_tokens, 2_000);
@@ -1709,7 +1711,7 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
         },
         &mut remote,
     );
-    assert_eq!(oauth_app.cost.total_cost, 0.0);
+    assert_eq!(session_cost_usd(&oauth_app), 0.0);
     assert_eq!(oauth_app.token_accounting.total_input_tokens, 1_000);
 }
 
@@ -1717,7 +1719,7 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
 fn test_resumed_session_seeds_cost_from_history_token_totals() {
     // Reopening an older session restores token totals from history but never
     // ran the live per-call cost path, so the cost widget showed $0. The resume
-    // path must price the restored totals once to seed total_cost.
+    // path must price the restored totals once to seed the session cost.
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
 
@@ -1742,17 +1744,17 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     // Same split-accounting math as the live-call test above.
     let expected = 0.003 + 0.030 + 0.012 + 0.600;
     assert!(
-        (app.cost.total_cost - expected).abs() < 1e-4,
+        (session_cost_usd(&app) - expected).abs() < 1e-4,
         "resumed session cost should be seeded to ~${expected:.4}, got ${:.4}",
-        app.cost.total_cost
+        session_cost_usd(&app)
     );
 
     // Idempotent: a repeated history snapshot must not double the cost.
     app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
     assert!(
-        (app.cost.total_cost - expected).abs() < 1e-4,
+        (session_cost_usd(&app) - expected).abs() < 1e-4,
         "re-seeding must overwrite (not accrue), got ${:.4}",
-        app.cost.total_cost
+        session_cost_usd(&app)
     );
 
     // OAuth subscription sessions are not metered per token; cost stays $0.
@@ -1762,7 +1764,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     oauth_app.remote_provider_model = Some("claude-sonnet-4-6".to_string());
     oauth_app.remote_resolved_credential = Some(jcode_provider_core::ResolvedCredential::Oauth);
     oauth_app.seed_cost_from_history_totals(&totals, std::time::SystemTime::now());
-    assert_eq!(oauth_app.cost.total_cost, 0.0);
+    assert_eq!(session_cost_usd(&oauth_app), 0.0);
 }
 
 #[test]
@@ -1805,7 +1807,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
         },
         &mut remote,
     );
-    let standard_cost = app.cost.total_cost;
+    let standard_cost = session_cost_usd(&app);
     assert!(
         (standard_cost - 0.030).abs() < 1e-4,
         "standard-tier cost should be ~$0.030, got ${standard_cost:.4}"
@@ -1823,7 +1825,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
         },
         &mut remote,
     );
-    let fast_call_cost = app.cost.total_cost - standard_cost;
+    let fast_call_cost = session_cost_usd(&app) - standard_cost;
     assert!(
         (fast_call_cost - 0.180).abs() < 1e-4,
         "fast-mode call cost should be ~$0.180, got ${fast_call_cost:.4}"
@@ -1832,7 +1834,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
     // Fast mode off again: pricing drops back to standard rates.
     app.remote_service_tier = None;
     reset_call_state(&mut app);
-    let before = app.cost.total_cost;
+    let before = session_cost_usd(&app);
     app.handle_server_event(
         crate::protocol::ServerEvent::TokenUsage {
             input: 1_000,
@@ -1842,7 +1844,7 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
         },
         &mut remote,
     );
-    let off_call_cost = app.cost.total_cost - before;
+    let off_call_cost = session_cost_usd(&app) - before;
     assert!(
         (off_call_cost - 0.030).abs() < 1e-4,
         "post-toggle standard cost should be ~$0.030, got ${off_call_cost:.4}"
@@ -1974,7 +1976,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2261,7 +2265,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with
