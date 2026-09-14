@@ -216,7 +216,8 @@ fn main() {
             0,
             90,
             12,
-        None),
+            None,
+        ),
     );
     print_lines(
         "STRIP: focused, selected #1 @ width 90",
@@ -251,7 +252,8 @@ fn main() {
             90,
             4,
             12,
-        None),
+            None,
+        ),
     );
     print_lines(
         "VERTICAL: focused (accordion), selected #1 @ width 90",
@@ -277,7 +279,8 @@ fn main() {
             80,
             4,
             12,
-        None),
+            None,
+        ),
     );
 
     // ---- Dock (vertical agent list for the info-widget margins) ----
