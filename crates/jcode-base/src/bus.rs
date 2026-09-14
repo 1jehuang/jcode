@@ -79,6 +79,13 @@ pub struct ManualToolCompleted {
     pub duration_ms: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct PluginOperationCompleted {
+    pub session_id: String,
+    pub output: String,
+    pub success: bool,
+}
+
 /// Type of file operation for swarm awareness
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FileOp {
@@ -397,6 +404,8 @@ pub enum BusEvent {
     TodoUpdated(TodoEvent),
     SubagentStatus(SubagentStatus),
     ManualToolCompleted(ManualToolCompleted),
+    /// A local `/plugin` operation completed off the UI thread.
+    PluginOperationCompleted(PluginOperationCompleted),
     BatchProgress(BatchProgress),
     /// File was touched by an agent (for swarm conflict detection)
     FileTouch(FileTouch),

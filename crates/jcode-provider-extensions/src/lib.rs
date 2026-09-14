@@ -5,11 +5,16 @@
 //! deadlines, cancellation, and frame limits outside the persistence layer.
 
 mod bundle;
+mod remote;
 mod runtime;
 
 pub use bundle::{
     BundleComponents, BundleError, PLUGIN_MANIFEST_VERSION, PluginBundle, PluginManifest,
     SkillMetadata,
+};
+pub use remote::{
+    InstalledPlugin, PluginInstallMetadata, PluginSource, PluginStore, PluginStoreSnapshot,
+    RemotePluginError,
 };
 pub use runtime::{
     EmbeddedExtension, EmbeddedExtensionManifest, ExtensionBackend, ExtensionEvent,
@@ -86,6 +91,8 @@ pub enum ExtensionError {
     RequestFailed(String),
     #[error("extension cancellation is not supported by '{0}'")]
     CancellationUnsupported(String),
+    #[error("plugin operation failed: {0}")]
+    Plugin(#[from] RemotePluginError),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -498,6 +505,41 @@ impl ProviderRegistry {
         Ok(())
     }
 
+    /// Register a provider from an installed plugin, or update that plugin's
+    /// existing provider while preserving its enabled and trust state.
+    ///
+    /// A provider ID may only be replaced when the previous source is inside
+    /// the same plugin root. This prevents a plugin install from silently
+    /// taking over an unrelated user-managed provider with the same ID.
+    pub fn register_or_update_plugin(
+        &mut self,
+        manifest: ProviderManifest,
+        source: PathBuf,
+        plugin_root: &Path,
+        trusted: bool,
+    ) -> Result<(), ExtensionError> {
+        manifest.validate()?;
+        if !source.starts_with(plugin_root) {
+            return Err(ExtensionError::InvalidManifest(
+                "plugin provider source must remain inside its plugin root".to_string(),
+            ));
+        }
+        if let Some(existing) = self.providers.get_mut(&manifest.id) {
+            if !existing
+                .source
+                .as_deref()
+                .is_some_and(|path| path.starts_with(plugin_root))
+            {
+                return Err(ExtensionError::DuplicateProvider(manifest.id));
+            }
+            existing.manifest = manifest;
+            existing.source = Some(source);
+            existing.trusted |= trusted;
+            return Ok(());
+        }
+        self.register(manifest, Some(source), trusted)
+    }
+
     pub fn remove(&mut self, id: &str) -> Result<ProviderRecord, ExtensionError> {
         self.providers
             .remove(id)
@@ -510,6 +552,15 @@ impl ProviderRegistry {
             .get_mut(id)
             .ok_or_else(|| ExtensionError::MissingProvider(id.to_string()))?;
         record.enabled = enabled;
+        Ok(())
+    }
+
+    pub fn set_trusted(&mut self, id: &str, trusted: bool) -> Result<(), ExtensionError> {
+        let record = self
+            .providers
+            .get_mut(id)
+            .ok_or_else(|| ExtensionError::MissingProvider(id.to_string()))?;
+        record.trusted = trusted;
         Ok(())
     }
 
@@ -626,6 +677,35 @@ permissions = ["network"]
         assert!(!loaded.get("fixture-provider").unwrap().enabled);
         loaded.remove("fixture-provider").unwrap();
         assert_eq!(loaded.list().count(), 0);
+    }
+
+    #[test]
+    fn plugin_provider_update_preserves_state_and_rejects_foreign_owner() {
+        let dir = tempdir().unwrap();
+        let plugin_root = dir.path().join("plugin");
+        let old_source = plugin_root.join("versions/1.0.0+old");
+        let new_source = plugin_root.join("versions/1.1.0+new");
+        let foreign_source = dir.path().join("other/versions/1.1.0+new");
+        let mut registry = ProviderRegistry::open(dir.path().join("providers.json")).unwrap();
+        registry
+            .register(manifest("fixture-provider"), Some(old_source), true)
+            .unwrap();
+        registry.set_enabled("fixture-provider", false).unwrap();
+
+        let mut updated = manifest("fixture-provider");
+        updated.version = "1.1.0".to_string();
+        registry
+            .register_or_update_plugin(updated.clone(), new_source, &plugin_root, false)
+            .unwrap();
+        let record = registry.get("fixture-provider").unwrap();
+        assert_eq!(record.manifest.version, "1.1.0");
+        assert!(!record.enabled);
+        assert!(record.trusted);
+
+        assert!(matches!(
+            registry.register_or_update_plugin(updated, foreign_source, &plugin_root, false,),
+            Err(ExtensionError::InvalidManifest(_))
+        ));
     }
 
     #[test]

@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use super::args::{
     AmbientCommand, Args, AuthCommand, CloudCommand, CloudSessionsCommand, Command, MemoryCommand,
-    ModelCommand, ProviderCommand, ProviderExtensionCommand, RestartCommand, ServerCommand,
-    SessionCommand, TranscriptModeArg,
+    ModelCommand, PluginCommand, ProviderCommand, ProviderExtensionCommand, RestartCommand,
+    ServerCommand, SessionCommand, TranscriptModeArg,
 };
 use crate::{
     agent, auth, build, provider, provider_catalog, server, session, setup_hints, startup_profile,
@@ -358,6 +358,37 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
         Some(Command::Update) => {
             hot_exec::run_update()?;
         }
+        Some(Command::Plugin { action }) => match action {
+            PluginCommand::Inspect { source, json } => {
+                commands::run_plugin_inspect_command(&source, json)?;
+            }
+            PluginCommand::Add {
+                source,
+                trusted,
+                json,
+            } => {
+                commands::run_plugin_add_command(&source, trusted, json)?;
+            }
+            PluginCommand::Update {
+                name,
+                trusted,
+                json,
+            } => {
+                commands::run_plugin_update_command(&name, trusted, json)?;
+            }
+            PluginCommand::List { json } => {
+                commands::run_plugin_list_command(json)?;
+            }
+            PluginCommand::Doctor { json } => {
+                commands::run_plugin_doctor_command(json)?;
+            }
+            PluginCommand::Trust { id, json } => {
+                commands::run_plugin_trust_command(&id, json)?;
+            }
+            PluginCommand::Remove { name, json } => {
+                commands::run_plugin_remove_command(&name, json)?;
+            }
+        },
         Some(Command::Version { json }) => {
             commands::run_version_command(json)?;
         }

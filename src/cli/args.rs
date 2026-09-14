@@ -273,6 +273,12 @@ pub(crate) enum Command {
     /// Update jcode to the latest version
     Update,
 
+    /// Inspect and install GitHub-hosted jcode plugin bundles
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommand,
+    },
+
     /// Show build/version information in human or JSON form
     Version {
         /// Emit JSON instead of plain text
@@ -589,6 +595,59 @@ pub(crate) enum Command {
         /// Starts the shared daemon if needed; does not create an API socket.
         #[arg(long, conflicts_with = "api_socket")]
         stdio: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PluginCommand {
+    /// Inspect a local bundle or GitHub repository without installing it
+    Inspect {
+        /// Local bundle path or owner/repository[@ref]
+        source: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a GitHub bundle into the immutable plugin store
+    Add {
+        /// owner/repository[@ref], or an HTTPS GitHub URL
+        source: String,
+        /// Mark a contained external provider trusted after validation
+        #[arg(long)]
+        trusted: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update an installed GitHub plugin from its recorded source
+    Update {
+        /// Installed plugin name
+        name: String,
+        #[arg(long)]
+        trusted: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List installed plugin versions and pinned commits
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate installed plugin metadata and provider manifests
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust an installed plugin's external provider
+    Trust {
+        /// Provider ID from `jcode plugin list` or `jcode provider extension list`
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove all installed versions of a plugin and its provider registration
+    Remove {
+        name: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 

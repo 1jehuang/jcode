@@ -13,6 +13,7 @@ use crate::{browser, gateway, memory, session, storage, tui};
 use super::{output::terminal_title, terminal::init_tui_runtime};
 
 mod menubar;
+mod plugins;
 mod provider_extensions;
 mod provider_setup;
 mod report_info;
@@ -28,6 +29,11 @@ pub use super::auth_test::{
     run_auth_test_command, run_auth_test_context_audit_command, run_auth_test_coverage_command,
 };
 pub use menubar::{ensure_menubar_helper_running, run_menubar_command};
+pub(crate) use plugins::{
+    run_plugin_add_command, run_plugin_doctor_command, run_plugin_inspect_command,
+    run_plugin_list_command, run_plugin_remove_command, run_plugin_trust_command,
+    run_plugin_update_command,
+};
 pub(crate) use provider_extensions::{
     run_provider_extension_add_command, run_provider_extension_doctor_command,
     run_provider_extension_inspect_command, run_provider_extension_list_command,

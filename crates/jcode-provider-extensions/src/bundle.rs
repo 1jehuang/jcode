@@ -1,5 +1,5 @@
 use super::{ExtensionError, PROVIDER_MANIFEST_FILE, ProviderManifest};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -46,7 +46,7 @@ pub struct PluginManifest {
     pub version: String,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_author")]
     pub author: Option<String>,
     #[serde(default)]
     pub homepage: Option<String>,
@@ -60,6 +60,23 @@ pub struct PluginManifest {
 
 fn default_plugin_manifest_version() -> u32 {
     PLUGIN_MANIFEST_VERSION
+}
+
+fn deserialize_author<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::String(author)) => Ok(Some(author)),
+        Some(serde_json::Value::Object(author)) => author
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(|name| Some(name.to_string()))
+            .ok_or_else(|| D::Error::custom("author object must contain a string name")),
+        Some(_) => Err(D::Error::custom("author must be a string or object")),
+    }
 }
 
 impl PluginManifest {
@@ -184,11 +201,10 @@ impl PluginBundle {
         .into_iter()
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();
-        let manifest_path = match manifest_candidates.as_slice() {
-            [] => return Err(BundleError::MissingManifest),
-            [path] => path.clone(),
-            paths => return Err(BundleError::AmbiguousManifest(paths.to_vec())),
-        };
+        let manifest_path = manifest_candidates
+            .first()
+            .cloned()
+            .ok_or(BundleError::MissingManifest)?;
 
         let manifest_bytes = read_bounded(&manifest_path, MAX_PLUGIN_MANIFEST_BYTES).map_err(
             |error| match error {
@@ -210,6 +226,29 @@ impl PluginBundle {
                 }
             })?;
         manifest.validate()?;
+        for candidate in manifest_candidates.iter().skip(1) {
+            let candidate_bytes = read_bounded(candidate, MAX_PLUGIN_MANIFEST_BYTES).map_err(
+                |error| match error {
+                    BoundedReadError::TooLarge => BundleError::ManifestTooLarge {
+                        path: candidate.clone(),
+                        limit: MAX_PLUGIN_MANIFEST_BYTES,
+                    },
+                    BoundedReadError::Io(source) => BundleError::Read {
+                        path: candidate.clone(),
+                        source,
+                    },
+                },
+            )?;
+            let candidate_manifest: PluginManifest = serde_json::from_slice(&candidate_bytes)
+                .map_err(|source| BundleError::ParseManifest {
+                    path: candidate.clone(),
+                    source,
+                })?;
+            candidate_manifest.validate()?;
+            if !compatible_manifests(&manifest, &candidate_manifest) {
+                return Err(BundleError::AmbiguousManifest(manifest_candidates));
+            }
+        }
 
         let provider_path = root.join(PROVIDER_MANIFEST_FILE);
         let provider_manifest = if provider_path.is_file() {
@@ -233,6 +272,22 @@ impl PluginBundle {
 
     pub fn unsupported_components(&self) -> Vec<&'static str> {
         self.components.unsupported()
+    }
+}
+
+fn compatible_manifests(left: &PluginManifest, right: &PluginManifest) -> bool {
+    left.manifest_version == right.manifest_version
+        && left.name == right.name
+        && left.version == right.version
+        && optional_field_matches(&left.homepage, &right.homepage)
+        && optional_field_matches(&left.repository, &right.repository)
+        && optional_field_matches(&left.license, &right.license)
+}
+
+fn optional_field_matches(left: &Option<String>, right: &Option<String>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left == right,
+        _ => true,
     }
 }
 
@@ -473,5 +528,51 @@ mod tests {
             PluginBundle::load(dir.path()),
             Err(BundleError::AmbiguousManifest(_))
         ));
+    }
+
+    #[test]
+    fn accepts_equivalent_claude_and_codex_manifests() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".claude-plugin")).unwrap();
+        fs::create_dir_all(dir.path().join(".codex-plugin")).unwrap();
+        let manifest = r#"{"name":"shared-plugin","version":"1.0.0"}"#;
+        fs::write(dir.path().join(".claude-plugin/plugin.json"), manifest).unwrap();
+        fs::write(dir.path().join(".codex-plugin/plugin.json"), manifest).unwrap();
+
+        let bundle = PluginBundle::load(dir.path()).unwrap();
+        assert_eq!(bundle.manifest.name, "shared-plugin");
+    }
+
+    #[test]
+    fn accepts_platform_specific_metadata_for_same_plugin_identity() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".claude-plugin")).unwrap();
+        fs::create_dir_all(dir.path().join(".codex-plugin")).unwrap();
+        fs::write(
+            dir.path().join(".codex-plugin/plugin.json"),
+            r#"{"name":"shared-plugin","version":"1.0.0","description":"Codex description","keywords":["codex"],"repository":"https://github.com/example/shared-plugin"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(".claude-plugin/plugin.json"),
+            r#"{"name":"shared-plugin","version":"1.0.0","description":"Claude description","keywords":["claude"],"repository":"https://github.com/example/shared-plugin"}"#,
+        )
+        .unwrap();
+
+        let bundle = PluginBundle::load(dir.path()).unwrap();
+        assert_eq!(bundle.manifest.name, "shared-plugin");
+    }
+
+    #[test]
+    fn accepts_structured_author_metadata() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name":"structured-author","version":"1.0.0","author":{"name":"Jesse Vincent","email":"jesse@example.com"}}"#,
+        )
+        .unwrap();
+
+        let bundle = PluginBundle::load(dir.path()).unwrap();
+        assert_eq!(bundle.manifest.author.as_deref(), Some("Jesse Vincent"));
     }
 }

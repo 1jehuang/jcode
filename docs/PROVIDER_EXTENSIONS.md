@@ -138,6 +138,43 @@ foundation. `provider extension run` remains the only execution path until each
 additional component has its own permission model, lifecycle tests, and failure
 containment.
 
+## GitHub plugin lifecycle
+
+The interactive TUI exposes the same safe lifecycle through `/plugin`. GitHub
+sources are HTTPS-only and may use a branch, tag, or commit reference:
+
+```text
+/plugin inspect owner/repository@v1.2.3
+/plugin add owner/repository@v1.2.3
+/plugin add owner/repository@v1.2.3 --trusted
+/plugin update example-plugin
+/plugin list
+/plugin doctor
+/plugin trust example-provider
+/plugin remove example-plugin
+```
+
+The standalone CLI has equivalent commands under `jcode plugin`; add `--json`
+to any command when machine-readable output is needed. `update` reuses the
+repository and reference recorded at install time. A floating branch follows
+its current tip, while a tag or commit remains reproducible until the user
+changes the source.
+
+Installation clones into a private staging directory with terminal prompts
+disabled, validates bounded metadata, resolves the commit, and atomically
+selects an immutable version directory. No provider, hook, script, MCP server,
+agent, or skill is executed during inspect, add, or update. A provider with the
+same ID is replaced only when its previous registration belongs to the same
+plugin root. Existing enabled and trust state is preserved during update, and
+`--trusted` is the explicit opt-in that can elevate an untrusted provider.
+
+Remote GitHub bundles always use the external subprocess tier when they contain
+`provider.toml`. Bundles containing only metadata or currently unsupported
+surfaces remain metadata-only. Embedded Rust extensions are not downloaded or
+loaded dynamically. They require a Cargo dependency, compile-time registration,
+and a rebuild of the Jcode binary, which preserves native Rust performance and
+avoids an unstable Rust ABI.
+
 Use `--trusted` on `add` only after reviewing the executable, arguments,
 permissions, and source. Use `--json` for automation. The registry is stored
 under the Jcode configuration directory and is written with a temporary file
@@ -179,9 +216,11 @@ Unknown fields and capabilities must be ignored. Incompatible wire changes
 require a new protocol version and adapter path. A provider should fail with a
 structured error instead of silently changing behavior.
 
-Providers are currently installed and updated by the user. Remote downloads,
-signatures, binary verification, rollback storage, and marketplace discovery
-are intentionally deferred until a distribution design exists.
+Remote GitHub installation is intentionally separate from marketplace discovery.
+Signature verification, binary provenance policies, and marketplace catalogs
+remain future distribution layers. Until those exist, users should inspect the
+source, prefer immutable commit references, review `provider.toml`, and only
+use `--trusted` after reviewing the requested permissions and executable.
 
 ## Security model
 
