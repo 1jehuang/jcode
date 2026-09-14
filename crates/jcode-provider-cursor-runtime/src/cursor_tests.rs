@@ -328,6 +328,39 @@ fn colliding_and_overlong_mcp_names_get_unique_bounded_aliases() {
 }
 
 #[test]
+fn eager_mcp_descriptors_keep_both_name_fields_cursor_safe() {
+    let tools = (0..20)
+        .map(|index| ToolDefinition {
+            name: format!("mcp__Mobile MCP/{index}__click.on-screen"),
+            description: "Click a target".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        })
+        .collect::<Vec<_>>();
+    let encoded = wire::encode_mcp_tools(&tools).expect("encode eager MCP tools");
+    let is_cursor_safe = |name: &str| {
+        !name.is_empty()
+            && name.len() <= wire::MAX_CURSOR_TOOL_NAME_LEN
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    };
+
+    let definitions = wire::iter_fields(&encoded)
+        .map(|wrapper| {
+            wire::iter_fields(wrapper.data)
+                .filter(|field| field.field == 1 || field.field == 5)
+                .map(|field| std::str::from_utf8(field.data).expect("UTF-8 tool name"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(definitions.len(), 20);
+    assert!(definitions.iter().all(|fields| {
+        fields.len() == 2 && fields.iter().all(|name| is_cursor_safe(name))
+    }));
+}
+
+#[test]
 fn test_google_protobuf_value_roundtrip() {
     let test_values = vec![
         serde_json::Value::Null,

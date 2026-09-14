@@ -287,17 +287,28 @@ pub fn mcp_wire_name(tool_name: &str) -> String {
         .unwrap_or(tool_name);
     let mut sanitized = String::with_capacity(bare.len() + JCODE_TOOL_PREFIX.len());
     sanitized.push_str(JCODE_TOOL_PREFIX);
-    for ch in bare.chars() {
+    sanitized.push_str(&sanitize_cursor_name(bare));
+    fit_cursor_name(&sanitized, tool_name)
+}
+
+/// Normalize a name at the final Cursor protocol boundary.
+///
+/// Cursor validates every name-bearing field with `^[a-zA-Z0-9_-]+$`. Keep
+/// this helper independent from MCP alias allocation so every encoder path can
+/// defensively apply the same contract, including secondary name fields.
+fn sanitize_cursor_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    for ch in name.chars() {
         if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
             sanitized.push(ch);
         } else {
             sanitized.push('_');
         }
     }
-    if sanitized.len() == JCODE_TOOL_PREFIX.len() {
+    if sanitized.is_empty() {
         sanitized.push_str("tool");
     }
-    fit_cursor_name(&sanitized, tool_name)
+    sanitized
 }
 
 /// Build a deterministic, reversible mapping from local registry names to
@@ -389,15 +400,19 @@ fn encode_mcp_tool_definition_with_wire_name(
     // calls field 5 `tool_name`. Use the same safe spelling for both fields.
     // The runtime resolves this alias back to the original registry key when a
     // call returns, so sanitizing cannot break local MCP dispatch.
-    let tool_name = mcp_bare_name(&wire_name);
+    let safe_wire_name = fit_cursor_name(&sanitize_cursor_name(wire_name), wire_name);
+    let safe_tool_name = fit_cursor_name(
+        &sanitize_cursor_name(mcp_bare_name(wire_name)),
+        mcp_bare_name(wire_name),
+    );
     let schema_bytes = encode_google_protobuf_value(&def.input_schema, 0)
         .context("Failed to encode tool input_schema to google.protobuf.Value")?;
 
-    let mut out = field_str(1, &wire_name);
+    let mut out = field_str(1, &safe_wire_name);
     out.extend(field_str(2, &def.description));
     out.extend(field_ld(3, &schema_bytes));
     out.extend(field_str(4, JCODE_TOOL_PROVIDER));
-    out.extend(field_str(5, tool_name));
+    out.extend(field_str(5, &safe_tool_name));
     Ok(out)
 }
 
