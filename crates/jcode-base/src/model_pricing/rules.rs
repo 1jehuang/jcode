@@ -383,6 +383,51 @@ mod tests {
         assert_eq!(peak.cost.cache_write, Some(1.2));
     }
 
+    /// Spec 4.0 Success / 5.4 item 2, as written: with the DeepSeek example
+    /// rule, Beijing 10:00 is the peak price and Beijing 20:00 the off-peak
+    /// price, and both amounts match a hand calculation over the reference
+    /// request (25k input / 5k output tokens).
+    #[test]
+    fn deepseek_example_beijing_peak_and_off_peak_match_the_hand_calculation() {
+        with_config(&peak_config(""), || {
+            // 10:00 Beijing == 02:00 UTC, inside the 01:00-04:00 peak window.
+            let money = crate::model_pricing::effective_cost(
+                "deepseek",
+                "deepseek-v4-pro",
+                at(2026, 9, 14, 2, 0, 0),
+            )
+            .expect("the peak instant is a config hit");
+            assert_eq!(money.currency.as_str(), "CNY");
+            let hand = (9.0 * 25_000.0 + 27.0 * 5_000.0) / 1_000_000.0;
+            assert!(
+                (money.amount - hand).abs() <= 1e-9,
+                "peak amount {} must equal the hand calculation {hand}",
+                money.amount
+            );
+
+            // 20:00 Beijing == 12:00 UTC, outside both declared windows.
+            let money = crate::model_pricing::effective_cost(
+                "deepseek",
+                "deepseek-v4-pro",
+                at(2026, 9, 14, 12, 0, 0),
+            )
+            .expect("the off-peak instant is a config hit");
+            assert_eq!(money.currency.as_str(), "CNY");
+            let hand = (4.5 * 25_000.0 + 13.5 * 5_000.0) / 1_000_000.0;
+            assert!(
+                (money.amount - hand).abs() <= 1e-9,
+                "off-peak amount {} must equal the hand calculation {hand}",
+                money.amount
+            );
+
+            // The peak amount is exactly twice the off-peak one for this card,
+            // which is what a 2.0x multiplier over the same base must produce.
+            let peak_hand: f64 = (9.0 * 25_000.0 + 27.0 * 5_000.0) / 1_000_000.0;
+            let off_peak_hand: f64 = (4.5 * 25_000.0 + 13.5 * 5_000.0) / 1_000_000.0;
+            assert!((peak_hand / off_peak_hand - 2.0).abs() < 1e-12);
+        });
+    }
+
     #[test]
     fn weekday_gating_uses_the_local_date() {
         let entry = deepseek_entry();

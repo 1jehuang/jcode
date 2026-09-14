@@ -618,6 +618,62 @@ output = 13.5
         });
     }
 
+    /// F10/F18, the third cache point: the resolver's own memoized `[pricing]`
+    /// view has to follow a config reload. A hand edit plus a reload must change
+    /// the price on the very next read, with no pricing cache cleared by the
+    /// caller, and it must advance `pricing_generation` — the counter the TUI
+    /// price memo and the route catalog fold into their keys.
+    #[test]
+    fn a_config_edit_reprices_without_clearing_the_pricing_memo() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+
+        let card = |input: f64, output: f64| {
+            format!(
+                "[pricing.providers.deepseek]\ncurrency = \"CNY\"\n\n\
+                 [pricing.providers.deepseek.models.\"deepseek-v4-pro\".cost]\n\
+                 input = {input}\noutput = {output}\n"
+            )
+        };
+        let path = temp.path().join("config.toml");
+        let at = SystemTime::now();
+
+        std::fs::write(&path, card(4.5, 13.5)).expect("write config.toml");
+        crate::config::invalidate_config_cache();
+        let before = effective_cost("deepseek", "deepseek-v4-pro", at).expect("first card prices");
+        assert_eq!(before.currency.as_str(), "CNY");
+        assert!((before.amount - reference_cost(4.5, 13.5)).abs() <= 1e-9);
+        let generation_before = pricing_generation();
+
+        // Hand edit + reload. Nothing clears a pricing cache in between: the
+        // resolver has to notice the new config on its own.
+        std::fs::write(&path, card(9.0, 27.0)).expect("rewrite config.toml");
+        crate::config::invalidate_config_cache();
+
+        let after = effective_cost("deepseek", "deepseek-v4-pro", at).expect("second card prices");
+        assert!(
+            (after.amount - reference_cost(9.0, 27.0)).abs() <= 1e-9,
+            "the edited card must be in force, got {}",
+            after.amount
+        );
+        assert!(
+            pricing_generation() > generation_before,
+            "a config reload must advance the pricing generation"
+        );
+
+        clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// A cache written by the previous binary has no `schema_version` and stores
     /// bare cost objects; it must still load.
     #[test]

@@ -352,6 +352,38 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    /// Spec 5.3 (currency/display): in native mode *any* currency is shown as
+    /// it was recorded, with its own code and no conversion — not just USD/CNY.
+    #[test]
+    fn native_mode_leaves_every_currency_alone() {
+        let target = DisplayTarget::native();
+        let rows = target.resolve_buckets(&BTreeMap::from([
+            (Currency::new("eur"), 3.5),
+            (Currency::new("JPY"), 1500.0),
+        ]));
+
+        assert_eq!(rows.len(), 2, "one row per currency: {rows:?}");
+        assert_eq!(rows[0].currency.as_str(), "JPY", "largest first");
+        assert!((rows[0].amount - 1500.0).abs() < 1e-9);
+        assert_eq!(
+            rows[1].currency.as_str(),
+            "EUR",
+            "codes normalize to upper case"
+        );
+        assert!((rows[1].amount - 3.5).abs() < 1e-9);
+        assert!(
+            rows.iter().all(|row| row.note.is_none()),
+            "native mode has no rate to be missing: {rows:?}"
+        );
+
+        assert_eq!(
+            format_amount(1500.0, &Currency::new("JPY"), 2),
+            "JPY 1500.00"
+        );
+        assert_eq!(format_amount(3.5, &Currency::new("EUR"), 2), "EUR 3.50");
+        assert_eq!(summarize(&rows, 2), "JPY 1500.00 +1 more");
+    }
+
     #[test]
     fn empty_session_still_renders_zero_in_a_named_currency() {
         let native = DisplayTarget::native();
