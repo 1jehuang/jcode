@@ -576,7 +576,7 @@ pub fn render_swarm_panel(
     if detail_budget >= 3
         && let Some(tile) = tiles.get(display_index_to_tile_index(&ordered, members, selected))
     {
-        let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget);
+        let detail = crate::swarm_tiles::render_single_tile(tile, width, detail_budget, focused);
         out.extend(detail);
     }
 
@@ -1885,26 +1885,38 @@ fn hovered_detail_body(
     out
 }
 fn panel_header(total: usize, active: usize, focused: bool) -> Line<'static> {
+    let agent_color = if focused {
+        rgb(220, 220, 230) // bright white when focused
+    } else {
+        rgb(160, 160, 170) // dim gray when unfocused
+    };
+    let active_color = if focused {
+        if active > 0 {
+            rgb(255, 200, 100) // accent gold when focused and active
+        } else {
+            rgb(150, 150, 160)
+        }
+    } else {
+        rgb(140, 140, 150) // dim when unfocused
+    };
+
     let mut spans = vec![
         Span::styled("🐝 ", Style::default().fg(rgb(255, 200, 100))),
         Span::styled(
-            format!(
-                "{} agent{}{}",
-                total,
-                if total == 1 { "" } else { "s" },
-                if active > 0 {
-                    format!(" · {active} active")
-                } else {
-                    String::new()
-                }
-            ),
-            Style::default().fg(rgb(160, 160, 170)),
+            format!("{} agent{}", total, if total == 1 { "" } else { "s" }),
+            Style::default().fg(agent_color),
         ),
     ];
+    if active > 0 {
+        spans.push(Span::styled(
+            format!(" · {active} active"),
+            Style::default().fg(active_color),
+        ));
+    }
     if focused {
         spans.push(Span::styled(
             "  (j/k select · o pop out · esc)",
-            Style::default().fg(rgb(110, 110, 120)),
+            Style::default().fg(rgb(100, 100, 110)),
         ));
     }
     Line::from(spans)
@@ -1981,7 +1993,11 @@ fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize)
     let label = truncate_label(&member.label, label_budget);
     let label_w = disp_w(&label);
 
-    let label_style = if selected {
+    let label_style = if selected && focused {
+        Style::default()
+            .fg(accent)
+            .add_modifier(Modifier::BOLD)
+    } else if selected {
         Style::default().fg(rgb(235, 235, 245))
     } else {
         Style::default().fg(rgb(170, 170, 180))

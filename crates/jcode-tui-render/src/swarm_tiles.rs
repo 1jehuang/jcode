@@ -74,6 +74,10 @@ pub struct SwarmGalleryConfig {
     pub gap: usize,
     /// Target width:height ratio for a cell, used to pick the column count.
     pub target_aspect: f32,
+    /// Index of the currently selected/focused tile within the displayed grid,
+    /// if any. The selected tile gets a brighter border and dimmed inactive tiles
+    /// for visual differentiation.
+    pub selected: Option<usize>,
 }
 
 impl Default for SwarmGalleryConfig {
@@ -85,6 +89,7 @@ impl Default for SwarmGalleryConfig {
             preferred_cell_height: 7,
             gap: 2,
             target_aspect: 4.5,
+            selected: None,
         }
     }
 }
@@ -155,16 +160,38 @@ fn choose_grid(
 
 /// Render a single cell box of the given inner dimensions. `inner_w`/`inner_h`
 /// are the content area (excluding borders).
-fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize) -> Vec<Line<'static>> {
-    let border_style = Style::default().fg(Color::Rgb(80, 80, 92));
-    let accent_style = Style::default().fg(tile.accent);
+fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize, selected: bool) -> Vec<Line<'static>> {
+    // --- Color palette based on selection state ---
+    let (border_color, title_color, badge_color, text_color) = if selected {
+        (
+            tile.accent,                                       // bright accent border
+            tile.accent,                                       // full brightness title
+            tile.accent,                                       // accent badge
+            Color::Rgb(170, 172, 180),                         // normal body text
+        )
+    } else {
+        (
+            Color::Rgb(80, 80, 92),                            // dim border (default)
+            Color::Rgb(130, 130, 145),                         // slightly dim title
+            Color::Rgb(100, 100, 115),                         // dim badge
+            Color::Rgb(170, 170, 185),                         // slightly dimmed body text
+        )
+    };
+    let border_style = Style::default().fg(border_color);
+    let accent_style = Style::default().fg(badge_color);
 
     // ---- Title bar (drawn into the top border line) ----
     let glyph = tile.role_glyph.as_deref().unwrap_or("");
+    let title_prefix = if selected { "▸ " } else { "" };
     let title_raw = if glyph.is_empty() {
-        tile.title.clone()
+        format!("{}{}", title_prefix, tile.title)
     } else {
-        format!("{} {}", glyph, tile.title)
+        format!("{}{} {}", title_prefix, glyph, tile.title)
+    };
+    let title_style = if selected {
+        Style::default().fg(title_color).bold()
+    } else {
+        Style::default().fg(title_color)
     };
     let box_width = inner_w + 2;
 
@@ -203,7 +230,7 @@ fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize) -> Vec<Line<'st
 
     let mut top_spans: Vec<Span<'static>> = vec![
         Span::styled("╭─ ".to_string(), border_style),
-        Span::styled(title_text, accent_style.bold()),
+        Span::styled(title_text, title_style),
         Span::styled(" ".to_string(), border_style),
         Span::styled("─".repeat(dashes), border_style),
     ];
@@ -222,7 +249,7 @@ fn render_cell(tile: &SwarmTile, inner_w: usize, inner_h: usize) -> Vec<Line<'st
     // ---- Body: bottom-anchored tail of the stream ----
     let body_lines = wrap_tail(&tile.body, inner_w, inner_h);
     let blank_top = inner_h.saturating_sub(body_lines.len());
-    let text_style = Style::default().fg(Color::Rgb(170, 172, 180));
+    let text_style = Style::default().fg(text_color);
     for _ in 0..blank_top {
         lines.push(content_line("", inner_w, border_style, text_style));
     }
@@ -331,14 +358,16 @@ fn truncate_w(s: &str, max_width: usize) -> String {
 
 /// Render a single tile filling exactly `width` x `height` (including borders).
 /// Used by the list+detail swarm panel to draw the focused agent's viewport.
-/// Returns an empty vec when the area is too small to draw a bordered box.
-pub fn render_single_tile(tile: &SwarmTile, width: usize, height: usize) -> Vec<Line<'static>> {
+/// `focused` controls whether the tile border uses the bright accent color
+/// (focused) or the dim default border (unfocused). Returns an empty vec when
+/// the area is too small to draw a bordered box.
+pub fn render_single_tile(tile: &SwarmTile, width: usize, height: usize, focused: bool) -> Vec<Line<'static>> {
     if width < 4 || height < 3 {
         return Vec::new();
     }
     let inner_w = width - 2;
     let inner_h = height - 2;
-    let mut lines = render_cell(tile, inner_w, inner_h);
+    let mut lines = render_cell(tile, inner_w, inner_h, focused);
     // render_cell already yields `height` lines, but pad/truncate defensively so
     // callers can rely on the exact height.
     while lines.len() < height {
@@ -393,7 +422,12 @@ pub fn render_swarm_gallery(
         // Render each cell in this row.
         let cell_blocks: Vec<Vec<Line<'static>>> = row_tiles
             .iter()
-            .map(|tile| render_cell(tile, cell_inner_w, cell_inner_h))
+            .enumerate()
+            .map(|(ci, tile)| {
+                let tile_idx = row * cols + ci;
+                let is_selected = cfg.selected == Some(tile_idx);
+                render_cell(tile, cell_inner_w, cell_inner_h, is_selected)
+            })
             .collect();
 
         for line_idx in 0..cell_total_h {
@@ -566,7 +600,7 @@ mod tests {
         ]);
         for w in 0..24usize {
             for h in 0..8usize {
-                let lines = render_single_tile(&t, w, h);
+                let lines = render_single_tile(&t, w, h, true);
                 if w < 4 || h < 3 {
                     assert!(lines.is_empty(), "expected empty at {w}x{h}");
                     continue;
