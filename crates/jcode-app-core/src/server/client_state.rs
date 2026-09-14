@@ -222,7 +222,7 @@ pub(super) async fn handle_get_model_catalog(
                     Some(provider.name().to_string()),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
-                    provider.model_routes(),
+                    model_routes,
                     provider.active_resolved_credential(),
                     provider.service_tier(),
                     provider.reasoning_effort(),
