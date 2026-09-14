@@ -1,7 +1,11 @@
 use anyhow::Result;
-use jcode_provider_extensions::{ProviderRecord, ProviderRegistry, load_manifest_file};
+use jcode_provider_extensions::{
+    ExternalProviderProcess, Permission, PermissionPolicy, ProviderRecord, ProviderRegistry,
+    load_manifest_file,
+};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn registry() -> Result<ProviderRegistry> {
     Ok(ProviderRegistry::open(ProviderRegistry::default_path()?)?)
@@ -171,6 +175,76 @@ pub(crate) fn run_provider_extension_doctor_command(id: Option<&str>, json: bool
     }
     if failed {
         anyhow::bail!("one or more external provider checks failed")
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_provider_extension_run_command(
+    id: &str,
+    message: &str,
+    allow_network: bool,
+    allow_filesystem: bool,
+    allow_environment: bool,
+    allow_subprocess: bool,
+    allow_native_tools: bool,
+    json: bool,
+) -> Result<()> {
+    let registry = registry()?;
+    let record = registry
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("external provider '{id}' is not registered"))?;
+    let mut policy = PermissionPolicy::default();
+    for (allowed, permission) in [
+        (allow_network, Permission::Network),
+        (allow_filesystem, Permission::Filesystem),
+        (allow_environment, Permission::Environment),
+        (allow_subprocess, Permission::Subprocess),
+        (allow_native_tools, Permission::NativeTools),
+    ] {
+        if allowed {
+            policy = policy.allow(permission);
+        }
+    }
+    let process = ExternalProviderProcess::start_with_policy(record, "jcode-cli", &policy).await?;
+    let request_id = format!(
+        "cli-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    );
+    let frames = process
+        .request_and_collect(
+            request_id,
+            "complete",
+            serde_json::json!({"prompt": message}),
+        )
+        .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&frames)?);
+        return Ok(());
+    }
+    for frame in &frames {
+        match frame {
+            jcode_provider_extensions::Frame::Event { event, payload, .. } => {
+                println!("[{event}] {payload}");
+            }
+            jcode_provider_extensions::Frame::Response {
+                ok, result, error, ..
+            } if *ok => {
+                if let Some(result) = result {
+                    println!("{result}");
+                }
+            }
+            jcode_provider_extensions::Frame::Response { error, .. } => {
+                let message = error
+                    .as_ref()
+                    .map(|error| error.message.as_str())
+                    .unwrap_or("provider request failed");
+                anyhow::bail!("external provider '{id}' failed: {message}");
+            }
+            _ => {}
+        }
     }
     Ok(())
 }

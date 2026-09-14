@@ -1112,6 +1112,39 @@ pub(crate) enum ProviderExtensionCommand {
         #[arg(long)]
         json: bool,
     },
+
+    /// Invoke a trusted external provider through the versioned protocol
+    Run {
+        /// Stable provider ID
+        id: String,
+
+        /// Prompt to send to the provider
+        message: String,
+
+        /// Grant the provider's declared network permission for this invocation
+        #[arg(long)]
+        allow_network: bool,
+
+        /// Grant the provider's declared filesystem permission for this invocation
+        #[arg(long)]
+        allow_filesystem: bool,
+
+        /// Grant the provider's declared environment permission for this invocation
+        #[arg(long)]
+        allow_environment: bool,
+
+        /// Grant the provider's declared subprocess permission for this invocation
+        #[arg(long)]
+        allow_subprocess: bool,
+
+        /// Grant the provider's declared native-tools permission for this invocation
+        #[arg(long)]
+        allow_native_tools: bool,
+
+        /// Emit the complete protocol exchange as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]

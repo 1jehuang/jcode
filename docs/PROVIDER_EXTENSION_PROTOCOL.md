@@ -56,8 +56,8 @@ cargo run -p jcode-provider-protocol --example fixture_provider
 
 The fixture uses only the public protocol crate and never links to application
 internals. External providers can use it as a conformance reference without
-adopting jcode's implementation details.
 ## Reference adapter
+
 
 `jcode-provider-subprocess::SubprocessProvider` launches a provider, sends the
 handshake, reads bounded frames, collects a request stream, sends cancellation,

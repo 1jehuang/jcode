@@ -4,7 +4,8 @@
 //! executed by `jcode-provider-subprocess`, which keeps executable lifecycle,
 //! deadlines, cancellation, and frame limits outside the persistence layer.
 
-use jcode_provider_protocol::{Frame, PROTOCOL_VERSION};
+pub use jcode_provider_protocol::Frame;
+use jcode_provider_protocol::PROTOCOL_VERSION;
 use jcode_provider_subprocess::{AdapterError, Handshake, SubprocessProvider};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

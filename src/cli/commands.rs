@@ -31,7 +31,7 @@ pub use menubar::{ensure_menubar_helper_running, run_menubar_command};
 pub(crate) use provider_extensions::{
     run_provider_extension_add_command, run_provider_extension_doctor_command,
     run_provider_extension_list_command, run_provider_extension_remove_command,
-    run_provider_extension_set_enabled_command,
+    run_provider_extension_run_command, run_provider_extension_set_enabled_command,
 };
 pub(crate) use provider_setup::{ProviderAddOptions, run_provider_add_command};
 pub use restart::{

@@ -457,6 +457,28 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
                 ProviderExtensionCommand::Doctor { id, json } => {
                     commands::run_provider_extension_doctor_command(id.as_deref(), json)?;
                 }
+                ProviderExtensionCommand::Run {
+                    id,
+                    message,
+                    allow_network,
+                    allow_filesystem,
+                    allow_environment,
+                    allow_subprocess,
+                    allow_native_tools,
+                    json,
+                } => {
+                    commands::run_provider_extension_run_command(
+                        &id,
+                        &message,
+                        allow_network,
+                        allow_filesystem,
+                        allow_environment,
+                        allow_subprocess,
+                        allow_native_tools,
+                        json,
+                    )
+                    .await?;
+                }
             },
         },
         Some(Command::Memory(subcmd)) => {

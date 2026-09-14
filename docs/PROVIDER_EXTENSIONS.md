@@ -50,8 +50,14 @@ jcode provider extension list
 jcode provider extension enable example-provider
 jcode provider extension disable example-provider
 jcode provider extension doctor
+jcode provider extension run example-provider "hello" --json
 jcode provider extension remove example-provider
 ```
+
+`run` is an explicit integration seam for testing or invoking an extension. It
+requires the record to be trusted and enabled. Each declared permission must be
+approved for that invocation with its matching `--allow-*` flag. No permission
+flag grants undeclared permissions.
 
 Use `--trusted` on `add` only after reviewing the executable, arguments,
 permissions, and source. Use `--json` for automation. The registry is stored
@@ -90,9 +96,9 @@ are intentionally deferred until a distribution design exists.
 - Handshake, request, frame-size, and process lifecycle limits are bounded by
   `jcode-provider-subprocess`.
 - Credentials must not be embedded in protocol frames or logs.
-- The extension runtime forwards only a minimal environment (`PATH`, and
-  `SystemRoot` on Windows). Environment permission does not implicitly expose
-  parent-process secrets.
+- The public `provider extension run` command is permission-gated and forwards
+  only a minimal environment (`PATH`, and `SystemRoot` on Windows). Environment
+  permission does not implicitly expose parent-process secrets.
 - Native tools and filesystem access require separate permission decisions.
 - A provider manifest is metadata and is never proof that an executable is
   trustworthy.
