@@ -6,6 +6,10 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Sentinel value for `[display].currency` meaning "show each provider in its
+/// own currency, never convert".
+pub const DISPLAY_CURRENCY_NATIVE: &str = "native";
+
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -119,6 +123,10 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Cost display currency: `"native"` (default) shows each provider in its
+    /// own currency; any ISO 4217 code (e.g. `"CNY"`) converts costs into it
+    /// using the `[pricing]` reference rates.
+    pub currency: String,
 }
 impl Default for DisplayConfig {
     fn default() -> Self {
@@ -157,6 +165,7 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
+            currency: DISPLAY_CURRENCY_NATIVE.to_string(),
         }
     }
 }
@@ -204,6 +213,11 @@ impl DisplayConfig {
 
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
+    }
+
+    /// Whether `[display].currency` asks for no conversion at all.
+    pub fn currency_is_native(&self) -> bool {
+        self.currency.eq_ignore_ascii_case(DISPLAY_CURRENCY_NATIVE)
     }
 }
 
