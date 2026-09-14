@@ -664,36 +664,37 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
         }
     }
 
-    /// Deliverable 2: `config_price` hands downstream the card *as selected at
-    /// the call instant*, so the billing path only has to read `cost`.
+    /// The card the resolver hands downstream: config lookup, field-level merge
+    /// with the next layer, then tariff selection on the merged base.
+    fn resolved(
+        provider: &str,
+        model: &str,
+        at: SystemTime,
+    ) -> Option<(ModelPricingEntry, Currency)> {
+        let (entry, currency) = hit(sources::config_price(provider, model, at))?;
+        let card = sources::resolve_card(entry, currency, provider, model, at);
+        Some((card.entry, card.currency))
+    }
+
+    /// Deliverable 2: the resolved card carries the rates *as selected at the
+    /// call instant*, so the billing path only has to read `cost`.
     #[test]
-    fn config_price_hands_out_the_tier_selected_at_the_call_time() {
+    fn resolved_card_carries_the_tier_selected_at_the_call_time() {
         with_config(&peak_config(""), || {
-            let (peak, currency) = hit(sources::config_price(
-                "deepseek",
-                "deepseek-v4-pro",
-                at(2026, 9, 14, 2, 0, 0),
-            ))
-            .expect("peak instant is a config hit");
+            let (peak, currency) =
+                resolved("deepseek", "deepseek-v4-pro", at(2026, 9, 14, 2, 0, 0))
+                    .expect("peak instant is a config hit");
             assert_eq!(currency.as_str(), "CNY");
             assert_eq!(peak.cost.input, Some(9.0), "peak = 2x the base card");
             assert_eq!(peak.cost.output, Some(27.0));
             assert_eq!(peak.cost.cache_read, Some(0.3));
 
-            let (off_peak, _) = hit(sources::config_price(
-                "deepseek",
-                "deepseek-v4-pro",
-                at(2026, 9, 14, 0, 30, 0),
-            ))
-            .expect("off-peak instant is a config hit");
+            let (off_peak, _) = resolved("deepseek", "deepseek-v4-pro", at(2026, 9, 14, 0, 30, 0))
+                .expect("off-peak instant is a config hit");
             assert_eq!(off_peak.cost.input, Some(4.5));
 
-            let (weekend, _) = hit(sources::config_price(
-                "deepseek",
-                "deepseek-v4-pro",
-                at(2026, 9, 12, 2, 0, 0),
-            ))
-            .expect("weekends are off-peak");
+            let (weekend, _) = resolved("deepseek", "deepseek-v4-pro", at(2026, 9, 12, 2, 0, 0))
+                .expect("weekends are off-peak");
             assert_eq!(weekend.cost.input, Some(4.5));
 
             // The scalar entry point sees the same tier.
@@ -714,12 +715,8 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
     fn expiry_at_the_instant_follows_on_rule_expiry() {
         let fallback = peak_config("effective_until = \"2026-09-14T03:00:00Z\"");
         with_config(&fallback, || {
-            let (before, _) = hit(sources::config_price(
-                "deepseek",
-                "deepseek-v4-pro",
-                at(2026, 9, 14, 2, 59, 59),
-            ))
-            .expect("one second before the bound the card is still in effect");
+            let (before, _) = resolved("deepseek", "deepseek-v4-pro", at(2026, 9, 14, 2, 59, 59))
+                .expect("one second before the bound the card is still in effect");
             assert_eq!(before.cost.input, Some(9.0), "and still on the peak tier");
 
             assert!(
@@ -752,6 +749,51 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
                     ConfigPrice::Hit { .. }
                 ),
                 "the card still prices one second earlier"
+            );
+        });
+    }
+
+    /// Regression: a tariff scales the **effective** base card, i.e. after the
+    /// field-level merge. Scaling before the merge used to scale only the fields
+    /// a partial USD card had written, leaving the merged-in fields at their
+    /// unpremultiplied value (peak `input` doubled, `output` not).
+    #[test]
+    fn usd_partial_card_multiplier_also_scales_merged_fields() {
+        let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 1.0
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".tariffs.peak]
+multiplier = 2.0
+
+[[pricing.providers.deepseek.models."deepseek-v4-pro".schedule]]
+tariff = "peak"
+utc_offset_minutes = 0
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+windows = [["01:00", "04:00"]]
+"#;
+        with_config(config, || {
+            crate::model_pricing::clear_memory_cache_for_tests();
+            crate::model_pricing::save_test_cache(&[(
+                "deepseek",
+                "deepseek-v4-pro",
+                crate::model_pricing::ModelCost {
+                    input_usd_per_mtok: 1.0,
+                    output_usd_per_mtok: 8.0,
+                    cache_read_usd_per_mtok: None,
+                    cache_write_usd_per_mtok: None,
+                },
+            )]);
+
+            let (card, currency) =
+                resolved("deepseek", "deepseek-v4-pro", at(2026, 9, 14, 2, 0, 0))
+                    .expect("peak instant is a config hit");
+            assert!(currency.is_usd(), "an absent `currency` key means USD");
+            assert_eq!(card.cost.input, Some(2.0), "the written field is scaled");
+            assert_eq!(
+                card.cost.output,
+                Some(16.0),
+                "the merged-in field must be scaled by the same tariff"
             );
         });
     }
