@@ -25,6 +25,7 @@
 mod call_rates;
 mod catalog;
 mod entry;
+mod generation;
 mod rules;
 mod sources;
 
@@ -34,6 +35,7 @@ pub use crate::config::CostFields;
 pub use call_rates::{CallRateCard, ConfigCallRates, config_call_rates};
 pub use catalog::ModelCost;
 pub use entry::ModelPricingEntry;
+pub use generation::pricing_generation;
 
 use catalog::PricingCache;
 #[cfg(test)]

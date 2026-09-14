@@ -554,15 +554,24 @@ impl App {
     /// per-token rates on premium models. Re-resolves when the model or tier
     /// changes.
     ///
+    /// The pricing generation is part of the key too. These rates come from
+    /// sources a `[pricing]` edit cannot change directly, but a hand-edited
+    /// section *is* a statement about what prices are in force: once it lands,
+    /// nothing memoized from before it should still be served (F18). Without
+    /// the generation the memo would keep handing back what it resolved before
+    /// the edit until the model or tier happened to change.
+    ///
     /// Only the derived layers are memoized here: hand-written config cards are
     /// resolved separately, at each call's own instant, so this memo can never
     /// hand back a stale tariff.
     fn refresh_cached_pricing(&mut self, model: &str, is_anthropic: bool, is_openai: bool) {
         let service_tier = self.active_service_tier_for_pricing();
-        // Tier is part of the memo key so toggling `/fast on` re-prices.
+        let pricing_generation = crate::model_pricing::pricing_generation();
+        // Tier and pricing generation are both part of the memo key so toggling
+        // `/fast on` re-prices, and so does a hand-edited `[pricing]` section.
         let price_key = match service_tier.as_deref() {
-            Some(tier) => format!("{model}|{tier}"),
-            None => model.to_string(),
+            Some(tier) => format!("{model}|{tier}|{pricing_generation}"),
+            None => format!("{model}|{pricing_generation}"),
         };
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {
             return;
