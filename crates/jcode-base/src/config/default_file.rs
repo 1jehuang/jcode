@@ -127,6 +127,10 @@ timeout_secs = 90
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
+# Cost display currency: "native" (default) shows every provider in its own
+# currency; any ISO 4217 code (e.g. "CNY") converts costs using [pricing].fx_rates
+currency = "native"
+
 # Center all content by default (default: false)
 centered = false
 
@@ -265,6 +269,33 @@ prompt_entry_animation = true
 # success = "#64c864"
 # warning = "#ffc864"
 # error = "#ff6464"
+
+[pricing]
+# Hand-written rate rules. These outrank models.dev and every other source;
+# with this section left empty the cost path behaves exactly as before.
+#
+# Reference rates used only when [display].currency names a concrete currency.
+# v1 has no automatic fetch: whatever you write here is authoritative.
+# fx_base = "USD"
+# [pricing.fx_rates]
+# CNY = 7.20
+# EUR = 0.92
+# JPY = 150.0
+#
+# Example: DeepSeek peak/off-peak (peak hours are 01:00-04:00 and 06:00-10:00 UTC, Mon-Fri).
+# [pricing.providers."deepseek"]
+# currency = "CNY"
+#
+# [pricing.providers."deepseek".models."deepseek-v4-pro"]
+# cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
+# tariffs = { peak = { multiplier = 2.0 } }
+# schedule = [
+#   { tariff = "peak", utc_offset_minutes = 0,
+#     weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"],
+#     windows = [["01:00", "04:00"], ["06:00", "10:00"]] },
+# ]
+# effective_until = "2026-12-31T23:59:59Z"
+# on_rule_expiry = "fallback"
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
