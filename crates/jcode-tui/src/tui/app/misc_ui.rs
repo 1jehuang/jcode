@@ -1,10 +1,11 @@
 use super::*;
+use jcode_provider_core::Currency;
 
 /// Resolved per-million-token pricing for the active model, used to turn a
 /// single API call's token usage into a dollar cost. Shared by the local
 /// (`update_cost_impl`) and remote (`accrue_remote_call_cost`) billing paths so
 /// they cannot drift apart.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ResolvedTokenPricing {
     /// Fresh (uncached) input price in $/1M tokens.
     pub prompt_price: f32,
@@ -17,10 +18,46 @@ pub(crate) struct ResolvedTokenPricing {
     pub is_anthropic: bool,
     /// OpenAI reports both reads and writes as subsets of input_tokens.
     pub is_openai: bool,
+    /// Currency the rates above are denominated in. It is the currency of the
+    /// layer that produced the rates, never the provider's (F1).
+    pub currency: Currency,
+}
+
+/// How one API call is priced.
+#[derive(Clone, Debug)]
+pub(crate) enum PinnedCallPricing {
+    /// Rates in effect for this call, resolved at the call's own instant.
+    Priced(ResolvedTokenPricing),
+    /// A hand-written `[pricing.providers]` rule claims this model but cannot
+    /// price the call: the card is incomplete in a currency that cannot merge
+    /// with the layer below, or its rule expired with `on_rule_expiry =
+    /// "no_price"`. The call is deliberately left unpriced instead of being
+    /// billed at the generic defaults (spec 4.4): a number the user never wrote
+    /// is worse than no number.
+    ConfiguredWithoutPrice,
 }
 
 impl ResolvedTokenPricing {
+    /// The rates a resolved card states, in the card's own currency.
+    fn from_rate_card(
+        card: &crate::model_pricing::CallRateCard,
+        is_anthropic: bool,
+        is_openai: bool,
+    ) -> Self {
+        Self {
+            prompt_price: card.input_per_mtok as f32,
+            completion_price: card.output_per_mtok as f32,
+            cache_read_price: card.cache_read_per_mtok.map(|rate| rate as f32),
+            is_anthropic,
+            is_openai,
+            currency: card.currency.clone(),
+        }
+    }
+
     /// Dollar cost of one API call's reported usage.
+    ///
+    /// Returns the amount together with the currency its rates are in, so the
+    /// caller can accrue and record it without assuming USD (F1).
     ///
     /// Providers report usage with two different conventions:
     ///   - Split accounting (Anthropic): `input_tokens` already EXCLUDES the
@@ -36,7 +73,7 @@ impl ResolvedTokenPricing {
         output_tokens: u64,
         cache_read_tokens: u64,
         cache_creation_tokens: u64,
-    ) -> f32 {
+    ) -> (f32, Currency) {
         let split_accounting = self.is_anthropic
             || (!self.is_openai && (cache_creation_tokens > 0 || cache_read_tokens > input_tokens));
 
@@ -75,7 +112,8 @@ impl ResolvedTokenPricing {
             0.0
         };
 
-        prompt_cost + completion_cost + cache_read_cost + cache_write_cost
+        let amount = prompt_cost + completion_cost + cache_read_cost + cache_write_cost;
+        (amount, self.currency.clone())
     }
 }
 
@@ -223,31 +261,25 @@ impl App {
         }
 
         let model = self.provider.model().to_string();
-        self.refresh_cached_pricing(&model, is_anthropic, is_openai);
-
-        // Pricing in $/1M tokens. Anthropic resolves real per-model pricing in
-        // refresh_cached_pricing; other providers fall back to the generic
-        // defaults cached here.
-        let prompt_price = *self.cost.cached_prompt_price.get_or_insert(15.0);
-        let completion_price = *self.cost.cached_completion_price.get_or_insert(60.0);
-        let cache_read_price = self.cost.cached_cache_read_price;
-
-        let pricing = ResolvedTokenPricing {
-            prompt_price,
-            completion_price,
-            cache_read_price,
-            is_anthropic,
-            is_openai,
+        // The call is priced at the instant it was sent (F15); a second
+        // `update_cost_impl` for the same call reuses the pinned card.
+        let at = self.cost.call_started_at.unwrap_or_else(SystemTime::now);
+        let pricing = self.call_pricing(at, &model, is_anthropic, is_openai);
+        let PinnedCallPricing::Priced(pricing) = pricing else {
+            // The user configured a rule for this model that cannot price the
+            // call. Leave it unpriced: the generic $15/$60 estimate would
+            // report a number they never wrote (spec 4.4).
+            return;
         };
 
-        let call_cost = pricing.cost_for_usage(
+        let (call_cost, currency) = pricing.cost_for_usage(
             self.streaming.streaming_input_tokens,
             self.streaming.streaming_output_tokens,
             self.streaming.streaming_cache_read_tokens.unwrap_or(0),
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(call_cost, &currency);
     }
 
     /// Accrue the dollar cost of a single completed remote API call.
@@ -261,12 +293,18 @@ impl App {
     /// `input`/`output` are this call's totals and `*_delta` are the new tokens
     /// since the previous usage snapshot for the same call, so a streaming call
     /// that reports usage multiple times is billed exactly once overall.
+    ///
+    /// `at` is the instant of this usage snapshot. The first snapshot priced for
+    /// a call decides its rate card and pins it (F15/F16); later deltas of the
+    /// same call reuse that card whatever `at` says, so a call that crosses a
+    /// peak/off-peak boundary is not re-priced mid-flight.
     pub(super) fn accrue_remote_call_cost(
         &mut self,
         input_delta: u64,
         output_delta: u64,
         cache_read_delta: u64,
         cache_creation_delta: u64,
+        at: SystemTime,
     ) {
         if input_delta == 0
             && output_delta == 0
@@ -275,17 +313,23 @@ impl App {
         {
             return;
         }
-        let Some(pricing) = self.resolve_remote_cost_pricing() else {
+        if !self.remote_call_is_metered() {
+            return;
+        }
+        let (model, is_anthropic, is_openai) = self.remote_billing_identity();
+        let PinnedCallPricing::Priced(pricing) =
+            self.call_pricing(at, &model, is_anthropic, is_openai)
+        else {
             return;
         };
-        let call_cost = pricing.cost_for_usage(
+        let (call_cost, currency) = pricing.cost_for_usage(
             input_delta,
             output_delta,
             cache_read_delta,
             cache_creation_delta,
         );
         self.cost.total_cost += call_cost;
-        self.record_api_key_spend(call_cost);
+        self.record_api_key_spend(call_cost, &currency);
     }
 
     /// Seed `cost.total_cost` from token totals restored when resuming a
@@ -302,14 +346,23 @@ impl App {
     pub(super) fn seed_cost_from_history_totals(
         &mut self,
         totals: &crate::protocol::TokenUsageTotals,
+        at: SystemTime,
     ) {
         if totals.input_tokens == 0 && totals.output_tokens == 0 {
             return;
         }
-        let Some(pricing) = self.resolve_remote_cost_pricing() else {
+        if !self.remote_call_is_metered() {
+            return;
+        }
+        // Restored totals have no per-call instant of their own; the snapshot's
+        // instant is the best available and is passed in so tests can fix it.
+        let (model, is_anthropic, is_openai) = self.remote_billing_identity();
+        let PinnedCallPricing::Priced(pricing) =
+            self.resolve_call_pricing(at, &model, is_anthropic, is_openai)
+        else {
             return;
         };
-        let cost = pricing.cost_for_usage(
+        let (cost, _currency) = pricing.cost_for_usage(
             totals.input_tokens,
             totals.output_tokens,
             totals.cache_read_input_tokens,
@@ -324,8 +377,19 @@ impl App {
     /// `/usage` can show per-login spend (today / month / all-time). Only ever
     /// called from the billed-per-token paths, so every dollar recorded here
     /// is real API-key spend rather than subscription usage.
-    fn record_api_key_spend(&self, call_cost: f32) {
+    fn record_api_key_spend(&self, call_cost: f32, currency: &Currency) {
         if !call_cost.is_finite() || call_cost <= 0.0 {
+            return;
+        }
+        if !currency.is_usd() {
+            // The activity ledger still keeps a single USD bucket per window
+            // (multi-currency buckets land with the ledger work). Writing an
+            // amount in another currency into that bucket would misstate both
+            // and could not be untangled afterwards, so the spend is left out
+            // of the ledger until it can be recorded as its own currency.
+            crate::logging::debug(&format!(
+                "not recording {call_cost} {currency}: the activity ledger is USD-only"
+            ));
             return;
         }
         use crate::tui::TuiState;
@@ -340,17 +404,15 @@ impl App {
         });
     }
 
-    /// Resolve per-token pricing for the active *remote* session, or `None` when
-    /// the session is not billed per token (e.g. an OAuth subscription, or a
-    /// provider we cannot price). Mirrors the cost-based decision the info widget
-    /// uses so the displayed `$` total and the widget stay consistent.
-    fn resolve_remote_cost_pricing(&mut self) -> Option<ResolvedTokenPricing> {
+    /// Whether the active *remote* session bills per token. Mirrors the
+    /// cost-based decision the info widget uses so the displayed total and the
+    /// widget stay consistent. OAuth subscriptions are not metered.
+    fn remote_call_is_metered(&self) -> bool {
         use crate::tui::TuiState;
         if !self.is_remote {
-            return None;
+            return false;
         }
 
-        let model = <Self as TuiState>::provider_model(self);
         let provider_name = <Self as TuiState>::provider_name(self).to_lowercase();
         let is_anthropic = provider_name.contains("anthropic") || provider_name.contains("claude");
         let is_openai = provider_name.contains("openai");
@@ -365,24 +427,123 @@ impl App {
         // For dual-auth providers (Anthropic/OpenAI) we require an API-key
         // credential. Other cost-based providers (OpenCode, OpenRouter direct,
         // bedrock-style API-key profiles) always meter per token when remote.
-        let billed = if is_anthropic || is_openai {
+        if is_anthropic || is_openai {
             api_key_billed
         } else {
             // Providers that are inherently cost-based when proxied remotely.
             remote_provider_is_inherently_billed(&provider_name)
-        };
-        if !billed {
-            return None;
+        }
+    }
+
+    /// The model and dual-auth flags the remote billing paths price with.
+    fn remote_billing_identity(&self) -> (String, bool, bool) {
+        use crate::tui::TuiState;
+        let model = <Self as TuiState>::provider_model(self);
+        let provider_name = <Self as TuiState>::provider_name(self).to_lowercase();
+        let is_anthropic = provider_name.contains("anthropic") || provider_name.contains("claude");
+        let is_openai = provider_name.contains("openai");
+        (model, is_anthropic, is_openai)
+    }
+
+    /// Mark the start of a new API call: remember its instant (F15) and drop the
+    /// card pinned to the previous call (F16).
+    pub(super) fn begin_call_pricing(&mut self, at: SystemTime) {
+        self.cost.call_started_at = Some(at);
+        self.cost.pinned_call_pricing = None;
+    }
+
+    /// Everything that has to happen when a new API call starts.
+    ///
+    /// Per-call usage accounting (`mark_stream_usage_call_boundary`) and
+    /// per-call pricing are the same boundary: the call's own instant decides
+    /// its tariff (F15), and the card pinned to the previous call must not leak
+    /// into this one (F16).
+    pub(super) fn begin_api_call_accounting(&mut self) {
+        self.mark_stream_usage_call_boundary();
+        self.begin_call_pricing(SystemTime::now());
+    }
+
+    /// The rate card for the call currently being priced, resolved once at `at`
+    /// and reused for every later snapshot of the same call (F16).
+    fn call_pricing(
+        &mut self,
+        at: SystemTime,
+        model: &str,
+        is_anthropic: bool,
+        is_openai: bool,
+    ) -> PinnedCallPricing {
+        if let Some(pinned) = self.cost.pinned_call_pricing.clone() {
+            return pinned;
+        }
+        let pinned = self.resolve_call_pricing(at, model, is_anthropic, is_openai);
+        self.cost.pinned_call_pricing = Some(pinned.clone());
+        pinned
+    }
+
+    /// Resolve the rate card for `model` as of `at`.
+    ///
+    /// Hand-written `[pricing.providers]` rules are authoritative *and* time
+    /// dependent (peak/off-peak), so they are resolved here, per call, and never
+    /// taken from the cross-call memo. Only when no rule claims the model do the
+    /// time-independent derived layers answer, and those still go through the
+    /// memo below.
+    fn resolve_call_pricing(
+        &mut self,
+        at: SystemTime,
+        model: &str,
+        is_anthropic: bool,
+        is_openai: bool,
+    ) -> PinnedCallPricing {
+        let source_key = self.billing_source_key(is_anthropic, is_openai);
+        match crate::model_pricing::config_call_rates(&source_key, model, at) {
+            crate::model_pricing::ConfigCallRates::Priced(card) => {
+                return PinnedCallPricing::Priced(ResolvedTokenPricing::from_rate_card(
+                    &card,
+                    is_anthropic,
+                    is_openai,
+                ));
+            }
+            crate::model_pricing::ConfigCallRates::ConfiguredWithoutPrice => {
+                crate::logging::warn(&format!(
+                    "pricing rule for {source_key}/{model} cannot price this call; \
+                     leaving it unpriced instead of billing the generic defaults"
+                ));
+                return PinnedCallPricing::ConfiguredWithoutPrice;
+            }
+            crate::model_pricing::ConfigCallRates::Absent => {}
         }
 
-        self.refresh_cached_pricing(&model, is_anthropic, is_openai);
-        Some(ResolvedTokenPricing {
+        // No configured rule for this model: price from the derived layers.
+        // Nothing here falls back to the generic defaults unless the model is
+        // unknown to every source, which is the pre-feature behaviour.
+        self.refresh_cached_pricing(model, is_anthropic, is_openai);
+        PinnedCallPricing::Priced(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
             cache_read_price: self.cost.cached_cache_read_price,
             is_anthropic,
             is_openai,
+            currency: self
+                .cost
+                .cached_price_currency
+                .clone()
+                .unwrap_or_else(Currency::usd),
         })
+    }
+
+    /// The cross-provider activity key the billing path prices through. Also the
+    /// identity hand-written `[pricing.providers]` keys are matched against.
+    fn billing_source_key(&self, is_anthropic: bool, is_openai: bool) -> String {
+        if is_anthropic {
+            "claude:api-key".to_string()
+        } else if is_openai {
+            "openai:api-key".to_string()
+        } else {
+            use crate::tui::TuiState;
+            let label = <Self as TuiState>::provider_name(self);
+            let runtime = active_runtime_provider_key();
+            crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
+        }
     }
 
     /// Resolve and cache per-model pricing for the active provider. Uses the
@@ -392,6 +553,10 @@ impl App {
     /// service tier (`/fast on` priority, OpenAI flex), which changes
     /// per-token rates on premium models. Re-resolves when the model or tier
     /// changes.
+    ///
+    /// Only the derived layers are memoized here: hand-written config cards are
+    /// resolved separately, at each call's own instant, so this memo can never
+    /// hand back a stale tariff.
     fn refresh_cached_pricing(&mut self, model: &str, is_anthropic: bool, is_openai: bool) {
         let service_tier = self.active_service_tier_for_pricing();
         // Tier is part of the memo key so toggling `/fast on` re-prices.
@@ -404,17 +569,8 @@ impl App {
         }
 
         let per_mtok = |micros: Option<u64>| micros.map(|m| m as f32 / 1_000_000.0);
-        let source_key = if is_anthropic {
-            "claude:api-key".to_string()
-        } else if is_openai {
-            "openai:api-key".to_string()
-        } else {
-            use crate::tui::TuiState;
-            let label = <Self as TuiState>::provider_name(self);
-            let runtime = active_runtime_provider_key();
-            crate::provider_activity::source_key_for_provider_label(&label, runtime.as_deref())
-        };
-        let estimate = crate::provider::pricing::metered_pricing_for_source_with_tier(
+        let source_key = self.billing_source_key(is_anthropic, is_openai);
+        let estimate = crate::provider::pricing::derived_pricing_for_source(
             &source_key,
             model,
             service_tier.as_deref(),
@@ -424,6 +580,7 @@ impl App {
             self.cost.cached_prompt_price = per_mtok(estimate.input_price_per_mtok_micros);
             self.cost.cached_completion_price = per_mtok(estimate.output_price_per_mtok_micros);
             self.cost.cached_cache_read_price = per_mtok(estimate.cache_read_price_per_mtok_micros);
+            self.cost.cached_price_currency = Some(estimate.currency);
             self.cost.cached_price_model = Some(price_key);
             return;
         }
@@ -437,6 +594,7 @@ impl App {
             self.cost.cached_prompt_price = None;
             self.cost.cached_completion_price = None;
             self.cost.cached_cache_read_price = None;
+            self.cost.cached_price_currency = None;
             self.cost.cached_price_model = None;
         }
     }
@@ -566,11 +724,28 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::remote_provider_is_inherently_billed;
+    use super::{Currency, ResolvedTokenPricing, remote_provider_is_inherently_billed};
 
     #[test]
     fn remote_billing_recognizes_deepseek_display_name() {
         assert!(remote_provider_is_inherently_billed("DeepSeek"));
+    }
+
+    #[test]
+    fn cost_for_usage_carries_the_currency_of_its_rates() {
+        // F1: the amount and its currency travel together, so a caller never has
+        // to assume the provider's currency.
+        let pricing = ResolvedTokenPricing {
+            prompt_price: 1.0,
+            completion_price: 2.0,
+            cache_read_price: None,
+            is_anthropic: false,
+            is_openai: false,
+            currency: Currency::new("CNY"),
+        };
+        let (cost, currency) = pricing.cost_for_usage(1_000_000, 1_000_000, 0, 0);
+        assert_eq!(currency.as_str(), "CNY");
+        assert!((cost - 3.0).abs() < 1e-6, "1M in at ¥1 + 1M out at ¥2");
     }
 
     #[test]
@@ -586,7 +761,7 @@ mod tests {
 
 #[cfg(test)]
 mod cache_cost_tests {
-    use super::ResolvedTokenPricing;
+    use super::{Currency, ResolvedTokenPricing};
 
     #[test]
     fn openai_cache_writes_replace_uncached_input_cost() {
@@ -596,11 +771,12 @@ mod cache_cost_tests {
             cache_read_price: Some(1.0),
             is_anthropic: false,
             is_openai: true,
+            currency: Currency::usd(),
         };
         // 10K total = 2K ordinary + 6K cache reads + 2K cache writes.
-        let cost = pricing.cost_for_usage(10_000, 100, 6_000, 2_000);
+        let (cost, _) = pricing.cost_for_usage(10_000, 100, 6_000, 2_000);
         let expected = (2_000.0 * 10.0 + 6_000.0 + 2_000.0 * 12.5 + 100.0 * 40.0) / 1_000_000.0;
         assert!((cost - expected).abs() < 0.000001, "{cost} != {expected}");
-        assert!((pricing.cost_for_usage(10_000, 0, 6_000, 0) - 0.046).abs() < 0.000001);
+        assert!((pricing.cost_for_usage(10_000, 0, 6_000, 0).0 - 0.046).abs() < 0.000001);
     }
 }
