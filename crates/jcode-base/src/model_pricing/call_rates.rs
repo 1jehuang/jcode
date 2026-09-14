@@ -14,7 +14,7 @@
 //! rule cannot price it, so show nothing".
 
 use crate::config::CostFields;
-use crate::model_pricing::entry::ModelPricingEntry;
+use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::sources::{self, ConfigPrice};
 use jcode_provider_core::Currency;
 use std::time::SystemTime;
@@ -65,6 +65,13 @@ pub enum ConfigCallRates {
     /// rule expired with `on_rule_expiry = "no_price"`. Callers must show
     /// "unknown" rather than substitute an estimate (spec 4.4).
     ConfiguredWithoutPrice,
+    /// A rule claims this pair but is out of effect with `on_rule_expiry =
+    /// "fallback"` (spec F20): the *next* layer prices the call, and callers
+    /// must label that price with [`RuleOutOfEffect::label`] so the user learns
+    /// their own rule stopped applying (spec F8). This is deliberately not
+    /// [`Self::ConfiguredWithoutPrice`]: here the call *is* priced, just not by
+    /// the config layer.
+    OutOfEffect(RuleOutOfEffect),
     /// No card claims this pair. Callers keep their pre-feature fallback.
     Absent,
 }
@@ -77,6 +84,7 @@ pub enum ConfigCallRates {
 pub fn config_call_rates(provider: &str, model: &str, at: SystemTime) -> ConfigCallRates {
     match sources::config_price(provider, model, at) {
         ConfigPrice::NoPrice => ConfigCallRates::ConfiguredWithoutPrice,
+        ConfigPrice::OutOfEffect(reason) => ConfigCallRates::OutOfEffect(reason),
         ConfigPrice::Absent => ConfigCallRates::Absent,
         ConfigPrice::Hit { entry, currency } => {
             let resolved = sources::resolve_card(*entry, currency, provider, model, at);

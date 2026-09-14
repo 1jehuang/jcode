@@ -490,8 +490,12 @@ impl App {
         is_openai: bool,
     ) -> PinnedCallPricing {
         let source_key = self.billing_source_key(is_anthropic, is_openai);
+        // The expiry marker describes *this* pricing decision, so every arm
+        // sets it: a call priced by the user's rule (or by a card that is
+        // simply absent) clears whatever the previous call recorded (F8/F20).
         match crate::model_pricing::config_call_rates(&source_key, model, at) {
             crate::model_pricing::ConfigCallRates::Priced(card) => {
+                self.cost.rule_out_of_effect = None;
                 return PinnedCallPricing::Priced(ResolvedTokenPricing::from_rate_card(
                     &card,
                     is_anthropic,
@@ -503,14 +507,26 @@ impl App {
                     "pricing rule for {source_key}/{model} cannot price this call; \
                      leaving it unpriced instead of billing the generic defaults"
                 ));
+                // Nothing is billed, so there is no fallback price that an
+                // "expired rule" marker could be explaining.
+                self.cost.rule_out_of_effect = None;
                 return PinnedCallPricing::ConfiguredWithoutPrice;
             }
-            crate::model_pricing::ConfigCallRates::Absent => {}
+            crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
+                // The next layer prices the call, and the display has to say
+                // that the user's own rule stopped applying (F8/F20).
+                self.cost.rule_out_of_effect = Some(reason);
+            }
+            crate::model_pricing::ConfigCallRates::Absent => {
+                self.cost.rule_out_of_effect = None;
+            }
         }
 
-        // No configured rule for this model: price from the derived layers.
-        // Nothing here falls back to the generic defaults unless the model is
-        // unknown to every source, which is the pre-feature behaviour.
+        // No configured rule in effect for this model (`Absent`, or a rule that
+        // is out of effect with `on_rule_expiry = "fallback"`): price from the
+        // derived layers. Nothing here falls back to the generic defaults
+        // unless the model is unknown to every source, which is the pre-feature
+        // behaviour.
         self.refresh_cached_pricing(model, is_anthropic, is_openai);
         PinnedCallPricing::Priced(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),

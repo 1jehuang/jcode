@@ -44,6 +44,32 @@ pub struct ModelPricingEntry {
     pub on_rule_expiry: OnRuleExpiry,
 }
 
+/// Why a rule's validity window does not cover an instant (spec F8/F20).
+///
+/// The two directions are different user situations — a promotion that ran out
+/// versus a rule that has not opened yet — so the resolver reports which one
+/// applies and the display can name it instead of a generic "not applicable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleOutOfEffect {
+    /// `effective_until` has passed.
+    Expired,
+    /// `effective_from` has not been reached yet.
+    NotYetEffective,
+}
+
+impl RuleOutOfEffect {
+    /// The short marker shown next to a price that a *lower* layer produced
+    /// because this rule was out of effect, in the same style as the
+    /// `(no EUR rate)` note. Kept here so the wording lives next to the reason
+    /// it describes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Expired => "rule expired",
+            Self::NotYetEffective => "rule not in effect yet",
+        }
+    }
+}
+
 impl ModelPricingEntry {
     /// A bare models.dev entry: rates only, every extension field empty.
     pub fn from_model_cost(cost: ModelCost) -> Self {
@@ -86,24 +112,29 @@ impl ModelPricingEntry {
         })
     }
 
-    /// Whether the card is in effect at `at`.
+    /// Why this card is not in effect at `at`, or `None` when it is.
     ///
     /// Only the validity bounds are checked here: tariff/schedule selection
     /// (which tariff applies *within* the valid window) is
     /// `model_pricing::rules`' job.
-    pub fn is_active_at(&self, at: SystemTime) -> bool {
+    pub fn out_of_effect_reason(&self, at: SystemTime) -> Option<RuleOutOfEffect> {
         let at: DateTime<Utc> = at.into();
         if let Some(from) = self.effective_from
             && at < from
         {
-            return false;
+            return Some(RuleOutOfEffect::NotYetEffective);
         }
         if let Some(until) = self.effective_until
             && at >= until
         {
-            return false;
+            return Some(RuleOutOfEffect::Expired);
         }
-        true
+        None
+    }
+
+    /// Whether this card's validity window covers `at`.
+    pub fn is_active_at(&self, at: SystemTime) -> bool {
+        self.out_of_effect_reason(at).is_none()
     }
 }
 
@@ -241,5 +272,22 @@ mod tests {
         assert!(!entry.is_active_at(before), "not in effect before `from`");
         assert!(entry.is_active_at(at_start), "`from` is inclusive");
         assert!(!entry.is_active_at(at_end), "`until` is exclusive");
+
+        // F8/F20: the display has to name *which* way the rule is out of
+        // effect, so the reason is not collapsed into "not active".
+        assert_eq!(
+            entry.out_of_effect_reason(before),
+            Some(RuleOutOfEffect::NotYetEffective)
+        );
+        assert_eq!(entry.out_of_effect_reason(at_start), None);
+        assert_eq!(
+            entry.out_of_effect_reason(at_end),
+            Some(RuleOutOfEffect::Expired)
+        );
+        assert_eq!(
+            RuleOutOfEffect::Expired.label(),
+            "rule expired",
+            "the marker the widget shows"
+        );
     }
 }

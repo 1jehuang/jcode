@@ -161,6 +161,26 @@ impl DisplayTarget {
     }
 }
 
+/// Attach a display note to the primary (largest) row of a resolved total,
+/// keeping any note the currency resolution already put there.
+///
+/// This is how the F8/F20 marker rides along with the figure it explains: the
+/// note belongs on the amount the user reads, not in a log line — the pricing
+/// resolver runs per call and the note is rendered every frame, so the two must
+/// not be the same event.
+pub fn note_primary(rows: &mut [DisplayAmount], note: &str) {
+    let Some(primary) = rows.first_mut() else {
+        return;
+    };
+    match primary.note.as_mut() {
+        Some(existing) => {
+            existing.push_str(", ");
+            existing.push_str(note);
+        }
+        None => primary.note = Some(note.to_string()),
+    }
+}
+
 /// Format one amount with the currency it is actually in.
 ///
 /// USD keeps the familiar `$` (and the pre-existing rendering); every other
@@ -306,6 +326,30 @@ mod tests {
 
         assert_eq!(summarize(&rows, 4), "CNY 8.0000 +2 more");
         assert_eq!(summarize(&[], 4), "");
+    }
+
+    #[test]
+    fn note_primary_appends_without_losing_the_rate_note() {
+        // The expired-rule marker (F8/F20) rides on the amount as a note. A row
+        // that already explains a missing FX rate keeps that explanation: both
+        // facts are true and the user needs both.
+        let mut rows =
+            DisplayTarget::native().resolve_totals(&BTreeMap::from([(Currency::usd(), 0.42)]));
+        note_primary(&mut rows, "rule expired");
+        assert_eq!(summarize(&rows, 2), "$0.42 (rule expired)");
+
+        let target = DisplayTarget::new(
+            Some(Currency::new("EUR")),
+            FxTable::new(Currency::usd(), BTreeMap::new()),
+        );
+        let mut rows = target.resolve_totals(&BTreeMap::from([(Currency::usd(), 8.0)]));
+        note_primary(&mut rows, "rule expired");
+        assert_eq!(summarize(&rows, 2), "$8.00 (no EUR rate, rule expired)");
+
+        // No rows to label is a no-op, not a panic.
+        let mut empty: Vec<DisplayAmount> = Vec::new();
+        note_primary(&mut empty, "rule expired");
+        assert!(empty.is_empty());
     }
 
     #[test]
