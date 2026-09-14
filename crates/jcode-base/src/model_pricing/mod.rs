@@ -147,7 +147,7 @@ fn effective_entry(
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::NoPrice => None,
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model);
+            let resolved = sources::resolve_card(*entry, currency, provider, model, at);
             Some((resolved.entry, resolved.currency))
         }
         sources::ConfigPrice::Absent => models_dev_entry(provider, model),
@@ -171,7 +171,7 @@ pub(crate) fn configured_entry(
 ) -> Option<(ModelPricingEntry, Currency)> {
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model);
+            let resolved = sources::resolve_card(*entry, currency, provider, model, at);
             // A card that could not price the model is not this layer's win;
             // let the chain reach models.dev and label it as such.
             resolved

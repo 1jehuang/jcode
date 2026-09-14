@@ -93,10 +93,12 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
     };
 
     let entry = ModelPricingEntry::from_rule(rule);
-    // Peak/off-peak selection happens here, on the card this layer hands
-    // downstream: the `cost` it carries is already the tariff in effect at
-    // `at`, so the billing path (spec 4.3, F16) only reads `cost` + `currency`.
-    let Some(selected) = rules::resolve_tier(&entry, at) else {
+    // Only the validity window is decided here. Peak/off-peak selection runs in
+    // `resolve_card`, *after* the field-level merge: a tariff scales the
+    // effective base card, so scaling before models.dev fills in the fields a
+    // partial card leaves out would scale the written fields and leave the
+    // merged ones behind.
+    if !entry.is_active_at(at) {
         return match entry.on_rule_expiry {
             crate::config::OnRuleExpiry::Fallback => {
                 crate::logging::warn(&format!(
@@ -107,16 +109,10 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
             }
             crate::config::OnRuleExpiry::NoPrice => ConfigPrice::NoPrice,
         };
-    };
-    crate::logging::debug(&format!(
-        "pricing: {source_key}/{model} uses tariff `{}`",
-        selected.tariff.as_deref().unwrap_or("base")
-    ));
+    }
 
-    let mut priced = entry;
-    priced.cost = selected.cost;
     ConfigPrice::Hit {
-        entry: Box::new(priced),
+        entry: Box::new(entry),
         currency: provider.currency.clone().unwrap_or_else(Currency::usd),
     }
 }
@@ -130,48 +126,46 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
 ///   the model on its own, the next layer wins outright.
 pub(super) fn resolve_card(
     mut entry: ModelPricingEntry,
-    currency: Currency,
+    mut currency: Currency,
     provider: &str,
     model: &str,
+    at: SystemTime,
 ) -> ResolvedCard {
     let fallback = crate::model_pricing::lookup(provider, model);
+    let mut from_config = true;
 
     if currency.is_usd() {
+        // Same currency as the next layer, so missing fields merge per field.
         if let Some(fallback) = fallback {
             merge_same_currency(&mut entry, &fallback);
         }
-        return ResolvedCard {
-            entry,
-            currency,
-            from_config: true,
-        };
+    } else if entry.cost.input.is_some() && entry.cost.output.is_some() {
+        // A complete foreign-currency card stands on its own.
+    } else if let Some(fallback) = fallback {
+        crate::logging::warn(&format!(
+            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
+             using models.dev values (USD) instead of relabelling them"
+        ));
+        entry = ModelPricingEntry::from_model_cost(fallback);
+        currency = Currency::usd();
+        from_config = false;
     }
 
-    if entry.cost.input.is_some() && entry.cost.output.is_some() {
-        return ResolvedCard {
-            entry,
-            currency,
-            from_config: true,
-        };
+    // Peak/off-peak selection runs on the *effective* card, i.e. after any
+    // field-level merge above: a tariff scales the whole base, and running it
+    // first would scale only the fields the card happened to write.
+    if let Some(selected) = rules::resolve_tier(&entry, at) {
+        crate::logging::debug(&format!(
+            "pricing: {provider}/{model} uses tariff `{}`",
+            selected.tariff.as_deref().unwrap_or("base")
+        ));
+        entry.cost = selected.cost;
     }
 
-    match fallback {
-        Some(fallback) => {
-            crate::logging::warn(&format!(
-                "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
-                 using models.dev values (USD) instead of relabelling them"
-            ));
-            ResolvedCard {
-                entry: ModelPricingEntry::from_model_cost(fallback),
-                currency: Currency::usd(),
-                from_config: false,
-            }
-        }
-        None => ResolvedCard {
-            entry,
-            currency,
-            from_config: true,
-        },
+    ResolvedCard {
+        entry,
+        currency,
+        from_config,
     }
 }
 
