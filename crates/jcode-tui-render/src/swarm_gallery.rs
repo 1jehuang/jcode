@@ -37,6 +37,20 @@ pub fn role_glyph(role: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// Role-based accent color for tile borders and title text.
+///
+/// Provides visual differentiation between agent roles in the gallery grid.
+/// Falls back to `None` for unknown roles so callers can use `status_accent()`.
+pub fn role_color(role: Option<&str>) -> Option<Color> {
+    match role {
+        Some("coordinator") => Some(rgb(255, 200, 100)), // gold/amber
+        Some("worker") | Some("implementer") => Some(rgb(100, 160, 255)), // blue
+        Some("reviewer") => Some(rgb(130, 210, 130)), // green
+        Some("researcher") => Some(rgb(180, 140, 255)), // purple
+        _ => None,
+    }
+}
+
 /// Compact age formatting for member viewports (now/Ns/Nm/Nh).
 pub fn humanize_age(age: u64) -> String {
     if age < 2 {
@@ -320,15 +334,23 @@ pub struct GalleryToolIntent {
 
 /// Convert members into gallery tiles, sorted for stable placement
 /// (coordinator first, worktree manager next, then by `sort_key`).
+///
+/// When a member has a recognized role, the tile accent (border color)
+/// uses the role-based color instead of the status-based accent.
 pub fn members_to_tiles(members: &[GalleryMember]) -> Vec<SwarmTile> {
     sort_members_for_display(members)
         .into_iter()
         .map(|m| {
+            let accent = role_color(m.role.as_deref())
+                .unwrap_or_else(|| status_accent(&m.status));
             let mut tile =
-                SwarmTile::new(m.label.clone(), m.status.clone(), status_accent(&m.status))
+                SwarmTile::new(m.label.clone(), m.status.clone(), accent)
                     .with_body(m.body.clone());
             if let Some(glyph) = role_glyph(m.role.as_deref()) {
                 tile = tile.with_role_glyph(glyph);
+            }
+            if let Some(rc) = role_color(m.role.as_deref()) {
+                tile = tile.with_role_color(rc);
             }
             tile
         })
@@ -344,6 +366,7 @@ pub fn render_gallery(
     members: &[GalleryMember],
     width: usize,
     max_height: usize,
+    selected: Option<usize>,
 ) -> Vec<Line<'static>> {
     if members.is_empty() {
         return Vec::new();
@@ -356,6 +379,7 @@ pub fn render_gallery(
     let header = gallery_header(members.len(), active);
     let cfg = SwarmGalleryConfig {
         max_height: max_height.saturating_sub(1).max(4),
+        selected,
         ..Default::default()
     };
     let mut out = render_swarm_gallery(&tiles, width, &cfg, Some(header));
@@ -382,7 +406,8 @@ pub fn render_swarm_chat_cards(members: &[GalleryMember], width: usize) -> Vec<L
 
     let mut out = Vec::new();
     for member in sort_members_for_display(members) {
-        let accent = status_accent(&member.status);
+        let accent = role_color(member.role.as_deref())
+            .unwrap_or_else(|| status_accent(&member.status));
         let lead = format!(
             "    {} {} ",
             member.icon.as_deref().unwrap_or("🐝"),
@@ -444,7 +469,8 @@ pub fn render_swarm_live_card(
         return Vec::new();
     }
 
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
     let mut metadata = Vec::new();
     if let Some(elapsed) = member.elapsed_secs {
         metadata.push(format_elapsed(elapsed));
@@ -684,7 +710,7 @@ pub fn render_swarm_strip(
                 .filter(|t| !t.trim().is_empty())
                 .map(|t| truncate_label(t, CHIP_TASK_MAX_W)),
             todo: m.todo.map(|(done, total)| format!("{done}/{total}")),
-            color: status_accent(&m.status),
+            color: role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)),
             active: is_active_status(&m.status),
             is_sel: idx == selected,
         })
@@ -905,7 +931,7 @@ pub fn render_swarm_strip(
                 let prefix_w = prefix.chars().count();
                 let body = truncate_label(&detail, width.saturating_sub(prefix_w));
                 out.push(Line::from(vec![
-                    Span::styled(prefix, Style::default().fg(status_accent(&m.status))),
+                    Span::styled(prefix, Style::default().fg(role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status)))),
                     Span::styled(body, Style::default().fg(rgb(180, 180, 190))),
                 ]));
             }
@@ -1028,7 +1054,7 @@ pub fn render_swarm_strip_vertical(
     for (row, m) in ordered.iter().enumerate().skip(start).take(shown) {
         let first = out.is_empty();
         let is_sel = row == selected;
-        let color = status_accent(&m.status);
+        let color = role_color(m.role.as_deref()).unwrap_or_else(|| status_accent(&m.status));
         let glyph = status_glyph(&m.status, spinner_frame);
         let todo = m.todo.map(|(done, total)| format!("{done}/{total}"));
 
@@ -1567,7 +1593,8 @@ fn dock_row(
     spinner_frame: usize,
     width: usize,
 ) -> Line<'static> {
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
     let active = is_active_status(&member.status);
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
@@ -1701,7 +1728,8 @@ fn render_hovered_detail(
     width: usize,
     budget: usize,
 ) -> Vec<Line<'static>> {
-    let accent = status_accent(&m.status);
+    let accent = role_color(m.role.as_deref())
+        .unwrap_or_else(|| status_accent(&m.status));
     let dim = rgb(120, 120, 130);
     const GUTTER: &str = "   ";
 
@@ -2007,7 +2035,8 @@ fn display_index_to_tile_index(
 /// One row in the agent list: a selection marker, optional role glyph, the
 /// label, a status badge, and an age hint, all bounded to `width`.
 fn list_row(member: &GalleryMember, selected: bool, focused: bool, width: usize) -> Line<'static> {
-    let accent = status_accent(&member.status);
+    let accent = role_color(member.role.as_deref())
+        .unwrap_or_else(|| status_accent(&member.status));
     let marker = if selected { "▸ " } else { "  " };
     let glyph = role_glyph(member.role.as_deref())
         .map(|g| format!("{g} "))
@@ -2080,3 +2109,4 @@ pub(super) use labels::{count_digits, disp_w, truncate_label};
 #[cfg(test)]
 #[path = "swarm_gallery_tests.rs"]
 mod tests;
+>>>>>>> 9861b1e23 (feat(tui): per-role border colors for swarm gallery tiles)
