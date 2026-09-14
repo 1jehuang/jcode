@@ -175,8 +175,36 @@ pub(crate) fn openrouter_route_pricing(
     })
 }
 
-fn usd_to_micros(usd: f64) -> u64 {
-    (usd * 1_000_000.0).round() as u64
+/// Convert a per-million-token rate into the micros-per-Mtok unit the route
+/// catalog uses. Rates are currency-agnostic; the currency travels separately
+/// on [`RouteCheapnessEstimate::currency`].
+fn rate_to_micros(rate: f64) -> u64 {
+    (rate * 1_000_000.0).round() as u64
+}
+
+/// Build a route estimate straight from a hand-written `[pricing.providers]`
+/// card. The card is the authoritative source (spec 4.4), so this runs before
+/// the curated static tables, OpenRouter's caches, and models.dev.
+///
+/// `at` gates the card's validity window. Peak/off-peak tariff selection is not
+/// wired in yet: the tier resolver arrives with a later task, and this call site
+/// is where the current tariff will be selected.
+fn config_price_estimate(source_key: &str, model: &str) -> Option<RouteCheapnessEstimate> {
+    let at = std::time::SystemTime::now();
+    let (entry, currency) = crate::model_pricing::configured_entry(source_key, model, at)?;
+    let input = entry.cost.input?;
+    let output = entry.cost.output?;
+    Some(
+        RouteCheapnessEstimate::metered(
+            RouteCostSource::ConfigPriceSheet,
+            RouteCostConfidence::Exact,
+            rate_to_micros(input),
+            rate_to_micros(output),
+            entry.cost.cache_read.map(rate_to_micros),
+            Some(format!("config [pricing.providers] card in {currency}")),
+        )
+        .with_currency(currency),
+    )
 }
 
 /// Unified metered per-token pricing resolver for any provider/model pair.
@@ -187,9 +215,10 @@ fn usd_to_micros(usd: f64) -> u64 {
 /// `openai-compatible:deepseek`, `bedrock`.
 ///
 /// Resolution order:
-///   1. Curated static tables (exact, hand-reviewed) for Anthropic/OpenAI.
-///   2. OpenRouter endpoint/catalog disk caches for OpenRouter routes.
-///   3. The live models.dev pricing catalog cache (140+ providers).
+///   1. Hand-written `[pricing.providers]` config rules (highest authority).
+///   2. Curated static tables (exact, hand-reviewed) for Anthropic/OpenAI.
+///   3. OpenRouter endpoint/catalog disk caches for OpenRouter routes.
+///   4. The live models.dev pricing catalog cache (140+ providers).
 ///
 /// Returns `None` when nothing can price the route, so callers can
 /// distinguish "unknown" from "free" instead of silently guessing.
@@ -205,7 +234,13 @@ pub fn metered_pricing_for_source_with_tier(
     model: &str,
     service_tier: Option<&str>,
 ) -> Option<RouteCheapnessEstimate> {
-    // 1. Curated static tables.
+    // 1. Config is authoritative: a hand-written card outranks every derived
+    //    source, including the curated tables below.
+    if let Some(estimate) = config_price_estimate(source_key, model) {
+        return Some(estimate);
+    }
+
+    // 2. Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),
         "openai:api-key" => core_pricing::openai_api_pricing_with_tier(model, service_tier),
@@ -215,7 +250,7 @@ pub fn metered_pricing_for_source_with_tier(
         return static_estimate;
     }
 
-    // 2. OpenRouter's own caches carry per-endpoint pricing, which is more
+    // 3. OpenRouter's own caches carry per-endpoint pricing, which is more
     // precise than any catalog average for the route actually used.
     if source_key == "openrouter"
         && let Some(estimate) = openrouter_route_pricing(model, "auto")
@@ -223,14 +258,14 @@ pub fn metered_pricing_for_source_with_tier(
         return Some(estimate);
     }
 
-    // 3. Live models.dev catalog (disk cache; refreshes in the background).
+    // 4. Live models.dev catalog (disk cache; refreshes in the background).
     let cost = crate::model_pricing::lookup(source_key, model)?;
     Some(RouteCheapnessEstimate::metered(
         RouteCostSource::ModelsDevCatalog,
         RouteCostConfidence::High,
-        usd_to_micros(cost.input_usd_per_mtok),
-        usd_to_micros(cost.output_usd_per_mtok),
-        cost.cache_read_usd_per_mtok.map(usd_to_micros),
+        rate_to_micros(cost.input_usd_per_mtok),
+        rate_to_micros(cost.output_usd_per_mtok),
+        cost.cache_read_usd_per_mtok.map(rate_to_micros),
         Some("models.dev pricing catalog".to_string()),
     ))
 }
@@ -292,7 +327,10 @@ pub(crate) fn cheapness_for_route(
             } else {
                 model.to_string()
             };
-            openrouter_route_pricing(&model_id, provider)
+            // Config is authoritative here too, ahead of OpenRouter's own
+            // per-endpoint caches.
+            config_price_estimate("openrouter", &model_id)
+                .or_else(|| openrouter_route_pricing(&model_id, provider))
                 .or_else(|| metered_pricing_for_source("openrouter", &model_id))
         }
         _ => None,
@@ -503,5 +541,173 @@ mod tests {
 
             crate::model_pricing::clear_memory_cache_for_tests();
         });
+    }
+
+    #[test]
+    fn config_price_sheet_outranks_static_tables_and_catalog() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::model_pricing::save_test_cache(&[(
+            "anthropic",
+            "claude-sonnet-4-6",
+            crate::model_pricing::ModelCost {
+                // Deliberately wrong, so a catalog win would be visible.
+                input_usd_per_mtok: 99.0,
+                output_usd_per_mtok: 99.0,
+                cache_read_usd_per_mtok: None,
+                cache_write_usd_per_mtok: None,
+            },
+        )]);
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[pricing.providers."claude:api-key"]
+currency = "EUR"
+
+[pricing.providers."claude:api-key".models."claude-sonnet-4-6".cost]
+input = 1.5
+output = 4.0
+"#,
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let estimate = metered_pricing_for_source("claude:api-key", "claude-sonnet-4-6")
+            .expect("config card prices the route");
+        assert_eq!(estimate.source, RouteCostSource::ConfigPriceSheet);
+        assert_eq!(estimate.confidence, RouteCostConfidence::Exact);
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(1_500_000));
+        assert_eq!(estimate.output_price_per_mtok_micros, Some(4_000_000));
+        assert_eq!(estimate.currency.as_str(), "EUR");
+
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn incomplete_foreign_currency_card_falls_through_to_the_models_dev_label() {
+        // A card denominated in CNY cannot absorb models.dev's USD numbers, so
+        // the chain must keep going and label the result ModelsDevCatalog
+        // instead of pretending the config priced it (F1).
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::model_pricing::save_test_cache(&[(
+            "deepseek",
+            "deepseek-v4-pro",
+            crate::model_pricing::ModelCost {
+                input_usd_per_mtok: 0.66,
+                output_usd_per_mtok: 1.98,
+                cache_read_usd_per_mtok: None,
+                cache_write_usd_per_mtok: None,
+            },
+        )]);
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+"#,
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let estimate = metered_pricing_for_source("deepseek", "deepseek-v4-pro")
+            .expect("the catalog prices the route");
+        assert_eq!(estimate.source, RouteCostSource::ModelsDevCatalog);
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(660_000));
+        assert_eq!(estimate.output_price_per_mtok_micros, Some(1_980_000));
+        assert!(estimate.currency.is_usd());
+
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[test]
+    fn config_price_sheet_outranks_openrouter_endpoint_caches() {
+        // OpenRouter's own per-endpoint prices are more precise than a catalog
+        // average, but the user's card still wins (spec 4.4).
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        let prev_process_home = std::env::var_os("HOME");
+        let prev_namespace = std::env::var_os("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        // Point both home lookups at the tempdir so the endpoint cache this test
+        // writes is discarded with it.
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::env::set_var("HOME", temp.path());
+        crate::env::set_var(
+            "JCODE_OPENROUTER_CACHE_NAMESPACE",
+            format!("pricing-config-test-{}", std::process::id()),
+        );
+        crate::model_pricing::clear_memory_cache_for_tests();
+
+        let model = "deepseek/deepseek-v4-pro-0813";
+        let endpoints: Vec<openrouter::EndpointInfo> = serde_json::from_value(serde_json::json!([
+            {
+                "provider_name": "DeepInfra",
+                "pricing": { "prompt": "0.0000003", "completion": "0.0000012" }
+            }
+        ]))
+        .expect("endpoints");
+        openrouter::save_endpoints_disk_cache(model, &endpoints);
+
+        std::fs::write(
+            temp.path().join("config.toml"),
+            r#"
+[pricing.providers.openrouter.models."deepseek/deepseek-v4-pro-0813".cost]
+input = 9.0
+output = 9.0
+"#,
+        )
+        .expect("write config.toml");
+        crate::config::invalidate_config_cache();
+
+        let estimate = cheapness_for_route(model, "auto", "openrouter").expect("config prices it");
+        assert_eq!(estimate.source, RouteCostSource::ConfigPriceSheet);
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(9_000_000));
+        assert!(estimate.currency.is_usd());
+
+        // Without a card the endpoint cache is still the authority.
+        let endpoint_model = "deepseek/deepseek-v4-pro-0755";
+        openrouter::save_endpoints_disk_cache(endpoint_model, &endpoints);
+        let endpoint_estimate =
+            cheapness_for_route(endpoint_model, "auto", "openrouter").expect("endpoint priced");
+        assert_eq!(
+            endpoint_estimate.source,
+            RouteCostSource::OpenRouterEndpoint
+        );
+        assert_eq!(endpoint_estimate.input_price_per_mtok_micros, Some(300_000));
+
+        crate::model_pricing::clear_memory_cache_for_tests();
+        crate::config::invalidate_config_cache();
+        for (key, value) in [
+            ("JCODE_HOME", prev_home),
+            ("HOME", prev_process_home),
+            ("JCODE_OPENROUTER_CACHE_NAMESPACE", prev_namespace),
+        ] {
+            match value {
+                Some(prev) => crate::env::set_var(key, prev),
+                None => crate::env::remove_var(key),
+            }
+        }
     }
 }
