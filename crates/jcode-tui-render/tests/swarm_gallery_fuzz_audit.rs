@@ -372,7 +372,8 @@ fn strip_selected_indices_no_panic() {
                 5, // spinner_frame
                 width,
                 max_height,
-            , None);
+                None,
+            );
             for line in &lines {
                 assert!(
                     plain(line).as_str().width() <= width,
