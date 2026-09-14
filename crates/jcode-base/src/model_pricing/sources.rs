@@ -73,7 +73,19 @@ pub(super) fn pricing_config() -> Arc<PricingConfig> {
     };
     let parsed = Arc::new(parsed);
     if let Ok(mut memo) = PRICING_CONFIG.lock() {
+        // Only a *new* identity counts as a change, and the comparison is made
+        // against the entry being replaced: when two threads race the same
+        // reload the loser sees the winner's identity already stored and does
+        // not bump a second time.
+        let changed = memo.as_ref().map(|(cached, _)| *cached) != Some(identity);
         *memo = Some((identity, Arc::clone(&parsed)));
+        drop(memo);
+        if changed {
+            // This is the one place that observes "the config in force is not
+            // the one the priced view was built from", so it is the one place
+            // that can tell the price memos outside this module to re-derive.
+            super::generation::bump_pricing_generation();
+        }
     }
     parsed
 }

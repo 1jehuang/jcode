@@ -57,6 +57,7 @@ include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/pricing_call_pin.rs");
+include!("tests/pricing_config_reload.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
 #[test]

@@ -397,13 +397,17 @@ pub struct MultiProvider {
 
 /// Memoized route catalog with the inputs that decide its freshness: build
 /// time (short TTL), the auth generation at build time (bumped by
-/// `AuthStatus::invalidate_cache()` on login/logout/credential edits), and the
-/// catalog generation (bumped by prefetch/refresh completions).
+/// `AuthStatus::invalidate_cache()` on login/logout/credential edits), the
+/// generation (bumped by prefetch/refresh completions), and the pricing
+/// generation (bumped when a new config, and so a new `[pricing]` view, comes
+/// into force): prices are read from the config at build time, so without it a
+/// hand-edited `[pricing]` fed the picker stale numbers until the TTL.
 #[derive(Clone)]
 struct RoutesMemoEntry {
     built_at: std::time::Instant,
     auth_generation: u64,
     catalog_generation: u64,
+    pricing_generation: u64,
     routes: Vec<ModelRoute>,
     /// `listable_model_names_from_routes(&routes)`, cached because the
     /// non-chat-model heuristic string-scans every route name and callers
@@ -542,9 +546,15 @@ impl MultiProvider {
 
         let auth_generation = pricing::auth_pricing_generation();
         let catalog_gen = catalog_generation();
+        // Read (not just compare) the pricing generation before judging
+        // entries fresh: the read is what observes a newly loaded config, so an
+        // edit to `[pricing]` is seen here instead of only after something else
+        // happens to price a call.
+        let pricing_gen = crate::model_pricing::pricing_generation();
         let fresh = |entry: &RoutesMemoEntry| {
             entry.auth_generation == auth_generation
                 && entry.catalog_generation == catalog_gen
+                && entry.pricing_generation == pricing_gen
                 && entry.built_at.elapsed() < ROUTES_MEMO_TTL
         };
 
@@ -591,6 +601,7 @@ impl MultiProvider {
             built_at: std::time::Instant::now(),
             auth_generation,
             catalog_generation: catalog_gen,
+            pricing_generation: pricing_gen,
             listable_models: listable_model_names_from_routes(&routes),
             routes,
         };
