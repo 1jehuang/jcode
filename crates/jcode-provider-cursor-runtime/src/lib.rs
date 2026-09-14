@@ -582,59 +582,6 @@ impl Provider for CursorCliProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
-    async fn complete_for_account(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-        system: &str,
-        resume_session_id: Option<&str>,
-        account_label: &str,
-    ) -> Result<EventStream> {
-        let prompt = build_cli_prompt(system, messages);
-        let model = self
-            .model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let client = self.client.clone();
-        let account_label = account_label.to_string();
-        let resume_session_id = resume_session_id.map(str::to_string);
-        let (tx, rx) = mpsc::channel::<Result<jcode_message_types::StreamEvent>>(100);
-        let stream_uuid = uuid::Uuid::new_v4().to_string();
-        let (tool_result_tx, tool_result_rx) = mpsc::channel::<NativeToolResult>(16);
-        let stream_guard = self.multiplexer.register(&stream_uuid, tool_result_tx);
-        let tools = tools.to_vec();
-        let system = system.to_string();
-        self.ensure_forwarder_loop();
-
-        tokio::spawn(async move {
-            let _stream_guard = stream_guard;
-            let result = run_native_text_command(
-                client,
-                tx.clone(),
-                &prompt,
-                &model,
-                Some(&account_label),
-                resume_session_id.as_deref(),
-                &stream_uuid,
-                &tools,
-                &system,
-                tool_result_rx,
-            )
-            .await;
-
-            if let Err(err) = result {
-                let _ = tx.send(Err(err)).await;
-            }
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    fn supports_request_scoped_accounts(&self) -> bool {
-        true
-    }
-
     fn name(&self) -> &'static str {
         "cursor"
     }
@@ -779,21 +726,14 @@ async fn run_native_text_command(
     tx: mpsc::Sender<Result<StreamEvent>>,
     prompt: &str,
     model: &str,
-    account_label: Option<&str>,
+    _account_label: Option<&str>,
     resume_session_id: Option<&str>,
     stream_uuid: &str,
     tools: &[ToolDefinition],
     system: &str,
     mut tool_result_rx: mpsc::Receiver<NativeToolResult>,
 ) -> Result<()> {
-    let tokens = match account_label {
-        Some(label) => {
-            let account = jcode_base::auth::provider_pool::account("cursor", label)?
-                .with_context(|| format!("No Cursor account with label '{label}'"))?;
-            cursor_auth::resolve_direct_tokens_for_account(&client, &account).await?
-        }
-        None => cursor_auth::resolve_direct_tokens(&client).await?,
-    };
+    let tokens = cursor_auth::resolve_direct_tokens(&client).await?;
 
     // The current Cursor agent transport (`agent.v1.AgentService/Run`) is a
     // paced bidirectional Connect/HTTP2 stream. The old
