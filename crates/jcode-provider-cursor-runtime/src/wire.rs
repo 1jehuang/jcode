@@ -925,17 +925,22 @@ pub fn encode_agent_client_stream_close(id: u32) -> Vec<u8> {
 }
 
 pub fn encode_request_context_result(
-    _id: u32,
-    _exec_id: &str,
+    id: u32,
+    exec_id: &str,
     request_context_bytes: &[u8],
 ) -> Vec<u8> {
     let request_context_success = field_ld(1, request_context_bytes);
     let result = field_ld(1, &request_context_success);
-    // Cursor's request_context_args carries neither id nor exec_id. The
-    // connect-es client consequently omits both proto3-default fields in the
-    // acknowledgement. Echoing synthetic zero values makes the message
-    // malformed on current AgentService servers.
-    field_ld(2, &field_ld(10, &result))
+    // Preserve the server's correlation fields when supplied. Current Cursor
+    // sends these on ExecServerMessage and expects them on the response; omit
+    // proto3 defaults only when they are genuinely absent.
+    let mut exec = Vec::new();
+    if id != 0 {
+        exec.extend(field_varint(1, id as u64));
+    }
+    exec.extend(field_str(15, exec_id));
+    exec.extend(field_ld(10, &result));
+    field_ld(2, &exec)
 }
 
 pub fn encode_request_context(system_prompt: &str, cwd: &str) -> Result<Vec<u8>> {

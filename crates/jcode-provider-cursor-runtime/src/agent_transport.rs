@@ -43,12 +43,50 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// served `cursor-agent` CLI build; override at runtime with
 /// `JCODE_CURSOR_CLI_VERSION` if Cursor moves the floor.
 const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.08.25-3e8eec8";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+pub(crate) const AGENT_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn valid_cli_build_id(value: &str) -> bool {
+    let Some((date, commit)) = value.split_once('-') else {
+        return false;
+    };
+    let mut date_parts = date.split('.');
+    matches!(
+        (date_parts.next(), date_parts.next(), date_parts.next(), date_parts.next()),
+        (Some(year), Some(month), Some(day), None)
+            if year.len() == 4
+                && month.len() == 2
+                && day.len() == 2
+                && year.chars().all(|ch| ch.is_ascii_digit())
+                && month.chars().all(|ch| ch.is_ascii_digit())
+                && day.chars().all(|ch| ch.is_ascii_digit())
+    ) && !commit.is_empty()
+        && commit.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn installed_cli_build_id() -> Option<String> {
+    let shim = jcode_base::storage::user_home_path(".local/bin/cursor-agent").ok()?;
+    let resolved = std::fs::canonicalize(shim).ok()?;
+    let mut components = resolved.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() == "versions" {
+            let version = components.next()?.as_os_str().to_str()?.to_string();
+            return valid_cli_build_id(&version).then_some(version);
+        }
+    }
+    None
+}
 
 pub(crate) fn cli_client_version() -> String {
-    std::env::var("JCODE_CURSOR_CLI_VERSION")
+    if let Some(version) = std::env::var("JCODE_CURSOR_CLI_VERSION")
         .ok()
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
+    {
+        return version;
+    }
+    installed_cli_build_id()
+        .map(|version| format!("cli-{version}"))
         .unwrap_or_else(|| CLI_CLIENT_VERSION_DEFAULT.to_string())
 }
 
@@ -273,11 +311,19 @@ fn build_run_frames(
         req.extend(field_str(4, ""));
     }
     req.extend(field_str(5, &conv));
-    // AgentRunRequest.f9 is a ModelEntry, not the older model metadata shape:
-    // f1 is the model id, f2 is the optional max-mode flag, and f3 is repeated
-    // parameter entries. Sending the legacy f3 {fast=...} map makes the server
-    // accept the HTTP request but leaves the bidirectional run at heartbeats.
-    req.extend(field_ld(9, &field_str(1, model)));
+    // AgentRunRequest.f9 is a ModelEntry. Mark the selected model as a built-in
+    // model explicitly. Omitting this metadata can leave AgentService at HTTP 200
+    // with only heartbeats instead of starting the turn.
+    let mut selected_model = field_str(1, model);
+    selected_model.extend(field_varint(7, 1));
+    // ModelDetails (f3) carries the canonical/display model identity used by the
+    // current AgentService model resolver. The server accepts the request without
+    // it, but may leave the stream pending while resolving the model.
+    let mut model_details = field_str(1, model);
+    model_details.extend(field_str(3, model));
+    model_details.extend(field_str(4, model));
+    req.extend(field_ld(3, &model_details));
+    req.extend(field_ld(9, &selected_model));
     req.extend(field_varint(12, 0));
     // Keep the catalog entry in the same ModelEntry shape. A fabricated
     // "default" model is not part of Cursor's catalog and can cause the
@@ -873,12 +919,14 @@ pub async fn run_agent_turn(
                             }
                         }
                         ExecServerMessageVariant::RequestContext(_) => {
-                            let rc_bytes = crate::wire::encode_request_context(system, &cwd)
-                                .unwrap_or_default();
+                            // The current AgentService request-context ack is intentionally
+                            // empty. Tool definitions already travel in RunRequest.mcp_tools;
+                            // echoing them here double-advertises the tools and can leave the
+                            // server at HTTP 200 with no response frames.
                             let res_bytes = crate::wire::encode_request_context_result(
                                 msg.id,
                                 &msg.exec_id,
-                                &rc_bytes,
+                                &[],
                             );
                             let agent_bytes =
                                 crate::wire::encode_agent_client_exec_message(&res_bytes);
@@ -1113,6 +1161,8 @@ mod tests {
                 .and_then(|field| std::str::from_utf8(field.data).ok()),
             Some("composer-2.5")
         );
+        assert!(iter_fields(requested_model.data).any(|field| field.field == 7 && field.wire == 0));
+        assert!(iter_fields(run_request.data).any(|field| field.field == 3 && field.wire == 2));
         assert!(iter_fields(requested_model.data).all(|field| field.field != 3));
 
         let catalog_ids = iter_fields(run_request.data)

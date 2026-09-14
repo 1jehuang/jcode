@@ -711,14 +711,15 @@ fn request_context_result_has_required_success_wrapper() {
 }
 
 #[test]
-fn request_context_result_omits_synthetic_ids() {
+fn request_context_result_preserves_correlation_ids() {
     let encoded = wire::encode_request_context_result(7, "exec", &[]);
     let fields: Vec<_> = wire::iter_fields(&encoded).collect();
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0].field, 2);
     let exec_fields: Vec<_> = wire::iter_fields(fields[0].data).collect();
-    assert_eq!(exec_fields.len(), 1);
-    assert_eq!(exec_fields[0].field, 10);
+    assert!(exec_fields.iter().any(|field| field.field == 1 && field.varint == 7));
+    assert!(exec_fields.iter().any(|field| field.field == 15 && field.data == b"exec"));
+    assert!(exec_fields.iter().any(|field| field.field == 10));
 }
 
 #[test]
