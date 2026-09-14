@@ -187,3 +187,60 @@ fn unconfigured_model_keeps_the_generic_default_fallback() {
         );
     });
 }
+
+/// A complete CNY card: unlike `HALF_WRITTEN_CNY_CARD_CONFIG` this one can
+/// price a whole call, so the billing path really does produce a CNY amount.
+const COMPLETE_CNY_CARD_CONFIG: &str = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 7.0
+output = 8.0
+"#;
+
+#[test]
+fn non_usd_spend_lands_in_its_own_ledger_bucket() {
+    // The activity ledger used to be USD-only, so the billing path skipped it
+    // for any other currency. With per-currency buckets that skip is gone: a
+    // CNY call must be recorded as CNY, not dropped and not relabelled.
+    with_temp_jcode_home(|| {
+        write_pricing_config(COMPLETE_CNY_CARD_CONFIG);
+        let mut app = remote_deepseek_app();
+        app.streaming.streaming_input_tokens = 1_000_000;
+
+        app.update_cost_impl();
+        assert!(
+            (app.cost.total_cost - 7.0).abs() < 1e-4,
+            "1M input tokens on a CNY 7.0/Mtok card is CNY 7.00, got {}",
+            app.cost.total_cost
+        );
+
+        // The ledger write is spawned off the render loop, so wait for the file
+        // instead of assuming it is already there.
+        let path = std::path::PathBuf::from(std::env::var_os("JCODE_HOME").expect("test home"))
+            .join("provider_activity.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let recorded = loop {
+            if let Ok(raw) = std::fs::read_to_string(&path)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw)
+                && let Some(entries) = json["entries"].as_object()
+                && let Some(spend) = entries
+                    .values()
+                    .map(|entry| &entry["spend"])
+                    .find(|spend| spend["day"]["CNY"] == serde_json::json!(7.0))
+            {
+                break spend.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no CNY bucket appeared in the ledger within 10s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            recorded["day_usd"], 7.0,
+            "the USD mirror tracks the single CNY bucket"
+        );
+    });
+}
