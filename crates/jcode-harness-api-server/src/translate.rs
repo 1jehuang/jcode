@@ -1658,9 +1658,9 @@ impl BridgeState {
             if let ApiEvent::Attached { session } | ApiEvent::SessionForked { session } =
                 &mut frame.event
             {
-                jcode_harness_api::enrich_sessions_from_local_swarm_state(
-                    std::slice::from_mut(session),
-                );
+                jcode_harness_api::enrich_sessions_from_local_swarm_state(std::slice::from_mut(
+                    session,
+                ));
             }
         }
         frames

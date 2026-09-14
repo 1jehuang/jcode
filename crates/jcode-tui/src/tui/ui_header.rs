@@ -850,10 +850,7 @@ fn build_header_lines_with_auth(
         // The native protocol reports the active route, not a complete remote
         // credential inventory. Do not render the laptop's (or an empty)
         // inventory as if it described providers configured on the server.
-        (
-            format!("/login to authenticate on {host}"),
-            Vec::new(),
-        )
+        (format!("/login to authenticate on {host}"), Vec::new())
     } else {
         (
             "/login to add provider".to_string(),

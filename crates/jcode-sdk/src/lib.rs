@@ -56,10 +56,10 @@ pub use client::{
     UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
+pub use errors::{Error, ErrorKind, Result};
 pub use jcode_harness_api::{
     enrich_sessions_from_local_swarm_state, enrich_sessions_from_swarm_state,
 };
-pub use errors::{Error, ErrorKind, Result};
 pub use launch::{
     LaunchOptions, LaunchedInstance, WakeMode, ensure_runtime, inherit_credentials,
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
