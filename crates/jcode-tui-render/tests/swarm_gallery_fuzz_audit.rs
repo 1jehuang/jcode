@@ -203,7 +203,8 @@ fn strip_never_panics_and_stays_width_bounded() {
                             spinner,
                             width,
                             12,
-                        None);
+                            None,
+                        );
                         for line in &lines {
                             let text = plain(line);
                             let w = text.as_str().width();
