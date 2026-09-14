@@ -53,4 +53,3 @@ the source checkout or delete the previous binary while a server may still be
 using it. After rollback, rerun `jcode version --json`, reconnect the client,
 and verify session rendering and provider selection before trying the update
 again.
-
