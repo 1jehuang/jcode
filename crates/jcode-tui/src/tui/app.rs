@@ -64,6 +64,7 @@ mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
 mod commands_plan;
+mod commands_pricing;
 mod commands_remote;
 mod commands_review;
 mod conversation_state;

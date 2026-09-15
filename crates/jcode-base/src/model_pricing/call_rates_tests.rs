@@ -384,3 +384,54 @@ fn a_provider_key_that_can_never_match_is_named() {
         vec!["deepsek".to_string(), "openai-compatible:nope".to_string()],
     );
 }
+
+/// Provenance: a cost view has to be able to name the tariff that is in force,
+/// from either branch of the selection (a schedule window, or `default_tariff`).
+#[test]
+fn selected_config_tariff_names_the_window_in_force() {
+    let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+default_tariff = "off_peak"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".tariffs.off_peak]
+input = 4.5
+output = 13.5
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".tariffs.peak]
+multiplier = 2.0
+
+[[pricing.providers.deepseek.models."deepseek-v4-pro".schedule]]
+tariff = "peak"
+utc_offset_minutes = 0
+weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+windows = [["01:00", "04:00"]]
+"#;
+    with_pricing_env(config, &[], || {
+        assert_eq!(
+            super::selected_config_tariff("deepseek", "deepseek-v4-pro", instant(INSIDE_PEAK)),
+            Some("peak".to_string()),
+            "the schedule window selects the peak tariff"
+        );
+        assert_eq!(
+            super::selected_config_tariff(
+                "deepseek",
+                "deepseek-v4-pro",
+                instant(ONE_SECOND_BEFORE_PEAK)
+            ),
+            Some("off_peak".to_string()),
+            "outside every window the card's default tariff applies"
+        );
+        assert_eq!(
+            super::selected_config_tariff("openai", "gpt-5.5", instant(INSIDE_PEAK)),
+            None,
+            "a model no hand-written card prices has no config tariff"
+        );
+    });
+}

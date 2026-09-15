@@ -1,0 +1,282 @@
+//! `/pricing` - what prices the current model, and where that number comes from.
+//!
+//! A call is priced by whichever layer wins: the hand-written `[pricing]` card,
+//! the curated tables, models.dev, or the fallback estimate. That choice was
+//! invisible in the UI, which is why "why is it this price" had no answer short
+//! of reading the log. This command prints the winning layer for the current
+//! model, the tariff in force, the currency, and the state of the rate table.
+
+use super::*;
+
+/// What the `[pricing]` layer says about the current model.
+pub(super) enum CardState<'a> {
+    /// A hand-written card prices this model, with `tariff` already applied.
+    Priced {
+        card: &'a crate::model_pricing::CallRateCard,
+        tariff: Option<&'a str>,
+    },
+    /// A card claims the pair but cannot price the call: incomplete in a
+    /// currency that cannot merge with the next layer, or expired with
+    /// `on_rule_expiry = "no_price"`. The display has to say so rather than
+    /// echo a number from a layer the user did not ask for.
+    ConfiguredWithoutPrice,
+    /// No hand-written rule claims this model.
+    Absent,
+}
+
+/// Everything `/pricing` reports, gathered before formatting so the text can be
+/// asserted without an `App`.
+pub(super) struct PricingReport<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub card: CardState<'a>,
+    /// Why the `[pricing]` section was rejected, when it was.
+    pub config_error: Option<&'a str>,
+    pub fx_base: &'a jcode_provider_core::Currency,
+    pub fx_rates: &'a std::collections::BTreeMap<jcode_provider_core::Currency, f64>,
+    pub display_currency: &'a str,
+    /// Canonical-request cost from whichever layer wins, when one can be had.
+    pub reference_cost: Option<&'a jcode_provider_core::Money>,
+}
+
+impl PricingReport<'_> {
+    pub(super) fn render(&self) -> String {
+        let mut out = format!("**Pricing · {} / {}**\n", self.provider, self.model);
+
+        match &self.card {
+            CardState::Priced { card, tariff } => {
+                let mut parts = vec![
+                    format!(
+                        "{} in · {} out",
+                        crate::money_display::format_amount(card.input_per_mtok, &card.currency, 2),
+                        crate::money_display::format_amount(card.output_per_mtok, &card.currency, 2),
+                    ),
+                    match card.cache_read_per_mtok {
+                        Some(rate) => format!(
+                            "{} cache-read",
+                            crate::money_display::format_amount(rate, &card.currency, 2)
+                        ),
+                        None => "no cache-read rate".to_string(),
+                    },
+                ];
+                if card.cache_write_per_mtok.is_some() {
+                    parts.push("cache-write set".to_string());
+                }
+                let tariff = match tariff {
+                    Some(name) => format!("`{name}` tariff"),
+                    None => "card's own rates".to_string(),
+                };
+                out.push_str(&format!(
+                    "\n- rate card: {} per Mtok ({tariff}, {})\n- from: your `[pricing.providers]` card, which outranks every other source\n",
+                    parts.join(" · "),
+                    card.currency.as_str(),
+                ));
+            }
+            CardState::ConfiguredWithoutPrice => out.push_str(
+                "\n- rate card: **unknown** - your `[pricing]` card claims this model but cannot price it \
+                 (an incomplete card in its own currency, or a rule that expired with `on_rule_expiry = \"no_price\"`). \
+                 No other layer is substituted.\n",
+            ),
+            CardState::Absent => out.push_str(
+                "\n- rate card: no `[pricing]` rule prices this model, so the cost comes from a lower layer \
+                 (models.dev, a provider cache, or the fallback estimate)\n",
+            ),
+        }
+
+        if let Some(cost) = self.reference_cost {
+            out.push_str(&format!(
+                "- reference request (25k in / 5k out): {}\n",
+                crate::money_display::format_amount(cost.amount, &cost.currency, 4)
+            ));
+        } else {
+            out.push_str(
+                "- reference request: **unpriced** - no layer can price this model right now\n",
+            );
+        }
+
+        if self.fx_rates.is_empty() {
+            out.push_str(&format!(
+                "- fx: no rates configured, so every cost stays in its own currency ({}) and the model \
+                 picker skips cross-currency ordering\n",
+                self.fx_base.as_str()
+            ));
+        } else {
+            let rates = self
+                .fx_rates
+                .iter()
+                .map(|(currency, rate)| format!("{} {rate}", currency.as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "- fx: 1 {} = {rates} (used for display conversion and for ordering the model picker)\n",
+                self.fx_base.as_str()
+            ));
+        }
+
+        out.push_str(&format!(
+            "- display currency: `{}`\n",
+            self.display_currency
+        ));
+
+        match self.config_error {
+            Some(error) => out.push_str(&format!(
+                "- config: the `[pricing]` section was **rejected** ({error}), so every rule in it is ignored\n"
+            )),
+            None => out.push_str("- config: `[pricing]` accepted\n"),
+        }
+
+        out
+    }
+}
+
+pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix("/pricing") else {
+        return false;
+    };
+    if !rest.trim().is_empty() {
+        return false;
+    }
+
+    let now = std::time::SystemTime::now();
+    let (model, is_anthropic, is_openai) = app.remote_billing_identity();
+    let source_key = app.billing_source_key(is_anthropic, is_openai);
+    let provider = <App as crate::tui::TuiState>::provider_name(app).to_string();
+    let tariff = crate::model_pricing::selected_config_tariff(&source_key, &model, now);
+
+    // One lookup, then own the card so the report can borrow all of it.
+    let rates_state = crate::model_pricing::config_call_rates(&source_key, &model, now);
+    let priced = match &rates_state {
+        crate::model_pricing::ConfigCallRates::Priced(card) => Some(card.clone()),
+        _ => None,
+    };
+    let card = match priced.as_ref() {
+        Some(card) => CardState::Priced {
+            card,
+            tariff: tariff.as_deref(),
+        },
+        None => match rates_state {
+            crate::model_pricing::ConfigCallRates::ConfiguredWithoutPrice => {
+                CardState::ConfiguredWithoutPrice
+            }
+            _ => CardState::Absent,
+        },
+    };
+
+    let pricing = crate::model_pricing::pricing_config();
+    let error = crate::model_pricing::pricing_config_error();
+    let reference = crate::model_pricing::effective_cost(&source_key, &model, now);
+    let display_currency = crate::config::config().display.currency.clone();
+
+    let report = PricingReport {
+        provider: &provider,
+        model: &model,
+        card,
+        config_error: error.as_ref().map(|error| error.message.as_str()),
+        fx_base: &pricing.fx_base,
+        fx_rates: &pricing.fx_rates,
+        display_currency: &display_currency,
+        reference_cost: reference.as_ref(),
+    };
+    app.push_display_message(DisplayMessage::system(report.render()));
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jcode_provider_core::{Currency, Money};
+
+    fn card() -> crate::model_pricing::CallRateCard {
+        crate::model_pricing::CallRateCard {
+            input_per_mtok: 2.0,
+            output_per_mtok: 8.0,
+            cache_read_per_mtok: Some(0.04),
+            cache_write_per_mtok: None,
+            currency: Currency::new("CNY"),
+        }
+    }
+
+    /// The priced case names the layer, the tariff and the currency, and never
+    /// prints a CNY amount as dollars.
+    #[test]
+    fn a_config_priced_model_reports_its_tariff_and_currency() {
+        let card = card();
+        let rates = std::collections::BTreeMap::from([(Currency::new("CNY"), 7.2)]);
+        let report = PricingReport {
+            provider: "DeepSeek",
+            model: "deepseek-flash",
+            card: CardState::Priced {
+                card: &card,
+                tariff: Some("peak"),
+            },
+            config_error: None,
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: Some(&Money::new(0.09, Currency::new("CNY"))),
+        };
+        let text = report.render();
+
+        assert!(text.contains("CNY 2.00 in"), "{text}");
+        assert!(text.contains("CNY 8.00 out"), "{text}");
+        assert!(text.contains("peak"), "{text}");
+        assert!(
+            !text.contains('$'),
+            "a CNY card must not be labelled with a dollar sign: {text}"
+        );
+        assert!(text.contains("CNY 0.0900"), "{text}");
+        assert!(text.contains("1 USD = CNY 7.2"), "{text}");
+        assert!(text.contains("`[pricing]` accepted"), "{text}");
+    }
+
+    /// A card that claims the model but cannot price it must say "unknown"
+    /// rather than borrow a number from another layer.
+    #[test]
+    fn a_card_that_cannot_price_says_unknown() {
+        let rates = std::collections::BTreeMap::new();
+        let report = PricingReport {
+            provider: "DeepSeek",
+            model: "deepseek-v4-pro",
+            card: CardState::ConfiguredWithoutPrice,
+            config_error: None,
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: None,
+        };
+        let text = report.render();
+
+        assert!(text.contains("**unknown**"), "{text}");
+        assert!(text.contains("unpriced"), "{text}");
+        assert!(
+            text.contains("no rates configured"),
+            "an empty fx table must be stated, not implied: {text}"
+        );
+    }
+
+    /// A rejected `[pricing]` section is why every hand-written rule stopped
+    /// applying, so the report has to lead with it.
+    #[test]
+    fn a_rejected_section_is_reported() {
+        let rates = std::collections::BTreeMap::new();
+        let report = PricingReport {
+            provider: "OpenAI",
+            model: "gpt-5.5",
+            card: CardState::Absent,
+            config_error: Some("pricing.schedule[0].windows: window end must be after start"),
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "CNY",
+            reference_cost: None,
+        };
+        let text = report.render();
+
+        assert!(
+            text.contains("no `[pricing]` rule prices this model"),
+            "{text}"
+        );
+        assert!(text.contains("**rejected**"), "{text}");
+        assert!(text.contains("window end must be after start"), "{text}");
+        assert!(text.contains("display currency: `CNY`"), "{text}");
+    }
+}

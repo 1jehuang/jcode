@@ -150,6 +150,10 @@ These are worth reading once, because each one breaks more than it looks like:
 
 ## Checking that it took effect
 
+* **`/pricing`** answers "why is it this price?" for the current model: which
+  layer priced it, the tariff in force right now, the currency, the state of the
+  `[pricing]` section, and the rate table. Use it instead of guessing from the
+  cost on screen.
 * Saving the file is enough: a running session reports `Config reloaded from disk`.
 * `/usage` lists the spend per currency and marks a rule that expired or was
   rejected, so a rule that stopped applying is visible instead of silently

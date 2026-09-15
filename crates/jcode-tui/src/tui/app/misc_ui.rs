@@ -449,7 +449,7 @@ impl App {
     }
 
     /// The model and dual-auth flags the remote billing paths price with.
-    fn remote_billing_identity(&self) -> (String, bool, bool) {
+    pub(super) fn remote_billing_identity(&self) -> (String, bool, bool) {
         use crate::tui::TuiState;
         let model = <Self as TuiState>::provider_model(self);
         let provider_name = <Self as TuiState>::provider_name(self).to_lowercase();
@@ -574,7 +574,7 @@ impl App {
 
     /// The cross-provider activity key the billing path prices through. Also the
     /// identity hand-written `[pricing.providers]` keys are matched against.
-    fn billing_source_key(&self, is_anthropic: bool, is_openai: bool) -> String {
+    pub(super) fn billing_source_key(&self, is_anthropic: bool, is_openai: bool) -> String {
         if is_anthropic {
             "claude:api-key".to_string()
         } else if is_openai {
