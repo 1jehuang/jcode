@@ -383,7 +383,11 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         .expect("create temp JCODE_HOME");
     let _home = EnvVarGuard::set("JCODE_HOME", temp_home.path().as_os_str());
 
-    let mut seed = Session::create_with_id("session_seed".to_string(), None, None);
+    let mut seed = Session::create_with_id(
+        "session_seed".to_string(),
+        None,
+        Some("seed".to_string()),
+    );
     seed.working_dir = Some("/tmp/repo".to_string());
     seed.record_swarm_status_event(vec![SwarmMemberStatus {
         session_id: "session_seed".to_string(),

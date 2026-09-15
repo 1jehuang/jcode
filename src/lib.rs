@@ -25,6 +25,7 @@ pub use jcode_tui::*;
 
 // Cli + entrypoint layer (kept in the root crate).
 pub mod cli;
+pub mod herdr;
 
 use anyhow::Result;
 

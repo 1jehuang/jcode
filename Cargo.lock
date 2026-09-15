@@ -3604,6 +3604,7 @@ dependencies = [
  "jcode-docs-data",
  "jcode-harness-api",
  "jcode-harness-api-server",
+ "jcode-herdr",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-copilot-runtime",
@@ -4021,6 +4022,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "jcode-herdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -9006,6 +9019,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
