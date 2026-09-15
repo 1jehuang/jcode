@@ -483,6 +483,107 @@ async fn comm_list_includes_member_status_and_detail() {
 }
 
 #[tokio::test]
+async fn comm_status_reports_retained_identity_while_member_is_busy() {
+    let requester = test_agent().await;
+    let peer = test_agent().await;
+
+    let requester_id = requester.lock().await.session_id().to_string();
+    let peer_id = peer.lock().await.session_id().to_string();
+    let swarm_id = "swarm-test".to_string();
+
+    let (requester_event_tx, _requester_event_rx) = mpsc::unbounded_channel();
+    let (peer_event_tx, _peer_event_rx) = mpsc::unbounded_channel();
+    let (client_event_tx, mut client_event_rx) = mpsc::unbounded_channel();
+
+    let member = |session_id: &str,
+                  event_tx: mpsc::UnboundedSender<ServerEvent>,
+                  status: &str,
+                  runtime: crate::protocol::SwarmMemberRuntime| SwarmMember {
+        session_id: session_id.to_string(),
+        event_tx,
+        event_txs: HashMap::new(),
+        working_dir: None,
+        swarm_id: Some(swarm_id.clone()),
+        swarm_enabled: true,
+        status: status.to_string(),
+        detail: None,
+        friendly_name: None,
+        report_back_to_session_id: None,
+        latest_completion_report: None,
+        role: "agent".to_string(),
+        joined_at: Instant::now(),
+        last_status_change: Instant::now(),
+        is_headless: false,
+        output_tail: None,
+        todo_progress: None,
+        todo_items: Vec::new(),
+        runtime,
+        task_label: None,
+    };
+
+    let swarm_members = Arc::new(RwLock::new(HashMap::from([
+        (
+            requester_id.clone(),
+            member(
+                &requester_id,
+                requester_event_tx,
+                "ready",
+                crate::protocol::SwarmMemberRuntime::default(),
+            ),
+        ),
+        (
+            peer_id.clone(),
+            member(
+                &peer_id,
+                peer_event_tx,
+                "running",
+                crate::protocol::SwarmMemberRuntime {
+                    provider: Some("OpenCode Go".to_string()),
+                    model: Some("deepseek-v4.1-flash".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ),
+    ])));
+    let sessions = Arc::new(RwLock::new(HashMap::from([
+        (requester_id.clone(), requester.clone()),
+        (peer_id.clone(), peer.clone()),
+    ])));
+    let client_connections = Arc::new(RwLock::new(HashMap::new()));
+    let file_touch = crate::server::FileTouchService::new();
+
+    // The peer is mid-turn, so its agent lock is held and the live identity
+    // lookup is unavailable. Status must fall back to the retained snapshot.
+    let _peer_turn_guard = peer.lock().await;
+
+    crate::server::comm_sync::handle_comm_status(
+        7,
+        requester_id,
+        peer_id.clone(),
+        &sessions,
+        &swarm_members,
+        &client_connections,
+        &file_touch,
+        &client_event_tx,
+    )
+    .await;
+
+    match client_event_rx.recv().await.expect("status response") {
+        ServerEvent::CommStatusResponse { id, snapshot } => {
+            assert_eq!(id, 7);
+            assert_eq!(snapshot.session_id, peer_id);
+            assert_eq!(snapshot.status.as_deref(), Some("running"));
+            assert_eq!(snapshot.provider_name.as_deref(), Some("OpenCode Go"));
+            assert_eq!(
+                snapshot.provider_model.as_deref(),
+                Some("deepseek-v4.1-flash")
+            );
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn comm_message_accepts_friendly_name_dm_target() {
     let sender = test_agent().await;
     let target = test_agent().await;
