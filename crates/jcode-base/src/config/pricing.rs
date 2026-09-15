@@ -720,4 +720,29 @@ mod tests {
         let err = validate(&file).expect_err("dangling default_tariff is rejected");
         assert!(err.field_path.contains("default_tariff"), "path: {err}");
     }
+
+    /// `Config::save()` serializes the whole struct, so any field without
+    /// `skip_serializing_if` gets baked into the user's `config.toml` the next
+    /// time anything saves it. An unconfigured `[pricing]` must stay absent.
+    #[test]
+    fn an_empty_pricing_section_is_never_written_back_to_config() {
+        let toml =
+            toml::to_string_pretty(&crate::config::Config::default()).expect("serialize config");
+        assert!(
+            !toml.contains("[pricing"),
+            "an empty [pricing] section must not be baked into the user's config:\n{toml}"
+        );
+    }
+
+    /// The flip side: a section the user actually configured must still round-trip.
+    #[test]
+    fn a_configured_pricing_section_is_written_back() {
+        let mut config = crate::config::Config::default();
+        config.pricing.fx_rates.insert("CNY".to_string(), 7.2);
+        let toml = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(
+            toml.contains("[pricing.fx_rates]"),
+            "a configured [pricing] must survive a save:\n{toml}"
+        );
+    }
 }
