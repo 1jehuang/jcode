@@ -270,30 +270,36 @@ prompt_entry_animation = true
 # warning = "#ffc864"
 # error = "#ff6464"
 
-[pricing]
 # Hand-written rate rules. These outrank models.dev and every other source;
 # with this section left empty the cost path behaves exactly as before.
 #
-# Reference rates used only when [display].currency names a concrete currency.
-# v1 has no automatic fetch: whatever you write here is authoritative.
+# Examples only — uncomment what you need. Every commented line below is valid
+# TOML on its own; `schedule` is written as an array of tables (`[[...]]`)
+# because a multi-line inline table (`{ a = 1,\n b = 2 }`) is invalid TOML and
+# would make this whole file fail to parse.
+#
+# The example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC, Mon-Fri.
+[pricing]
 # fx_base = "USD"
+#
 # [pricing.fx_rates]
 # CNY = 7.20
 # EUR = 0.92
 # JPY = 150.0
 #
-# Example: DeepSeek peak/off-peak (peak hours are 01:00-04:00 and 06:00-10:00 UTC, Mon-Fri).
 # [pricing.providers."deepseek"]
 # currency = "CNY"
 #
 # [pricing.providers."deepseek".models."deepseek-v4-pro"]
 # cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
 # tariffs = { peak = { multiplier = 2.0 } }
-# schedule = [
-#   { tariff = "peak", utc_offset_minutes = 0,
-#     weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"],
-#     windows = [["01:00", "04:00"], ["06:00", "10:00"]] },
-# ]
+#
+# [[pricing.providers."deepseek".models."deepseek-v4-pro".schedule]]
+# tariff = "peak"
+# utc_offset_minutes = 0
+# weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+# windows = [["01:00", "04:00"], ["06:00", "10:00"]]
+#
 # effective_until = "2026-12-31T23:59:59Z"
 # on_rule_expiry = "fallback"
 
@@ -811,5 +817,51 @@ mod tests {
             );
             assert_eq!(value.len(), 7, "{role} example should be #rrggbb: {value}");
         }
+    }
+
+    /// Uncommenting the documented `[pricing]` example must actually work, the
+    /// same contract the colors example above is held to.
+    ///
+    /// This is not academic: a multi-line inline table (`{ a = 1,\n b = 2 }`)
+    /// is invalid TOML, and a single invalid byte makes `config.toml` fail to
+    /// parse as a whole — so the user's entire config silently reverts to
+    /// defaults. Shipping such a shape in the template would hand every user
+    /// that trap the first time they uncomment it.
+    #[test]
+    fn documented_pricing_example_is_valid_when_uncommented() {
+        let template = Config::default_config_file_contents();
+        // Unlike the colors example below, this section's header is a real
+        // table header, so keep it and uncomment only the body that follows.
+        let header = "[pricing]\n";
+        let body_start = template
+            .find(header)
+            .expect("template documents a [pricing] section")
+            + header.len();
+        let body: String = template[body_start..]
+            .lines()
+            .take_while(|line| line.starts_with("# ") || line == &"#")
+            .map(|line| {
+                format!(
+                    "{}\n",
+                    line.trim_start_matches("# ").trim_start_matches('#')
+                )
+            })
+            .collect();
+        let example = format!("{header}{body}");
+
+        let parsed: Config =
+            toml::from_str(&example).expect("uncommented [pricing] example must parse");
+        let deepseek = parsed
+            .pricing
+            .providers
+            .get("deepseek")
+            .expect("the example configures a deepseek provider");
+        assert!(
+            deepseek
+                .models
+                .values()
+                .any(|model| !model.schedule.is_empty()),
+            "the example should demonstrate a schedule rule, got {deepseek:?}"
+        );
     }
 }
