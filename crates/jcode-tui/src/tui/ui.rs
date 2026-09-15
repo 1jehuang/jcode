@@ -3449,6 +3449,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Session status line (dir, branch, context, provider, model), always
     // pinned directly below the input line.
     let overscroll_height: u16 = 1;
+    // Compact status bar: shows workspace, repo, agent stats. Hidden on narrow terminals.
+    let status_bar_height: u16 = if chat_area.width >= 80 { 1 } else { 0 };
     let fixed_height = 1
         + queued_height
         + swarm_strip_height
@@ -3457,7 +3459,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         + inline_ui_gap_height
         + input_height
         + overscroll_height
-        + donut_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut
+        + donut_height
+        + status_bar_height; // status + queued + swarm strip + notification + inline UI + gap + input + overscroll + donut + status bar
     let available_height = chat_area.height;
     let stable_fixed_height = fixed_height;
     let overflows = |prepared: &PreparedChatFrame| {
@@ -3600,7 +3603,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
             && !side_panel_fullscreen
             && content_height.saturating_add(fixed_height) <= available_height);
 
-    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut
+    // Layout: messages (includes header), queued, status, notification, inline UI, gap, input, donut, status bar
     // All vertical chunks are within the chat_area (left column).
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3620,6 +3623,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),  // 7 Input
                 Constraint::Length(overscroll_height), // 8 Overscroll status line
                 Constraint::Length(donut_height),  // 9 Donut animation
+                Constraint::Length(status_bar_height), // 10 Compact status bar
             ]
         } else {
             vec![
@@ -3633,6 +3637,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 Constraint::Length(input_height),         // 7 Input
                 Constraint::Length(overscroll_height),    // 8 Overscroll status line
                 Constraint::Length(donut_height),         // 9 Donut animation
+                Constraint::Length(status_bar_height),    // 10 Compact status bar
             ]
         })
         .split(chat_area);
@@ -3931,6 +3936,10 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     if donut_height > 0 {
         animations::draw_idle_animation(frame, app, chunks[9]);
+    }
+    // Compact status bar: workspace, repo, agent stats
+    if status_bar_height > 0 {
+        status_bar::render_status_bar(frame, app, chunks[10]);
     }
     let chrome_elapsed = chrome_start.elapsed();
 
