@@ -83,6 +83,19 @@ pub(super) struct MemberRuntimeExtras {
     pub(super) todos_total: Option<usize>,
 }
 
+fn resolve_member_identity(
+    live_identity: Option<(Option<String>, Option<String>, Option<String>)>,
+    retained: &crate::protocol::SwarmMemberRuntime,
+) -> (Option<String>, Option<String>, Option<String>) {
+    live_identity.unwrap_or_else(|| {
+        (
+            retained.provider.clone(),
+            retained.model.clone(),
+            retained.effort.clone(),
+        )
+    })
+}
+
 /// Gather live runtime extras for a single member session.
 ///
 /// `member_is_running` is used as a fallback "processing" hint when no live
@@ -90,6 +103,7 @@ pub(super) struct MemberRuntimeExtras {
 pub(super) async fn member_runtime_extras(
     session_id: &str,
     member_is_running: bool,
+    retained_runtime: &crate::protocol::SwarmMemberRuntime,
     sessions: &SessionAgents,
     client_connections: &Arc<RwLock<HashMap<String, ClientConnectionInfo>>>,
 ) -> MemberRuntimeExtras {
@@ -98,25 +112,27 @@ pub(super) async fn member_runtime_extras(
         live_activity_snapshot(&connections, session_id, member_is_running)
     };
 
-    let (provider_name, provider_model, provider_effort) = {
+    let live_identity = {
         let agent_sessions = sessions.read().await;
         if let Some(agent) = agent_sessions.get(session_id) {
             // Never block on a busy agent: token churn and turns come from the
-            // lock-free metrics registry, so a missing provider name here just
-            // means the agent is mid-turn.
+            // lock-free metrics registry. The member's retained runtime
+            // snapshot supplies identity while the agent is mid-turn.
             if let Ok(agent) = agent.try_lock() {
-                (
+                Some((
                     Some(agent.provider_name()),
                     Some(agent.provider_model()),
                     agent.provider_reasoning_effort(),
-                )
+                ))
             } else {
-                (None, None, None)
+                None
             }
         } else {
-            (None, None, None)
+            None
         }
     };
+    let (provider_name, provider_model, provider_effort) =
+        resolve_member_identity(live_identity, retained_runtime);
 
     let metrics = crate::session_metrics::snapshot(
         session_id,
@@ -294,18 +310,26 @@ pub(super) async fn handle_comm_status(
             live_activity_snapshot(&connections, &target_session, member.status == "running")
         };
 
-        let (provider_name, provider_model) = {
+        let retained_runtime = member.runtime.clone();
+        let live_identity = {
             let agent_sessions = sessions.read().await;
             if let Some(agent) = agent_sessions.get(&target_session) {
                 if let Ok(agent) = agent.try_lock() {
-                    (Some(agent.provider_name()), Some(agent.provider_model()))
+                    Some((
+                        Some(agent.provider_name()),
+                        Some(agent.provider_model()),
+                        agent.provider_reasoning_effort(),
+                    ))
                 } else {
-                    (None, None)
+                    None
                 }
             } else {
-                (None, None)
+                None
             }
         };
+
+        let (provider_name, provider_model, _) =
+            resolve_member_identity(live_identity, &retained_runtime);
 
         AgentStatusSnapshot {
             session_id: member.session_id.clone(),
@@ -501,5 +525,45 @@ pub(super) async fn handle_comm_resync_plan(
             message: "Not in a swarm.".to_string(),
             retry_after_secs: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod member_identity_tests {
+    use super::resolve_member_identity;
+    use crate::protocol::SwarmMemberRuntime;
+
+    fn retained_identity() -> SwarmMemberRuntime {
+        SwarmMemberRuntime {
+            provider: Some("OpenCode Go".to_string()),
+            model: Some("deepseek-v4.1-flash".to_string()),
+            effort: Some("max".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn retained_runtime_supplies_identity_when_live_agent_is_busy_or_absent() {
+        let (provider, model, effort) = resolve_member_identity(None, &retained_identity());
+
+        assert_eq!(provider.as_deref(), Some("OpenCode Go"));
+        assert_eq!(model.as_deref(), Some("deepseek-v4.1-flash"));
+        assert_eq!(effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn live_agent_identity_wins_over_retained_runtime() {
+        let (provider, model, effort) = resolve_member_identity(
+            Some((
+                Some("OpenRouter".to_string()),
+                Some("new-model".to_string()),
+                Some("high".to_string()),
+            )),
+            &retained_identity(),
+        );
+
+        assert_eq!(provider.as_deref(), Some("OpenRouter"));
+        assert_eq!(model.as_deref(), Some("new-model"));
+        assert_eq!(effort.as_deref(), Some("high"));
     }
 }
