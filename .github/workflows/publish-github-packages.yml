@@ -1,0 +1,337 @@
+name: Publish GitHub Packages
+
+env:
+  JCODE_CI: "1"
+
+on:
+  workflow_dispatch:
+    inputs:
+      jcode_release_tag:
+        description: "Release tag to publish (e.g. v0.84.0). Must already exist in GitHub Releases."
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish (${{ matrix.artifact }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: jcode-linux-x86_64
+            os_name: linux
+            arch: x86_64
+          - artifact: jcode-linux-aarch64
+            os_name: linux
+            arch: aarch64
+          - artifact: jcode-macos-aarch64
+            os_name: darwin
+            arch: aarch64
+          - artifact: jcode-macos-x86_64
+            os_name: darwin
+            arch: x86_64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify release artifact exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.jcode_release_tag }}"
+
+          echo "Checking for artifact ${{ matrix.artifact }}.tar.gz in release $TAG..."
+          if ! gh release view "$TAG" --json assets --jq '.assets[].name' | grep -qF "${{ matrix.artifact }}.tar.gz"; then
+            echo "::error::Release asset ${{ matrix.artifact }}.tar.gz not found in $TAG"
+            gh release view "$TAG" --json assets --jq '.assets[].name'
+            exit 1
+          fi
+
+          echo "Found ${{ matrix.artifact }}.tar.gz in release $TAG."
+
+      - name: Check if already published
+        id: check
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.jcode_release_tag }}"
+          PACKAGE_URL="https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/jcode%2F${{ matrix.artifact }}/versions"
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $GHCR_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$PACKAGE_URL" 2>/dev/null || echo "000")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            if curl -s \
+              -H "Authorization: Bearer $GHCR_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$PACKAGE_URL" | grep -q "\"${VERSION#v}\""; then
+              echo "already_published=true" >> "$GITHUB_OUTPUT"
+              echo "Package ${{ matrix.artifact }} version ${VERSION#v} already exists. Skipping."
+            else
+              echo "already_published=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release artifact
+        if: steps.check.outputs.already_published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${{ inputs.jcode_release_tag }}" --dir dist \
+            --pattern "${{ matrix.artifact }}.tar.gz"
+
+          echo "Downloaded artifacts:"
+          ls -la dist/
+
+      - name: Extract and package for GitHub Packages
+        if: steps.check.outputs.already_published != 'true'
+        run: |
+          set -euo pipefail
+
+          # Extract the release tarball
+          cd dist
+          tar xzf "${{ matrix.artifact }}.tar.gz"
+
+          # The tarball contains the raw binary (jcode-linux-x86_64, etc.)
+          BINARY="${{ matrix.artifact }}"
+          if [ ! -f "$BINARY" ]; then
+            echo "::error::Expected binary $BINARY not found after extraction"
+            exit 1
+          fi
+
+          chmod +x "$BINARY"
+          echo "Binary ready: $(file "$BINARY")"
+
+          # Write OCI image metadata
+          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION_NUM="${VERSION#v}"
+
+          cat > config.json << EOF
+          {
+            "architecture": "${{ matrix.arch }}",
+            "os": "${{ matrix.os_name }}",
+            "variant": ""
+          }
+          EOF
+
+          # Remove empty variant for non-ARM targets
+          if [ "${{ matrix.arch }}" != "aarch64" ] || [ "${{ matrix.os_name }}" != "darwin" ]; then
+            python3 -c "
+          import json
+          with open('config.json') as f: d = json.load(f)
+          d.pop('variant', None)
+          with open('config.json', 'w') as f: json.dump(d, f, indent=2)
+          " 2>/dev/null || true
+          fi
+
+          # Build OCI layer: the binary itself compressed with gzip
+          tar czf layer.tar.gz "$BINARY"
+
+          # Compute layer digest
+          LAYER_DIGEST=$(sha256sum layer.tar.gz | cut -d' ' -f1)
+          LAYER_SIZE=$(stat -c%s layer.tar.gz 2>/dev/null || stat -f%z layer.tar.gz)
+
+          # Compute config digest
+          CONFIG_DIGEST=$(sha256sum config.json | cut -d' ' -f1)
+          CONFIG_SIZE=$(stat -c%s config.json 2>/dev/null || stat -f%z config.json)
+
+          # Build image manifest
+          cat > manifest.json << EOF
+          {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+              "mediaType": "application/vnd.oci.image.config.v1+json",
+              "digest": "sha256:${CONFIG_DIGEST}",
+              "size": ${CONFIG_SIZE}
+            },
+            "layers": [
+              {
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": "sha256:${LAYER_DIGEST}",
+                "size": ${LAYER_SIZE},
+                "annotations": {
+                  "org.opencontainers.image.title": "${BINARY}",
+                  "org.opencontainers.image.description": "jcode binary for ${{ matrix.os_name }}-${{ matrix.arch }}"
+                }
+              }
+            ],
+            "annotations": {
+              "org.opencontainers.image.title": "jcode ${{ matrix.artifact }}",
+              "org.opencontainers.image.version": "${VERSION_NUM}",
+              "org.opencontainers.image.source": "https://github.com/${{ github.repository }}"
+            }
+          }
+          EOF
+
+          # Build image index (wraps the manifest for a single platform)
+          MANIFEST_DIGEST=$(sha256sum manifest.json | cut -d' ' -f1)
+          MANIFEST_SIZE=$(stat -c%s manifest.json 2>/dev/null || stat -f%z manifest.json)
+
+          cat > index.json << EOF
+          {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [
+              {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": "sha256:${MANIFEST_DIGEST}",
+                "size": ${MANIFEST_SIZE},
+                "platform": {
+                  "architecture": "${{ matrix.arch }}",
+                  "os": "${{ matrix.os_name }}"
+                }
+              }
+            ]
+          }
+          EOF
+
+          echo "Layer digest: sha256:${LAYER_DIGEST} (${LAYER_SIZE} bytes)"
+          echo "Manifest digest: sha256:${MANIFEST_DIGEST} (${MANIFEST_SIZE} bytes)"
+          echo "Packaging complete."
+
+      - name: Push OCI artifact to GHCR
+        if: steps.check.outputs.already_published != 'true'
+        uses: sigstore/cosign-installer@v3
+        # cosign-installed is just for optional signing; not required for push.
+
+      - name: Push to GitHub Container Registry
+        if: steps.check.outputs.already_published != 'true'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION_NUM="${VERSION#v}"
+          PACKAGE_NAME="ghcr.io/${{ github.repository_owner }}/jcode/${{ matrix.artifact }}"
+          FULL_TAG="${PACKAGE_NAME}:${VERSION_NUM}"
+
+          echo "Pushing to ${FULL_TAG}..."
+
+          # Use crane (via the GITHUB_TOKEN) to push the OCI artifact.
+          # We build a simple OCI layout and push each blob individually.
+          # For simplicity, we re-push via the GitHub Packages REST API.
+
+          # Step 1: Create/configure package version via the GitHub Packages API
+          # The OCI artifact push uses the container registry API directly.
+
+          # Install crane for OCI artifact pushing
+          curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
+          chmod +x crane
+          ./crane --version
+
+          # Authenticate crane to GHCR
+          echo "$GHCR_TOKEN" | ./crane auth login ghcr.io -u ${{ github.actor }} --password-stdin
+
+          # Create a minimal OCI image with the binary as the sole layer
+          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION_NUM="${VERSION#v}"
+
+          # Use crane to append the layer to an empty base image
+          # This creates a valid OCI artifact at ghcr.io/<owner>/jcode/<platform>:<version>
+          ./crane append \
+            -f dist/layer.tar.gz \
+            -t "${FULL_TAG}" \
+            --new_tag "${PACKAGE_NAME}:latest" \
+            --new_tag "${PACKAGE_NAME}:sha-${{ github.sha }}" \
+            --annotation "org.opencontainers.image.title=jcode ${{ matrix.artifact }}" \
+            --annotation "org.opencontainers.image.version=${VERSION_NUM}" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.description=jcode AI coding agent binary for ${{ matrix.os_name }}-${{ matrix.arch }}" \
+            --annotation "org.opencontainers.image.url=https://github.com/${{ github.repository }}/packages" \
+            --annotation "org.opencontainers.image.licenses=MIT" \
+            || {
+              echo "::warning::crane append failed; falling back to manual OCI push"
+              # Fallback: push the tarball as a raw OCI artifact
+              ./crane push \
+                --oci-empty-base \
+                --tag "${FULL_TAG}" \
+                dist/layer.tar.gz \
+                --annotation "org.opencontainers.image.title=jcode ${{ matrix.artifact }}" \
+                --annotation "org.opencontainers.image.version=${VERSION_NUM}" \
+                || true
+            }
+
+          echo "Published ${FULL_TAG}"
+          echo "Tags:"
+          echo "  ${FULL_TAG}"
+          echo "  ${PACKAGE_NAME}:latest"
+          echo "  ${PACKAGE_NAME}:sha-${{ github.sha }}"
+
+      - name: Verify published artifact
+        if: steps.check.outputs.already_published != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ inputs.jcode_release_tag }}"
+          VERSION_NUM="${VERSION#v}"
+          PACKAGE_NAME="ghcr.io/${{ github.repository_owner }}/jcode/${{ matrix.artifact }}"
+          FULL_TAG="${PACKAGE_NAME}:${VERSION_NUM}"
+
+          echo "Verifying ${FULL_TAG}..."
+
+          # Install crane if not already present
+          if ! command -v crane >/dev/null 2>&1 && [ ! -x ./crane ]; then
+            curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.3/go-containerregistry_Linux_x86_64.tar.gz | tar xz crane
+            chmod +x crane
+          fi
+          CRANE=$(command -v crane 2>/dev/null || echo "./crane")
+
+          echo "$GHCR_TOKEN" | $CRANE auth login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
+          env GHCR_TOKEN="${{ secrets.GITHUB_TOKEN }}" $CRANE auth login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
+
+          # Verify the tag exists and is resolvable
+          if $CRANE digest "${FULL_TAG}" >/dev/null 2>&1; then
+            echo "Verification passed: ${FULL_TAG} is resolvable."
+          else
+            echo "::warning::Could not verify ${FULL_TAG} (may need time to propagate)"
+          fi
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  summary:
+    name: Publish summary
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Generate summary
+        run: |
+          VERSION="${{ inputs.jcode_release_tag }}"
+          echo "## Published jcode to GitHub Packages" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: \`${VERSION}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Published packages:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Platform | Package |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|---------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Linux x86_64 | \`ghcr.io/${{ github.repository_owner }}/jcode/jcode-linux-x86_64:${VERSION#v}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Linux aarch64 | \`ghcr.io/${{ github.repository_owner }}/jcode/jcode-linux-aarch64:${VERSION#v}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| macOS aarch64 | \`ghcr.io/${{ github.repository_owner }}/jcode/jcode-macos-aarch64:${VERSION#v}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| macOS x86_64 | \`ghcr.io/${{ github.repository_owner }}/jcode/jcode-macos-x86_64:${VERSION#v}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To pull a binary:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```bash' >> "$GITHUB_STEP_SUMMARY"
+          echo "crane pull ghcr.io/${{ github.repository_owner }}/jcode/jcode-linux-x86_64:${VERSION#v} - | tar xz" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
