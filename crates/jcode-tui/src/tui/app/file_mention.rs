@@ -1652,17 +1652,32 @@ pub(super) fn build_prompt_with_files(input: &str, file_chips: &[PathBuf], cwd: 
             continue;
         }
 
-        match std::fs::read_to_string(path) {
+        // Check the size from metadata *before* reading: a chip pointing at a
+        // huge file must not be fully loaded into memory just to be rejected.
+        let file_size = std::fs::metadata(path).map(|m| m.len()).ok();
+        if file_size.is_some_and(|size| size > MAX_FILE_SIZE as u64) {
+            let size = file_size.unwrap_or(0);
+            let preview = read_prefix_lines(path, 200).unwrap_or_default();
+            let block = if preview.trim().is_empty() {
+                format!("[file too large: {} bytes, showing first 200 lines]", size)
+            } else {
+                format!(
+                    "{}\n\n[... file too large: {} bytes, showing first 200 lines]",
+                    preview, size
+                )
+            };
+            file_blocks.push((rel_path, block));
+            continue;
+        }
+
+        match read_to_string_bounded(path, MAX_FILE_SIZE) {
             Ok(content) => {
                 let block = if content.len() <= MAX_FILE_SIZE {
                     content
                 } else {
-                    let line_count = content.lines().count();
-                    let preview: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
                     format!(
-                        "{}\n\n[... file too large: {} lines, {} bytes, showing first 200 lines]",
-                        preview,
-                        line_count,
+                        "{}\n\n[... file too large: {} bytes, showing first 200 lines]",
+                        content,
                         content.len(),
                     )
                 };
@@ -1692,6 +1707,43 @@ pub(super) fn build_prompt_with_files(input: &str, file_chips: &[PathBuf], cwd: 
     }
 
     format!("{}{}", input, context)
+}
+
+/// Read at most `limit` bytes of a file as a (possibly lossy) string.
+///
+/// Metadata can race with concurrent writes, so a file that grew past the
+/// limit between the stat and the read is still capped here instead of
+/// ballooning memory.
+fn read_to_string_bounded(path: &Path, limit: usize) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = Vec::with_capacity(limit.min(64 * 1024));
+    (&mut file).take(limit as u64).read_to_end(&mut buf)?;
+    // Same validation as read_to_string, without loading the whole file.
+    match String::from_utf8(buf) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let valid_up_to = e.utf8_error().valid_up_to();
+            if valid_up_to > 0 {
+                // Invalid bytes only affect the tail (e.g. the cut landed
+                // mid-character at the limit): keep the valid prefix.
+                let bytes = e.into_bytes();
+                let s = String::from_utf8_lossy(&bytes[..valid_up_to]).into_owned();
+                Ok(s)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ))
+            }
+        }
+    }
+}
+
+/// Read the first `max_lines` lines of a file (bounded by MAX_FILE_SIZE).
+fn read_prefix_lines(path: &Path, max_lines: usize) -> std::io::Result<String> {
+    let content = read_to_string_bounded(path, MAX_FILE_SIZE)?;
+    Ok(content.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -2038,6 +2090,55 @@ mod tests {
         assert!(prompt.contains("Question"));
         assert!(prompt.contains("--- context.md ---"));
         assert!(prompt.contains("hello from workspace"));
+    }
+
+    /// An oversized file is truncated without ever loading it fully into
+    /// memory: size comes from metadata and the preview from a bounded read.
+    #[test]
+    fn build_prompt_with_files_truncates_oversized_file_without_full_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path();
+        let big = cwd.join("big.log");
+        // 200 distinct lines plus padding past the 100 KB limit.
+        let line = "x".repeat(600);
+        let mut content = String::new();
+        for i in 0..200 {
+            content.push_str(&format!("{:04} {}\n", i, line));
+        }
+        content.push_str(&"pad ".repeat(40000));
+        std::fs::write(&big, content).unwrap();
+        assert!(std::fs::metadata(&big).unwrap().len() > MAX_FILE_SIZE as u64);
+
+        let prompt = build_prompt_with_files("Q", &[PathBuf::from("big.log")], cwd);
+
+        assert!(prompt.contains("[... file too large:"), "must be marked truncated");
+        assert!(
+            prompt.contains("0000 "),
+            "the preview must contain the first lines of the file"
+        );
+        assert!(
+            !prompt.contains("pad pad pad"),
+            "the tail padding must not be read into the prompt"
+        );
+        assert!(
+            prompt.matches("1999 ").count() <= 1,
+            "preview is capped at 200 lines"
+        );
+    }
+
+    /// The bounded reader caps reads at the limit even when the file grows
+    /// between the metadata check and the read.
+    #[test]
+    fn read_to_string_bounded_caps_at_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path().join("bounded.txt");
+        std::fs::write(&p, "abcdef").unwrap();
+
+        let full = read_to_string_bounded(&p, 100).unwrap();
+        assert_eq!(full, "abcdef");
+
+        let capped = read_to_string_bounded(&p, 3).unwrap();
+        assert_eq!(capped, "abc", "read must stop at the byte limit");
     }
 
     // -- load_gitignore ------------------------------------------------------
