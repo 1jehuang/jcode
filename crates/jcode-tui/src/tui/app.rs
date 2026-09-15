@@ -92,11 +92,12 @@ mod replay;
 pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
+mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
-pub(crate) use state_ui_input_helpers::registered_command_entries;
+pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
@@ -119,6 +120,10 @@ pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
 pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
     self::input::extract_input_shell_command(input)
+}
+
+pub(crate) fn has_safe_slash_command_token(input: &str) -> bool {
+    self::slash_command_parser::active_token_before_cursor(input, input.len()).is_some()
 }
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
