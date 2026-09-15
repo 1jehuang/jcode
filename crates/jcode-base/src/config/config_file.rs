@@ -31,7 +31,7 @@ impl Config {
     /// Saving those defaults would destroy the user's existing config. It also
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
-    fn load_for_update() -> anyhow::Result<Self> {
+    pub(crate) fn load_for_update() -> anyhow::Result<Self> {
         Ok(Self::load_from_file_strict()?.unwrap_or_default())
     }
 
@@ -245,6 +245,20 @@ impl Config {
             show
         ));
         Ok(())
+    }
+
+    /// Read-modify-write the config file.
+    ///
+    /// Reloads before patching so a concurrent edit by another jcode session is
+    /// not clobbered, and so a config that cannot be parsed is reported instead
+    /// of being replaced by in-memory defaults. Those defaults would erase every
+    /// setting the file holds, not just the one being changed. Returns whatever
+    /// `mutate` returns.
+    pub fn update<R>(mutate: impl FnOnce(&mut Self) -> R) -> anyhow::Result<R> {
+        let mut cfg = Self::load_for_update()?;
+        let out = mutate(&mut cfg);
+        cfg.save()?;
+        Ok(out)
     }
 
     /// Persist the baked global launch-hotkey mapping.

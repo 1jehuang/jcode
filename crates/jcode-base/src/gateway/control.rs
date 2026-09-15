@@ -209,7 +209,9 @@ pub enum ToggleOutcome {
 /// bound at server startup and a no-op change should not tell the user to
 /// restart for nothing.
 pub fn set_gateway_enabled(enabled: bool) -> Result<ToggleOutcome> {
-    let mut config = crate::config::Config::load();
+    // Strict load: a malformed config must surface an error rather than being
+    // saved back as in-memory defaults, which would erase every user setting.
+    let mut config = crate::config::Config::load_for_update()?;
     if config.gateway.enabled == enabled {
         return Ok(ToggleOutcome::Unchanged { enabled });
     }
@@ -504,6 +506,29 @@ mod tests {
         assert_eq!(
             reloaded.compaction.lookahead_turns, 9,
             "unrelated config must survive the rewrite: {written}"
+        );
+    }
+
+    /// A malformed config must never be replaced by in-memory defaults.
+    ///
+    /// This is the sharper half of the risk above: when the file cannot be
+    /// parsed, the lenient loader hands back defaults, and saving those would
+    /// erase every setting the user has - silently, because the write succeeds.
+    /// Toggling an unrelated setting must fail loudly and leave the bytes alone.
+    #[test]
+    fn enabling_the_gateway_leaves_a_malformed_config_untouched() {
+        let _lock = lock_env();
+        let broken = "[gateway\nenabled = false\n";
+        let home = HomeGuard::new(broken);
+
+        assert!(
+            set_gateway_enabled(true).is_err(),
+            "a config that cannot be parsed must not be silently rewritten"
+        );
+        assert_eq!(
+            home.config_text(),
+            broken,
+            "the unparseable config must survive byte-for-byte"
         );
     }
 

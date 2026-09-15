@@ -88,19 +88,19 @@ pub(super) fn save_agent_model_override(
     target: AgentModelTarget,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut cfg = crate::config::Config::load();
     let value = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    match target {
+    // Reload-then-patch: a config that cannot be parsed must be reported rather
+    // than replaced by in-memory defaults, which would drop every other setting.
+    crate::config::Config::update(|cfg| match target {
         AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
         AgentModelTarget::Review => cfg.autoreview.model = value,
         AgentModelTarget::Judge => cfg.autojudge.model = value,
         AgentModelTarget::Memory => cfg.agents.memory_model = value,
         AgentModelTarget::Ambient => cfg.ambient.model = value,
-    }
-    cfg.save()
+    })
 }
 
 pub(super) fn model_entry_base_name(entry: &PickerEntry) -> String {
@@ -299,6 +299,42 @@ mod tests {
             detail: String::new(),
             estimated_reference_cost_micros: None,
         }
+    }
+
+    /// A malformed config must survive an agent-model override.
+    ///
+    /// The override reloads before patching, so a config we cannot parse has to
+    /// be reported rather than replaced by in-memory defaults - that write would
+    /// drop every setting in the file, not just the model being changed.
+    #[test]
+    fn a_malformed_config_is_not_overwritten_by_an_agent_model_override() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        let broken = "[agents\nswarm_model = \"x\"\n";
+        std::fs::write(&path, broken).expect("write config");
+
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        crate::config::Config::invalidate_cache();
+
+        let result = save_agent_model_override(AgentModelTarget::Swarm, Some("gpt-5.5"));
+
+        let written = std::fs::read_to_string(&path).expect("read config");
+
+        match &previous {
+            Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        crate::config::Config::invalidate_cache();
+
+        assert!(
+            result.is_err(),
+            "a config that cannot be parsed must not be silently rewritten"
+        );
+        assert_eq!(
+            written, broken,
+            "the unparseable config must survive byte-for-byte"
+        );
     }
 
     #[test]
