@@ -1745,3 +1745,58 @@ fn anthropic_cache_preference_persists_and_preserves_other_settings() {
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
 }
+
+/// The example in `docs/MODEL_PRICING.md` is meant to be copied, so keep it
+/// executable: the block has to parse as a config (an invalid one makes jcode
+/// ignore the whole file) and price the call at the rates the document states.
+#[test]
+fn documented_pricing_example_prices_as_documented() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/MODEL_PRICING.md"
+    ))
+    .expect("docs/MODEL_PRICING.md should exist");
+    let example = doc
+        .split("```toml")
+        .nth(1)
+        .and_then(|rest| rest.split("```").next())
+        .expect("the quick-start TOML block");
+
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    std::fs::write(dir.path().join("config.toml"), example).expect("write documented config");
+    crate::config::invalidate_config_cache();
+
+    // A malformed example reverts every setting, so this is the first thing the
+    // document has to get right.
+    Config::load_strict().expect("the documented example must parse");
+
+    let instant = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // 2030-06-22T02:00:00Z (Saturday) and 2030-06-24T02:00:00Z (Monday, inside
+    // the documented 01:00-04:00 UTC weekday peak window).
+    let off_peak =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-flash", instant(1_908_324_000))
+            .expect("the documented example prices an off-peak flash call");
+    let peak =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-flash", instant(1_908_496_800))
+            .expect("the documented example prices a peak flash call");
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    // 25k input at CNY 1.0/Mtok plus 5k output at CNY 4.0/Mtok.
+    assert_eq!(
+        off_peak.currency.as_str(),
+        "CNY",
+        "the card is denominated in CNY"
+    );
+    assert!(
+        (off_peak.amount - 0.045).abs() < 1e-9,
+        "off-peak should be CNY 0.045 per reference request, got {off_peak:?}"
+    );
+    assert!(
+        (peak.amount - 0.09).abs() < 1e-9,
+        "the documented peak multiplier doubles it, got {peak:?}"
+    );
+}
