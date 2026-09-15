@@ -1900,7 +1900,10 @@ mod tests {
             Some(("see src/main.rs".to_string(), 4 + "src/main.rs".len()))
         );
         // Inactive mention (user typed past the token): nothing to accept.
-        assert_eq!(accept_completion("see @main.rs please", "src/main.rs"), None);
+        assert_eq!(
+            accept_completion("see @main.rs please", "src/main.rs"),
+            None
+        );
     }
 
     #[test]

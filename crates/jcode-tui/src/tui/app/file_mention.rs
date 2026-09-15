@@ -254,14 +254,12 @@ pub(super) struct Frecency {
 
 impl Frecency {
     pub fn new(cwd: &Path) -> Self {
-        let file = if cfg!(test)
+        // Under cargo test (without an explicit state dir) persistence is
+        // disabled so parallel tests never share or clobber a real log.
+        let persist = !(cfg!(test)
             && std::env::var_os("JCODE_HOME").is_none()
-            && std::env::var_os("JCODE_RUNTIME_DIR").is_none()
-        {
-            None
-        } else {
-            Some(crate::storage::durable_state_dir().join("file_frecency.jsonl"))
-        };
+            && std::env::var_os("JCODE_RUNTIME_DIR").is_none());
+        let file = persist.then(|| Self::state_file(cwd)).flatten();
         let mut frecency = Self {
             data: HashMap::new(),
             file,
@@ -269,6 +267,25 @@ impl Frecency {
         };
         frecency.load();
         frecency
+    }
+
+    /// Per-project frecency log: `state_dir/file_frecency/<hash>/file_frecency.jsonl`.
+    ///
+    /// Ranking signals from one repository are noise in another (identical
+    /// relative paths like `src/main.rs` exist everywhere), so the store is
+    /// keyed by the project working dir.
+    fn state_file(cwd: &Path) -> Option<PathBuf> {
+        let dir = crate::storage::durable_state_dir();
+        // Stable, filesystem-safe project key (first 16 hex chars of
+        // the SHA-256 of the cwd string).
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(cwd.to_string_lossy().as_bytes());
+        let key: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+        Some(
+            dir.join("file_frecency")
+                .join(key)
+                .join("file_frecency.jsonl"),
+        )
     }
 
     /// Current unix timestamp in seconds.
@@ -1355,6 +1372,8 @@ impl FileMentionCache {
                 .unwrap_or(".")
                 .to_string();
             self.history = SearchHistory::new();
+            // Frecency is keyed per project: switch to the new project's log.
+            self.frecency = Frecency::new(cwd);
         }
 
         for manager in &self.managers {
@@ -1743,7 +1762,11 @@ fn read_to_string_bounded(path: &Path, limit: usize) -> std::io::Result<String> 
 /// Read the first `max_lines` lines of a file (bounded by MAX_FILE_SIZE).
 fn read_prefix_lines(path: &Path, max_lines: usize) -> std::io::Result<String> {
     let content = read_to_string_bounded(path, MAX_FILE_SIZE)?;
-    Ok(content.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
+    Ok(content
+        .lines()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1842,6 +1865,26 @@ mod tests {
 
         assert!(loaded.score("src/main.rs") >= 2.0);
         assert_eq!(loaded.recent_paths(), vec!["src/main.rs".to_string()]);
+    }
+
+    /// Frecency state must be keyed per project: two different cwds map to
+    /// two different log files, so one project's ranking cannot leak into
+    /// another (identical relative paths like `src/main.rs` are common).
+    #[test]
+    fn frecency_state_file_is_keyed_by_cwd() {
+        let a = Frecency::state_file(Path::new("/repo/alpha"))
+            .expect("state file must resolve outside cfg(test) helper dirs");
+        let b = Frecency::state_file(Path::new("/repo/beta"))
+            .expect("state file must resolve outside cfg(test) helper dirs");
+        let a2 = Frecency::state_file(Path::new("/repo/alpha"))
+            .expect("state file must resolve outside cfg(test) helper dirs");
+        assert_ne!(a, b, "different projects must use different log files");
+        assert_eq!(a, a2, "the same project must map to a stable path");
+        assert!(
+            a.to_string_lossy().contains("file_frecency"),
+            "logs live under a file_frecency subdir: {}",
+            a.display()
+        );
     }
 
     // -- match_entry ---------------------------------------------------------
@@ -2111,7 +2154,10 @@ mod tests {
 
         let prompt = build_prompt_with_files("Q", &[PathBuf::from("big.log")], cwd);
 
-        assert!(prompt.contains("[... file too large:"), "must be marked truncated");
+        assert!(
+            prompt.contains("[... file too large:"),
+            "must be marked truncated"
+        );
         assert!(
             prompt.contains("0000 "),
             "the preview must contain the first lines of the file"
