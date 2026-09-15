@@ -879,6 +879,13 @@ impl App {
                     bus_event = bus_receiver.recv() => {
                         needs_redraw |= local::handle_bus_event(&mut self, bus_event);
                     }
+                    // Handle elicitation requests from tool-core (agent → user)
+                    elicit_msg = self.elicit_rx.recv() => {
+                        if let Some(msg) = elicit_msg {
+                            self.handle_elicit_msg(msg);
+                            needs_redraw = true;
+                        }
+                    }
                 }
             }
         }
@@ -1271,6 +1278,13 @@ impl App {
                             Err(_) => super::wake_stats::note("bus:lagged"),
                         }
                         needs_redraw |= remote::handle_bus_event(&mut self, &mut remote_conn, bus_event).await;
+                    }
+                    // Handle elicitation requests from tool-core (agent → user)
+                    elicit_msg = self.elicit_rx.recv() => {
+                        if let Some(msg) = elicit_msg {
+                            self.handle_elicit_msg(msg);
+                            needs_redraw = true;
+                        }
                     }
                 }
             }

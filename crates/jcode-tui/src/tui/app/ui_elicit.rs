@@ -6,11 +6,116 @@
 
 use super::App;
 use crate::tui::elicitation_types::{
-    ElicitAction, ElicitOverlayState, ElicitResponse, FieldSpec,
+    ButtonSpec, ChoiceOption, DateTimeKind, ElicitAction, ElicitOverlayState, ElicitRequest,
+    ElicitResponse, FieldSpec, NotesSpec, Urgency,
 };
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
 impl App {
+    /// Handle an incoming elicitation message from the tool-core global channel.
+    ///
+    /// Converts tool-core types to TUI types, sets up a bridge oneshot channel,
+    /// and activates the modal overlay.
+    pub(super) fn handle_elicit_msg(&mut self, msg: jcode_tool_core::ElicitMessage) {
+        let jcode_tool_core::ElicitMessage {
+            request: tc_req,
+            response_tx: tc_tx,
+        } = msg;
+
+        // Convert field spec from JSON to typed enum
+        let field = parse_field_spec(&tc_req.field);
+
+        // Convert notes
+        let notes = tc_req.notes.as_ref().and_then(parse_notes_spec);
+
+        // Convert buttons
+        let buttons = tc_req.buttons.as_ref().and_then(parse_button_spec);
+
+        // Convert urgency
+        let urgency = parse_urgency(&tc_req.urgency);
+
+        let tui_request = ElicitRequest {
+            title: tc_req.title,
+            field,
+            intent: tc_req.intent,
+            question: tc_req.question,
+            notes,
+            buttons,
+            request_id: tc_req.request_id,
+            timeout_secs: tc_req.timeout_secs,
+            urgency,
+        };
+
+        // Create a bridge: TUI sends ElicitResponse via bridge_tx, a spawned
+        // task converts it to tool-core ElicitResponse and forwards to tc_tx.
+        let (bridge_tx, bridge_rx) = tokio::sync::oneshot::channel::<ElicitResponse>();
+        tokio::spawn(async move {
+            match bridge_rx.await {
+                Ok(tui_resp) => {
+                    let action_str = match tui_resp.action {
+                        ElicitAction::Confirm => "confirm".to_string(),
+                        ElicitAction::Cancel => "cancel".to_string(),
+                    };
+                    let tc_resp = jcode_tool_core::ElicitResponse {
+                        action: action_str,
+                        value: tui_resp.value,
+                        notes: tui_resp.notes,
+                    };
+                    let _ = tc_tx.send(tc_resp);
+                }
+                Err(_) => {
+                    // Bridge dropped (overlay dismissed without response).
+                    let _ = tc_tx.send(jcode_tool_core::ElicitResponse {
+                        action: "cancel".to_string(),
+                        value: None,
+                        notes: None,
+                    });
+                }
+            }
+        });
+
+        // Initialize text_buffer with default value if present
+        let text_buffer = match &tui_request.field {
+            FieldSpec::Text {
+                default: Some(d), ..
+            }
+            | FieldSpec::LongText {
+                default: Some(d), ..
+            }
+            | FieldSpec::DateTime {
+                default: Some(d), ..
+            } => d.clone(),
+            FieldSpec::Boolean {
+                default: Some(true),
+                ..
+            } => "Y".to_string(),
+            FieldSpec::Boolean {
+                default: Some(false),
+                ..
+            } => "N".to_string(),
+            FieldSpec::Integer {
+                default: Some(d), ..
+            } => d.to_string(),
+            _ => String::new(),
+        };
+
+        let selected = match &tui_request.field {
+            FieldSpec::Choice {
+                default_index: Some(idx),
+                options,
+                ..
+            } => (*idx).min(options.len().saturating_sub(1)),
+            _ => 0,
+        };
+
+        self.elicit_overlay = Some(ElicitOverlayState {
+            request: tui_request,
+            cursor: 0,
+            selected,
+            text_buffer,
+            response_tx: Some(bridge_tx),
+        });
+    }
     /// Handle a key press while the elicitation overlay is active.
     ///
     /// All keys are consumed; nothing falls through to the normal input path.
@@ -235,5 +340,136 @@ impl App {
                 let _ = tx.send(response);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse helpers: tool-core JSON values → TUI typed structs
+// ---------------------------------------------------------------------------
+
+fn parse_field_spec(v: &serde_json::Value) -> FieldSpec {
+    let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("text");
+    let label = v
+        .get("label")
+        .and_then(|l| l.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    match kind {
+        "text" => FieldSpec::Text {
+            label,
+            default: v.get("default").and_then(|d| d.as_str()).map(String::from),
+            placeholder: v.get("placeholder").and_then(|p| p.as_str()).map(String::from),
+            max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+            secret: v.get("secret").and_then(|s| s.as_bool()).unwrap_or(false),
+        },
+        "long_text" => FieldSpec::LongText {
+            label,
+            default: v.get("default").and_then(|d| d.as_str()).map(String::from),
+            max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+        },
+        "integer" => FieldSpec::Integer {
+            label,
+            default: v.get("default").and_then(|d| d.as_i64()),
+            min: v.get("min").and_then(|m| m.as_i64()),
+            max: v.get("max").and_then(|m| m.as_i64()),
+        },
+        "choice" => {
+            let options = v
+                .get("options")
+                .and_then(|o| o.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|opt| ChoiceOption {
+                            label: opt
+                                .get("label")
+                                .and_then(|l| l.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            value: opt
+                                .get("value")
+                                .and_then(|val| val.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            description: opt
+                                .get("description")
+                                .and_then(|d| d.as_str())
+                                .map(String::from),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            FieldSpec::Choice {
+                label,
+                options,
+                default_index: v.get("default_index").and_then(|i| i.as_u64()).map(|n| n as usize),
+            }
+        }
+        "boolean" => FieldSpec::Boolean {
+            label,
+            default: v.get("default").and_then(|d| d.as_bool()),
+        },
+        "date_time" => FieldSpec::DateTime {
+            label,
+            default: v.get("default").and_then(|d| d.as_str()).map(String::from),
+            picker_kind: match v
+                .get("picker_kind")
+                .and_then(|p| p.as_str())
+                .unwrap_or("datetime")
+            {
+                "date" => DateTimeKind::Date,
+                "time" => DateTimeKind::Time,
+                _ => DateTimeKind::DateTime,
+            },
+        },
+        // Fallback: treat unknown kinds as text
+        _ => FieldSpec::Text {
+            label,
+            default: None,
+            placeholder: None,
+            max_length: None,
+            secret: false,
+        },
+    }
+}
+
+fn parse_notes_spec(v: &serde_json::Value) -> Option<NotesSpec> {
+    Some(NotesSpec {
+        label: v
+            .get("label")
+            .and_then(|l| l.as_str())
+            .unwrap_or("Notes")
+            .to_string(),
+        default: v.get("default").and_then(|d| d.as_str()).map(String::from),
+        max_length: v.get("max_length").and_then(|m| m.as_u64()).map(|n| n as u32),
+        required: v.get("required").and_then(|r| r.as_bool()).unwrap_or(false),
+    })
+}
+
+fn parse_button_spec(v: &serde_json::Value) -> Option<ButtonSpec> {
+    Some(ButtonSpec {
+        confirm: v
+            .get("confirm")
+            .and_then(|c| c.as_str())
+            .unwrap_or("OK")
+            .to_string(),
+        cancel: v
+            .get("cancel")
+            .and_then(|c| c.as_str())
+            .unwrap_or("Cancel")
+            .to_string(),
+        default_is_cancel: v
+            .get("default_is_cancel")
+            .and_then(|d| d.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+fn parse_urgency(s: &str) -> Urgency {
+    match s {
+        "warning" => Urgency::Warning,
+        "error" => Urgency::Error,
+        "secret" => Urgency::Secret,
+        _ => Urgency::Info,
     }
 }

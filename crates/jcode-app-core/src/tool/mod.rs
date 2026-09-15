@@ -22,6 +22,7 @@ mod discover;
 mod discover_secrets;
 mod edit;
 mod edit_stats;
+mod elicitation;
 mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
@@ -534,6 +535,12 @@ impl Registry {
                 &mut timings,
                 "maintainer_feedback",
                 feedback::MaintainerFeedbackTool::new,
+            );
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "elicitate_mcp",
+                elicitation::ElicitateMcpTool::new,
             );
             Self::insert_tool_timed(
                 &mut m,
