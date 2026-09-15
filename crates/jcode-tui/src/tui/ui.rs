@@ -81,6 +81,9 @@ mod onboarding;
 mod output_style;
 #[path = "ui_overlays.rs"]
 mod overlays;
+
+#[path = "ui_elicitation.rs"]
+mod elicit_overlay;
 #[path = "ui_panel_image_preview.rs"]
 pub(crate) mod panel_image_preview;
 #[path = "ui_pinned.rs"]
@@ -3092,6 +3095,18 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     if let Some(picker_cell) = app.account_picker_overlay() {
         let mut picker = picker_cell.borrow_mut();
         picker.render(frame);
+        finalize_frame_metrics(
+            app,
+            total_start,
+            Duration::ZERO,
+            total_start.elapsed(),
+            None,
+        );
+        return;
+    }
+
+    if let Some(ref elicit_state) = app.elicit_overlay() {
+        elicit_overlay::draw_elicit_overlay(frame, area, elicit_state);
         finalize_frame_metrics(
             app,
             total_start,

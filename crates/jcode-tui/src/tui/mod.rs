@@ -1223,6 +1223,10 @@ pub trait TuiState {
     fn account_picker_overlay(&self) -> Option<&std::cell::RefCell<account_picker::AccountPicker>>;
     /// Usage overlay for /usage command
     fn usage_overlay(&self) -> Option<&std::cell::RefCell<usage_overlay::UsageOverlay>>;
+    /// Elicitation overlay for structured agent-to-user input
+    fn elicit_overlay(&self) -> Option<&elicitation_types::ElicitOverlayState> {
+        None
+    }
     /// Working directory for this session
     // ---- Misc ----
     fn working_dir(&self) -> Option<String>;

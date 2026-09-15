@@ -2338,6 +2338,10 @@ impl crate::tui::TuiState for App {
         self.usage_overlay.as_ref()
     }
 
+    fn elicit_overlay(&self) -> Option<&crate::tui::elicitation_types::ElicitOverlayState> {
+        self.elicit_overlay.as_ref()
+    }
+
     fn working_dir(&self) -> Option<String> {
         self.session.working_dir.clone()
     }
