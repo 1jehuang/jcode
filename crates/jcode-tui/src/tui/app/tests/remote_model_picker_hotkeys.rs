@@ -16,6 +16,7 @@ fn remote_model_picker_preview_state() -> crate::tui::InlineInteractiveState {
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Model,
             selected_option: 0,
@@ -47,12 +48,8 @@ fn test_remote_model_picker_preview_ctrl_n_toggles_favorite() {
         app.is_remote = true;
         app.inline_interactive_state = Some(remote_model_picker_preview_state());
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .expect("Ctrl+N should be handled in the remote path");
+        rt.block_on(app.handle_remote_key(KeyCode::Char('n'), KeyModifiers::CONTROL, &mut remote))
+            .expect("Ctrl+N should be handled in the remote path");
 
         let picker = app
             .inline_interactive_state
@@ -72,12 +69,8 @@ fn test_remote_model_picker_preview_ctrl_n_toggles_favorite() {
 
         // Toggling again must unfavorite, proving the chord is consumed by the
         // picker on every press instead of falling through once.
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('n'),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .expect("second Ctrl+N should be handled in the remote path");
+        rt.block_on(app.handle_remote_key(KeyCode::Char('n'), KeyModifiers::CONTROL, &mut remote))
+            .expect("second Ctrl+N should be handled in the remote path");
         let picker = app
             .inline_interactive_state
             .as_ref()
@@ -97,12 +90,8 @@ fn test_remote_model_picker_preview_ctrl_o_sets_default() {
         app.is_remote = true;
         app.inline_interactive_state = Some(remote_model_picker_preview_state());
 
-        rt.block_on(app.handle_remote_key(
-            KeyCode::Char('o'),
-            KeyModifiers::CONTROL,
-            &mut remote,
-        ))
-        .expect("Ctrl+O should be handled in the remote path");
+        rt.block_on(app.handle_remote_key(KeyCode::Char('o'), KeyModifiers::CONTROL, &mut remote))
+            .expect("Ctrl+O should be handled in the remote path");
 
         let picker = app
             .inline_interactive_state

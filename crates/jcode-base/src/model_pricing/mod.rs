@@ -49,9 +49,13 @@ pub(crate) use catalog::{clear_memory_cache_for_tests, save_test_cache};
 #[cfg(test)]
 #[path = "call_rates_tests.rs"]
 mod call_rates_tests;
+#[cfg(test)]
+#[path = "comparable_cost_tests.rs"]
+mod comparable_cost_tests;
 
 use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, Currency, Money,
+    RouteCheapnessEstimate,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -227,6 +231,31 @@ pub fn effective_cost(provider: &str, model: &str, at: SystemTime) -> Option<Mon
         + output * CHEAPNESS_REFERENCE_OUTPUT_TOKENS as f64)
         / 1_000_000.0;
     Some(Money::new(amount, currency))
+}
+
+/// [`RouteCheapnessEstimate::estimated_reference_cost_micros`] expressed in the
+/// FX base currency, so routes priced in different currencies can be ordered.
+///
+/// The raw estimate is only meaningful inside one currency: 7 CNY/Mtok is
+/// cheaper than 2 USD/Mtok at any plausible rate, yet the raw numbers order them
+/// the other way round. That is not hypothetical - a hand-written
+/// `[pricing.providers]` card stamps its own currency onto the estimate (see
+/// `config_price_estimate`), so a CNY card and a USD catalog sit side by side in
+/// the model picker.
+///
+/// The rate table is the live `[pricing].fx_rates`, and `None` means it cannot
+/// convert this estimate's currency: a caller must then keep the route out of
+/// cross-currency ordering instead of comparing unlike units.
+pub fn comparable_reference_cost_micros(estimate: &RouteCheapnessEstimate) -> Option<u64> {
+    let micros = estimate.estimated_reference_cost_micros?;
+    let fx = FxTable::from_config(&pricing_config());
+    if estimate.currency == fx.base {
+        return Some(micros);
+    }
+    let amount = Money::new(micros as f64 / 1_000_000.0, estimate.currency.clone());
+    let converted = convert(&amount, &fx.base, &fx)?;
+    let micros = (converted.amount * 1_000_000.0).round();
+    (micros.is_finite() && micros >= 0.0 && micros <= u64::MAX as f64).then_some(micros as u64)
 }
 
 /// Spawn one background refresh at a time. Safe to call from sync contexts;
