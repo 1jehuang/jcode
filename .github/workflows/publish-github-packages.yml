@@ -67,15 +67,15 @@ jobs:
           VERSION="${{ inputs.jcode_release_tag }}"
           PACKAGE_URL="https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/jcode%2F${{ matrix.artifact }}/versions"
           HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $GHCR_TOKEN" \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "$PACKAGE_URL" 2>/dev/null || echo "000")
+            "${PACKAGE_URL}" 2>/dev/null || echo "000")
 
           if [ "$HTTP_CODE" = "200" ]; then
             if curl -s \
-              -H "Authorization: Bearer $GHCR_TOKEN" \
+              -H "Authorization: Bearer ${GHCR_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              "$PACKAGE_URL" | grep -q "\"${VERSION#v}\""; then
+              "${PACKAGE_URL}" | grep -q "\"${VERSION#v}\""; then
               echo "already_published=true" >> "$GITHUB_OUTPUT"
               echo "Package ${{ matrix.artifact }} version ${VERSION#v} already exists. Skipping."
             else
@@ -109,7 +109,7 @@ jobs:
 
           # The tarball contains the raw binary (jcode-linux-x86_64, etc.)
           BINARY="${{ matrix.artifact }}"
-          if [ ! -f "$BINARY" ]; then
+          if [ ! -f "${BINARY}" ]; then
             echo "::error::Expected binary $BINARY not found after extraction"
             exit 1
           fi
@@ -313,7 +313,6 @@ jobs:
     needs: publish
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Generate summary
         run: |
