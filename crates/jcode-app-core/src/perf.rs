@@ -906,20 +906,17 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_detect_fragile_glyph_cache_targets_macos_terminals() {
+        let _env_lock = crate::storage::lock_test_env();
         // Env override must not leak between cases.
         let prev = std::env::var("JCODE_GLYPH_SAFE_MODE").ok();
-        unsafe {
-            std::env::remove_var("JCODE_GLYPH_SAFE_MODE");
-        }
+        crate::env::remove_var("JCODE_GLYPH_SAFE_MODE");
         assert!(detect_fragile_glyph_cache("vscode"));
         assert!(detect_fragile_glyph_cache("apple_terminal"));
         assert!(!detect_fragile_glyph_cache("ghostty"));
         assert!(!detect_fragile_glyph_cache("iterm.app"));
         assert!(!detect_fragile_glyph_cache("kitty"));
         if let Some(prev) = prev {
-            unsafe {
-                std::env::set_var("JCODE_GLYPH_SAFE_MODE", prev);
-            }
+            crate::env::set_var("JCODE_GLYPH_SAFE_MODE", prev);
         }
     }
 }
