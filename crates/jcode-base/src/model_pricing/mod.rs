@@ -233,6 +233,20 @@ pub fn effective_cost(provider: &str, model: &str, at: SystemTime) -> Option<Mon
     Some(Money::new(amount, currency))
 }
 
+/// The `[pricing]` tariff in effect for `(provider, model)` at `at`.
+///
+/// Provenance for a caller that has to *explain* a price rather than compute
+/// one: the name is the `tariffs.<name>` key that the hand-written card's
+/// schedule (or its `default_tariff`) selected. `None` means no hand-written rule
+/// prices this model at `at`, or the card applies its own `cost` with no tariff
+/// in force - the two cases a cost view should not have to guess between.
+pub fn selected_config_tariff(provider: &str, model: &str, at: SystemTime) -> Option<String> {
+    let sources::ConfigPrice::Hit { entry, .. } = sources::config_price(provider, model, at) else {
+        return None;
+    };
+    rules::resolve_tier(&entry, at)?.tariff
+}
+
 /// [`RouteCheapnessEstimate::estimated_reference_cost_micros`] expressed in the
 /// FX base currency, so routes priced in different currencies can be ordered.
 ///
