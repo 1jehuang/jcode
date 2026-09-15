@@ -1728,32 +1728,41 @@ pub(super) fn build_prompt_with_files(input: &str, file_chips: &[PathBuf], cwd: 
     format!("{}{}", input, context)
 }
 
-/// Read at most `limit` bytes of a file as a (possibly lossy) string.
+/// Read at most `limit` bytes of a file as a string.
 ///
 /// Metadata can race with concurrent writes, so a file that grew past the
 /// limit between the stat and the read is still capped here instead of
 /// ballooning memory.
+///
+/// UTF-8 validation matches `read_to_string` with one carve-out: when the
+/// read stopped exactly at the byte limit and the *only* problem is a
+/// multi-byte character sliced in half at that boundary, the file itself is
+/// valid and the truncated prefix is kept. Any invalid byte before the
+/// limit is genuine corruption and returns `InvalidData` so the caller can
+/// surface a read-failure marker instead of silently embedding a partial
+/// file.
 fn read_to_string_bounded(path: &Path, limit: usize) -> std::io::Result<String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
     let mut buf = Vec::with_capacity(limit.min(64 * 1024));
     (&mut file).take(limit as u64).read_to_end(&mut buf)?;
-    // Same validation as read_to_string, without loading the whole file.
+    let read_len = buf.len();
     match String::from_utf8(buf) {
         Ok(s) => Ok(s),
         Err(e) => {
             let valid_up_to = e.utf8_error().valid_up_to();
-            if valid_up_to > 0 {
-                // Invalid bytes only affect the tail (e.g. the cut landed
-                // mid-character at the limit): keep the valid prefix.
-                let bytes = e.into_bytes();
-                let s = String::from_utf8_lossy(&bytes[..valid_up_to]).into_owned();
-                Ok(s)
-            } else {
-                Err(std::io::Error::new(
+            match e.utf8_error().error_len() {
+                // No error_len means the input ended mid-character: the byte
+                // limit sliced a multi-byte char exactly at the cut.
+                None if read_len == limit => {
+                    let bytes = e.into_bytes();
+                    let s = String::from_utf8_lossy(&bytes[..valid_up_to]).into_owned();
+                    Ok(s)
+                }
+                _ => Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "stream did not contain valid UTF-8",
-                ))
+                )),
             }
         }
     }
@@ -2185,6 +2194,62 @@ mod tests {
 
         let capped = read_to_string_bounded(&p, 3).unwrap();
         assert_eq!(capped, "abc", "read must stop at the byte limit");
+    }
+
+    /// A genuinely corrupt file (invalid byte before the read limit) must be
+    /// reported as a read failure so the prompt shows the failure marker
+    /// instead of silently embedding a partial file.
+    #[test]
+    fn read_to_string_bounded_rejects_invalid_utf8_mid_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path().join("corrupt.txt");
+        let mut bytes = b"valid prefix".to_vec();
+        bytes.push(0xff); // invalid UTF-8 byte in the middle
+        bytes.extend_from_slice(b" trailing");
+        std::fs::write(&p, bytes).unwrap();
+
+        let err = read_to_string_bounded(&p, 100).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "corrupt content must surface as a read failure"
+        );
+    }
+
+    /// A valid file whose multi-byte character happens to be sliced at the
+    /// byte limit is not corruption: the truncated prefix is kept.
+    #[test]
+    fn read_to_string_bounded_keeps_prefix_sliced_at_char_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let p = temp.path().join("sliced.txt");
+        // 'é' is 2 bytes: a 1-byte cut lands mid-character.
+        std::fs::write(&p, "caf\u{e9}s").unwrap();
+
+        let s = read_to_string_bounded(&p, 4).unwrap();
+        assert_eq!(s, "caf", "sliced char at the limit keeps the valid prefix");
+    }
+
+    /// Corrupt content must reach the prompt as a read-failure marker, never
+    /// as silently truncated content.
+    #[test]
+    fn build_prompt_with_files_reports_read_failure_for_corrupt_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path();
+        let p = cwd.join("corrupt.txt");
+        let mut bytes = b"valid prefix".to_vec();
+        bytes.push(0xff);
+        std::fs::write(&p, bytes).unwrap();
+
+        let prompt = build_prompt_with_files("Q", &[PathBuf::from("corrupt.txt")], cwd);
+
+        assert!(
+            prompt.contains("[read failed: corrupt.txt"),
+            "corrupt file must surface the read-failure marker: {prompt}"
+        );
+        assert!(
+            !prompt.contains("valid prefix"),
+            "partial content must not be silently embedded: {prompt}"
+        );
     }
 
     // -- load_gitignore ------------------------------------------------------
