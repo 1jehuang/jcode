@@ -92,9 +92,23 @@ pub(super) fn save_agent_model_override(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // A cleared override is deletion by omission: `None` is not serialized, so
+    // the save has to be told to drop the file's key instead of keeping it.
+    let dotted = match target {
+        AgentModelTarget::Swarm => "agents.swarm_model",
+        AgentModelTarget::Review => "autoreview.model",
+        AgentModelTarget::Judge => "autojudge.model",
+        AgentModelTarget::Memory => "agents.memory_model",
+        AgentModelTarget::Ambient => "ambient.model",
+    };
+    let removals: &[&str] = if value.is_none() {
+        std::slice::from_ref(&dotted)
+    } else {
+        &[]
+    };
     // Reload-then-patch: a config that cannot be parsed must be reported rather
     // than replaced by in-memory defaults, which would drop every other setting.
-    crate::config::Config::update(|cfg| match target {
+    crate::config::Config::update_removing(removals, |cfg| match target {
         AgentModelTarget::Swarm => cfg.agents.swarm_model = value,
         AgentModelTarget::Review => cfg.autoreview.model = value,
         AgentModelTarget::Judge => cfg.autojudge.model = value,

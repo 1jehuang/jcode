@@ -1,6 +1,27 @@
 use super::*;
 use crate::storage::jcode_dir;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+
+/// Dotted config paths that a caller has declared as removals, keyed by the
+/// config file they belong to.
+///
+/// A serialized struct can only express a removal by omitting a key, and at the
+/// file level "we deliberately emptied this table" is indistinguishable from
+/// "a newer build wrote this section". So every path that deletes by omission
+/// must say so explicitly, and the save applies exactly those deletions.
+///
+/// Keying by config path keeps a removal recorded under one `JCODE_HOME` from
+/// ever touching another home's file (tests switch homes constantly).
+static DECLARED_REMOVALS: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn declared_removals() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Vec<String>>> {
+    DECLARED_REMOVALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 impl Config {
     /// Get the config file path
@@ -88,8 +109,57 @@ impl Config {
         Ok(Some(config))
     }
 
+    /// Declare that `dotted` (e.g. `"display.colors"`) must disappear from the
+    /// active config file on the next save.
+    ///
+    /// This is the explicit half of the "a struct expresses deletion by
+    /// omission" problem: the save keeps every key the serialized struct does
+    /// not model (comments' anchors, sections written by a newer build), so a
+    /// deliberate deletion has to be announced here instead of being inferred
+    /// from absence. Declarations are keyed by config path and consumed once.
+    pub fn declare_removal(dotted: &str) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        let mut pending = declared_removals();
+        let entry = pending.entry(path).or_default();
+        if !entry.iter().any(|declared| declared == dotted) {
+            entry.push(dotted.to_string());
+        }
+    }
+
+    /// Drain the removals declared for the active config path.
+    fn take_declared_removals() -> Vec<String> {
+        let Some(path) = Self::path() else {
+            return Vec::new();
+        };
+        declared_removals().remove(&path).unwrap_or_default()
+    }
+
+    /// Removals currently pending for the active config path (inspection only).
+    #[cfg(test)]
+    pub(crate) fn pending_removals() -> Vec<String> {
+        let Some(path) = Self::path() else {
+            return Vec::new();
+        };
+        declared_removals().get(&path).cloned().unwrap_or_default()
+    }
+
     /// Save config to file
     pub fn save(&self) -> anyhow::Result<()> {
+        // Drain first: a declaration belongs to exactly one save, so a failed
+        // write cannot leak it onto an unrelated later save.
+        let removals = Self::take_declared_removals();
+        self.save_with_removals(&removals)
+    }
+
+    /// Save config to file.
+    ///
+    /// The declared removals are drained by [`Self::save`] but deliberately not
+    /// applied yet: this change only teaches the write path to *announce*
+    /// deletions, so the call-site migrations can be reviewed as inert before
+    /// the preserving save changes any behaviour.
+    fn save_with_removals(&self, _removals: &[String]) -> anyhow::Result<()> {
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         // Ensure parent directory exists
@@ -120,6 +190,9 @@ impl Config {
     pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.copilot_premium = mode.map(|s| s.to_string());
+        if mode.is_none() {
+            Self::declare_removal("provider.copilot_premium");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved copilot_premium to config: {}",
@@ -134,6 +207,14 @@ impl Config {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
+        // Clearing a default is deletion by omission: `None` is not
+        // serialized, so the save has to be told to drop the file's key.
+        if model.is_none() {
+            Self::declare_removal("provider.default_model");
+        }
+        if provider.is_none() {
+            Self::declare_removal("provider.default_provider");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved default model: {}, provider: {}",
@@ -159,6 +240,9 @@ impl Config {
     pub fn set_openai_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_reasoning_effort = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_reasoning_effort");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_reasoning_effort to config: {}",
@@ -171,6 +255,9 @@ impl Config {
     pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.anthropic_reasoning_effort");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved anthropic_reasoning_effort to config: {}",
@@ -183,6 +270,9 @@ impl Config {
     pub fn set_openai_transport(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_transport = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_transport");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_transport to config: {}",
@@ -195,6 +285,9 @@ impl Config {
     pub fn set_openai_service_tier(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_service_tier = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_service_tier");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_service_tier to config: {}",
@@ -278,6 +371,27 @@ impl Config {
     /// `mutate` returns.
     pub fn update<R>(mutate: impl FnOnce(&mut Self) -> R) -> anyhow::Result<R> {
         let mut cfg = Self::load_for_update()?;
+        let out = mutate(&mut cfg);
+        cfg.save()?;
+        Ok(out)
+    }
+
+    /// Read-modify-write the config file, declaring paths that must disappear.
+    ///
+    /// Same as [`Self::update`], but `removals` lists the dotted paths the
+    /// caller deliberately emptied (for example `"display.colors"` after a
+    /// palette reset). The serialized struct cannot express that deletion, so
+    /// it has to be stated; the next save applies exactly these removals and
+    /// keeps everything else, including comments and sections written by a
+    /// newer build. Returns whatever `mutate` returns.
+    pub fn update_removing<R>(
+        removals: &[&str],
+        mutate: impl FnOnce(&mut Self) -> R,
+    ) -> anyhow::Result<R> {
+        let mut cfg = Self::load_for_update()?;
+        for dotted in removals {
+            Self::declare_removal(dotted);
+        }
         let out = mutate(&mut cfg);
         cfg.save()?;
         Ok(out)
@@ -725,6 +839,11 @@ impl Config {
             .trusted_external_source_paths
             .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
         if cfg.auth.trusted_external_source_paths.len() != before {
+            // An empty list is omitted from the serialization, so revoking the
+            // last path has to be declared or the file keeps the old entry.
+            if cfg.auth.trusted_external_source_paths.is_empty() {
+                Self::declare_removal("auth.trusted_external_source_paths");
+            }
             cfg.save()?;
             crate::logging::info(&format!(
                 "Removed trusted external auth source path: {}",
