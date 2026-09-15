@@ -19,6 +19,7 @@ Reference documentation for the jcode codebase.
 - Desktop app: `DESKTOP_APP_ARCHITECTURE.md`, `DESKTOP_CODEBASE_ARCHITECTURE.md`
 - Providers: `PROVIDER_DOCTOR.md`, `AWS_BEDROCK_PROVIDER.md`
 - Platform: `WINDOWS.md`, `TERMINAL_CAPABILITIES.md`
+- Minimal footprint build: `TINY_BUILD.md`
 
 ## Conventions
 

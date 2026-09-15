@@ -300,6 +300,67 @@ lto = "thin"
 codegen-units = 16
 incremental = false
 
+# Minimal-footprint build: smallest shipped binary and lowest runtime
+# footprint, at the cost of a much slower one-off build. Intended to be paired
+# with the reduced feature set, which drops the optional dependency stacks
+# (local ONNX embeddings, the AWS SDK/Bedrock stack, PDF extraction):
+#
+#   JCODE_DEV_FEATURE_PROFILE=minimal scripts/dev_cargo.sh build \
+#       --profile tiny -p jcode --bin jcode
+#
+# (or `scripts/build_tiny.sh`, which wraps the above and reports the size).
+#
+# Differences from `release`:
+# - opt-level = "z": optimize for size rather than speed.
+# - lto = "fat": whole-program cross-crate LTO, the single largest size win.
+# - codegen-units = 1: allows the LTO pass to see everything in one unit.
+# - incremental = false: incremental artifacts bloat the binary and are
+#   incompatible with LTO anyway.
+# - strip = "symbols": drops the symbol table from the shipped binary. Pair
+#   with debug = 0 so no debug info is emitted in the first place.
+# - panic = "abort": removes unwind tables. NOTE this changes behavior: the
+#   TUI draw loop, the Mermaid renderer, and PDF extraction use catch_unwind as
+#   defense-in-depth so a rendering panic degrades instead of killing the
+#   process. Under panic = "abort" those catch_unwind sites no longer recover
+#   and any panic aborts the process. Session state is still persisted
+#   server-side, so a client abort is recoverable, but remove this line if you
+#   want the graceful-degradation paths back.
+[profile.tiny]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+incremental = false
+panic = "abort"
+strip = "symbols"
+debug = 0
+
+# Keep the interactive hot paths optimized even in the size-focused tiny
+# profile. These are small, pure-Rust crates whose inner loops run per frame or
+# per keystroke; at opt-level = "z" the TUI render loop and fuzzy picker feel
+# visibly laggy, and the size cost of pinning them is a couple of megabytes on
+# a binary this size. Same rationale as the dev/selfdev/test pins below.
+[profile.tiny.package.jcode-tui-anim]
+opt-level = 3
+[profile.tiny.package.jcode-fuzzy]
+opt-level = 3
+[profile.tiny.package.ratatui]
+opt-level = 3
+[profile.tiny.package.ratatui-core]
+opt-level = 3
+[profile.tiny.package.ratatui-widgets]
+opt-level = 3
+[profile.tiny.package.ratatui-crossterm]
+opt-level = 3
+[profile.tiny.package.crossterm]
+opt-level = 3
+[profile.tiny.package.unicode-width]
+opt-level = 3
+[profile.tiny.package.unicode-segmentation]
+opt-level = 3
+[profile.tiny.package.unicode-truncate]
+opt-level = 3
+
 [profile.dev]
 debug = 0
 incremental = true

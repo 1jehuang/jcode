@@ -1,0 +1,114 @@
+# Minimal jcode runtime configuration.
+#
+# Copy to the jcode config path to apply:
+#
+#   mkdir -p "${JCODE_HOME:-$HOME/.jcode}"
+#   cp assets/config-templates/tiny.toml "${JCODE_HOME:-$HOME/.jcode}/config.toml"
+#
+# This pairs with the `tiny` Cargo profile + `minimal` feature set built by
+# `scripts/build_tiny.sh` (see docs/TINY_BUILD.md). Everything here is a runtime
+# toggle, so it also trims a normal build's footprint; the compile-time savings
+# come from the profile/feature flags, not from this file.
+#
+# Telemetry is NOT controlled from config.toml. Opt out with either:
+#   - `export JCODE_NO_TELEMETRY=1` (or DO_NOT_TRACK=1), or
+#   - `touch "${JCODE_HOME:-$HOME/.jcode}/no_telemetry"` to persist it.
+
+[features]
+# Do not check for or install updates at startup. This removes the background
+# update-check thread entirely; run `jcode update` manually when you want one.
+check_updates = false
+
+# Disable the memory subsystem (retrieval, extraction, LLM rerank/judge calls,
+# and the local embedding model load). This is the single largest runtime win:
+# the bundled all-MiniLM-L6-v2 ONNX model is ~87 MB resident when loaded.
+memory = false
+
+# Disable swarm coordination (no worker agents, no inline gallery, no extra
+# provider sessions).
+swarm = false
+
+# Disable Mermaid rendering and the Mermaid prompt guidance. The renderer also
+# pulls in the SVG/image rasterization stack.
+mermaid = false
+
+# Disable automatic follow-up turns when the model stops with incomplete todos.
+auto_poke = false
+
+# Leave the rest at their defaults unless you want to trim further:
+# message_timestamps = false        # stop injecting timestamps into prompts
+# kv_cache_miss_notices = false     # silence KV-cache-miss alarm cards
+# persist_memory_injections = false # (no effect while memory = false)
+
+[agents]
+# No LLM sidecar for memory. Memory is already off above; this makes the intent
+# explicit and guarantees no sidecar request is ever attempted.
+memory_sidecar_enabled = false
+
+# Keep the swarm RAM budget at the floor (no effect while swarm = false).
+swarm_max_concurrent_agents = 1
+
+[display]
+# Lowest TUI performance tier: caps redraw at 12 fps, disables decorative
+# animations, and slows linked side-panel refresh. Equivalent to running with
+# JCODE_PERF_TIER=minimal.
+performance = "minimal"
+
+# No idle animation before the first prompt, and no prompt-entry animation.
+idle_animation = false
+prompt_entry_animation = false
+
+# Belt-and-braces animation kill switch (empty by default).
+disabled_animations = ["donut", "orbit_rings"]
+
+# Do not rasterize LaTeX to images; render nothing instead of running the
+# image pipeline.
+latex_rendering = "none"
+
+# Keep rendered images out of the pinned side pane.
+pin_images = false
+
+# Markdown stays compact.
+markdown_spacing = "compact"
+
+[power]
+# Do not inhibit system sleep while streaming.
+prevent_sleep_while_streaming = false
+
+[notifications]
+# No desktop/Notification Center notification on turn completion (avoids
+# spawning the macOS notification broker).
+turn_complete = false
+
+[safety]
+# No desktop notifications via notify-send.
+desktop_notifications = false
+
+[autoreview]
+# No automatic end-of-turn review session (extra LLM call + child session).
+enabled = false
+
+[autojudge]
+# No automatic end-of-turn judging session.
+enabled = false
+
+[sponsors]
+# Opt out of integration discovery: no `discover_tools` tool is registered and
+# jcode never contacts the discovery endpoint.
+enabled = false
+
+[tools]
+# Expose only the core coding tools: bash, read, write, edit, multiedit,
+# apply_patch, patch, agentgrep, ls. This shrinks the system prompt/tool schema
+# sent on every request.
+#
+# To add a tool back, replace the profile with an explicit allow-list (an
+# explicit `enabled` list wins over `profile`). Example:
+#   enabled = ["bash", "read", "write", "edit", "multiedit", "apply_patch",
+#              "patch", "agentgrep", "ls", "todo"]
+profile = "minimal"
+
+# Choose your model/auth here (uncomment and edit):
+# [provider]
+# default_provider = "anthropic"
+# default_model = "claude-opus-4-8"
