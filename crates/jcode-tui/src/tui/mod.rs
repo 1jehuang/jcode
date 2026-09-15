@@ -27,6 +27,14 @@ pub struct BackgroundTaskRow {
     pub completed_at: Option<std::time::Instant>,
 }
 
+/// Aggregated swarm dispatch statistics for the status bar.
+#[derive(Debug, Clone, Default)]
+pub struct SwarmStats {
+    pub active: u32,
+    pub completed: u32,
+    pub failed: u32,
+}
+
 pub mod backend;
 mod cloud_git;
 mod cloud_latency;
@@ -1023,6 +1031,11 @@ pub trait TuiState {
     /// Active when `agents.swarm_spawn_mode = inline` and the swarm has members.
     fn inline_swarm_gallery_active(&self) -> bool {
         false
+    }
+    /// Aggregated swarm dispatch statistics (active/completed/failed) for the
+    /// status bar. Default returns zeroed stats for states that don't track swarm.
+    fn swarm_stats(&self) -> SwarmStats {
+        SwarmStats::default()
     }
     /// Members to render in the inline swarm gallery band.
     fn inline_swarm_members(&self) -> Vec<crate::protocol::SwarmMemberStatus> {
