@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use super::color_support::rgb;
-use super::{dim_color, TuiState};
+use super::TuiState;
 
 /// Minimum terminal width to show the status bar.
 const MIN_WIDTH: u16 = 80;
@@ -60,7 +60,7 @@ pub(crate) fn render_status_bar(frame: &mut Frame, app: &dyn TuiState, area: Rec
 /// Build the single-line content for the status bar.
 fn build_status_line(data: &StatusBarData, width: usize) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let dim = dim_color();
+    let dim = jcode_tui_style::theme::dim_color();
     let separator_color = rgb(60, 60, 60);
 
     // Left side: workspace + repo
