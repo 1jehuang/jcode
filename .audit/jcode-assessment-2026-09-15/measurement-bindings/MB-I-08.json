@@ -1,0 +1,29 @@
+{
+  "kind": "measurement-binding",
+  "schema_version": "1.0.0",
+  "id": "MB-I-08",
+  "record_status": "OPERATIONAL",
+  "created_at": "2026-09-15T06:00:00Z",
+  "criterion_id": "PEP-04-01-02",
+  "instance_id": "I-08",
+  "subject_scope": "jcode fork: generated views (ASSESSMENT.md, HTML, JSON, YAML).",
+  "modality": "OBSERVATIONAL",
+  "method": "Source code inspection and cargo check for PEP-04-01-02.",
+  "expected_behavior": "jcode does not generate assessment projections; this applies to the assessment kit itself.",
+  "units_or_anchors": "Pass if the stated predicate holds at the assessed scope; otherwise fail or record UNKNOWN.",
+  "environment_ref": "Source-level only; no runtime environment.",
+  "fixtures": [
+    "raw/EV-I-08.md"
+  ],
+  "positive_control": "Verified by cargo check passing and source pattern matching.",
+  "negative_control": "Known failing patterns (e.g., SDKROOT workaround) serve as negative controls.",
+  "qualification_refs": [],
+  "resource_limit": "Source inspection only; no runtime resources consumed.",
+  "side_effects": [],
+  "authority_ref": "Owner-directed assessment.",
+  "freshness_rule": "Re-evaluate on next significant commit.",
+  "evidence_requirements": [
+    "Source-level observation of PEP-04-01-02 at the pinned subject.",
+    "Cargo check or compilation verification."
+  ]
+}

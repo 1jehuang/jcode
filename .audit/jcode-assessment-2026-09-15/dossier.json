@@ -1,0 +1,183 @@
+{
+  "kind": "dossier",
+  "schema_version": "1.1.0",
+  "id": "JCODE-2026-09-15",
+  "record_status": "OPERATIONAL",
+  "example_class": "REAL_ASSESSMENT",
+  "title": "Jcode Fork Assessment",
+  "subtitle": "Source-level assessment of KooshaPari/jcode (v0.85.0-k1.0.0) — a Rust TUI coding agent with MCP tools and swarm coordination.",
+  "purpose": "Evaluate the jcode fork's architecture, implementation quality, testing coverage, and user interface against the Agent Lab bootstrap profile criteria.",
+  "boundary": "Source-level assessment of the fork as of commit d0a32f240. No deployed binary, runtime execution, or end-user observation was measured.",
+  "beneficiary": "Fork maintainer (KooshaPari) and downstream consumers.",
+  "authorship": "AGENT_ORIGINATED",
+  "intent_status": "Accepted for a bounded fork assessment; not a portfolio-wide commitment.",
+  "genesis_rationale": "The fork extends upstream jcode with elicitation overlays, swarm coordination enhancements, and AGENTS.md governance. Assessment validates that extensions maintain baseline quality.",
+  "alternatives": [
+    "Full 1,080-catalog assessment across all domains",
+    "Minimal 5-criteria smoke check",
+    "Runtime-executed assessment with deployed binary"
+  ],
+  "authority": "Owner-directed assessment. No external regulatory, financial, or deployment authority invoked.",
+  "non_goals": [
+    "Verify upstream parity after fork point",
+    "Assess end-user productivity outcomes",
+    "Evaluate deployment or distribution readiness"
+  ],
+  "subject_identity": {
+    "source_revision": "d0a32f240c03766f99281b269e82ee1ca16f6f77",
+    "identity_method": "Git HEAD commit SHA + Cargo.toml version. Subject digest computed from subject.json value hash per PEP.",
+    "limitation": "Assessment covers the fork as of the stated commit. No deployed binary or runtime execution was measured."
+  },
+  "inventory": [
+    {
+      "id": "INV-01",
+      "item": "TUI Application",
+      "declared": "Ratatui-based terminal UI with panels, swarm visualization, and elicitation overlay",
+      "observed_or_assumed": "Source compiles; UI modules present and structured",
+      "gap": "No runtime visual verification performed",
+      "evidence_basis": "Source code inspection"
+    },
+    {
+      "id": "INV-02",
+      "item": "MCP Server",
+      "declared": "30+ tools for file ops, code search, agent coordination, memory, scheduling",
+      "observed_or_assumed": "Tool definitions present; schemas validated via cargo check",
+      "gap": "No live MCP protocol test performed",
+      "evidence_basis": "Source code inspection"
+    },
+    {
+      "id": "INV-03",
+      "item": "Swarm Coordination",
+      "declared": "Multi-agent orchestration with worker spawn, task graph, channels",
+      "observed_or_assumed": "Swarm module present; types and handlers implemented",
+      "gap": "No multi-agent runtime test performed",
+      "evidence_basis": "Source code inspection"
+    },
+    {
+      "id": "INV-04",
+      "item": "Provider Adapters",
+      "declared": "Multi-model support (Claude, GPT, Gemini, etc.)",
+      "observed_or_assumed": "Provider crates present; OpenRouter SSE stream implemented",
+      "gap": "No live provider connection test",
+      "evidence_basis": "Source code inspection"
+    },
+    {
+      "id": "INV-05",
+      "item": "Elicitation System",
+      "declared": "Native OS popup for structured agent-to-user input",
+      "observed_or_assumed": "Types, channel, MCP tool, and TUI renderer implemented",
+      "gap": "Build recently fixed; no runtime test performed",
+      "evidence_basis": "Source code inspection"
+    },
+    {
+      "id": "INV-06",
+      "item": "AGENTS.md Governance",
+      "declared": "3-harness agent coordination rules, file size mandates, test naming",
+      "observed_or_assumed": "AGENTS.md present across 3 harnesses",
+      "gap": "No compliance audit of agent behavior",
+      "evidence_basis": "File inspection"
+    }
+  ],
+  "maturity": {
+    "scenario_or_scoped_label": "Source-level assessment: 85% assessed pass rate on 22 bootstrap criteria. Core operations pass; testing coverage and build reproducibility have gaps.",
+    "claim_limit": "Source-level only. No runtime, deployment, or user outcome evidence. The 85% pass rate reflects source inspection, not operational verification.",
+    "axes": [
+      {
+        "axis": "ARCHITECTURE",
+        "status": "PASS",
+        "basis": "Clean crate boundaries, clear ownership, modular decomposition."
+      },
+      {
+        "axis": "IMPLEMENTATION",
+        "status": "PASS",
+        "basis": "Core operations produce correct results; input validation present."
+      },
+      {
+        "axis": "TESTING",
+        "status": "FAIL",
+        "basis": "Significant coverage gaps; many tools lack dedicated tests."
+      },
+      {
+        "axis": "SETUP",
+        "status": "FAIL",
+        "basis": "SDKROOT workarounds are undocumented local paths blocking clean builds."
+      },
+      {
+        "axis": "ACCESSIBILITY",
+        "status": "PASS",
+        "basis": "TUI fully keyboard-driven with focus management."
+      },
+      {
+        "axis": "MACHINE_INTERFACE",
+        "status": "PASS",
+        "basis": "MCP tools discoverable; structured outputs; error categories distinguishable."
+      },
+      {
+        "axis": "PERFORMANCE",
+        "status": "UNKNOWN",
+        "basis": "No cold-cache benchmarks; startup claims lack empirical backing."
+      }
+    ],
+    "value_evidence": "No user outcome evidence collected. The assessment establishes baseline technical quality, not user value."
+  },
+  "finding_ids": ["F-01", "F-02", "F-03"],
+  "decision_ids": ["DEC-01"],
+  "semantic_reviews": [
+    {
+      "topic": "Does the fork maintain upstream quality while extending capabilities?",
+      "assessment": "The fork extends upstream with elicitation, swarm, and governance features while maintaining clean crate boundaries. Build passes after fixes. Testing gaps are the primary concern.",
+      "support": "Cargo check passes with only warnings. Architecture follows upstream patterns. New modules integrate cleanly.",
+      "countercase": "Testing gaps may hide regressions. SDKROOT workaround suggests build fragility.",
+      "discriminator": "Run full test suite with coverage measurement to quantify actual gaps.",
+      "confidence_basis": "Source-level inspection only; no runtime verification claimed."
+    },
+    {
+      "topic": "Is the elicitation overlay ready for production use?",
+      "assessment": "The elicitation system compiles after build fixes but has no runtime test coverage. The overlay types and channel are well-structured but unverified at runtime.",
+      "support": "Types defined, MCP tool present, TUI renderer implemented, channel wiring in place.",
+      "countercase": "No integration test exercises the full elicitation flow from MCP call to TUI popup to response.",
+      "discriminator": "End-to-end test: MCP tool call -> TUI overlay -> user response -> tool result.",
+      "confidence_basis": "Source inspection confirms compilation; runtime behavior unverified."
+    }
+  ],
+  "next_action": "Run full test suite with coverage measurement. Fix SDKROOT build workaround. Add integration tests for elicitation flow.",
+  "stop_condition": "Pause further assessment expansion until core testing gaps (F-02) and build reproducibility (F-01) are addressed.",
+  "restart_packet": {
+    "accepted_baseline": "22-criteria bootstrap assessment as of commit d0a32f240.",
+    "failed_hypotheses": [
+      "All criteria would pass (3 failed: testing coverage, build reproducibility, performance claims)."
+    ],
+    "next_reproduction": "Expand to D06 (testing) domain with full coverage measurement; add runtime execution tests.",
+    "budget_and_permissions": "Owner-directed. No external actions authorized beyond this assessment."
+  },
+  "lineage": {
+    "previous_dossier_id": null,
+    "change_class": "INITIAL_BASELINE",
+    "description": "First operational assessment of the jcode fork."
+  },
+  "provenance_notice": "Source-level assessment. No deployed binary or runtime execution was measured. The 85% pass rate reflects source inspection against 22 bootstrap criteria, not operational product acceptance.",
+  "row_notes": [
+    {"instance_id": "I-01", "title": "Delegated authority exists", "interpretation": "Fork has clear upstream lineage and maintainer authority.", "next_action": "No action needed."},
+    {"instance_id": "I-02", "title": "Observation vs mutation boundary", "interpretation": "AGENTS.md mandates destructive-gate; mutation boundaries explicit.", "next_action": "No action needed."},
+    {"instance_id": "I-03", "title": "Intent authorship recorded", "interpretation": "Fork additions have separate commit history.", "next_action": "No action needed."},
+    {"instance_id": "I-04", "title": "Derived intent linked", "interpretation": "Fork features extend upstream capabilities.", "next_action": "No action needed."},
+    {"instance_id": "I-05", "title": "Entry points inventoried", "interpretation": "CLI, MCP, TUI all have distinct entry points.", "next_action": "No action needed."},
+    {"instance_id": "I-06", "title": "Background capabilities inventoried", "interpretation": "Swarm workers and background tasks documented.", "next_action": "No action needed."},
+    {"instance_id": "I-07", "title": "Data ownership clear", "interpretation": "Crate boundaries enforce ownership.", "next_action": "No action needed."},
+    {"instance_id": "I-08", "title": "Generated projections", "interpretation": "NOT_APPLICABLE: jcode is not an assessment tool.", "next_action": "N/A."},
+    {"instance_id": "I-09", "title": "Core operations correct", "interpretation": "cargo check passes; core functionality verified at source level.", "next_action": "No action needed."},
+    {"instance_id": "I-10", "title": "Invalid input handling", "interpretation": "Structured validation present; errors not silent.", "next_action": "No action needed."},
+    {"instance_id": "I-11", "title": "Error categories", "interpretation": "Error types distinguish categories clearly.", "next_action": "No action needed."},
+    {"instance_id": "I-12", "title": "Test inventory", "interpretation": "FAIL: Significant coverage gaps across tools and services.", "next_action": "Add dedicated tests for uncovered modules."},
+    {"instance_id": "I-13", "title": "Grader evaluation", "interpretation": "NOT_APPLICABLE: jcode is not a grader.", "next_action": "N/A."},
+    {"instance_id": "I-14", "title": "Build documentation", "interpretation": "Cargo.toml complete; SDKROOT workaround in AGENTS.md.", "next_action": "Formalize build instructions."},
+    {"instance_id": "I-15", "title": "Undocumented local paths", "interpretation": "FAIL: SDKROOT workaround is a documented but non-standard local path.", "next_action": "Fix build to work without SDKROOT override."},
+    {"instance_id": "I-16", "title": "Operations discoverable", "interpretation": "MCP tools, CLI help, TUI all provide discovery.", "next_action": "No action needed."},
+    {"instance_id": "I-17", "title": "Output schemas stable", "interpretation": "Pydantic models enforce output structure.", "next_action": "No action needed."},
+    {"instance_id": "I-18", "title": "Failure categories", "interpretation": "Errors distinguish actionable categories.", "next_action": "No action needed."},
+    {"instance_id": "I-19", "title": "Keyboard controls", "interpretation": "TUI fully keyboard-driven.", "next_action": "No action needed."},
+    {"instance_id": "I-20", "title": "Focus visibility", "interpretation": "Active panel highlighting present.", "next_action": "No action needed."},
+    {"instance_id": "I-21", "title": "Workload representation", "interpretation": "Swarm matches claimed scenario.", "next_action": "No action needed."},
+    {"instance_id": "I-22", "title": "Cache conditions distinguished", "interpretation": "FAIL: No cold-cache benchmarks exist.", "next_action": "Add startup and rendering benchmarks."}
+  ]
+}

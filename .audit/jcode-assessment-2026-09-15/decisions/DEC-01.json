@@ -1,0 +1,20 @@
+{
+  "kind": "decision",
+  "schema_version": "1.0.0",
+  "id": "DEC-01",
+  "record_status": "OPERATIONAL",
+  "disposition": "IMPROVE",
+  "status": "ACCEPTED",
+  "rationale": "Bootstrap profile with 22 criteria provides meaningful coverage without over-engineering the initial assessment.",
+  "alternatives": [
+    "Full 1,080-catalog assessment",
+    "Minimal 5-criteria smoke check"
+  ],
+  "reversal_condition": "If initial findings warrant deeper investigation in specific domains.",
+  "evidence_refs": [],
+  "created_at": "2026-09-15T06:00:00Z",
+  "subject_ref": "github.com/1jehuang/jcode",
+  "authority_ref": "Owner-directed assessment",
+  "execution_receipt_refs": [],
+  "resource_envelope_ref": "Source inspection only"
+}

@@ -1,0 +1,22 @@
+{
+  "kind": "finding",
+  "schema_version": "1.0.0",
+  "id": "F-03",
+  "record_status": "OPERATIONAL",
+  "class": "VERIFICATION_GAP",
+  "severity": "LOW",
+  "claim": "No cold-cache benchmarks exist; startup performance claims lack empirical backing.",
+  "owner_ref": "performance",
+  "status": "ACCEPTED",
+  "next_action_kind": "EXPERIMENT",
+  "wakeup_condition": "Before performance-critical release.",
+  "evidence_refs": [
+    "EV-I-04"
+  ],
+  "instance_refs": [
+    "I-22"
+  ],
+  "counterevidence_refs": [],
+  "created_at": "2026-09-15T06:00:00Z",
+  "subject_ref": "github.com/1jehuang/jcode"
+}

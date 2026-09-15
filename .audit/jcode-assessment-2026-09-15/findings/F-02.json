@@ -1,0 +1,22 @@
+{
+  "kind": "finding",
+  "schema_version": "1.0.0",
+  "id": "F-02",
+  "record_status": "OPERATIONAL",
+  "class": "VERIFICATION_GAP",
+  "severity": "HIGH",
+  "claim": "Test coverage has significant gaps; many tools and services lack dedicated unit tests.",
+  "owner_ref": "testing",
+  "status": "ACCEPTED",
+  "next_action_kind": "TEST",
+  "wakeup_condition": "Before next feature release.",
+  "evidence_refs": [
+    "EV-I-05"
+  ],
+  "instance_refs": [
+    "I-12"
+  ],
+  "counterevidence_refs": [],
+  "created_at": "2026-09-15T06:00:00Z",
+  "subject_ref": "github.com/1jehuang/jcode"
+}

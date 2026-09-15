@@ -1,0 +1,13 @@
+{
+  "kind": "evidence",
+  "schema_version": "1.0.0",
+  "id": "EV-I-17",
+  "subject_digest": "sha256:5817f20e26b404348fd839907de0fc7e6c9e6e69f41eae7deb8205458b3334d1",
+  "path": "raw/EV-I-17.md",
+  "digest": "sha256:4a44f8183c29d4dcac0ec1e4e0ab7800cef140f6f4e4b1d28bd83ec55ad79aed",
+  "observed_at": "2026-09-15T06:05:00Z",
+  "sensitivity": "PUBLIC",
+  "role": "OBSERVATION",
+  "origin": "LOCAL_OBSERVATION",
+  "summary": "Source-level inspection of PEP-08-01-02: Output schemas stable."
+}

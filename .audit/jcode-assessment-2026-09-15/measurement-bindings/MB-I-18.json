@@ -1,0 +1,29 @@
+{
+  "kind": "measurement-binding",
+  "schema_version": "1.0.0",
+  "id": "MB-I-18",
+  "record_status": "OPERATIONAL",
+  "created_at": "2026-09-15T06:00:00Z",
+  "criterion_id": "PEP-08-01-03",
+  "instance_id": "I-18",
+  "subject_scope": "jcode fork: error responses, panic handling, graceful degradation.",
+  "modality": "OBSERVATIONAL",
+  "method": "Source code inspection and cargo check for PEP-08-01-03.",
+  "expected_behavior": "Failures must distinguish actionable error categories.",
+  "units_or_anchors": "Pass if the stated predicate holds at the assessed scope; otherwise fail or record UNKNOWN.",
+  "environment_ref": "Source-level only; no runtime environment.",
+  "fixtures": [
+    "raw/EV-I-18.md"
+  ],
+  "positive_control": "Verified by cargo check passing and source pattern matching.",
+  "negative_control": "Known failing patterns (e.g., SDKROOT workaround) serve as negative controls.",
+  "qualification_refs": [],
+  "resource_limit": "Source inspection only; no runtime resources consumed.",
+  "side_effects": [],
+  "authority_ref": "Owner-directed assessment.",
+  "freshness_rule": "Re-evaluate on next significant commit.",
+  "evidence_requirements": [
+    "Source-level observation of PEP-08-01-03 at the pinned subject.",
+    "Cargo check or compilation verification."
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "kind": "result",
+  "schema_version": "1.0.0",
+  "id": "R-I-09",
+  "instance_id": "I-09",
+  "criterion_id": "PEP-05-01-01",
+  "assignment_id": "A-JCODE-2026-09-15",
+  "epoch_id": "E-JCODE-2026-09-15",
+  "subject_digest": "sha256:5817f20e26b404348fd839907de0fc7e6c9e6e69f41eae7deb8205458b3334d1",
+  "assignment_digest": "sha256:35d981423477705588aaaf9a8666f562626d736906e331756ccdf461186c6415",
+  "execution": "COMPLETED",
+  "verdict": "PASS",
+  "evidence_state": "CURRENT",
+  "review_status": "ACCEPTED",
+  "observed_at": "2026-09-15T06:05:00Z",
+  "expires_at": null,
+  "evidence_ids": [
+    "EV-I-09"
+  ],
+  "qualification_ids": [],
+  "evaluator_id": "JCODE-SOURCE-REVIEW",
+  "evaluator_digest": "sha256:d9d4b55d751b490f0249870e0210e5a39e7d7a3e4b3e69279a56a73156825c5f",
+  "observation": {
+    "summary": "cargo check passes; core functionality verified.",
+    "assertions_executed": null,
+    "modality": "OBSERVATIONAL"
+  },
+  "supersedes": []
+}

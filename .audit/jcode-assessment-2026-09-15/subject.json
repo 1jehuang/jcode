@@ -1,0 +1,11 @@
+{
+  "kind": "subject",
+  "schema_version": "1.0.0",
+  "record_status": "OPERATIONAL",
+  "subject_id": "JCODE",
+  "source_or_bom": "Rust workspace: jcode v0.85.0-k1.0.0 (1jehuang/jcode fork by KooshaPari). Multi-crate Cargo workspace with TUI (ratatui), app-core, tool-core, provider adapters, MCP server, and CLI. 1,214 Rust source files. Edition 2024, nightly toolchain.",
+  "source_revision": "d0a32f240c03766f99281b269e82ee1ca16f6f77",
+  "source_digest": "sha256:placeholder-for-full-workspace-digest",
+  "identity_method": "Git HEAD commit SHA + Cargo.toml version + file count. Subject digest computed from subject.json value hash per PEP.",
+  "limitation": "Assessment covers the fork as of the stated commit. Upstream changes after fork point are not independently verified. No deployed binary or runtime execution was measured; assessment is source-level."
+}

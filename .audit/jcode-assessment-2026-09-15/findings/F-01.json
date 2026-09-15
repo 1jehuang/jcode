@@ -1,0 +1,22 @@
+{
+  "kind": "finding",
+  "schema_version": "1.0.0",
+  "id": "F-01",
+  "record_status": "OPERATIONAL",
+  "class": "IMPLEMENTATION_GAP",
+  "severity": "MEDIUM",
+  "claim": "SDKROOT and MACOSX_DEPLOYMENT_TARGET workarounds are undocumented local paths that block clean builds on fresh checkouts.",
+  "owner_ref": "build-system",
+  "status": "ACCEPTED",
+  "next_action_kind": "IMPLEMENT",
+  "wakeup_condition": "Before next release or CI/CD setup.",
+  "evidence_refs": [
+    "EV-I-04"
+  ],
+  "instance_refs": [
+    "I-15"
+  ],
+  "counterevidence_refs": [],
+  "created_at": "2026-09-15T06:00:00Z",
+  "subject_ref": "github.com/1jehuang/jcode"
+}

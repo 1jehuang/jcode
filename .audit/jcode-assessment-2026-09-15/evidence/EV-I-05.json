@@ -1,0 +1,13 @@
+{
+  "kind": "evidence",
+  "schema_version": "1.0.0",
+  "id": "EV-I-05",
+  "subject_digest": "sha256:5817f20e26b404348fd839907de0fc7e6c9e6e69f41eae7deb8205458b3334d1",
+  "path": "raw/EV-I-05.md",
+  "digest": "sha256:f0615d84eca8a0622d25b968d616fcb2112206e85eaa2cdaeb17b4a979929cce",
+  "observed_at": "2026-09-15T06:05:00Z",
+  "sensitivity": "PUBLIC",
+  "role": "OBSERVATION",
+  "origin": "LOCAL_OBSERVATION",
+  "summary": "Source-level inspection of PEP-03-01-01: CLI, MCP, TUI entry points."
+}

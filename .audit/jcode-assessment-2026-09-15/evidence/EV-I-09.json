@@ -1,0 +1,13 @@
+{
+  "kind": "evidence",
+  "schema_version": "1.0.0",
+  "id": "EV-I-09",
+  "subject_digest": "sha256:5817f20e26b404348fd839907de0fc7e6c9e6e69f41eae7deb8205458b3334d1",
+  "path": "raw/EV-I-09.md",
+  "digest": "sha256:41ad4ccb533ffbf611ba076f47b71988b96169437d9a37c8fc86b6c5cb5b682c",
+  "observed_at": "2026-09-15T06:05:00Z",
+  "sensitivity": "PUBLIC",
+  "role": "OBSERVATION",
+  "origin": "LOCAL_OBSERVATION",
+  "summary": "Source-level inspection of PEP-05-01-01: cargo check passes."
+}

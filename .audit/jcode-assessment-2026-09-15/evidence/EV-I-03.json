@@ -1,0 +1,13 @@
+{
+  "kind": "evidence",
+  "schema_version": "1.0.0",
+  "id": "EV-I-03",
+  "subject_digest": "sha256:5817f20e26b404348fd839907de0fc7e6c9e6e69f41eae7deb8205458b3334d1",
+  "path": "raw/EV-I-03.md",
+  "digest": "sha256:5acee06864843015d477926061df6b62bdbdb3e6b6688fa996ccc87e41597e7d",
+  "observed_at": "2026-09-15T06:05:00Z",
+  "sensitivity": "PUBLIC",
+  "role": "OBSERVATION",
+  "origin": "LOCAL_OBSERVATION",
+  "summary": "Source-level inspection of PEP-01-04-01: Fork additions have separate history."
+}

@@ -1,0 +1,29 @@
+{
+  "kind": "measurement-binding",
+  "schema_version": "1.0.0",
+  "id": "MB-I-14",
+  "record_status": "OPERATIONAL",
+  "created_at": "2026-09-15T06:00:00Z",
+  "criterion_id": "PEP-07-01-01",
+  "instance_id": "I-14",
+  "subject_scope": "jcode fork: Cargo.toml, build scripts, CI configuration.",
+  "modality": "OBSERVATIONAL",
+  "method": "Source code inspection and cargo check for PEP-07-01-01.",
+  "expected_behavior": "Build setup must be documented and reproducible.",
+  "units_or_anchors": "Pass if the stated predicate holds at the assessed scope; otherwise fail or record UNKNOWN.",
+  "environment_ref": "Source-level only; no runtime environment.",
+  "fixtures": [
+    "raw/EV-I-14.md"
+  ],
+  "positive_control": "Verified by cargo check passing and source pattern matching.",
+  "negative_control": "Known failing patterns (e.g., SDKROOT workaround) serve as negative controls.",
+  "qualification_refs": [],
+  "resource_limit": "Source inspection only; no runtime resources consumed.",
+  "side_effects": [],
+  "authority_ref": "Owner-directed assessment.",
+  "freshness_rule": "Re-evaluate on next significant commit.",
+  "evidence_requirements": [
+    "Source-level observation of PEP-07-01-01 at the pinned subject.",
+    "Cargo check or compilation verification."
+  ]
+}
