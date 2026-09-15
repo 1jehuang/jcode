@@ -147,3 +147,35 @@ fn file_mention_enter_on_real_path_accepts_and_records_chip() {
         "the @ sign must be dropped after accepting a completion"
     );
 }
+/// Backspacing over a file chip removes it from `file_chips` (via
+/// `prune_orphan_chips`), but Ctrl+Z must restore both the text and the chip:
+/// the send-time expansion reads `file_chips`, so losing the chip on undo
+/// silently drops the file attachment from the prompt.
+#[test]
+fn undo_restores_file_chip_after_backspace() {
+    let mut app = create_test_app();
+    app.is_remote = false;
+    app.input = "see src/main.rs".to_string();
+    app.cursor_pos = app.input.len();
+    app.file_chips.push(std::path::PathBuf::from("src/main.rs"));
+
+    // Backspace once: the chip path vanishes from the input, so the chip is
+    // pruned along with the removed character.
+    crate::tui::app::input::handle_basic_key(&mut app, crossterm::event::KeyCode::Backspace);
+    assert!(
+        !app.input.contains("src/main.rs"),
+        "backspace should remove the chip text"
+    );
+    assert!(
+        app.file_chips.is_empty(),
+        "chip should be pruned once its text is gone"
+    );
+
+    // Undo must bring back the chip together with the text.
+    app.undo_input_change();
+    assert_eq!(app.input, "see src/main.rs", "undo must restore the text");
+    assert!(
+        app.file_chips.iter().any(|c| c.to_string_lossy() == "src/main.rs"),
+        "undo must restore the file chip so the attachment survives"
+    );
+}

@@ -1480,8 +1480,9 @@ pub struct App {
     scroll_bookmark: Option<usize>,
     // Stashed input: saved via Ctrl+S for later retrieval
     stashed_input: Option<(String, usize)>,
-    // Undo history for in-progress input editing (Ctrl+Z)
-    input_undo_stack: Vec<(String, usize)>,
+    // Undo history for in-progress input editing (Ctrl+Z). File chips are
+    // snapshot alongside the text so undo restores attachments too.
+    input_undo_stack: Vec<InputUndoEntry>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1666,6 +1667,14 @@ pub struct App {
     /// Lazily-loaded persisted cross-session prompt history (oldest first,
     /// deduped). None until first use; see `prompt_history.rs`.
     persisted_prompt_history: Option<Vec<String>>,
+}
+
+/// One Ctrl+Z snapshot of the composer state.
+#[derive(Clone, PartialEq)]
+pub(crate) struct InputUndoEntry {
+    pub(crate) input: String,
+    pub(crate) cursor_pos: usize,
+    pub(crate) file_chips: Vec<PathBuf>,
 }
 
 /// Inert provider used by runtime modes whose output is supplied by another source.

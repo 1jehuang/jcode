@@ -1823,7 +1823,11 @@ impl App {
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
-        let snapshot = (self.input.clone(), self.cursor_pos.min(self.input.len()));
+        let snapshot = crate::tui::app::InputUndoEntry {
+            input: self.input.clone(),
+            cursor_pos: self.cursor_pos.min(self.input.len()),
+            file_chips: self.file_chips.clone(),
+        };
         if self.input_undo_stack.last() == Some(&snapshot) {
             return;
         }
@@ -1838,9 +1842,10 @@ impl App {
     }
 
     pub(super) fn undo_input_change(&mut self) {
-        if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
-            self.input = input;
-            self.cursor_pos = cursor_pos.min(self.input.len());
+        if let Some(entry) = self.input_undo_stack.pop() {
+            self.input = entry.input;
+            self.cursor_pos = entry.cursor_pos.min(self.input.len());
+            self.file_chips = entry.file_chips;
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
             self.set_status_notice("↶ Input restored");
