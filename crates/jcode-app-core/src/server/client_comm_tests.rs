@@ -427,7 +427,12 @@ async fn comm_list_includes_member_status_and_detail() {
                 output_tail: None,
                 todo_progress: None,
                 todo_items: Vec::new(),
-                runtime: crate::protocol::SwarmMemberRuntime::default(),
+                runtime: crate::protocol::SwarmMemberRuntime {
+                    provider: Some("OpenCode Go".to_string()),
+                    model: Some("deepseek-v4.1-flash".to_string()),
+                    effort: Some("max".to_string()),
+                    ..Default::default()
+                },
                 task_label: None,
             },
         ),
@@ -442,6 +447,11 @@ async fn comm_list_includes_member_status_and_detail() {
         (peer_id.clone(), peer.clone()),
     ])));
     let client_connections = Arc::new(RwLock::new(HashMap::new()));
+
+    // Reproduce a member invoking `swarm list` during its own turn: the agent
+    // lock is held, so live identity lookup must not block and the retained
+    // runtime snapshot must supply the model instead.
+    let _peer_turn_guard = peer.lock().await;
 
     handle_comm_list(
         1,
@@ -464,6 +474,9 @@ async fn comm_list_includes_member_status_and_detail() {
                 .expect("peer entry present");
             assert_eq!(peer.status.as_deref(), Some("running"));
             assert_eq!(peer.detail.as_deref(), Some("working on tests"));
+            assert_eq!(peer.provider_name.as_deref(), Some("OpenCode Go"));
+            assert_eq!(peer.provider_model.as_deref(), Some("deepseek-v4.1-flash"));
+            assert_eq!(peer.provider_effort.as_deref(), Some("max"));
         }
         other => panic!("unexpected response: {other:?}"),
     }
