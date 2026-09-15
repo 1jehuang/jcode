@@ -3610,6 +3610,7 @@ dependencies = [
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
  "jcode-provider-doctor",
+ "jcode-provider-forgecode-runtime",
  "jcode-provider-gemini-runtime",
  "jcode-provider-grok-build-runtime",
  "jcode-provider-openai-runtime",
@@ -4313,6 +4314,21 @@ dependencies = [
  "jcode-provider-metadata",
  "jcode-storage",
  "tempfile",
+]
+
+[[package]]
+name = "jcode-provider-forgecode-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "jcode-base",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
