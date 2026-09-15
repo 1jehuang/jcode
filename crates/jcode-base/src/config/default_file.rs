@@ -314,6 +314,17 @@ bing_market = "en-US"
 # set engine = "searxng" or add it to fallback_engines.
 # searxng_url = "https://searx.example.org"
 
+[file_mention]
+# @file mention picker tuning. All values are optional; zero or missing
+# fields fall back to the built-in defaults shown here.
+# Base index refresh TTL in seconds. Workspaces with 2000+ indexed files
+# refresh at 4x this TTL so expensive rebuilds happen less often.
+refresh_ttl_secs = 30
+# Maximum suggestions shown in the @file popover per query.
+max_results = 15
+# Maximum files indexed per workspace (safety cap for huge trees).
+max_files = 5000
+
 [tools]
 # Controls which built-in tools are sent to the model.
 # Profiles: "full" (default), "acp", "minimal"/"lite", or "none".
@@ -740,6 +751,57 @@ mod tests {
             ReasoningDisplayMode::Full,
             "the shipped user config must keep the full reasoning trace visible"
         );
+        assert_eq!(
+            config.file_mention.refresh_ttl_secs, DEFAULT_FILE_MENTION_REFRESH_TTL_SECS,
+            "the template must ship the default @file refresh TTL"
+        );
+        assert_eq!(
+            config.file_mention.max_results, DEFAULT_FILE_MENTION_MAX_RESULTS,
+            "the template must ship the default @file popover size"
+        );
+        assert_eq!(
+            config.file_mention.max_files, DEFAULT_FILE_MENTION_MAX_FILES,
+            "the template must ship the default @file index cap"
+        );
+    }
+
+    /// The `[file_mention]` knobs must round-trip through TOML and default
+    /// themselves when the section or individual fields are missing.
+    #[test]
+    fn file_mention_config_defaults_and_overrides() {
+        let missing_section = toml::from_str::<Config>("").expect("empty config must parse");
+        assert_eq!(
+            missing_section.file_mention,
+            FileMentionConfig::default(),
+            "an absent [file_mention] section must fall back to defaults"
+        );
+
+        let partial = toml::from_str::<Config>("[file_mention]\nmax_results = 40\n")
+            .expect("partial section must parse");
+        assert_eq!(partial.file_mention.max_results, 40);
+        assert_eq!(
+            partial.file_mention.refresh_ttl_secs, DEFAULT_FILE_MENTION_REFRESH_TTL_SECS,
+            "unset fields must keep their defaults"
+        );
+        assert_eq!(
+            partial.file_mention.max_files,
+            DEFAULT_FILE_MENTION_MAX_FILES
+        );
+
+        let full = toml::from_str::<Config>(
+            "[file_mention]\nrefresh_ttl_secs = 120\nmax_results = 25\nmax_files = 8000\n",
+        )
+        .expect("full section must parse");
+        assert_eq!(full.file_mention.refresh_ttl_secs, 120);
+        assert_eq!(full.file_mention.max_results, 25);
+        assert_eq!(full.file_mention.max_files, 8_000);
+
+        // Round-trip through serialization so a saved config re-reads the same.
+        let serialized =
+            toml::to_string_pretty(&full.file_mention).expect("FileMentionConfig must serialize");
+        let reparsed: FileMentionConfig =
+            toml::from_str(&serialized).expect("FileMentionConfig must re-parse");
+        assert_eq!(reparsed, full.file_mention);
     }
 
     /// Colors are only discoverable if the template mentions them, since most

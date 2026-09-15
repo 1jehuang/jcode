@@ -417,6 +417,11 @@ pub trait TuiState {
     /// the list also depends on mutable session state. Defaults to a no-op for
     /// impls that do not cache.
     fn advance_command_suggestions_epoch(&self) {}
+
+    /// Absolute paths of confirmed @file references. Used for chip rendering.
+    fn file_chips(&self) -> &[std::path::PathBuf] {
+        &[]
+    }
     fn command_suggestion_selected(&self) -> usize {
         0
     }

@@ -291,6 +291,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             model: "gpt-5.4".to_string(),
@@ -299,6 +300,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             model: "openrouter models".to_string(),
@@ -307,6 +309,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: false,
             detail: "OPENROUTER_API_KEY not set".to_string(),
             cheapness: None,
+            usage: None,
         },
     ];
 
@@ -326,6 +329,7 @@ fn test_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         available: true,
         detail: String::new(),
         cheapness: None,
+        usage: None,
     }
 }
 
@@ -391,7 +395,7 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            assert!(message.contains("Validate further:"));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
         _ => panic!("expected confidence-summary follow-up"),
@@ -1321,6 +1325,7 @@ fn collect_cli_model_names_falls_back_when_no_routes_are_available() {
         available: false,
         detail: "no credentials".to_string(),
         cheapness: None,
+        usage: None,
     }];
 
     let models = collect_cli_model_names(&routes, vec!["gpt-5.4".to_string()]);

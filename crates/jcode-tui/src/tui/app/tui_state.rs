@@ -792,6 +792,10 @@ impl crate::tui::TuiState for App {
         App::advance_command_suggestions_epoch(self)
     }
 
+    fn file_chips(&self) -> &[std::path::PathBuf] {
+        &self.file_chips
+    }
+
     fn command_suggestion_selected(&self) -> usize {
         self.command_suggestion_selected
     }

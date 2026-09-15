@@ -53,6 +53,7 @@ mod auth;
 mod auth_account_picker_saved_accounts;
 mod auth_remote;
 mod catchup;
+mod char_bag;
 mod commands;
 mod commands_colors;
 mod commands_dispatch;
@@ -66,6 +67,7 @@ mod copy_selection;
 mod debug;
 mod dictation;
 mod event_wrappers;
+mod file_mention;
 mod handterm_native_scroll;
 pub(crate) mod helpers;
 mod hotkey_feedback;
@@ -854,6 +856,10 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
+    /// @file search cache and index
+    file_mention_cache: RefCell<crate::tui::app::file_mention::FileMentionCache>,
+    /// Confirmed @file references (absolute paths); loaded on send
+    file_chips: Vec<PathBuf>,
     scroll_offset: usize,
     /// Pauses auto-scroll when user scrolls up during streaming
     auto_scroll_paused: bool,

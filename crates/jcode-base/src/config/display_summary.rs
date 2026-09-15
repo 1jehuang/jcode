@@ -129,6 +129,11 @@ impl Config {
 - Discord: {}
 - Discord replies: {}
 
+**File mention (`@file` picker):**
+- Refresh TTL: {}s
+- Max suggestions: {}
+- Max indexed files: {}
+
 *Edit the config file or set environment variables to customize.*
 *Environment variables (e.g., `JCODE_SCROLL_UP_KEY`, `JCODE_GATEWAY_ENABLED`) override file settings.*"#,
             path,
@@ -372,6 +377,9 @@ impl Config {
             } else {
                 "disabled"
             },
+            self.file_mention.refresh_ttl_secs,
+            self.file_mention.max_results,
+            self.file_mention.max_files,
         )
     }
 }
