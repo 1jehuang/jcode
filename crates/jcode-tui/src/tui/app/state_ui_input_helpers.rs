@@ -2178,19 +2178,23 @@ fn compact_suggestion_text(text: &str, max_chars: usize) -> String {
 /// Longest common prefix of a list of strings.
 fn common_prefix(strings: &[&str]) -> Option<String> {
     let first = strings.first()?;
-    let mut end = first.len();
+    let first_chars: Vec<char> = first.chars().collect();
+    let mut end = first_chars.len();
     for s in strings.iter().skip(1) {
-        end = first
-            .chars()
+        end = first_chars
+            .iter()
             .zip(s.chars())
             .take(end)
-            .take_while(|(a, b)| a == b)
+            .take_while(|(a, b)| **a == *b)
             .count();
         if end == 0 {
             return None;
         }
     }
-    Some(first[..end].to_string())
+    // `end` counts chars; collect from chars so multi-byte UTF-8 boundaries are
+    // never sliced mid-sequence (a byte slice here used to panic on paths like
+    // "éx"/"éy" whose shared prefix ends inside a multi-byte char).
+    Some(first_chars[..end].iter().collect())
 }
 
 /// Resolve a relative or absolute path into an absolute `PathBuf`.
@@ -2215,6 +2219,28 @@ mod file_mention_helper_tests {
             common_prefix(&["src/cli/startup.rs", "src/cli/selfdev.rs"]),
             Some("src/cli/s".to_string())
         );
+    }
+
+    /// Regression: a byte-count prefix used to slice mid-UTF-8-char and panic
+    /// when the shared prefix ended inside a multi-byte character.
+    #[test]
+    fn common_prefix_multibyte_never_panics() {
+        // Shared prefix "é" (2 bytes) followed by differing ASCII tails.
+        assert_eq!(common_prefix(&["éx", "éy"]), Some("é".to_string()));
+        // Shared multi-byte prefix of several chars.
+        assert_eq!(
+            common_prefix(&["café/x.rs", "café/y.rs"]),
+            Some("café/".to_string())
+        );
+        // Divergence inside a multi-byte char: prefix must cut at the char
+        // boundary (é shares fully, è differs from é's second char... they
+        // share only 'c','a','f').
+        assert_eq!(
+            common_prefix(&["café.rs", "cafe.rs"]),
+            Some("caf".to_string())
+        );
+        // All-ASCII sanity.
+        assert_eq!(common_prefix(&["ab.rs", "ac.rs"]), Some("a".to_string()));
     }
 
     #[test]

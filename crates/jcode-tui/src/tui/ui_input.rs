@@ -92,6 +92,11 @@ pub(crate) fn has_active_at_mention(input: &str) -> bool {
 ///   "help me look at @"           → Some((12, ""))
 ///   "help me look at @ main.rs"   → None  (whitespace after @)
 ///   "test@main.rs"                → None  (@ not at boundary)
+///
+/// The mention is only *active* while the query token runs to the end of the
+/// input: once the user types a space (e.g. "@main then continue"), the old
+/// mention must no longer drive suggestions or intercept Enter, otherwise
+/// accepting a suggestion would rewrite text the user already moved past.
 pub(crate) fn extract_at_query(input: &str) -> Option<(usize, String)> {
     let last_at = input.rmatch_indices('@').find(|(idx, _)| {
         // No whitespace immediately after @.
@@ -115,13 +120,14 @@ pub(crate) fn extract_at_query(input: &str) -> Option<(usize, String)> {
         return Some((pos, String::new()));
     }
 
-    let query_len = after_at.chars().take_while(|c| !c.is_whitespace()).count();
-    if query_len == 0 {
+    // The token must extend to the end of the input: any whitespace after the
+    // @ (not just inside the collected query) means the user has finished the
+    // mention and moved on.
+    if after_at.contains(|c: char| c.is_whitespace()) {
         return None;
     }
 
-    let query: String = after_at.chars().take(query_len).collect();
-    Some((pos, query))
+    Some((pos, after_at.to_string()))
 }
 
 /// Accept a completion: replace the `@query` with the selected path and drop
@@ -1867,10 +1873,16 @@ mod tests {
             Some((5, "main.rs".to_string()))
         );
         assert_eq!(extract_at_query("@"), Some((0, "".to_string())));
-        assert_eq!(
-            extract_at_query("x @main.rs y"),
-            Some((2, "main.rs".to_string()))
-        );
+    }
+
+    #[test]
+    fn extract_at_query_ends_after_whitespace() {
+        // Once the user types past the @ token, the mention is no longer
+        // active: it must not drive suggestions or intercept Enter.
+        assert_eq!(extract_at_query("x @main.rs y"), None);
+        assert_eq!(extract_at_query("@main then continue"), None);
+        assert_eq!(extract_at_query("help @main.rs "), None); // trailing space
+        assert_eq!(extract_at_query("see @a, @b ok"), None);
     }
 
     #[test]
@@ -1882,14 +1894,13 @@ mod tests {
 
     #[test]
     fn accept_completion_drops_at_sign() {
-        let result = accept_completion("see @main.rs please", "src/main.rs");
+        let result = accept_completion("see @main.rs", "src/main.rs");
         assert_eq!(
             result,
-            Some((
-                "see src/main.rs please".to_string(),
-                4 + "src/main.rs".len()
-            ))
+            Some(("see src/main.rs".to_string(), 4 + "src/main.rs".len()))
         );
+        // Inactive mention (user typed past the token): nothing to accept.
+        assert_eq!(accept_completion("see @main.rs please", "src/main.rs"), None);
     }
 
     #[test]
