@@ -267,11 +267,14 @@ fn session_total_keeps_one_bucket_per_currency() {
         assert!((app.cost.total_in(&Currency::new("CNY")) - 7.0).abs() < 1e-4);
 
         // Same session, now priced by the USD card (the default when no
-        // `currency` is written).
+        // `currency` is written). The instant is pinned off-peak: this test is
+        // about currency buckets, and reading the wall clock made it fail
+        // whenever the run happened to land inside the configured peak window
+        // (10x input, so the USD bucket read 10.0 instead of 1.0).
         write_pricing_config(PEAK_CARD_CONFIG);
         app.streaming.streaming_input_tokens = 1_000_000;
         app.streaming.streaming_output_tokens = 0;
-        app.begin_api_call_accounting();
+        app.begin_api_call_accounting_at(instant(FAR_FUTURE_OFF_PEAK));
         app.update_cost_impl();
 
         assert!(
