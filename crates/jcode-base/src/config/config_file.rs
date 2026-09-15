@@ -153,13 +153,16 @@ impl Config {
         self.save_with_removals(&removals)
     }
 
-    /// Save config to file.
+    /// Save config, preserving what the serialized struct cannot express.
     ///
-    /// The declared removals are drained by [`Self::save`] but deliberately not
-    /// applied yet: this change only teaches the write path to *announce*
-    /// deletions, so the call-site migrations can be reviewed as inert before
-    /// the preserving save changes any behaviour.
-    fn save_with_removals(&self, _removals: &[String]) -> anyhow::Result<()> {
+    /// A whole-file rewrite (`toml::to_string_pretty` + write) is destructive:
+    /// it drops the user's comments and every section a newer build wrote.
+    /// This overlays the serialized struct onto the parsed existing file
+    /// instead, keeping anything the struct does not model, and then applies
+    /// the declared removals. When the existing file cannot be parsed, fall
+    /// back to the plain write (callers normally reach `save` through
+    /// `load_for_update`, which refuses an unreadable config).
+    fn save_with_removals(&self, removals: &[String]) -> anyhow::Result<()> {
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         // Ensure parent directory exists
@@ -167,7 +170,14 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)?;
+        let serialized = toml::to_string_pretty(self)?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(existing) => match merge_into_existing(&existing, &serialized, removals) {
+                Some(merged) => merged,
+                None => serialized,
+            },
+            Err(_) => serialized,
+        };
         std::fs::write(&path, content)?;
         Self::invalidate_cache();
         Ok(())
@@ -873,6 +883,91 @@ impl Config {
             ));
         }
         Ok(())
+    }
+}
+
+/// Overlay `serialized` onto the parsed `existing` file, then apply `removals`.
+///
+/// Returns `None` when `existing` cannot be parsed as TOML; the caller then
+/// writes `serialized` unchanged.
+fn merge_into_existing(existing: &str, serialized: &str, removals: &[String]) -> Option<String> {
+    let mut document = existing.parse::<toml_edit::Document>().ok()?;
+    let serialized: toml_edit::Document = serialized.parse().ok()?;
+    merge_table(document.as_table_mut(), serialized.as_table());
+    for dotted in removals {
+        remove_dotted_path(document.as_table_mut(), dotted);
+    }
+    Some(document.to_string())
+}
+
+/// Merge `source` into `target`, recursing table-to-table.
+///
+/// Keys only present in `target` are kept. They are either the anchor of the
+/// user's comments or a section a newer build wrote, and the serialized struct
+/// has no opinion about them. Keys the struct does model are overwritten by the
+/// serialized value. Nothing is deleted here: deletions are declared explicitly
+/// and applied by the caller, because absence from the serialized output cannot
+/// distinguish "deliberately emptied" from "not modeled".
+fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
+    for (key, source_item) in source.iter() {
+        match target.get_mut(key) {
+            Some(target_item) => merge_item(target_item, source_item),
+            None => {
+                target.insert(key, source_item.clone());
+            }
+        }
+    }
+}
+
+fn merge_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
+    if let (toml_edit::Item::Table(target_table), toml_edit::Item::Table(source_table)) =
+        (&mut *target, source)
+    {
+        merge_table(target_table, source_table);
+        return;
+    }
+    if let (
+        toml_edit::Item::ArrayOfTables(target_array),
+        toml_edit::Item::ArrayOfTables(source_array),
+    ) = (&mut *target, source)
+        && target_array.len() == source_array.len()
+    {
+        for (target_table, source_table) in target_array.iter_mut().zip(source_array.iter()) {
+            merge_table(target_table, source_table);
+        }
+        return;
+    }
+    replace_item_preserving_decor(target, source);
+}
+
+/// Replace `target`'s value with `source`'s while keeping `target`'s decor.
+///
+/// A comment attached to a key lives in that key's decor, so a plain
+/// assignment would erase the user's annotation on every settings change.
+fn replace_item_preserving_decor(target: &mut toml_edit::Item, source: &toml_edit::Item) {
+    match (target.as_value_mut(), source.as_value()) {
+        (Some(target_value), Some(source_value)) => {
+            let decor = target_value.decor().clone();
+            *target_value = source_value.clone();
+            *target_value.decor_mut() = decor;
+        }
+        _ => *target = source.clone(),
+    }
+}
+
+/// Remove a `"a.b.c"` dotted path from `table`, if present.
+fn remove_dotted_path(table: &mut toml_edit::Table, dotted: &str) {
+    match dotted.split_once('.') {
+        None => {
+            table.remove(dotted);
+        }
+        Some((head, rest)) => {
+            if let Some(item) = table.get_mut(head)
+                && let Some(child) = item.as_table_mut()
+            {
+                remove_dotted_path(child, rest);
+            }
+        }
     }
 }
 

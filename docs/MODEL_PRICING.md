@@ -145,8 +145,12 @@ These are worth reading once, because each one breaks more than it looks like:
   just the `[pricing]` part: every setting reverts to its default. Current builds
   say so in the session and re-arm the notice once the file parses again; older
   builds only wrote a line to the log.
-* **Any settings change rewrites the file without comments** — jcode serializes
-  its own structure on save. Keep a pristine copy if you document inside the file.
+* **A settings change now preserves the file.** Changing a setting reloads,
+  patches, and saves through the existing file: your comments and any section a
+  newer build wrote are kept, and only the keys jcode models are rewritten. The
+  one thing a save can still drop is a setting you deliberately reset (for
+  example a cleared `/colors` or a cleared default model), because "empty" and
+  "not written by this build" look identical in the file.
 
 ## Checking that it took effect
 
