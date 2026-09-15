@@ -557,6 +557,11 @@ pub struct Config {
 
     /// Hand-written per-provider pricing rules. Outranks every other source;
     /// when empty the pricing path behaves exactly as before.
+    ///
+    /// Skipped when empty for the same reason as `sponsors` below: [`Self::save`]
+    /// serializes the whole struct, so without this an unconfigured `[pricing]`
+    /// would be baked into the user's `config.toml` the next time anything saves.
+    #[serde(skip_serializing_if = "PricingConfigFile::is_empty")]
     pub pricing: PricingConfigFile,
 }
 
