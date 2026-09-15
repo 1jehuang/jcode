@@ -162,7 +162,10 @@ fn generate_palette(app: &mut App, seed: Option<&str>) {
     let generated = jcode_tui_style::harmony::generate_from_seed(seed_rgb, background);
     let report = jcode_tui_style::analyze_harmony(&generated, background);
 
-    let result = persist(|colors| {
+    // No declared removal: the generator writes every role, so the overlay
+    // already replaces them. Declaring `display.colors` here would delete the
+    // palette we just wrote, because removals are applied after the overlay.
+    let result = persist(&[], |colors| {
         colors.clear();
         for role in ALL_ROLES.iter().copied() {
             colors.insert(role.key().to_string(), to_hex(generated.rgb(role)));
@@ -198,7 +201,7 @@ fn set_color(app: &mut App, role_key: &str, value: &str) {
         return;
     };
 
-    match persist(|colors| {
+    match persist(&[], |colors| {
         colors.insert(role.key().to_string(), to_hex(rgb));
     }) {
         Ok(()) => {
@@ -225,12 +228,16 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
                 )));
                 return;
             };
-            persist(|colors| {
+            // A single-role reset is deletion by omission too: the key leaves
+            // the in-memory map, so the save has to be told to drop it from the
+            // file as well.
+            let dotted = format!("display.colors.{}", role.key());
+            persist(&[dotted.as_str()], |colors| {
                 colors.remove(role.key());
             })
             .map(|()| format!("Reset {} to its default.", role.key()))
         }
-        None => persist(|colors| colors.clear())
+        None => persist(&["display.colors"], |colors| colors.clear())
             .map(|()| "Reset every color to its default.".to_string()),
     };
 
@@ -248,9 +255,10 @@ fn reset_colors(app: &mut App, role_key: Option<&str>) {
 /// concurrent config edit by another jcode session is not clobbered, and so a
 /// config we cannot parse is reported instead of being overwritten.
 fn persist(
+    removals: &[&str],
     mutate: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
 ) -> anyhow::Result<()> {
-    crate::config::Config::update(|config| mutate(&mut config.display.colors))?;
+    crate::config::Config::update_removing(removals, |config| mutate(&mut config.display.colors))?;
     crate::tui::theme_detect::init_palette();
     Ok(())
 }
@@ -330,7 +338,7 @@ mod tests {
         let broken = "[display\ncolors = {}\n";
         let home = HomeGuard::new(broken);
 
-        let result = persist(|colors| {
+        let result = persist(&[], |colors| {
             colors.insert("user".to_string(), "#ff0000".to_string());
         });
 
