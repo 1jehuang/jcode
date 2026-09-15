@@ -377,7 +377,10 @@ impl GeminiProvider {
         // Code Assist enforces a short-window burst limiter that returns 429
         // RESOURCE_EXHAUSTED with "quota will reset after 0s" even when the
         // daily bucket has plenty left. Those clear within seconds, so retry
-        // them with backoff instead of failing the turn.
+        // them with backoff instead of failing the turn. The same applies to
+        // transient 5xx from Google's side ("Authentication backend
+        // unavailable", "No capacity available"), which otherwise kill a
+        // long session mid-turn.
         const MAX_429_RETRIES: u32 = 5;
         let mut attempt: u32 = 0;
         loop {
@@ -397,11 +400,14 @@ impl GeminiProvider {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < MAX_429_RETRIES {
+                let transient =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                if transient && attempt < MAX_429_RETRIES {
                     let delay = Duration::from_millis(1500u64.saturating_mul(1u64 << attempt));
                     jcode_base::logging::warn(&format!(
-                        "Gemini {} hit burst 429 (attempt {}/{}); retrying in {:?}",
+                        "Gemini {} hit transient HTTP {} (attempt {}/{}); retrying in {:?}",
                         method,
+                        status.as_u16(),
                         attempt + 1,
                         MAX_429_RETRIES,
                         delay
