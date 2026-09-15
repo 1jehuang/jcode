@@ -25,6 +25,28 @@ impl Config {
         Ok(config)
     }
 
+    /// Load the config plus the parse error that forced a fallback to defaults.
+    ///
+    /// [`Self::load`] answers a malformed file with defaults, which is right for
+    /// a caller that has to keep running, but it leaves the user with no idea why
+    /// every setting stopped applying. This reports the cause alongside the
+    /// fallback so callers can surface it.
+    pub fn load_with_parse_error() -> (Self, Option<String>) {
+        match Self::load_from_file_strict() {
+            Ok(found) => {
+                let mut config = found.unwrap_or_default();
+                config.apply_env_overrides();
+                (config, None)
+            }
+            Err(error) => {
+                crate::logging::error(&format!("Failed to parse config file: {}", error));
+                let mut config = Self::default();
+                config.apply_env_overrides();
+                (config, Some(error.to_string()))
+            }
+        }
+    }
+
     /// Load the on-disk config for a read-modify-write operation.
     ///
     /// Unlike [`Self::load`], this never converts a parse error into defaults.

@@ -3008,6 +3008,9 @@ impl App {
         // deep-idle cadence, which would leave the first keystroke after an
         // edit matched against the old chords.
         self.refresh_keybindings_if_config_reloaded();
+        // A broken config silently reverts settings, so the check runs on the
+        // same pre-dispatch tick as the keybinding refresh.
+        self.refresh_config_parse_notice();
         self.handle_key_core(
             event.code,
             event.modifiers,

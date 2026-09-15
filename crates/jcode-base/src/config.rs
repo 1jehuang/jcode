@@ -276,6 +276,7 @@ pub fn config() -> &'static Config {
     }
 
     let mut reload_reason = None;
+    let mut parse_error = None;
     let config = {
         let mut cache = CONFIG_CACHE
             .write()
@@ -296,7 +297,9 @@ pub fn config() -> &'static Config {
                 &cache.fingerprint,
                 &fingerprint,
             ));
-            cache.config = leak_config(Config::load());
+            let (loaded, error) = Config::load_with_parse_error();
+            cache.config = leak_config(loaded);
+            parse_error = error;
             // Loading applies env overrides that can themselves set env vars
             // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
@@ -308,6 +311,10 @@ pub fn config() -> &'static Config {
     };
 
     if let Some(reason) = reload_reason {
+        // A config that stopped parsing is recorded so sessions can tell the
+        // user why their settings reverted, instead of the fallback to defaults
+        // being the only trace.
+        set_config_parse_error(parse_error);
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
         // A config reload can change config-derived system prompt sections
         // (feature toggles, sponsors, ...), which legitimately invalidates the
@@ -444,6 +451,27 @@ static CONFIG_RELOAD_GENERATION: std::sync::atomic::AtomicU64 =
 /// Current config reload generation. Increments after every cache reload.
 pub fn config_reload_generation() -> u64 {
     CONFIG_RELOAD_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parse failure from the most recent config reload, if the file was malformed.
+///
+/// `Config::load` answers a malformed file with defaults, so without this the
+/// only symptom of a broken config is that every setting quietly stopped
+/// applying. Sessions read this after a reload and tell the user.
+static CONFIG_PARSE_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Last config parse failure, if the active config file is currently malformed.
+pub fn config_parse_error() -> Option<String> {
+    CONFIG_PARSE_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn set_config_parse_error(error: Option<String>) {
+    *CONFIG_PARSE_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
 }
 
 /// Listeners invoked after the config cache reloads.

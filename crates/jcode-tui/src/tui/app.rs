@@ -1529,6 +1529,10 @@ pub struct App {
     // Polled on idle ticks so config.toml keybinding edits hot-reload
     // without a restart.
     keybindings_config_generation: u64,
+    // Parse failure already reported for the current config file. Dedupes the
+    // "your settings stopped applying" notice so a broken file is announced
+    // once rather than on every tick.
+    reported_config_parse_error: Option<String>,
     // Active external dictation session, if one is running
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running

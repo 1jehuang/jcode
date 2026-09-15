@@ -113,6 +113,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     app.check_debug_command();
     needs_redraw |= app.check_stable_version();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
+    needs_redraw |= app.refresh_config_parse_notice();
     needs_redraw |= app.maybe_finish_background_client_reload();
     if app.pending_migration.is_some() && !app.is_processing {
         app.execute_migration();
