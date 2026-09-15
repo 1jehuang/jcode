@@ -236,13 +236,23 @@ impl CompactionManager {
     }
 
     pub fn with_budget(mut self, budget: usize) -> Self {
-        self.token_budget = budget;
+        self.token_budget = Self::capped_budget(&self.compaction_config, budget);
         self
     }
 
     /// Update the token budget (e.g., when model changes)
     pub fn set_budget(&mut self, budget: usize) {
-        self.token_budget = budget;
+        self.token_budget = Self::capped_budget(&self.compaction_config, budget);
+    }
+
+    /// Apply `[compaction] max_context_tokens` so a large-window model cannot
+    /// push per-turn context past the operator's chosen ceiling.
+    fn capped_budget(cfg: &crate::config::CompactionConfig, budget: usize) -> usize {
+        if cfg.max_context_tokens > 0 {
+            budget.min(cfg.max_context_tokens)
+        } else {
+            budget
+        }
     }
 
     /// Get current token budget

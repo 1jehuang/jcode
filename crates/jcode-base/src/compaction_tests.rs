@@ -1105,3 +1105,25 @@ fn test_recover_within_budget_summary_line_variants() {
     assert!(line.contains("shortened 5 large tool result(s)"));
     assert!(!line.contains("dropped"));
 }
+
+#[test]
+fn max_context_tokens_caps_budget_from_large_window_models() {
+    // A 1M-window model with the default 0.80 trigger lets a session reach
+    // ~800k tokens per request before anything folds. The operator cap bounds
+    // that regardless of what the provider advertises.
+    let mut manager = CompactionManager::new();
+    manager.compaction_config.max_context_tokens = 200_000;
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), 200_000);
+    // A model smaller than the cap keeps its own window.
+    manager.set_budget(128_000);
+    assert_eq!(manager.token_budget(), 128_000);
+}
+
+#[test]
+fn max_context_tokens_zero_means_no_cap() {
+    let mut manager = CompactionManager::new();
+    manager.compaction_config.max_context_tokens = 0;
+    manager.set_budget(1_000_000);
+    assert_eq!(manager.token_budget(), 1_000_000);
+}

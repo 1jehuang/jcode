@@ -381,6 +381,15 @@ pub struct CompactionConfig {
 
     /// [semantic] Number of recent turns to look at for building the "current goal" embedding
     pub goal_window_turns: usize,
+
+    /// Hard cap on the token budget compaction measures against, regardless of
+    /// the model's advertised context window. 0 = no cap (use the model window).
+    ///
+    /// Every turn re-sends the whole transcript, so on a 1M-window model the
+    /// default 80%-of-window trigger lets a session reach ~800k tokens per
+    /// request before anything folds. Set this to e.g. 200000 to keep per-turn
+    /// cost bounded on large-window providers (Gemini, GPT-6, Claude 1M).
+    pub max_context_tokens: usize,
 }
 
 impl Default for CompactionConfig {
@@ -396,6 +405,7 @@ impl Default for CompactionConfig {
             topic_shift_threshold: 0.45,
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
+            max_context_tokens: 0,
         }
     }
 }
