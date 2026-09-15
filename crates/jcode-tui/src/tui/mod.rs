@@ -1,6 +1,7 @@
 pub mod account_picker;
 pub(crate) mod app;
 pub mod justrust_status;
+pub(crate) mod elicitation_types;
 
 #[derive(Clone)]
 pub struct ContextSnapshot {

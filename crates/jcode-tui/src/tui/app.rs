@@ -138,6 +138,7 @@ mod wake_stats;
 pub(crate) use todos_view::pinned_todos_payload_for_session;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
+pub(crate) mod tui_event;
 mod tui_state;
 mod turn;
 mod turn_memory;
@@ -1885,6 +1886,8 @@ pub struct App {
     account_picker_overlay: Option<RefCell<super::account_picker::AccountPicker>>,
     /// Usage overlay (None = not visible)
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
+    /// Elicitation overlay for structured agent-to-user input (None = not active)
+    elicit_overlay: Option<super::elicitation_types::ElicitOverlayState>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
     /// Provider query from `/usage <provider>`; None shows every provider.
