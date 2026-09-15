@@ -472,8 +472,17 @@ impl App {
     /// its tariff (F15), and the card pinned to the previous call must not leak
     /// into this one (F16).
     pub(super) fn begin_api_call_accounting(&mut self) {
+        self.begin_api_call_accounting_at(SystemTime::now());
+    }
+
+    /// [`Self::begin_api_call_accounting`] at an explicit instant.
+    ///
+    /// Exists so a caller that already knows the instant - and every test that
+    /// must not change meaning when the wall clock crosses a configured
+    /// peak/off-peak window - can pin it rather than read the clock.
+    pub(super) fn begin_api_call_accounting_at(&mut self, at: SystemTime) {
         self.mark_stream_usage_call_boundary();
-        self.begin_call_pricing(SystemTime::now());
+        self.begin_call_pricing(at);
     }
 
     /// The rate card for the call currently being priced, resolved once at `at`
