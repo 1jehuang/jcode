@@ -1654,6 +1654,65 @@ fn swarm_root_effort_env_overrides_and_shared_resolution() {
     for (key, value) in keys.into_iter().zip(previous) {
         restore_env_var(key, value);
     }
+/// A config that stops parsing must be reportable, not only silently replaced
+/// by defaults: the fallback is invisible and every setting stops applying.
+#[test]
+fn load_with_parse_error_reports_a_malformed_file() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[display\ncentered = true\n",
+    )
+    .expect("write malformed config");
+
+    let (config, error) = Config::load_with_parse_error();
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    let error = error.expect("a malformed config must be reported");
+    assert!(
+        error.contains("config.toml"),
+        "the report should name the file: {error}"
+    );
+    // The fallback still has to be usable, or every caller breaks.
+    assert_eq!(config.display.centered, Config::default().display.centered);
+}
+
+/// The cache reload is what every session sees, so a broken config has to be
+/// reported there; this is the signal the TUI turns into a user-facing notice.
+#[test]
+fn config_cache_reports_a_parse_failure_until_the_file_is_fixed() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[display\ncentered = true\n").expect("write malformed config");
+    crate::config::invalidate_config_cache();
+    let _ = crate::config::config();
+    let broken = crate::config::config_parse_error();
+
+    std::fs::write(&path, "[display]\ncentered = true\n").expect("write valid config");
+    crate::config::invalidate_config_cache();
+    let _ = crate::config::config();
+    let fixed = crate::config::config_parse_error();
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    let broken = broken.expect("a malformed config must be reported after a reload");
+    assert!(
+        broken.contains("config.toml"),
+        "the report should name the file: {broken}"
+    );
+    assert!(
+        fixed.is_none(),
+        "fixing the file must clear the report, got {fixed:?}"
+    );
 }
 
 #[test]
