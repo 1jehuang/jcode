@@ -182,8 +182,84 @@ fn should_record_panic_as_crash(status: &session::SessionStatus) -> bool {
 }
 
 pub fn install_panic_hook() {
+    use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+
+    // Rate guard: even with UnhandledPanic::Task (Fix D) we still want to die
+    // if panics are arriving faster than once every 12 s — a runaway panic
+    // loop is otherwise indistinguishable from a hot loop. We track the
+    // timestamp (ms since epoch) of the most recent panic; if the gap is
+    // below `PANIC_RATE_WINDOW_MS` five times in a row we `exit` after the
+    // next one.
+    const PANIC_RATE_WINDOW_MS: i64 = 12_000;
+    const PANIC_RATE_LIMIT: u8 = 5;
+
+    static PANIC_TS: AtomicI64 = AtomicI64::new(0);
+    static PANIC_BURST: AtomicU8 = AtomicU8::new(0);
+
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
+        // 0. Rate guard — runs first so we still call the cleanup branch
+        //    below even when we force-exit.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let prev_ms = PANIC_TS.swap(now_ms, Ordering::SeqCst);
+        let mut burst = PANIC_BURST.load(Ordering::SeqCst);
+        let in_window = prev_ms != 0 && (now_ms - prev_ms) < PANIC_RATE_WINDOW_MS;
+        if in_window {
+            if burst.saturating_add(1) >= PANIC_RATE_LIMIT {
+                default_hook(info);
+                std::process::exit(101);
+            }
+            burst = burst.saturating_add(1);
+        } else if prev_ms != 0 {
+            burst = 0;
+        }
+        PANIC_BURST.store(burst, Ordering::SeqCst);
+
+        // 1. Best-effort synchronous terminal cleanup so the user is not left
+        //    with raw mode / focus events / bracketed paste still enabled when
+        //    the panic propagates to std::process::exit (issue #214 / report
+        //    §4.4). Errors here are silently swallowed because the panic
+        //    handler must not panic itself.
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::event::DisableFocusChange
+        );
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::event::DisableBracketedPaste
+        );
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::terminal::LeaveAlternateScreen
+        );
+        let _ = crossterm::execute!(std::io::stderr(), crossterm::cursor::Show);
+
+        // 2. Persist the panic details to a sibling log file so the next
+        //    process can diagnose even when stderr was swallowed by a parent
+        //    shell or by the backgrounded jcode server.
+        if let Some(session_id) = get_current_session() {
+            let panic_path = std::path::PathBuf::from(format!(
+                "{session_id}.panic.log"
+            ));
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&panic_path)
+            {
+                use std::io::Write as _;
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let payload = info.payload_as_str().unwrap_or("<no message>");
+                let _ = writeln!(f, "PANIC at {timestamp}: {payload}");
+                if let Some(loc) = info.location() {
+                    let _ = writeln!(f, "  at {}:{}:{}", loc.file(), loc.line(), loc.column());
+                }
+                let _ = f.flush();
+            }
+        }
+
+        // 3. Delegate to the previous (default) hook so the user sees the
+        //    panic message and any RUST_BACKTRACE output as usual.
         default_hook(info);
 
         if let Some(session_id) = get_current_session() {
