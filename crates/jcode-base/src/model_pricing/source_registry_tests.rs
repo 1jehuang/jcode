@@ -701,6 +701,7 @@ url = "{url}"
         "deepseek",
         "deepseek-v4-pro",
         None,
+        SystemTime::now(),
         None,
     )
     .expect("priced");
@@ -724,6 +725,7 @@ url = "{url}"
         "deepseek",
         "deepseek-v4-pro",
         None,
+        SystemTime::now(),
         None,
     )
     .expect("priced");
@@ -878,6 +880,66 @@ url = "{url}"
     );
 }
 
+/// F-A at the base layer: the derived billing layer (curated tables, sheets,
+/// models.dev) prices a sheet-priced call at the *call's* instant, not the wall
+/// clock, so an ongoing session follows the schedule across a window boundary.
+#[test]
+fn the_derived_billing_layer_reads_a_sheet_schedule_at_the_call_instant() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "peak.json",
+        r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+            "cost":{"input":1.0,"output":2.0},
+            "tariffs":{"peak":{"multiplier":2.0}},
+            "schedule":[{
+                "tariff":"peak",
+                "utc_offset_minutes":0,
+                "weekdays":["Mon","Tue","Wed","Thu","Fri"],
+                "windows":[["01:00","04:00"]]
+            }]
+        }}}}"#,
+    );
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+id = "peak"
+url = "{url}"
+"#
+    ));
+
+    let instant = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // 2030-06-22T02:00:00Z (Saturday) and 2030-06-24T02:00:00Z (Monday, inside
+    // the 01:00-04:00 UTC weekday window). Both are years away from the wall
+    // clock, so a "read the clock" implementation cannot satisfy both.
+    let off_peak = crate::provider::pricing::derived_pricing_for_source_at_size(
+        "deepseek",
+        "deepseek-v4-pro",
+        None,
+        instant(1_908_324_000),
+        None,
+    )
+    .expect("priced");
+    let peak = crate::provider::pricing::derived_pricing_for_source_at_size(
+        "deepseek",
+        "deepseek-v4-pro",
+        None,
+        instant(1_908_496_800),
+        None,
+    )
+    .expect("priced");
+    assert_eq!(
+        off_peak.input_price_per_mtok_micros,
+        Some(1_000_000),
+        "off peak prices the sheet's base rate"
+    );
+    assert_eq!(
+        peak.input_price_per_mtok_micros,
+        Some(2_000_000),
+        "the peak window doubles the sheet's input rate"
+    );
+}
+
 /// A sheet's long-context tier has to be visible to the caller that memoizes a
 /// derived price, or a long call's higher rates would stay cached for the next
 /// short one (the trap models.dev's `context_over_200k` tier has).
@@ -902,22 +964,24 @@ url = "{url}"
 
     let now = SystemTime::now();
     assert_eq!(
-        crate::model_pricing::derived_context_tier_in_force(
+        crate::model_pricing::derived_price_identity(
             "deepseek",
             "deepseek-v4-pro",
             now,
             Some(200_000)
-        ),
+        )
+        .context_tier,
         None,
         "exactly the threshold is still the base tier"
     );
     assert_eq!(
-        crate::model_pricing::derived_context_tier_in_force(
+        crate::model_pricing::derived_price_identity(
             "deepseek",
             "deepseek-v4-pro",
             now,
             Some(200_001)
-        ),
+        )
+        .context_tier,
         Some(200_000)
     );
 
@@ -943,12 +1007,13 @@ url = "{url}"
     // With no sheet, the models.dev tier answers instead (here: none).
     env.write_config("");
     assert_eq!(
-        crate::model_pricing::derived_context_tier_in_force(
+        crate::model_pricing::derived_price_identity(
             "deepseek",
             "deepseek-v4-pro",
             now,
             Some(300_000)
-        ),
+        )
+        .context_tier,
         None
     );
 }

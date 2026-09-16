@@ -184,25 +184,28 @@ pub fn note_primary(rows: &mut [DisplayAmount], note: &str) {
 /// Say, on the amount itself, why the session cost is not what the user's own
 /// `[pricing]` config asked for.
 ///
-/// Two pricing problems silently change what the displayed figure *means*, and
-/// both used to be invisible in the UI:
+/// Three pricing problems silently change what the displayed figure *means*,
+/// and all of them used to be invisible in the UI:
 ///
 /// * a rule that is out of effect, where the figure is the next layer's
 ///   (F8/F20) — a hand-written card *or* a `[[pricing.sources]]` sheet, whose
-///   notice names the sheet, and
+///   notice names the sheet,
 /// * a `[pricing]` section that failed validation, where the resolver dropped
-///   every rule in it and the figure may be models.dev's (I-2).
+///   every rule in it and the figure may be models.dev's (I-2), and
+/// * a card that claims the pair but cannot price the call, where nothing was
+///   accrued and the figure stays at zero (spec 4.4): without the note that
+///   zero reads as "this call was free".
 ///
-/// The note belongs on the amount the user reads. The second case is read here
-/// rather than stored per call: the resolver memoizes the rejection against the
-/// loaded config, so this costs one lock (the same read `from_config` already
-/// does on this path) and the rejection is logged once per config instance, not
-/// once per frame.
+/// The note belongs on the amount the user reads. The validation case is read
+/// here rather than stored per call: the resolver memoizes the rejection against
+/// the loaded config, so this costs one lock (the same read `from_config`
+/// already does on this path) and the rejection is logged once per config
+/// instance, not once per frame.
 pub fn note_pricing_problems(
     rows: &mut [DisplayAmount],
-    rule_out_of_effect: Option<&crate::model_pricing::OutOfEffectNotice>,
+    notice: Option<&crate::model_pricing::PricingNotice>,
 ) {
-    if let Some(notice) = rule_out_of_effect {
+    if let Some(notice) = notice {
         note_primary(rows, &notice.label());
     }
     if let Some(error) = crate::model_pricing::pricing_config_error() {

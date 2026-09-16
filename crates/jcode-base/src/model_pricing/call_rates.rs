@@ -135,14 +135,25 @@ pub fn config_call_rates(
     }
 }
 
-/// The user's own rule that stopped applying to one call, in the form the
-/// display labels next to the amount a *lower* layer produced (F8/F20).
+/// A problem with the user's own `[pricing]` configuration that changes what
+/// the displayed figure *means*, in the form the display labels next to the
+/// amount that figure belongs to.
 ///
-/// Both layers that a user can write by hand are covered, and the sheet names
-/// itself: a user with several `[[pricing.sources]]` sheets has to be able to
-/// tell which of them stopped applying, so the marker carries the sheet's `id`.
+/// Two shapes reach here, and both are shown on the amount rather than in a log
+/// line because the resolver runs per call and the label is rendered every
+/// frame:
+///
+/// * a rule that stopped applying (F8/F20), where the figure is a lower layer's,
+///   and
+/// * a card that claims the pair but cannot price the call (spec 4.4), where no
+///   cost was accrued at all and the figure is deliberately left at zero rather
+///   than replaced by an estimate.
+///
+/// Both layers a user can write by hand are covered, and the sheet names itself:
+/// a user with several `[[pricing.sources]]` sheets has to be able to tell which
+/// of them stopped applying, so the marker carries the sheet's `id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutOfEffectNotice {
+pub enum PricingNotice {
     /// A hand-written `[pricing.providers]` card. Label: `rule expired` /
     /// `rule not in effect yet`.
     ConfigCard(RuleOutOfEffect),
@@ -156,9 +167,15 @@ pub enum OutOfEffectNotice {
         source_id: String,
         reason: RuleOutOfEffect,
     },
+    /// A hand-written card claims this pair but cannot price the call (its
+    /// `on_rule_expiry = "no_price"` rule expired, or the card is incomplete in
+    /// a currency that cannot merge with the next layer). Nothing is billed, so
+    /// the session figure stays at zero; the label is what stops that zero from
+    /// reading as "this call was free".
+    ConfiguredWithoutPrice,
 }
 
-impl OutOfEffectNotice {
+impl PricingNotice {
     /// The short marker shown next to the price, in the same style as the
     /// `(no EUR rate)` note.
     pub fn label(&self) -> String {
@@ -167,6 +184,7 @@ impl OutOfEffectNotice {
             Self::PriceSheet { source_id, reason } => {
                 format!("{} (pricing source `{source_id}`)", reason.label())
             }
+            Self::ConfiguredWithoutPrice => "rule cannot price this call".to_string(),
         }
     }
 }
@@ -182,7 +200,7 @@ pub fn sheet_rule_out_of_effect(
     provider: &str,
     model: &str,
     at: SystemTime,
-) -> Option<OutOfEffectNotice> {
+) -> Option<PricingNotice> {
     let (source_id, reason) = super::source_registry::out_of_effect_sheet(provider, model, at)?;
-    Some(OutOfEffectNotice::PriceSheet { source_id, reason })
+    Some(PricingNotice::PriceSheet { source_id, reason })
 }

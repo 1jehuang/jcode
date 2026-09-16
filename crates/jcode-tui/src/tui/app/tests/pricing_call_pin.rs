@@ -387,7 +387,10 @@ fn a_rule_that_only_starts_later_is_labelled_as_not_in_effect() {
 fn a_rule_that_refuses_to_price_is_never_labelled_expired_but_priced() {
     // `on_rule_expiry = "no_price"` bills nothing, so the display must not
     // carry a "the rule expired, this is the fallback price" marker: there is
-    // no fallback price to explain.
+    // no fallback price to explain. What it *must* carry is the honest label
+    // for why the figure is what it is: the user's own rule refused to price the
+    // call, so the zero on screen is not a price and must not read like one
+    // (F-C, spec 4.4).
     with_temp_jcode_home(|| {
         write_pricing_config(EXPIRED_RULE_NO_PRICE_CONFIG);
         let (cost, line) = widget_cost_line();
@@ -396,6 +399,11 @@ fn a_rule_that_refuses_to_price_is_never_labelled_expired_but_priced() {
         assert!(
             !line.contains("expired"),
             "an unpriced call must not be labelled as an expired rule that was priced: {line}"
+        );
+        assert!(
+            line.contains("rule cannot price this call"),
+            "the cost line must say the rule refused to price the call instead of \
+             showing a bare $0.0000 that reads as 'free': {line}"
         );
     });
 }
@@ -702,6 +710,67 @@ fn an_in_effect_sheet_rule_is_not_labelled() {
         assert!(
             !line.contains("expired") && !line.contains("pricing source"),
             "an in-effect sheet must not carry an out-of-effect marker: {line}"
+        );
+    });
+}
+
+// F-A: a `[[pricing.sources]]` sheet's `schedule` is as time-dependent as a
+// hand-written card's, but the TUI memoizes the derived price. The memo key has
+// to carry the tariff the sheet selects, or a memo filled in one window keeps
+// billing that window's rate after the schedule has moved on.
+
+/// A sheet whose peak tariff doubles the base rate, in the same JSON shape a
+/// hand-written card states its peak hours in.
+const PEAK_SHEET_BODY: &str = r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+    "cost":{"input":1.0,"output":2.0},
+    "tariffs":{"peak":{"multiplier":2.0}},
+    "schedule":[{
+        "tariff":"peak",
+        "utc_offset_minutes":0,
+        "weekdays":["Mon","Tue","Wed","Thu","Fri"],
+        "windows":[["01:00","04:00"]]
+    }]
+}}}}"#;
+
+#[test]
+fn a_sheet_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
+    with_temp_jcode_home(|| {
+        let section = write_source_sheet("peak-sheet", PEAK_SHEET_BODY);
+        write_pricing_config(&section);
+
+        let mut app = remote_deepseek_app();
+
+        // First call: Saturday 02:00Z, off-peak, so the sheet's base $1/$2 rates.
+        // This also fills the derived-price memo with the off-peak price.
+        app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_OFF_PEAK));
+        assert!(
+            (session_cost_usd(&app) - 1.0).abs() < 1e-4,
+            "off-peak the sheet's base input rate is $1.00/Mtok, got ${:.4}",
+            session_cost_usd(&app)
+        );
+
+        // A new call: Monday 02:00Z, inside the sheet's peak window. The memo was
+        // filled off-peak; billing must follow the schedule to the peak tariff
+        // (2x), not reuse the off-peak price it cached.
+        app.begin_api_call_accounting_at(instant(FAR_FUTURE_PEAK));
+        let before = session_cost_usd(&app);
+        app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_PEAK));
+        assert!(
+            (session_cost_usd(&app) - before - 2.0).abs() < 1e-4,
+            "inside the peak window the sheet's input rate doubles to $2.00/Mtok, got ${:.4} \
+             (a stale memo would bill the off-peak $1.00)",
+            session_cost_usd(&app) - before
+        );
+
+        // And back: a call after the window returns to the base rate, so the
+        // memo is re-read in both directions rather than pinned to one window.
+        app.begin_api_call_accounting_at(instant(FAR_FUTURE_OFF_PEAK));
+        let before = session_cost_usd(&app);
+        app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_OFF_PEAK));
+        assert!(
+            (session_cost_usd(&app) - before - 1.0).abs() < 1e-4,
+            "back off-peak the sheet's base rate applies again, got ${:.4}",
+            session_cost_usd(&app) - before
         );
     });
 }

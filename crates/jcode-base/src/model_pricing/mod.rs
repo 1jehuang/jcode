@@ -35,7 +35,7 @@ mod sources;
 /// call sites can read a card without reaching into `config`.
 pub use crate::config::CostFields;
 pub use call_rates::{
-    CallRateCard, ConfigCallRates, OutOfEffectNotice, config_call_rates, sheet_rule_out_of_effect,
+    CallRateCard, ConfigCallRates, PricingNotice, config_call_rates, sheet_rule_out_of_effect,
 };
 pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
@@ -279,15 +279,18 @@ pub(crate) fn source_card_at_size(
         entry,
         currency,
     } = hit;
-    // Asked before the merge below, and before the card is consumed: it is the
-    // sheet's own declaration, and it is what the billing memo has to key on.
-    let context_tier =
-        rules::resolve_tier(&entry, at, input_tokens).and_then(|tier| tier.context_tier);
+    // Asked before the merge below, and before the card is consumed: the
+    // schedule that picks the tariff is the sheet's own, and the selection (and
+    // the tier) is what the billing memo has to key on.
+    let selected = rules::resolve_tier(&entry, at, input_tokens);
+    let context_tier = selected.as_ref().and_then(|tier| tier.context_tier);
+    let tariff = selected.and_then(|tier| tier.tariff);
     let resolved = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
     resolved.owns_price.then_some(SourceCard {
         entry: resolved.entry,
         currency: resolved.currency,
         source_id,
+        tariff,
         context_tier,
     })
 }
@@ -298,6 +301,14 @@ pub(crate) struct SourceCard {
     pub(crate) currency: Currency,
     /// The `id` of the sheet that supplied the rates.
     pub(crate) source_id: String,
+    /// The name of the tariff the sheet's schedule selected at the call's
+    /// instant, or `None` when the sheet's own base `cost` applies.
+    ///
+    /// A sheet's schedule is time-dependent, and a derived price is memoized,
+    /// so the tariff in force is part of what identifies the price the memo
+    /// holds: without it a memo filled off-peak would keep billing off-peak
+    /// rates after the window closed (the schedule bug Task 10 introduced).
+    pub(crate) tariff: Option<String>,
     /// The sheet's long-context tier in force for the call's input token count,
     /// if it declares one.
     ///
@@ -329,29 +340,58 @@ pub(crate) fn models_dev_card_at_size(
     Some((entry, Currency::usd()))
 }
 
-/// The `min_input_tokens` of the models.dev long-context tier in force for a
-/// call reporting `input_tokens`, if any.
+/// What identifies the derived-layer rate card a call would be billed from at
+/// one instant, for the caller that memoizes a derived price.
 ///
-/// The derived billing layer memoizes one price per model, so it has to know
-/// which tier it just priced: without this a long call would leave its higher
-/// rates cached for the next short call.
-/// The long-context tier the *derived* layers would bill this call at, if any.
+/// The derived layers are the only ones memoized - a hand-written
+/// `[pricing.providers]` card is resolved at each call's own instant - so this
+/// is exactly the state of the derived chain that can change what a memoized
+/// price *means*:
 ///
-/// The extra-source layer outranks models.dev, so a sheet's own tier is asked
-/// for first; only when no sheet prices the call does models.dev's
-/// `context_over_200k` tier answer. `None` means the call is on the base tier
-/// (or unpriced), and it is what a price memo keyed per call size must record,
-/// otherwise a long call's higher rates stay cached for the next short one.
-pub fn derived_context_tier_in_force(
+/// * `sheet` names the `[[pricing.sources]]` sheet and the tariff its schedule
+///   selected at the call's instant, or `None` when no sheet prices the call and
+///   the catalogs jcode ships answer. A memo keyed on this identity re-resolves
+///   when the sheet's window changes, so a call in the peak window never reuses
+///   the price a call in the off-peak window cached.
+/// * `context_tier` is the long-context tier in force (`min_input_tokens`), or
+///   `None` for the base tier. Without it a long call's higher rates would stay
+///   cached for the next short one.
+///
+/// Both are read with the *call's* instant, never the wall clock, which is what
+/// makes peak/off-peak sheets behave like the hand-written rules they mirror.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedPriceIdentity {
+    /// `"{source_id}#{tariff}"` for the sheet in force, else `None`.
+    pub sheet: Option<String>,
+    /// The long-context tier in force, else `None`.
+    pub context_tier: Option<u64>,
+}
+
+/// The derived-layer price identity for `(provider, model)` at `at`.
+///
+/// The extra-source layer outranks models.dev, so a sheet's own tariff and tier
+/// are asked for first; only when no sheet prices the call does models.dev's
+/// `context_over_200k` tier answer.
+pub fn derived_price_identity(
     provider: &str,
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
-) -> Option<u64> {
+) -> DerivedPriceIdentity {
     if let Some(card) = source_card_at_size(provider, model, at, input_tokens) {
-        return card.context_tier;
+        return DerivedPriceIdentity {
+            sheet: Some(format!(
+                "{}#{}",
+                card.source_id,
+                card.tariff.as_deref().unwrap_or("base")
+            )),
+            context_tier: card.context_tier,
+        };
     }
-    models_dev_context_tier_in_force(provider, model, at, input_tokens)
+    DerivedPriceIdentity {
+        sheet: None,
+        context_tier: models_dev_context_tier_in_force(provider, model, at, input_tokens),
+    }
 }
 
 pub fn models_dev_context_tier_in_force(
@@ -778,6 +818,7 @@ mod tests {
             "deepseek",
             "deepseek-v4-pro",
             None,
+            at,
             Some(200_001),
         )
         .expect("derived estimate");
