@@ -174,7 +174,17 @@ impl Config {
         let content = match std::fs::read_to_string(&path) {
             Ok(existing) => match merge_into_existing(&existing, &serialized, removals) {
                 Some(merged) => merged,
-                None => serialized,
+                None => {
+                    // The merge could not be understood or would not parse back
+                    // (see `merged_document_parses`); a file jcode refuses is
+                    // worse than a file without comments, so write the plain
+                    // serialization instead.
+                    crate::logging::warn(
+                        "config: preserving save could not round-trip; writing the plain \
+                         serialization (comments in unmodeled sections are lost)",
+                    );
+                    serialized
+                }
             },
             Err(_) => serialized,
         };
@@ -888,16 +898,38 @@ impl Config {
 
 /// Overlay `serialized` onto the parsed `existing` file, then apply `removals`.
 ///
-/// Returns `None` when `existing` cannot be parsed as TOML; the caller then
-/// writes `serialized` unchanged.
-fn merge_into_existing(existing: &str, serialized: &str, removals: &[String]) -> Option<String> {
+/// Returns `None` when `existing` cannot be parsed as TOML, or when the merged
+/// result does not parse back into [`Config`]; the caller then writes
+/// `serialized` unchanged.
+pub(crate) fn merge_into_existing(
+    existing: &str,
+    serialized: &str,
+    removals: &[String],
+) -> Option<String> {
     let mut document = existing.parse::<toml_edit::Document>().ok()?;
     let serialized: toml_edit::Document = serialized.parse().ok()?;
     merge_table(document.as_table_mut(), serialized.as_table());
     for dotted in removals {
         remove_dotted_path(document.as_table_mut(), dotted);
     }
-    Some(document.to_string())
+    let merged = document.to_string();
+    merged_document_parses(&merged).then_some(merged)
+}
+
+/// Whether a merged document still round-trips back into [`Config`].
+///
+/// A preserving merge can assemble a file that jcode itself refuses. The
+/// clearest case is a key-level serde alias: the config types put
+/// `alias = "context-window"` (and friends) on fields inside
+/// `[[providers.<name>.models]]` entries, and an existing file may already spell
+/// that key with the alias. The overlay keeps the file's alias key (the struct
+/// does not model it, so it is "unmodeled") and adds the serialized canonical
+/// name, and serde's derived deserializer maps both names to one field and
+/// reports `duplicate field`; the whole config then stops parsing and every
+/// setting reverts to its default. Rather than let a merge produce that, the
+/// caller falls back to the plain serialized write.
+pub(crate) fn merged_document_parses(merged: &str) -> bool {
+    toml::from_str::<Config>(merged).is_ok()
 }
 
 /// Merge `source` into `target`, recursing table-to-table.
@@ -926,17 +958,11 @@ fn merge_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
         merge_table(target_table, source_table);
         return;
     }
-    if let (
-        toml_edit::Item::ArrayOfTables(target_array),
-        toml_edit::Item::ArrayOfTables(source_array),
-    ) = (&mut *target, source)
-        && target_array.len() == source_array.len()
-    {
-        for (target_table, source_table) in target_array.iter_mut().zip(source_array.iter()) {
-            merge_table(target_table, source_table);
-        }
-        return;
-    }
+    // Arrays of tables are values, not mergeable containers. Merging them
+    // element by element can leave a file key beside the serialized canonical
+    // name for the same field (see `merged_document_parses`), so the array is
+    // replaced wholesale. Comments inside those entries are lost; that is
+    // acceptable where a config that jcode cannot parse is not.
     replace_item_preserving_decor(target, source);
 }
 

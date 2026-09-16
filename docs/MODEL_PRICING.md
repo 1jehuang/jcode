@@ -298,6 +298,15 @@ These are worth reading once, because each one breaks more than it looks like:
   one thing a save can still drop is a setting you deliberately reset (for
   example a cleared `/colors` or a cleared default model), because "empty" and
   "not written by this build" look identical in the file.
+* **Entries inside an array of tables are rewritten wholesale.** A
+  `[[providers.<name>.models]]` or `[[...schedule]]` entry is a value, not a
+  sub-table jcode patches key by key, so comments *inside* such an entry are
+  lost on the next save (comments around it survive). This is deliberate: a
+  field spelled with a serde alias (for example `context-window` for
+  `context_window`) would otherwise be kept beside the canonical name the struct
+  writes, and serde reports both at once as `duplicate field` and refuses the
+  whole file. If a merge would ever produce a file jcode cannot parse, the save
+  falls back to a plain write instead of leaving an unusable config.
 
 ## Checking that it took effect
 

@@ -296,3 +296,118 @@ fn declared_removals_are_scoped_to_the_config_path() {
     }
     Config::invalidate_cache();
 }
+
+/// A `[[providers.<name>.models]]` entry may spell `context_window` with one of
+/// its serde aliases (`context-window`). The preserving save replaces an array
+/// of tables wholesale, so the alias cannot survive beside the canonical name:
+/// serde maps both to one field and reports `duplicate field`, which would make
+/// the saved file unparseable and revert every setting to its default.
+///
+/// The unmodeled section is asserted too, because it is what distinguishes a
+/// wholesale replacement from the plain-write fallback: the fallback would also
+/// drop the alias, but it would drop this section as well.
+#[test]
+fn alias_key_in_a_models_entry_is_normalized_by_a_save() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[display]\ncentered = false\n\n\
+         [from_a_newer_build]\nshiny = true\n\n\
+         [[providers.acme.models]]\n\
+         id = \"acme-large\"\n\
+         context-window = 200000\n",
+    );
+
+    let mut cfg = load_for_update();
+    assert_eq!(
+        cfg.providers["acme"].models[0].context_window,
+        Some(200000),
+        "the alias must parse on load"
+    );
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert_eq!(
+        written.matches("context_window").count(),
+        1,
+        "the canonical name must be present exactly once: {written}"
+    );
+    assert!(
+        !written.contains("context-window"),
+        "the alias key must not survive the wholesale replacement: {written}"
+    );
+    assert!(
+        written.contains("[from_a_newer_build]"),
+        "the merge must succeed rather than fall back to a plain write: {written}"
+    );
+
+    let parsed = Config::load_strict().expect("the saved config must parse");
+    assert_eq!(
+        parsed.providers["acme"].models[0].context_window,
+        Some(200000)
+    );
+}
+
+/// The safety net itself: a merged document the overlay cannot round-trip must
+/// be reported, so the caller writes the plain serialization instead.
+#[test]
+fn merged_document_that_serde_refuses_is_detected() {
+    let duplicate = "[[providers.acme.models]]\n\
+                     id = \"acme-large\"\n\
+                     context-window = 200000\n\
+                     context_window = 200000\n";
+    assert!(
+        !super::config_file::merged_document_parses(duplicate),
+        "a document carrying both an alias and its canonical name must be rejected"
+    );
+    assert!(
+        super::config_file::merged_document_parses("[display]\ncentered = true\n"),
+        "a plain valid document must be accepted"
+    );
+}
+
+/// A provider field with a key-level alias (`supports-reasoning-effort`) that the
+/// overlay keeps beside the serialized canonical name makes the merged document
+/// unparseable (serde: `duplicate field`). The save must detect that and use the
+/// plain serialized write, which keeps the config usable even though comments in
+/// unmodeled sections are lost.
+#[test]
+fn overlay_that_cannot_round_trip_falls_back_to_the_plain_write() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[display]\ncentered = false\n\n\
+         [from_a_newer_build]\nshiny = true\n\n\
+         [providers.acme]\n\
+         type = \"openai-compatible\"\n\
+         base_url = \"https://example.test/v1\"\n\
+         supports-reasoning-effort = true\n",
+    );
+
+    let mut cfg = load_for_update();
+    assert_eq!(
+        cfg.providers["acme"].supports_reasoning_effort,
+        Some(true),
+        "the alias must parse on load"
+    );
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert!(
+        !written.contains("supports-reasoning-effort"),
+        "the unparseable merge must be discarded for the plain write: {written}"
+    );
+    assert!(
+        !written.contains("[from_a_newer_build]"),
+        "the plain write drops unmodeled sections, which is the observable fallback: {written}"
+    );
+
+    let parsed = Config::load_strict().expect("the saved config must parse");
+    assert_eq!(
+        parsed.providers["acme"].supports_reasoning_effort,
+        Some(true)
+    );
+    assert!(parsed.display.centered, "the write must still persist");
+}
