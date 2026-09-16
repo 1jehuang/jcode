@@ -56,6 +56,26 @@ pub struct ScheduleRuleFile {
     pub windows: Vec<(String, String)>,
 }
 
+/// One `context_tiers` entry: "above this many input tokens, use these rates".
+///
+/// Reuses the `TariffFile` vocabulary (`multiplier` or absolute rates) rather
+/// than inventing a second one, so an absolute tier and a named tariff mean the
+/// same thing. Written as an array of tables (`[[...context_tiers]]`) for the
+/// same reason `schedule` is: a multi-line inline table is invalid TOML.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextTierFile {
+    /// The tier applies when a call's first usage snapshot reports **more** than
+    /// this many input tokens. Exactly this many does not trigger it.
+    pub min_input_tokens: Option<u64>,
+    pub input: Option<f64>,
+    pub output: Option<f64>,
+    pub cache_read: Option<f64>,
+    pub cache_write: Option<f64>,
+    /// Multiplier applied to the rate card the schedule already selected.
+    pub multiplier: Option<f64>,
+}
+
 /// Rate rules for a single model.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -63,6 +83,12 @@ pub struct ModelPricingRuleFile {
     pub cost: Option<CostFile>,
     pub tariffs: BTreeMap<String, TariffFile>,
     pub schedule: Vec<ScheduleRuleFile>,
+    /// Long-context overlays, matched in declaration order, first match wins.
+    ///
+    /// Never written back when empty: a default-valued field must not be baked
+    /// into the user's file on a save (the lesson of commit `9da6f9831`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context_tiers: Vec<ContextTierFile>,
     pub default_tariff: Option<String>,
     pub effective_from: Option<String>,
     pub effective_until: Option<String>,
@@ -129,6 +155,10 @@ mod tests {
                                 "weekdays": ["Mon", "Tue"],
                                 "windows": [["01:00", "04:00"], ["06:00", "10:00"]]
                             }],
+                            "context_tiers": [
+                                {"min_input_tokens": 200000, "multiplier": 2.0},
+                                {"min_input_tokens": 500000, "input": 9.0, "output": 27.0}
+                            ],
                             "default_tariff": "off_peak",
                             "on_rule_expiry": "no_price"
                         }
@@ -145,6 +175,10 @@ mod tests {
         assert_eq!(rule.schedule[0].utc_offset_minutes, 0);
         assert_eq!(rule.schedule[0].windows[0].0, "01:00");
         assert_eq!(rule.on_rule_expiry, Some(OnRuleExpiry::NoPrice));
+        assert_eq!(rule.context_tiers.len(), 2);
+        assert_eq!(rule.context_tiers[0].min_input_tokens, Some(200_000));
+        assert_eq!(rule.context_tiers[0].multiplier, Some(2.0));
+        assert_eq!(rule.context_tiers[1].input, Some(9.0));
 
         let again = serde_json::to_string(&parsed).expect("serialize");
         let reparsed: PricingConfigFile = serde_json::from_str(&again).expect("reparse");

@@ -5,8 +5,8 @@ pub use display::{DISPLAY_CURRENCY_NATIVE, DisplayConfig};
 pub mod keybindings;
 pub mod pricing;
 pub use pricing::{
-    CostFile, ModelPricingRuleFile, OnRuleExpiry, PricingConfigFile, ProviderPricingFile,
-    ScheduleRuleFile, TariffFile,
+    ContextTierFile, CostFile, ModelPricingRuleFile, OnRuleExpiry, PricingConfigFile,
+    ProviderPricingFile, ScheduleRuleFile, TariffFile,
 };
 mod serde_lenient;
 pub use keybindings::{

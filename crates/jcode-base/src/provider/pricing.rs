@@ -279,6 +279,22 @@ pub fn derived_pricing_for_source(
     model: &str,
     service_tier: Option<&str>,
 ) -> Option<RouteCheapnessEstimate> {
+    derived_pricing_for_source_at_size(source_key, model, service_tier, None)
+}
+
+/// [`derived_pricing_for_source`] with the call's reported input token count.
+///
+/// The curated static tables and the OpenRouter caches state one rate card each
+/// and have no long-context tiers, so they are unaffected. Only the models.dev
+/// arm uses `input_tokens`: its native `context_over_200k` rates are applied
+/// there, which is what stops a >200k models.dev call from being billed at the
+/// base rate. `None` (a cheapness comparison) prices the base tier.
+pub fn derived_pricing_for_source_at_size(
+    source_key: &str,
+    model: &str,
+    service_tier: Option<&str>,
+    input_tokens: Option<u64>,
+) -> Option<RouteCheapnessEstimate> {
     // 2. Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),
@@ -298,13 +314,20 @@ pub fn derived_pricing_for_source(
     }
 
     // 4. Live models.dev catalog (disk cache; refreshes in the background).
-    let cost = crate::model_pricing::lookup(source_key, model)?;
+    let (card, _currency) = crate::model_pricing::models_dev_card_at_size(
+        source_key,
+        model,
+        std::time::SystemTime::now(),
+        input_tokens,
+    )?;
+    let input = card.cost.input?;
+    let output = card.cost.output?;
     Some(RouteCheapnessEstimate::metered(
         RouteCostSource::ModelsDevCatalog,
         RouteCostConfidence::High,
-        rate_to_micros(cost.input_usd_per_mtok),
-        rate_to_micros(cost.output_usd_per_mtok),
-        cost.cache_read_usd_per_mtok.map(rate_to_micros),
+        rate_to_micros(input),
+        rate_to_micros(output),
+        card.cost.cache_read.map(rate_to_micros),
         Some("models.dev pricing catalog".to_string()),
     ))
 }

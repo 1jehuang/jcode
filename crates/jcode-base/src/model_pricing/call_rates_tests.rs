@@ -110,7 +110,7 @@ cache_read = 0.15
 "#;
     with_pricing_env(config, &[], || {
         let ConfigCallRates::Priced(card) =
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now())
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None)
         else {
             panic!("a complete card must price the call");
         };
@@ -128,13 +128,14 @@ fn tariff_in_effect_at_the_call_instant_is_the_one_priced() {
             "deepseek",
             "deepseek-v4-pro",
             instant(ONE_SECOND_BEFORE_PEAK),
+            None,
         ) else {
             panic!("off-peak instant is a config hit");
         };
         assert_eq!(off_peak.input_per_mtok, 1.0);
 
         let ConfigCallRates::Priced(peak) =
-            config_call_rates("deepseek", "deepseek-v4-pro", instant(INSIDE_PEAK))
+            config_call_rates("deepseek", "deepseek-v4-pro", instant(INSIDE_PEAK), None)
         else {
             panic!("peak instant is a config hit");
         };
@@ -147,7 +148,7 @@ fn tariff_in_effect_at_the_call_instant_is_the_one_priced() {
 fn without_a_configured_rule_the_answer_is_absent() {
     with_pricing_env("[display]\ncurrency = \"native\"\n", &[], || {
         assert!(matches!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::Absent
         ));
     });
@@ -160,7 +161,7 @@ fn incomplete_foreign_currency_card_is_reported_instead_of_priced() {
     // would top up with generic defaults.
     with_pricing_env(HALF_WRITTEN_CNY_CARD_CONFIG, &[], || {
         assert!(matches!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::ConfiguredWithoutPrice
         ));
     });
@@ -173,7 +174,7 @@ fn foreign_currency_card_that_loses_to_the_catalog_is_absent() {
     // non-price for the model.
     with_pricing_env(HALF_WRITTEN_CNY_CARD_CONFIG, DEEPSEEK_CATALOG, || {
         assert!(matches!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::Absent
         ));
     });
@@ -195,7 +196,7 @@ output = 13.5
 "#;
     with_pricing_env(config, DEEPSEEK_CATALOG, || {
         assert!(matches!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::ConfiguredWithoutPrice
         ));
     });
@@ -221,7 +222,7 @@ output = 13.5
 "#;
     with_pricing_env(config, DEEPSEEK_CATALOG, || {
         assert_eq!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::OutOfEffect(RuleOutOfEffect::Expired)
         );
     });
@@ -241,7 +242,7 @@ output = 13.5
 "#;
     with_pricing_env(config, DEEPSEEK_CATALOG, || {
         assert_eq!(
-            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+            config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
             ConfigCallRates::OutOfEffect(RuleOutOfEffect::NotYetEffective)
         );
     });
@@ -273,9 +274,12 @@ output = 2.0
 cache_write = 0.9
 "#;
     with_pricing_env(config, &[], || {
-        let ConfigCallRates::Priced(card) =
-            config_call_rates("claude:api-key", "claude-sonnet-4-6", SystemTime::now())
-        else {
+        let ConfigCallRates::Priced(card) = config_call_rates(
+            "claude:api-key",
+            "claude-sonnet-4-6",
+            SystemTime::now(),
+            None,
+        ) else {
             panic!("a complete card must price the call");
         };
         assert_eq!(card.input_per_mtok, 1.0);
@@ -297,9 +301,12 @@ input = 1.0
 output = 2.0
 "#;
     with_pricing_env(config, CACHE_WRITE_CATALOG, || {
-        let ConfigCallRates::Priced(card) =
-            config_call_rates("claude:api-key", "claude-sonnet-4-6", SystemTime::now())
-        else {
+        let ConfigCallRates::Priced(card) = config_call_rates(
+            "claude:api-key",
+            "claude-sonnet-4-6",
+            SystemTime::now(),
+            None,
+        ) else {
             panic!("a complete card must price the call");
         };
         assert_eq!(
@@ -331,7 +338,7 @@ output = 13.5
     with_pricing_env(config, DEEPSEEK_CATALOG, || {
         assert!(
             matches!(
-                config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now()),
+                config_call_rates("deepseek", "deepseek-v4-pro", SystemTime::now(), None),
                 ConfigCallRates::Absent
             ),
             "the whole section is dropped, including the providers that were fine"

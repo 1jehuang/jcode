@@ -862,8 +862,8 @@ mod env_overrides;
 pub mod pricing;
 
 pub use pricing::{
-    CostFields, ModelPricingRule, OnRuleExpiry, PricingConfig, PricingConfigError, ProviderPricing,
-    ScheduleRule, Tariff, TimeWindow,
+    ContextTier, CostFields, ModelPricingRule, OnRuleExpiry, PricingConfig, PricingConfigError,
+    ProviderPricing, ScheduleRule, Tariff, TimeWindow,
 };
 
 #[cfg(test)]

@@ -117,17 +117,26 @@ fn normalize_model_id(model: &str) -> &str {
 /// when the catalog has no entry; never blocks on the network. Schedules a
 /// background refresh when the disk cache is missing or stale.
 pub fn lookup(jcode_provider: &str, model: &str) -> Option<ModelCost> {
+    lookup_entry(jcode_provider, model).and_then(|entry| entry.to_model_cost())
+}
+
+/// The models.dev entry itself, extension fields included.
+///
+/// [`lookup`] flattens to [`ModelCost`], which cannot carry the long-context
+/// tiers models.dev states as `cost.context_over_200k`. The billing path needs
+/// them, so it reads this instead.
+pub(crate) fn lookup_entry(jcode_provider: &str, model: &str) -> Option<ModelPricingEntry> {
     let provider_id = models_dev_provider_id(jcode_provider)?;
     let cache = ensure_cache_fresh()?;
     let models = cache.providers.get(provider_id)?;
     let model = normalize_model_id(model);
     if let Some(entry) = models.get(model) {
-        return entry.to_model_cost();
+        return Some(entry.clone());
     }
     // OpenRouter-style ids (`anthropic/claude-...`) may reach here with the
     // provider prefix still attached; retry on the bare model name.
     if let Some((_, bare)) = model.rsplit_once('/') {
-        return models.get(bare).and_then(ModelPricingEntry::to_model_cost);
+        return models.get(bare).cloned();
     }
     None
 }
@@ -161,15 +170,31 @@ fn ensure_cache_fresh() -> Option<Arc<PricingCache>> {
 /// input/output/cache rates instead of one scalar, which is what a billing call
 /// site needs. Config rules are resolved at `at`, so tariff selection (peak vs
 /// off-peak) follows the instant the caller passes, not the wall clock.
+///
+/// A long-context tier needs the call's input token count, which this entry
+/// point does not take: it prices the **base tier** (below the card's first
+/// `min_input_tokens`). Use [`effective_entry_at_size`] when the count is known.
 pub fn effective_entry(
     provider: &str,
     model: &str,
     at: SystemTime,
 ) -> Option<(ModelPricingEntry, Currency)> {
+    effective_entry_at_size(provider, model, at, None)
+}
+
+/// [`effective_entry`] with the call's reported input token count, so a card's
+/// long-context tier is selected. `None` is the base tier.
+pub fn effective_entry_at_size(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<(ModelPricingEntry, Currency)> {
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::NoPrice => None,
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model, at);
+            let resolved =
+                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
             Some((resolved.entry, resolved.currency))
         }
         // A rule that is out of effect is not this layer's answer either: the
@@ -177,14 +202,46 @@ pub fn effective_entry(
         // written for this instant (the expiry itself is reported by
         // `config_call_rates`, which is the side that has to label it).
         sources::ConfigPrice::OutOfEffect(_) | sources::ConfigPrice::Absent => {
-            models_dev_entry(provider, model)
+            models_dev_card_at_size(provider, model, at, input_tokens)
         }
     }
 }
 
-/// The models.dev layer's card, always USD.
-fn models_dev_entry(provider: &str, model: &str) -> Option<(ModelPricingEntry, Currency)> {
-    lookup(provider, model).map(|cost| (ModelPricingEntry::from_model_cost(cost), Currency::usd()))
+/// The models.dev layer's card, always USD, with the long-context tier for
+/// `input_tokens` applied.
+///
+/// Reads the full entry rather than the flattened [`ModelCost`], so the
+/// `context_over_200k` rates the catalog parsed into `context_tiers` survive to
+/// the billing path instead of being dropped here. The derived billing layer
+/// (curated tables, OpenRouter caches, models.dev) uses this too, which is what
+/// makes a >200k models.dev call cost more than the base rate.
+pub(crate) fn models_dev_card_at_size(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<(ModelPricingEntry, Currency)> {
+    let mut entry = lookup_entry(provider, model)?;
+    if let Some(selected) = rules::resolve_tier(&entry, at, input_tokens) {
+        entry.cost = selected.cost;
+    }
+    Some((entry, Currency::usd()))
+}
+
+/// The `min_input_tokens` of the models.dev long-context tier in force for a
+/// call reporting `input_tokens`, if any.
+///
+/// The derived billing layer memoizes one price per model, so it has to know
+/// which tier it just priced: without this a long call would leave its higher
+/// rates cached for the next short call.
+pub fn models_dev_context_tier_in_force(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<u64> {
+    let entry = lookup_entry(provider, model)?;
+    rules::resolve_tier(&entry, at, input_tokens)?.context_tier
 }
 
 /// The hand-written `[pricing.providers]` card for `(provider, model)`, if the
@@ -199,7 +256,7 @@ pub(crate) fn configured_entry(
 ) -> Option<(ModelPricingEntry, Currency)> {
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model, at);
+            let resolved = sources::resolve_card(*entry, currency, provider, model, at, None);
             // A card that could not price the model is not this layer's win;
             // let the chain reach models.dev and label it as such.
             resolved
@@ -223,6 +280,10 @@ pub(crate) fn configured_entry(
 ///
 /// `None` means "we cannot price this": no config rule and no catalog entry, or
 /// a rule that expired with `on_rule_expiry = "no_price"`.
+///
+/// The reference request has no size of its own, so this prices the **base
+/// tier** and deliberately ignores any long-context overlay: the number is a
+/// cheapness comparison, not a prediction of one call's bill.
 pub fn effective_cost(provider: &str, model: &str, at: SystemTime) -> Option<Money> {
     let (entry, currency) = effective_entry(provider, model, at)?;
     let input = entry.cost.input?;
@@ -240,11 +301,45 @@ pub fn effective_cost(provider: &str, model: &str, at: SystemTime) -> Option<Mon
 /// schedule (or its `default_tariff`) selected. `None` means no hand-written rule
 /// prices this model at `at`, or the card applies its own `cost` with no tariff
 /// in force - the two cases a cost view should not have to guess between.
+///
+/// The long-context overlay is *not* reflected here: it changes the rates, not
+/// the tariff name. A caller with a token count reports it separately (see
+/// [`context_tier_thresholds`]); a caller without one is on the base
+/// tier.
 pub fn selected_config_tariff(provider: &str, model: &str, at: SystemTime) -> Option<String> {
     let sources::ConfigPrice::Hit { entry, .. } = sources::config_price(provider, model, at) else {
         return None;
     };
-    rules::resolve_tier(&entry, at)?.tariff
+    rules::resolve_tier(&entry, at, None)?.tariff
+}
+
+/// The long-context thresholds of the card that prices `(provider, model)` at
+/// `at`, in declaration order.
+///
+/// A caller that has to *explain* a price (`/pricing`) has no token count and
+/// therefore prices the base tier. Listing the declared thresholds is how it
+/// stays honest: the user learns which tiers a real call can cross instead of
+/// reading the base figure as the only one. The hand-written card wins when one
+/// is in effect; otherwise the models.dev card's own `context_over_200k` tier is
+/// what a real call crosses, so it is the one named.
+pub fn context_tier_thresholds(provider: &str, model: &str, at: SystemTime) -> Vec<u64> {
+    let entry = match sources::config_price(provider, model, at) {
+        sources::ConfigPrice::Hit { entry, .. } => entry,
+        // A `no_price` rule refuses to price the call at all, so no tier of it
+        // can ever apply.
+        sources::ConfigPrice::NoPrice => return Vec::new(),
+        sources::ConfigPrice::Absent | sources::ConfigPrice::OutOfEffect(_) => {
+            match lookup_entry(provider, model) {
+                Some(entry) => Box::new(entry),
+                None => return Vec::new(),
+            }
+        }
+    };
+    entry
+        .context_tiers
+        .iter()
+        .map(|tier| tier.min_input_tokens)
+        .collect()
 }
 
 /// [`RouteCheapnessEstimate::estimated_reference_cost_micros`] expressed in the
@@ -376,7 +471,12 @@ mod tests {
                 "id": "deepseek",
                 "models": {
                     "deepseek-v4-flash": {
-                        "cost": {"input": 0.14, "output": 0.28, "cache_read": 0.0028}
+                        "cost": {
+                            "input": 0.14,
+                            "output": 0.28,
+                            "cache_read": 0.0028,
+                            "context_over_200k": {"input": 0.28, "output": 0.56}
+                        }
                     },
                     "free-model": {"cost": {"input": 0, "output": 0}},
                     "no-cost-model": {}
@@ -399,6 +499,16 @@ mod tests {
         assert_eq!(flash.cost.output, Some(0.28));
         assert_eq!(flash.cost.cache_read, Some(0.0028));
         assert_eq!(flash.cost.cache_write, None);
+        assert_eq!(
+            flash.context_tiers.len(),
+            1,
+            "models.dev's `context_over_200k` rates must be consumed, not dropped"
+        );
+        assert_eq!(flash.context_tiers[0].min_input_tokens, 200_000);
+        assert!(matches!(
+            flash.context_tiers[0].tariff,
+            crate::config::Tariff::Absolute(_)
+        ));
 
         let fable = cache
             .providers
@@ -487,6 +597,83 @@ mod tests {
         }
     }
 
+    /// models.dev's native `context_over_200k` rates survive the whole path: the
+    /// response is parsed into the cache, the lookup applies the tier, and a
+    /// call above the threshold is priced above the base rate. This is the
+    /// end-to-end consumption check for the field that used to be dropped.
+    #[test]
+    fn models_dev_context_over_200k_is_consumed_end_to_end() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        clear_memory_cache_for_tests();
+
+        // The upstream shape: cost.context_over_200k = { input, output }.
+        let body = r#"{
+            "deepseek": {"models": {"deepseek-v4-pro": {
+                "cost": {
+                    "input": 0.28, "output": 0.42,
+                    "context_over_200k": {"input": 0.56, "output": 0.84}
+                }
+            }}}
+        }"#;
+        let cache = parse_api_response(body).expect("parse the models.dev response");
+        catalog::save_cache(&cache);
+        clear_memory_cache_for_tests();
+
+        let at = SystemTime::now();
+        let base = effective_entry_at_size("deepseek", "deepseek-v4-pro", at, Some(200_000))
+            .expect("models.dev card");
+        assert_eq!(
+            base.0.cost.input,
+            Some(0.28),
+            "exactly 200k is the base rate"
+        );
+        let long = effective_entry_at_size("deepseek", "deepseek-v4-pro", at, Some(200_001))
+            .expect("models.dev card");
+        assert_eq!(
+            long.0.cost.input,
+            Some(0.56),
+            "the >200k input rate must be billed, not the base rate"
+        );
+        assert_eq!(long.0.cost.output, Some(0.84));
+        let unknown = effective_entry_at_size("deepseek", "deepseek-v4-pro", at, None)
+            .expect("models.dev card");
+        assert_eq!(
+            unknown.0.cost.input,
+            Some(0.28),
+            "no count prices the base tier"
+        );
+
+        // The derived billing layer (what the TUI prices a models.dev model
+        // with) sees the tier too, instead of the flat base rates.
+        let estimate = crate::provider::pricing::derived_pricing_for_source_at_size(
+            "deepseek",
+            "deepseek-v4-pro",
+            None,
+            Some(200_001),
+        )
+        .expect("derived estimate");
+        assert_eq!(estimate.input_price_per_mtok_micros, Some(560_000));
+        assert_eq!(
+            models_dev_context_tier_in_force("deepseek", "deepseek-v4-pro", at, Some(200_001)),
+            Some(200_000)
+        );
+        assert_eq!(
+            models_dev_context_tier_in_force("deepseek", "deepseek-v4-pro", at, Some(200_000)),
+            None,
+            "the memo key marker is only set when a tier really applies"
+        );
+
+        clear_memory_cache_for_tests();
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     /// A non-USD card that cannot be completed and has no layer underneath it
     /// must never be rendered as a price: there is no scalar to show, only
     /// "unknown" (spec 4.4, and the warning the resolver emits).
@@ -513,7 +700,7 @@ input = 4.5
             assert_eq!(entry.cost.input, Some(4.5));
             assert_eq!(entry.cost.output, None, "no direction was invented");
             assert!(matches!(
-                config_call_rates("deepseek", "deepseek-v4-pro", at),
+                config_call_rates("deepseek", "deepseek-v4-pro", at, None),
                 ConfigCallRates::ConfiguredWithoutPrice
             ));
         });

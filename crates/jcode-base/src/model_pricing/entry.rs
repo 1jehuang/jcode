@@ -12,7 +12,9 @@
 //! the number and its currency apart is what makes the "no cross-currency
 //! inheritance" rule in the resolver enforceable.
 
-use crate::config::{CostFields, ModelPricingRule, OnRuleExpiry, ScheduleRule, Tariff};
+use crate::config::{
+    ContextTier, CostFields, ModelPricingRule, OnRuleExpiry, ScheduleRule, Tariff,
+};
 use crate::model_pricing::ModelCost;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -35,6 +37,14 @@ pub struct ModelPricingEntry {
     /// half-open local interval `[start, end)` of the rule's fixed UTC offset;
     /// `model_pricing::rules` does the matching.
     pub schedule: Vec<ScheduleRule>,
+    /// Long-context overlays, applied *after* the window tariff is selected and
+    /// only when the call's reported input token count exceeds the threshold.
+    ///
+    /// Declaration order, first match wins. Both hand-written config rules and
+    /// models.dev's native `context_over_200k` rates land here, so the two
+    /// sources converge on one representation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_tiers: Vec<ContextTier>,
     pub default_tariff: Option<String>,
     /// Inclusive lower bound; a card is not in effect before it.
     pub effective_from: Option<DateTime<Utc>>,
@@ -90,6 +100,7 @@ impl ModelPricingEntry {
             cost: rule.cost.clone().unwrap_or_default(),
             tariffs: rule.tariffs.clone(),
             schedule: rule.schedule.clone(),
+            context_tiers: rule.context_tiers.clone(),
             default_tariff: rule.default_tariff.clone(),
             effective_from: rule.effective_from,
             effective_until: rule.effective_until,
@@ -159,6 +170,8 @@ impl<'de> Deserialize<'de> for ModelPricingEntry {
             #[serde(default)]
             schedule: Vec<ScheduleRule>,
             #[serde(default)]
+            context_tiers: Vec<ContextTier>,
+            #[serde(default)]
             default_tariff: Option<String>,
             #[serde(default)]
             effective_from: Option<DateTime<Utc>>,
@@ -180,6 +193,7 @@ impl<'de> Deserialize<'de> for ModelPricingEntry {
                 cost: full.cost,
                 tariffs: full.tariffs,
                 schedule: full.schedule,
+                context_tiers: full.context_tiers,
                 default_tariff: full.default_tariff,
                 effective_from: full.effective_from,
                 effective_until: full.effective_until,
@@ -236,9 +250,32 @@ mod tests {
         entry
             .tariffs
             .insert("peak".to_string(), Tariff::Multiplier(2.0));
+        entry.context_tiers.push(crate::config::ContextTier {
+            min_input_tokens: 200_000,
+            tariff: Tariff::Multiplier(2.0),
+        });
+        entry.context_tiers.push(crate::config::ContextTier {
+            min_input_tokens: 500_000,
+            tariff: Tariff::Absolute(CostFields {
+                input: Some(9.0),
+                output: Some(27.0),
+                cache_read: None,
+                cache_write: None,
+            }),
+        });
         let json = serde_json::to_string(&entry).expect("serialize");
         let back: ModelPricingEntry = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, entry);
+        assert_eq!(back.context_tiers.len(), 2);
+    }
+
+    /// An entry with no tiers must not write an empty `context_tiers` key: the
+    /// cache is read by older binaries too, and a default-valued field is noise.
+    #[test]
+    fn an_entry_without_tiers_does_not_serialize_the_key() {
+        let entry = ModelPricingEntry::from_model_cost(deepseek_cost());
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(!json.contains("context_tiers"), "{json}");
     }
 
     #[test]

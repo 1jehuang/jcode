@@ -274,9 +274,14 @@ prompt_entry_animation = true
 # with this section left empty the cost path behaves exactly as before.
 #
 # Examples only — uncomment what you need. Every commented line below is valid
-# TOML on its own; `schedule` is written as an array of tables (`[[...]]`)
-# because a multi-line inline table (`{ a = 1,\n b = 2 }`) is invalid TOML and
-# would make this whole file fail to parse.
+# TOML on its own; `schedule` and `context_tiers` are written as arrays of
+# tables (`[[...]]`) because a multi-line inline table (`{ a = 1,\n b = 2 }`) is
+# invalid TOML and would make this whole file fail to parse.
+#
+# `context_tiers` are long-context rates: a call whose first usage snapshot
+# reports more than `min_input_tokens` input tokens is billed at the tier's
+# rates (a `multiplier`, or explicit prices) instead of the base rates. Tiers
+# are matched in declaration order, first match wins.
 #
 # The example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC, Mon-Fri.
 [pricing]
@@ -302,6 +307,10 @@ prompt_entry_animation = true
 #
 # effective_until = "2026-12-31T23:59:59Z"
 # on_rule_expiry = "fallback"
+#
+# [[pricing.providers."deepseek".models."deepseek-v4-pro".context_tiers]]
+# min_input_tokens = 200_000
+# multiplier = 2.0
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
@@ -862,6 +871,13 @@ mod tests {
                 .values()
                 .any(|model| !model.schedule.is_empty()),
             "the example should demonstrate a schedule rule, got {deepseek:?}"
+        );
+        assert!(
+            deepseek
+                .models
+                .values()
+                .any(|model| !model.context_tiers.is_empty()),
+            "the example should demonstrate a long-context tier, got {deepseek:?}"
         );
     }
 }

@@ -8,7 +8,8 @@
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use jcode_config_types::{
-    CostFile, ModelPricingRuleFile, PricingConfigFile, ScheduleRuleFile, TariffFile,
+    ContextTierFile, CostFile, ModelPricingRuleFile, PricingConfigFile, ScheduleRuleFile,
+    TariffFile,
 };
 use jcode_provider_core::Currency;
 use serde::{Deserialize, Serialize};
@@ -87,12 +88,25 @@ pub struct ScheduleRule {
     pub windows: Vec<TimeWindow>,
 }
 
+/// A long-context overlay: above `min_input_tokens`, apply `tariff`.
+///
+/// Same vocabulary as a named tariff ([`Tariff`]): a multiplier scales the rate
+/// card the schedule already selected, an absolute card overrides it field by
+/// field. Matched in declaration order, first match wins, and only for a call
+/// whose reported input token count is *strictly greater* than the threshold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextTier {
+    pub min_input_tokens: u64,
+    pub tariff: Tariff,
+}
+
 /// A validated per-model rate rule.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelPricingRule {
     pub cost: Option<CostFields>,
     pub tariffs: BTreeMap<String, Tariff>,
     pub schedule: Vec<ScheduleRule>,
+    pub context_tiers: Vec<ContextTier>,
     pub default_tariff: Option<String>,
     pub effective_from: Option<DateTime<Utc>>,
     pub effective_until: Option<DateTime<Utc>>,
@@ -216,6 +230,9 @@ fn convert_rule(
         schedule.push(convert_schedule(entry, &entry_path, &tariffs)?);
     }
 
+    let context_tiers =
+        convert_context_tiers(&rule.context_tiers, &format!("{path}.context_tiers"))?;
+
     if let Some(default) = &rule.default_tariff
         && !tariffs.contains_key(default)
     {
@@ -238,6 +255,7 @@ fn convert_rule(
         cost,
         tariffs,
         schedule,
+        context_tiers,
         default_tariff: rule.default_tariff.clone(),
         effective_from,
         effective_until,
@@ -349,6 +367,58 @@ fn convert_schedule(
         weekdays,
         windows,
     })
+}
+
+/// Validate `context_tiers`: threshold above zero, non-empty rates, no
+/// duplicate thresholds.
+///
+/// Each tier reuses [`convert_tariff`], so an absolute tier and an absolute
+/// named tariff accept exactly the same shape and produce the same error
+/// messages. Duplicate thresholds are rejected because that is the one way the
+/// "first match wins" rule could pick a tier the user did not mean: two entries
+/// with the same threshold look like one rule written twice.
+fn convert_context_tiers(
+    tiers: &[ContextTierFile],
+    path: &str,
+) -> Result<Vec<ContextTier>, PricingConfigError> {
+    let mut converted: Vec<ContextTier> = Vec::with_capacity(tiers.len());
+    for (index, tier) in tiers.iter().enumerate() {
+        let tier_path = format!("{path}[{index}]");
+        let Some(min_input_tokens) = tier.min_input_tokens else {
+            return Err(PricingConfigError::new(
+                &tier_path,
+                "a context tier must state `min_input_tokens`",
+            ));
+        };
+        if min_input_tokens == 0 {
+            return Err(PricingConfigError::new(
+                format!("{tier_path}.min_input_tokens"),
+                "a context tier threshold must be greater than zero",
+            ));
+        }
+        if converted
+            .iter()
+            .any(|existing| existing.min_input_tokens == min_input_tokens)
+        {
+            return Err(PricingConfigError::new(
+                format!("{tier_path}.min_input_tokens"),
+                format!("duplicate context tier threshold {min_input_tokens}"),
+            ));
+        }
+        let tariff_file = TariffFile {
+            input: tier.input,
+            output: tier.output,
+            cache_read: tier.cache_read,
+            cache_write: tier.cache_write,
+            multiplier: tier.multiplier,
+        };
+        let tariff = convert_tariff(&tariff_file, &tier_path)?;
+        converted.push(ContextTier {
+            min_input_tokens,
+            tariff,
+        });
+    }
+    Ok(converted)
 }
 
 fn parse_time(raw: &str, path: &str) -> Result<NaiveTime, PricingConfigError> {
@@ -663,6 +733,128 @@ mod tests {
         assert_eq!(
             config.providers["p"].models["m"].schedule[0].weekdays,
             vec![Weekday::Mon, Weekday::Tue, Weekday::Fri]
+        );
+    }
+
+    #[test]
+    fn context_tiers_convert_a_multiplier_and_an_absolute_card() {
+        let file = parse_toml(
+            r#"
+            [providers.p.models.m.cost]
+            input = 1.0
+            output = 2.0
+
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 200_000
+            multiplier = 2.0
+
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 500_000
+            input = 9.0
+            output = 27.0
+            "#,
+        );
+        let (config, _) = validate(&file).expect("validates");
+        let tiers = &config.providers["p"].models["m"].context_tiers;
+        assert_eq!(tiers.len(), 2, "declaration order is kept");
+        assert_eq!(tiers[0].min_input_tokens, 200_000);
+        assert_eq!(tiers[0].tariff, Tariff::Multiplier(2.0));
+        assert_eq!(
+            tiers[1].tariff,
+            Tariff::Absolute(CostFields {
+                input: Some(9.0),
+                output: Some(27.0),
+                cache_read: None,
+                cache_write: None,
+            })
+        );
+    }
+
+    #[test]
+    fn context_tier_without_a_threshold_is_rejected() {
+        let file = parse_toml(
+            r#"
+            [[providers.p.models.m.context_tiers]]
+            multiplier = 2.0
+            "#,
+        );
+        let err = validate(&file).expect_err("a tier must state its threshold");
+        assert!(err.field_path.contains("context_tiers[0]"), "path: {err}");
+    }
+
+    #[test]
+    fn zero_context_tier_threshold_is_rejected() {
+        let file = parse_toml(
+            r#"
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 0
+            multiplier = 2.0
+            "#,
+        );
+        let err = validate(&file).expect_err("a zero threshold would match every call");
+        assert!(err.field_path.contains("min_input_tokens"), "path: {err}");
+    }
+
+    #[test]
+    fn empty_context_tier_rates_are_rejected() {
+        let file = parse_toml(
+            r#"
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 200_000
+            "#,
+        );
+        let err = validate(&file).expect_err("an empty tier is meaningless");
+        assert!(err.field_path.contains("context_tiers[0]"), "path: {err}");
+    }
+
+    #[test]
+    fn duplicate_context_tier_thresholds_are_rejected() {
+        let file = parse_toml(
+            r#"
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 200_000
+            multiplier = 2.0
+
+            [[providers.p.models.m.context_tiers]]
+            min_input_tokens = 200_000
+            multiplier = 3.0
+            "#,
+        );
+        let err = validate(&file).expect_err("two tiers with one threshold are ambiguous");
+        assert!(err.field_path.contains("context_tiers[1]"), "path: {err}");
+    }
+
+    /// A rule with no tiers must not bake `context_tiers = []` into the user's
+    /// file the next time anything saves it (the lesson of `9da6f9831`).
+    #[test]
+    fn an_empty_context_tier_list_is_never_written_back_to_config() {
+        let mut config = crate::config::Config::default();
+        config.pricing.providers.insert(
+            "deepseek".to_string(),
+            jcode_config_types::ProviderPricingFile {
+                currency: Some("CNY".to_string()),
+                models: BTreeMap::from([(
+                    "m".to_string(),
+                    ModelPricingRuleFile {
+                        cost: Some(CostFile {
+                            input: Some(1.0),
+                            output: Some(2.0),
+                            cache_read: None,
+                            cache_write: None,
+                        }),
+                        ..Default::default()
+                    },
+                )]),
+            },
+        );
+        let toml = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(
+            toml.contains("[pricing.providers.deepseek.models.m"),
+            "the model table is serialized, so the assertion below is not vacuous:\n{toml}"
+        );
+        assert!(
+            !toml.contains("context_tiers"),
+            "an empty context_tiers list must not be baked into the user's config:\n{toml}"
         );
     }
 

@@ -98,13 +98,25 @@ pub enum ConfigCallRates {
 /// `provider` is the activity source key the billing path uses (`claude:api-key`,
 /// `openai-compatible:deepseek`, ...); `at` is the call's own instant, so the
 /// peak/off-peak tariff this returns is the one in effect for that call (F15).
-pub fn config_call_rates(provider: &str, model: &str, at: SystemTime) -> ConfigCallRates {
+///
+/// `input_tokens` is the call's reported input token count from its first usage
+/// snapshot; it selects the call's long-context tier when the card declares one.
+/// `None` means the caller has no count (a cheapness estimate, `/pricing`'s
+/// reference value), and the call is then priced at the base tier: the rates
+/// returned are the ones below the first `min_input_tokens`.
+pub fn config_call_rates(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> ConfigCallRates {
     match sources::config_price(provider, model, at) {
         ConfigPrice::NoPrice => ConfigCallRates::ConfiguredWithoutPrice,
         ConfigPrice::OutOfEffect(reason) => ConfigCallRates::OutOfEffect(reason),
         ConfigPrice::Absent => ConfigCallRates::Absent,
         ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model, at);
+            let resolved =
+                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
             if !resolved.from_config {
                 // The card lost to the next layer (a foreign-currency card that
                 // cannot be completed, per F1). That is not this layer's answer:

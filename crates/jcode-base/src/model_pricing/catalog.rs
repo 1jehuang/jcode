@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::entry::ModelPricingEntry;
+use crate::config::{ContextTier, CostFields, Tariff};
 
 pub(super) const API_URL: &str = "https://models.dev/api.json";
 pub(super) const CACHE_FILE: &str = "models_dev_pricing.json";
@@ -147,8 +148,8 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         let mut parsed_models = HashMap::new();
         for (model_id, model) in models {
             // models.dev nests rates under a `cost` object; the entry keeps that
-            // wrapped shape so tariffs/schedule from custom sources (a later
-            // task) can be attached without another cache migration.
+            // wrapped shape so tariffs/schedule from custom sources can be
+            // attached without another cache migration.
             let Some(cost) = model.get("cost") else {
                 continue;
             };
@@ -158,15 +159,16 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
             ) else {
                 continue;
             };
-            parsed_models.insert(
-                model_id.clone(),
-                ModelPricingEntry::from_model_cost(ModelCost {
-                    input_usd_per_mtok: input,
-                    output_usd_per_mtok: output,
-                    cache_read_usd_per_mtok: cost.get("cache_read").and_then(|v| v.as_f64()),
-                    cache_write_usd_per_mtok: cost.get("cache_write").and_then(|v| v.as_f64()),
-                }),
-            );
+            let mut entry = ModelPricingEntry::from_model_cost(ModelCost {
+                input_usd_per_mtok: input,
+                output_usd_per_mtok: output,
+                cache_read_usd_per_mtok: cost.get("cache_read").and_then(|v| v.as_f64()),
+                cache_write_usd_per_mtok: cost.get("cache_write").and_then(|v| v.as_f64()),
+            });
+            if let Some(tier) = context_over_200k_tier(cost) {
+                entry.context_tiers.push(tier);
+            }
+            parsed_models.insert(model_id.clone(), entry);
         }
         if !parsed_models.is_empty() {
             providers.insert(provider_id.clone(), parsed_models);
@@ -180,6 +182,36 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         schema_version: SCHEMA_VERSION,
         cached_at_unix_secs: now_unix_secs(),
         providers,
+    })
+}
+
+/// models.dev's native long-context rates, as a tier above 200k input tokens.
+///
+/// models.dev states these as `cost.context_over_200k = { input, output }` (the
+/// odd name is upstream's). They used to be dropped on the floor, which billed
+/// a >200k-context call at the base rate. Mapping them into the same
+/// [`ContextTier`] shape a hand-written `[[...context_tiers]]` rule uses is what
+/// makes the two sources converge internally.
+fn context_over_200k_tier(cost: &serde_json::Value) -> Option<ContextTier> {
+    const UPSTREAM_THRESHOLD: u64 = 200_000;
+    let over = cost.get("context_over_200k")?.as_object()?;
+    let fields = CostFields {
+        input: over.get("input").and_then(|v| v.as_f64()),
+        output: over.get("output").and_then(|v| v.as_f64()),
+        cache_read: over.get("cache_read").and_then(|v| v.as_f64()),
+        cache_write: over.get("cache_write").and_then(|v| v.as_f64()),
+    };
+    // An all-empty object states nothing; do not invent a tier for it.
+    if fields.input.is_none()
+        && fields.output.is_none()
+        && fields.cache_read.is_none()
+        && fields.cache_write.is_none()
+    {
+        return None;
+    }
+    Some(ContextTier {
+        min_input_tokens: UPSTREAM_THRESHOLD,
+        tariff: Tariff::Absolute(fields),
     })
 }
 

@@ -526,3 +526,103 @@ fn a_rejected_pricing_section_is_labelled_where_the_user_reads_the_price() {
         );
     });
 }
+
+// Long-context tiers: the tier is selected from the input token count of the
+// call's *first* usage snapshot and pinned with the card (F15/F16), so a call
+// that grows past a threshold mid-flight is not re-priced.
+
+/// A card whose >200k tier is 10x, so a leaked or missed tier is impossible to
+/// miss.
+const CONTEXT_TIER_CARD_CONFIG: &str = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 1.0
+output = 2.0
+
+[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+min_input_tokens = 200_000
+multiplier = 10.0
+"#;
+
+#[test]
+fn remote_call_is_billed_at_the_context_tier_its_first_snapshot_chose() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(CONTEXT_TIER_CARD_CONFIG);
+        let mut app = remote_deepseek_app();
+
+        // First snapshot reports 300k input tokens: above the 200k threshold,
+        // so the whole call is billed at the 10x tier.
+        app.accrue_remote_call_cost(300_000, 0, 0, 0, instant(INSIDE_PEAK));
+        assert!(
+            (session_cost_usd(&app) - 3.0).abs() < 1e-4,
+            "300k input at the 10x tier is $3.00, got ${:.4}",
+            session_cost_usd(&app)
+        );
+
+        // A later delta is still the same call, still the tier its first
+        // snapshot chose (the delta alone is below the threshold).
+        app.accrue_remote_call_cost(50_000, 0, 0, 0, instant(INSIDE_PEAK));
+        assert!(
+            (session_cost_usd(&app) - 3.5).abs() < 1e-4,
+            "the pinned tier still prices the delta at 10x, got ${:.4}",
+            session_cost_usd(&app)
+        );
+
+        // A new call whose first snapshot is below the threshold bills base
+        // rates, so the tier is chosen per call rather than leaked.
+        app.begin_api_call_accounting();
+        let before = session_cost_usd(&app);
+        app.accrue_remote_call_cost(100_000, 0, 0, 0, instant(INSIDE_PEAK));
+        assert!(
+            (session_cost_usd(&app) - before - 0.1).abs() < 1e-4,
+            "100k input on a fresh call is the base $1.00/Mtok, got ${:.4}",
+            session_cost_usd(&app) - before
+        );
+    });
+}
+
+#[test]
+fn a_call_that_grows_past_the_threshold_keeps_its_first_snapshot_tier() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(CONTEXT_TIER_CARD_CONFIG);
+        let mut app = remote_deepseek_app();
+
+        // First snapshot: 100k, below the threshold -> base tier.
+        app.accrue_remote_call_cost(100_000, 0, 0, 0, instant(INSIDE_PEAK));
+        assert!((session_cost_usd(&app) - 0.1).abs() < 1e-4);
+
+        // The call grows past 200k on a later snapshot, but the card (and with
+        // it the tier) was pinned at the first snapshot: no mid-flight upcharge.
+        app.accrue_remote_call_cost(300_000, 0, 0, 0, instant(INSIDE_PEAK));
+        assert!(
+            (session_cost_usd(&app) - 0.4).abs() < 1e-4,
+            "the whole call stays on the base rate it started with, got ${:.4}",
+            session_cost_usd(&app)
+        );
+    });
+}
+
+#[test]
+fn local_path_bills_the_context_tier_from_the_reported_input_count() {
+    with_temp_jcode_home(|| {
+        write_pricing_config(CONTEXT_TIER_CARD_CONFIG);
+
+        let local_cost = |input_tokens: u64| {
+            let mut app = create_named_provider_test_app("deepseek", "deepseek-v4-pro");
+            app.streaming.streaming_input_tokens = input_tokens;
+            app.streaming.streaming_output_tokens = 0;
+            app.begin_call_pricing(instant(INSIDE_PEAK));
+            app.update_cost_impl();
+            session_cost_usd(&app)
+        };
+
+        assert!(
+            (local_cost(200_000) - 0.2).abs() < 1e-4,
+            "exactly 200k input tokens is still the base tier"
+        );
+        assert!(
+            (local_cost(200_001) - 2.00001).abs() < 1e-3,
+            "one token above the threshold bills the 10x tier"
+        );
+        assert!((local_cost(300_000) - 3.0).abs() < 1e-4);
+    });
+}
