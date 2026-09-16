@@ -232,12 +232,20 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
 /// * A card in any other currency never inherits models.dev's numbers, because
 ///   a USD figure would be relabelled as, say, CNY. If such a card cannot price
 ///   the model on its own, the next layer wins outright.
+///
+/// `input_tokens` is the call's reported input token count from its first usage
+/// snapshot, if the caller has one: it decides the long-context overlay (see
+/// `rules::resolve_tier`). `None` prices at the base tier. models.dev's own
+/// `context_over_200k` rates are **not** merged into a hand-written card: a
+/// lower layer's absolute tier would silently overwrite the fields the user
+/// wrote, and the config layer is authoritative.
 pub(super) fn resolve_card(
     mut entry: ModelPricingEntry,
     mut currency: Currency,
     provider: &str,
     model: &str,
     at: SystemTime,
+    input_tokens: Option<u64>,
 ) -> ResolvedCard {
     let fallback = crate::model_pricing::lookup(provider, model);
     let mut from_config = true;
@@ -246,7 +254,7 @@ pub(super) fn resolve_card(
     // the user wrote may replace the billing premium (see
     // `CallRateCard::cache_write_per_mtok`); a figure that arrived from
     // models.dev belongs to that layer and must keep the pre-feature behaviour.
-    let declared_cache_write = declared_cache_write(&entry, at);
+    let declared_cache_write = declared_cache_write(&entry, at, input_tokens);
 
     if currency.is_usd() {
         // Same currency as the next layer, so missing fields merge per field.
@@ -278,11 +286,17 @@ pub(super) fn resolve_card(
 
     // Peak/off-peak selection runs on the *effective* card, i.e. after any
     // field-level merge above: a tariff scales the whole base, and running it
-    // first would scale only the fields the card happened to write.
-    if let Some(selected) = rules::resolve_tier(&entry, at) {
+    // first would scale only the fields the card happened to write. The
+    // long-context overlay is inside the same call so it applies after the
+    // window tariff, exactly as `rules` documents.
+    if let Some(selected) = rules::resolve_tier(&entry, at, input_tokens) {
         crate::logging::debug(&format!(
-            "pricing: {provider}/{model} uses tariff `{}`",
-            selected.tariff.as_deref().unwrap_or("base")
+            "pricing: {provider}/{model} uses tariff `{}`{}",
+            selected.tariff.as_deref().unwrap_or("base"),
+            match selected.context_tier {
+                Some(threshold) => format!(" with the >{threshold} input-token tier"),
+                None => String::new(),
+            }
         ));
         entry.cost = selected.cost;
     }
@@ -303,8 +317,12 @@ pub(super) fn resolve_card(
 /// The cache-write rate the `[pricing]` entry states on its own, with the tariff
 /// it selects already applied, or `None` when the card leaves the field to the
 /// layer below.
-fn declared_cache_write(entry: &ModelPricingEntry, at: SystemTime) -> Option<f64> {
-    match rules::resolve_tier(entry, at) {
+fn declared_cache_write(
+    entry: &ModelPricingEntry,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<f64> {
+    match rules::resolve_tier(entry, at, input_tokens) {
         Some(selected) => selected.cost.cache_write,
         None => entry.cost.cache_write,
     }

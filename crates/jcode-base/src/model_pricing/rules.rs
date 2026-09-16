@@ -13,6 +13,12 @@
 //!   `["22:00", "02:00"]` with `weekdays = ["Fri"]` covers Friday 22:00
 //!   through Saturday 01:59:59;
 //! * no match falls back to `default_tariff`, then to the entry's own `cost`;
+//! * `context_tiers` then overlay that result when the call's reported input
+//!   token count exceeds a tier's `min_input_tokens`: a multiplier scales,
+//!   an absolute card overrides the fields it writes and leaves the rest, and
+//!   the tiers are scanned in declaration order with the first match winning;
+//! * a caller with no token count (a cheapness estimate, `/pricing`'s reference
+//!   value) passes `None` and gets the base tier, never a guess;
 //! * `Tariff::Multiplier(m)` scales every known base field, `Tariff::Absolute`
 //!   overrides the fields it writes and leaves the rest to `cost`;
 //! * `effective_from` (inclusive) / `effective_until` (exclusive) bound the
@@ -22,7 +28,7 @@
 //! should evaluate, which is what makes peak/off-peak boundary behaviour
 //! testable at all.
 
-use crate::config::{CostFields, ScheduleRule, Tariff, TimeWindow};
+use crate::config::{ContextTier, CostFields, ScheduleRule, Tariff, TimeWindow};
 use crate::model_pricing::entry::ModelPricingEntry;
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc, Weekday};
 use std::time::SystemTime;
@@ -35,43 +41,87 @@ pub(super) struct SelectedTier {
     pub(super) tariff: Option<String>,
     /// The base `cost` with the selected tariff applied field by field.
     pub(super) cost: CostFields,
+    /// The `min_input_tokens` of the long-context overlay applied on top of
+    /// `cost`, when one applied. `None` is the base tier: no token count was
+    /// known, none crossed a threshold, or the card declares no tiers.
+    pub(super) context_tier: Option<u64>,
 }
 
 /// The tariff in effect at `at`, with the complete rates it produces.
+///
+/// `input_tokens` is the call's reported input token count from its *first*
+/// usage snapshot, when the caller has one. `None` means "unknown", and the
+/// long-context overlays are then skipped entirely: an unpriced-size caller has
+/// to see the base (≤ first threshold) rate card rather than a guess
+/// (spec ruling: callers without a token count price at the base tier).
 ///
 /// `None` means the *entry* is out of effect at `at` (`effective_from` /
 /// `effective_until`), which tariff selection cannot answer around; the caller
 /// applies `entry.on_rule_expiry` (F8/F20): fall back to the next layer, or
 /// refuse to price.
-pub(super) fn resolve_tier(entry: &ModelPricingEntry, at: SystemTime) -> Option<SelectedTier> {
+pub(super) fn resolve_tier(
+    entry: &ModelPricingEntry,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<SelectedTier> {
     if !entry.is_active_at(at) {
         return None;
     }
     let at: DateTime<Utc> = at.into();
+    let mut selected = base_tier(entry, at);
 
+    // The overlay is applied *after* the window/default tariff, field by field,
+    // so a tier that states only `input` keeps the schedule's `output`. It is
+    // also the last step, which is what makes "a long call is pinned to the
+    // tier its first snapshot chose" fall out of the existing pinning: callers
+    // resolve once and reuse.
+    if let Some(tokens) = input_tokens
+        && let Some(tier) = matching_context_tier(&entry.context_tiers, tokens)
+    {
+        selected.cost = apply_tariff(&selected.cost, &tier.tariff);
+        selected.context_tier = Some(tier.min_input_tokens);
+    }
+
+    Some(selected)
+}
+
+/// The tier a schedule window or `default_tariff` selects, before any
+/// long-context overlay.
+fn base_tier(entry: &ModelPricingEntry, at: DateTime<Utc>) -> SelectedTier {
     if let Some(rule) = entry.schedule.iter().find(|rule| rule_matches(rule, at))
         && let Some(cost) = tariff_cost(entry, &rule.tariff)
     {
-        return Some(SelectedTier {
+        return SelectedTier {
             tariff: Some(rule.tariff.clone()),
             cost,
-        });
+            context_tier: None,
+        };
     }
 
     if let Some(name) = entry.default_tariff.as_deref()
         && let Some(cost) = tariff_cost(entry, name)
     {
-        return Some(SelectedTier {
+        return SelectedTier {
             tariff: Some(name.to_string()),
             cost,
-        });
+            context_tier: None,
+        };
     }
 
     // Nothing selected: the entry's own `cost` is the rate card.
-    Some(SelectedTier {
+    SelectedTier {
         tariff: None,
         cost: entry.cost.clone(),
-    })
+        context_tier: None,
+    }
+}
+
+/// The first declared tier whose threshold `tokens` exceeds.
+///
+/// Strictly greater: a call reporting exactly the threshold is still on the
+/// base tier, which is the boundary models.dev's "over 200k" wording means.
+fn matching_context_tier(tiers: &[ContextTier], tokens: u64) -> Option<&ContextTier> {
+    tiers.iter().find(|tier| tokens > tier.min_input_tokens)
 }
 
 /// The rates a named tariff produces from `entry.cost`.
@@ -326,6 +376,7 @@ mod tests {
                 ],
                 vec![window((1, 0, 0), (4, 0, 0)), window((6, 0, 0), (10, 0, 0))],
             )],
+            context_tiers: Vec::new(),
             default_tariff: Some("off_peak".to_string()),
             effective_from: None,
             effective_until: None,
@@ -334,7 +385,16 @@ mod tests {
     }
 
     fn selected(entry: &ModelPricingEntry, at: SystemTime) -> SelectedTier {
-        resolve_tier(entry, at).expect("entry is in effect at this instant")
+        resolve_tier(entry, at, None).expect("entry is in effect at this instant")
+    }
+
+    /// Selection with an explicit first-snapshot input token count.
+    fn selected_at_size(
+        entry: &ModelPricingEntry,
+        at: SystemTime,
+        input_tokens: Option<u64>,
+    ) -> SelectedTier {
+        resolve_tier(entry, at, input_tokens).expect("entry is in effect at this instant")
     }
 
     fn tier(entry: &ModelPricingEntry, at: SystemTime) -> String {
@@ -625,7 +685,7 @@ mod tests {
             "one second before the upper bound is still in effect"
         );
         assert_eq!(
-            resolve_tier(&entry, SystemTime::from(until)),
+            resolve_tier(&entry, SystemTime::from(until), None),
             None,
             "`effective_until` is exclusive"
         );
@@ -635,7 +695,7 @@ mod tests {
             "`effective_from` is inclusive"
         );
         assert_eq!(
-            resolve_tier(&entry, SystemTime::from(from - Duration::seconds(1))),
+            resolve_tier(&entry, SystemTime::from(from - Duration::seconds(1)), None),
             None,
             "nothing applies before `effective_from`"
         );
@@ -711,8 +771,19 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
         model: &str,
         at: SystemTime,
     ) -> Option<(ModelPricingEntry, Currency)> {
+        resolved_at_size(provider, model, at, None)
+    }
+
+    /// [`resolved`] with a call's reported input token count, so a long-context
+    /// tier is selected.
+    fn resolved_at_size(
+        provider: &str,
+        model: &str,
+        at: SystemTime,
+        input_tokens: Option<u64>,
+    ) -> Option<(ModelPricingEntry, Currency)> {
         let (entry, currency) = hit(sources::config_price(provider, model, at))?;
-        let card = sources::resolve_card(entry, currency, provider, model, at);
+        let card = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
         Some((card.entry, card.currency))
     }
 
@@ -835,6 +906,158 @@ windows = [["01:00", "04:00"]]
                 card.cost.output,
                 Some(16.0),
                 "the merged-in field must be scaled by the same tariff"
+            );
+        });
+    }
+
+    // ---- long-context tiers ----
+
+    fn tier_at(threshold: u64, tariff: Tariff) -> ContextTier {
+        ContextTier {
+            min_input_tokens: threshold,
+            tariff,
+        }
+    }
+
+    /// The input count decides the tier, strictly above the threshold, and
+    /// "unknown" is not a number: no count means the base tier.
+    #[test]
+    fn context_tier_triggers_only_above_the_threshold() {
+        let mut entry = deepseek_entry();
+        entry
+            .context_tiers
+            .push(tier_at(200_000, Tariff::Multiplier(2.0)));
+        // Monday 02:00 UTC is inside the peak window, so the base input rate is 9.0.
+        let instant = at(2026, 9, 14, 2, 0, 0);
+
+        let unknown = selected_at_size(&entry, instant, None);
+        assert_eq!(unknown.context_tier, None, "no count means the base tier");
+        assert_eq!(unknown.cost.input, Some(9.0));
+
+        let exactly = selected_at_size(&entry, instant, Some(200_000));
+        assert_eq!(
+            exactly.context_tier, None,
+            "exactly the threshold is still the base tier"
+        );
+        assert_eq!(exactly.cost.input, Some(9.0));
+
+        let above = selected_at_size(&entry, instant, Some(200_001));
+        assert_eq!(above.context_tier, Some(200_000));
+        assert_eq!(above.cost.input, Some(18.0), "peak 9.0 doubled");
+        assert_eq!(above.cost.cache_write, Some(2.4));
+    }
+
+    /// A tier overlays the *selected* card field by field, exactly like a
+    /// tariff: an absolute tier that writes only `input` keeps the output rate.
+    #[test]
+    fn context_tier_overlays_field_by_field_over_the_selected_tariff() {
+        let mut entry = deepseek_entry();
+        entry.context_tiers.push(tier_at(
+            100_000,
+            Tariff::Absolute(CostFields {
+                input: Some(1.0),
+                output: None,
+                cache_read: None,
+                cache_write: None,
+            }),
+        ));
+        entry
+            .context_tiers
+            .push(tier_at(200_000, Tariff::Multiplier(3.0)));
+
+        // Peak window: the schedule selects `peak`, base 9.0/27.0.
+        let first = selected_at_size(&entry, at(2026, 9, 14, 2, 0, 0), Some(150_000));
+        assert_eq!(first.tariff.as_deref(), Some("peak"));
+        assert_eq!(first.context_tier, Some(100_000));
+        assert_eq!(first.cost.input, Some(1.0), "the written field wins");
+        assert_eq!(
+            first.cost.output,
+            Some(27.0),
+            "an unwritten field keeps the schedule's rate"
+        );
+
+        // Declaration order decides, not the largest threshold: 500k crosses
+        // both tiers and the first declared one still wins.
+        let still_first = selected_at_size(&entry, at(2026, 9, 14, 2, 0, 0), Some(500_000));
+        assert_eq!(still_first.context_tier, Some(100_000));
+        assert_eq!(still_first.cost.input, Some(1.0));
+    }
+
+    /// The overlay runs on top of `default_tariff` too, and a card with no
+    /// tiers is unaffected by a count.
+    #[test]
+    fn context_tier_applies_over_the_default_tariff_and_is_a_noop_without_tiers() {
+        let mut entry = deepseek_entry();
+        entry
+            .context_tiers
+            .push(tier_at(200_000, Tariff::Multiplier(2.0)));
+
+        // 05:00 UTC: no window matches, so `off_peak` (4.5 / 13.5 / 0.6).
+        let long = selected_at_size(&entry, at(2026, 9, 14, 5, 0, 0), Some(300_000));
+        assert_eq!(long.tariff.as_deref(), Some("off_peak"));
+        assert_eq!(long.context_tier, Some(200_000));
+        assert_eq!(long.cost.input, Some(9.0));
+        assert_eq!(long.cost.cache_write, Some(1.2));
+
+        // A card that declares no tiers ignores the count entirely.
+        let plain = deepseek_entry();
+        let selected = selected_at_size(&plain, at(2026, 9, 14, 5, 0, 0), Some(900_000));
+        assert_eq!(selected.context_tier, None);
+        assert_eq!(selected.cost.input, Some(4.5));
+    }
+
+    /// The user-writable syntax, end to end: a config `[[...context_tiers]]`
+    /// entry changes the card the resolver hands downstream.
+    #[test]
+    fn a_configured_context_tier_prices_a_long_call_above_the_base_rate() {
+        let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 1.0
+output = 2.0
+cache_read = 0.1
+
+[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+min_input_tokens = 200_000
+multiplier = 2.0
+"#;
+        with_config(config, || {
+            let instant = at(2026, 9, 14, 2, 0, 0);
+
+            let unknown = resolved_at_size("deepseek", "deepseek-v4-pro", instant, None)
+                .expect("config card");
+            assert_eq!(unknown.0.cost.input, Some(1.0));
+
+            let base = resolved_at_size("deepseek", "deepseek-v4-pro", instant, Some(200_000))
+                .expect("config card");
+            assert_eq!(
+                base.0.cost.input,
+                Some(1.0),
+                "exactly 200k is the base tier"
+            );
+
+            let long = resolved_at_size("deepseek", "deepseek-v4-pro", instant, Some(200_001))
+                .expect("config card");
+            assert_eq!(long.0.cost.input, Some(2.0));
+            assert_eq!(long.0.cost.output, Some(4.0));
+            assert_eq!(long.0.cost.cache_read, Some(0.2));
+
+            // A no-token-count caller (`effective_cost`, the cheapness estimate)
+            // stays on the base tier, so one model never shows two silently
+            // different numbers for the same reference request.
+            let reference =
+                crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant)
+                    .expect("priced");
+            let expected = (1.0 * 25_000.0 + 2.0 * 5_000.0) / 1_000_000.0;
+            assert!((reference.amount - expected).abs() <= 1e-9);
+
+            assert_eq!(
+                crate::model_pricing::context_tier_thresholds(
+                    "deepseek",
+                    "deepseek-v4-pro",
+                    instant
+                ),
+                vec![200_000],
+                "the base-tier report names the declared thresholds"
             );
         });
     }

@@ -99,6 +99,7 @@ on_rule_expiry = "fallback"
 | `cost` | Rates per **million tokens**, in the provider's `currency`. All four components (`input`, `output`, `cache_read`, `cache_write`) are optional; an unpriced component means "this card cannot price that part of the call". |
 | `tariffs.<name>` | A named rate card: `multiplier = 2.0` multiplies `cost`, or write explicit `input`/`output`/`cache_read`/`cache_write` rates. |
 | `schedule` | When a tariff applies. An array of tables, please: `[[pricing...schedule]]`. |
+| `context_tiers` | Long-context rates. An array of tables: `[[pricing...context_tiers]]`, described below. |
 | `default_tariff` | Tariff used when no schedule window matches. Without it, `cost` applies as written. |
 | `effective_from` / `effective_until` | RFC 3339 instants bounding the rule's validity, e.g. `2026-12-31T23:59:59Z`. |
 | `on_rule_expiry` | What an out-of-validity rule does: `"fallback"` (default) lets the next layer price the call and marks the rule expired where the cost is shown, `"no_price"` refuses to price it at all. |
@@ -124,6 +125,49 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
 
 Rules are matched **in declaration order and the first match wins**, so put the
 narrow exceptions first.
+
+### Long-context tiers
+
+Some models charge more once the request is large. Say it with a
+`context_tiers` array:
+
+```toml
+[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+min_input_tokens = 200_000
+multiplier = 2.0
+
+[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+min_input_tokens = 500_000
+input = 9.0
+output = 27.0
+```
+
+* `min_input_tokens` — the tier applies when the call's reported input token
+  count is **strictly greater** than this. A call reporting exactly `200000`
+  input tokens is still on the base tier; `200001` crosses.
+* The rest of the entry uses the same vocabulary as `tariffs.<name>`: either a
+  `multiplier` on the rate card the schedule selected, or explicit
+  `input`/`output`/`cache_read`/`cache_write` rates. An explicit tier overrides
+  only the fields it writes and keeps the rest, exactly like a tariff.
+* Tiers are matched **in declaration order, first match wins**.
+* A tier is chosen from the input token count of the call's **first usage
+  snapshot**, and is then pinned with the rest of the card: a call that grows
+  past a threshold mid-flight keeps the rate it started with.
+
+The same shape is what jcode builds from models.dev's native
+`context_over_200k` rates, so a model priced from models.dev gets its
+long-context rates too, with no configuration at all.
+
+**A caller with no token count prices the base tier.** The cheapness ordering in
+the model picker, `effective_cost`, and the `/pricing` reference figure cannot
+know a call's size, so they use the base rates — the ones below the first
+`min_input_tokens`. `/pricing` names the thresholds in force next to that figure
+(yours, or models.dev's own `context_over_200k` when no rule of yours prices the
+model), so the base rate is not mistaken for the only one.
+
+Once your own rule claims a model, it owns the whole card, tiers included:
+models.dev's `context_over_200k` rates are not merged into it, because a lower
+layer's absolute tier would silently overwrite the rates you wrote.
 
 ### Per-call pinning
 

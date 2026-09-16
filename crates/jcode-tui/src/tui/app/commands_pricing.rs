@@ -37,6 +37,12 @@ pub(super) struct PricingReport<'a> {
     pub display_currency: &'a str,
     /// Canonical-request cost from whichever layer wins, when one can be had.
     pub reference_cost: Option<&'a jcode_provider_core::Money>,
+    /// Long-context thresholds the winning card declares, in declaration order.
+    ///
+    /// This report has no token count and therefore prices the **base tier**.
+    /// Listing the thresholds is what keeps that honest: the user learns which
+    /// tiers a real call can cross instead of reading the figure as the only one.
+    pub context_tier_thresholds: &'a [u64],
 }
 
 impl PricingReport<'_> {
@@ -94,6 +100,19 @@ impl PricingReport<'_> {
             );
         }
 
+        if !self.context_tier_thresholds.is_empty() {
+            let tiers = self
+                .context_tier_thresholds
+                .iter()
+                .map(|threshold| format!(">{threshold} input tokens"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "- long-context tiers: {tiers} (the rates above are the base tier; a call whose \
+                 first usage snapshot reports more than a threshold is billed at that tier)\n"
+            ));
+        }
+
         if self.fx_rates.is_empty() {
             out.push_str(&format!(
                 "- fx: no rates configured, so every cost stays in its own currency ({}) and the model \
@@ -142,9 +161,13 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
     let source_key = app.billing_source_key(is_anthropic, is_openai);
     let provider = <App as crate::tui::TuiState>::provider_name(app).to_string();
     let tariff = crate::model_pricing::selected_config_tariff(&source_key, &model, now);
+    let context_tier_thresholds =
+        crate::model_pricing::context_tier_thresholds(&source_key, &model, now);
 
-    // One lookup, then own the card so the report can borrow all of it.
-    let rates_state = crate::model_pricing::config_call_rates(&source_key, &model, now);
+    // One lookup, then own the card so the report can borrow all of it. `None`
+    // is deliberate: this report is a reference request with no size, so it
+    // prices the base tier and names the tiers separately below.
+    let rates_state = crate::model_pricing::config_call_rates(&source_key, &model, now, None);
     let priced = match &rates_state {
         crate::model_pricing::ConfigCallRates::Priced(card) => Some(card.clone()),
         _ => None,
@@ -176,6 +199,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         fx_rates: &pricing.fx_rates,
         display_currency: &display_currency,
         reference_cost: reference.as_ref(),
+        context_tier_thresholds: &context_tier_thresholds,
     };
     app.push_display_message(DisplayMessage::system(report.render()));
     true
@@ -214,6 +238,7 @@ mod tests {
             fx_rates: &rates,
             display_currency: "native",
             reference_cost: Some(&Money::new(0.09, Currency::new("CNY"))),
+            context_tier_thresholds: &[],
         };
         let text = report.render();
 
@@ -243,6 +268,7 @@ mod tests {
             fx_rates: &rates,
             display_currency: "native",
             reference_cost: None,
+            context_tier_thresholds: &[],
         };
         let text = report.render();
 
@@ -268,6 +294,7 @@ mod tests {
             fx_rates: &rates,
             display_currency: "CNY",
             reference_cost: None,
+            context_tier_thresholds: &[],
         };
         let text = report.render();
 
@@ -278,5 +305,33 @@ mod tests {
         assert!(text.contains("**rejected**"), "{text}");
         assert!(text.contains("window end must be after start"), "{text}");
         assert!(text.contains("display currency: `CNY`"), "{text}");
+    }
+
+    /// `/pricing` has no token count, so it prices the base tier. It has to name
+    /// the declared thresholds, otherwise the base figure reads as the only one.
+    #[test]
+    fn a_long_context_card_names_its_tiers_and_the_base_tier_caveat() {
+        let card = card();
+        let rates = std::collections::BTreeMap::new();
+        let thresholds = [200_000u64, 500_000];
+        let report = PricingReport {
+            provider: "DeepSeek",
+            model: "deepseek-v4-pro",
+            card: CardState::Priced {
+                card: &card,
+                tariff: None,
+            },
+            config_error: None,
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: None,
+            context_tier_thresholds: &thresholds,
+        };
+        let text = report.render();
+
+        assert!(text.contains(">200000 input tokens"), "{text}");
+        assert!(text.contains(">500000 input tokens"), "{text}");
+        assert!(text.contains("base tier"), "{text}");
     }
 }

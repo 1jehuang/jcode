@@ -282,7 +282,11 @@ impl App {
         // The call is priced at the instant it was sent (F15); a second
         // `update_cost_impl` for the same call reuses the pinned card.
         let at = self.cost.call_started_at.unwrap_or_else(SystemTime::now);
-        let pricing = self.call_pricing(at, &model, is_anthropic, is_openai);
+        // The call's own reported input count decides its long-context tier, if
+        // the card declares one (the tier is pinned with the card on this first
+        // resolution, so later snapshots cannot re-price it).
+        let input_tokens = Some(self.streaming.streaming_input_tokens);
+        let pricing = self.call_pricing(at, &model, is_anthropic, is_openai, input_tokens);
         let PinnedCallPricing::Priced(pricing) = pricing else {
             // The user configured a rule for this model that cannot price the
             // call. Leave it unpriced: the generic $15/$60 estimate would
@@ -335,8 +339,13 @@ impl App {
             return;
         }
         let (model, is_anthropic, is_openai) = self.remote_billing_identity();
+        // `input_delta` is the call's full reported input on its first usage
+        // snapshot (per-call counters reset at the call boundary), which is
+        // exactly the count the spec pins the tier on. Later deltas reuse the
+        // card this pins, so their (smaller) delta cannot re-price the call.
+        let input_tokens = Some(input_delta);
         let PinnedCallPricing::Priced(pricing) =
-            self.call_pricing(at, &model, is_anthropic, is_openai)
+            self.call_pricing(at, &model, is_anthropic, is_openai, input_tokens)
         else {
             return;
         };
@@ -376,8 +385,9 @@ impl App {
         // Restored totals have no per-call instant of their own; the snapshot's
         // instant is the best available and is passed in so tests can fix it.
         let (model, is_anthropic, is_openai) = self.remote_billing_identity();
+        let input_tokens = (totals.input_tokens > 0).then_some(totals.input_tokens);
         let PinnedCallPricing::Priced(pricing) =
-            self.resolve_call_pricing(at, &model, is_anthropic, is_openai)
+            self.resolve_call_pricing(at, &model, is_anthropic, is_openai, input_tokens)
         else {
             return;
         };
@@ -493,11 +503,12 @@ impl App {
         model: &str,
         is_anthropic: bool,
         is_openai: bool,
+        input_tokens: Option<u64>,
     ) -> PinnedCallPricing {
         if let Some(pinned) = self.cost.pinned_call_pricing.clone() {
             return pinned;
         }
-        let pinned = self.resolve_call_pricing(at, model, is_anthropic, is_openai);
+        let pinned = self.resolve_call_pricing(at, model, is_anthropic, is_openai, input_tokens);
         self.cost.pinned_call_pricing = Some(pinned.clone());
         pinned
     }
@@ -515,12 +526,13 @@ impl App {
         model: &str,
         is_anthropic: bool,
         is_openai: bool,
+        input_tokens: Option<u64>,
     ) -> PinnedCallPricing {
         let source_key = self.billing_source_key(is_anthropic, is_openai);
         // The expiry marker describes *this* pricing decision, so every arm
         // sets it: a call priced by the user's rule (or by a card that is
         // simply absent) clears whatever the previous call recorded (F8/F20).
-        match crate::model_pricing::config_call_rates(&source_key, model, at) {
+        match crate::model_pricing::config_call_rates(&source_key, model, at, input_tokens) {
             crate::model_pricing::ConfigCallRates::Priced(card) => {
                 self.cost.rule_out_of_effect = None;
                 return PinnedCallPricing::Priced(ResolvedTokenPricing::from_rate_card(
@@ -556,7 +568,7 @@ impl App {
         // behaviour. Those layers state no cache-write rate either, so cache
         // writes keep the premium they always had (F1: the config layer is the
         // only one that can price a cache write differently).
-        self.refresh_cached_pricing(model, is_anthropic, is_openai);
+        self.refresh_cached_pricing(model, is_anthropic, is_openai, input_tokens);
         PinnedCallPricing::Priced(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
@@ -605,25 +617,45 @@ impl App {
     /// Only the derived layers are memoized here: hand-written config cards are
     /// resolved separately, at each call's own instant, so this memo can never
     /// hand back a stale tariff.
-    fn refresh_cached_pricing(&mut self, model: &str, is_anthropic: bool, is_openai: bool) {
+    fn refresh_cached_pricing(
+        &mut self,
+        model: &str,
+        is_anthropic: bool,
+        is_openai: bool,
+        input_tokens: Option<u64>,
+    ) {
         let service_tier = self.active_service_tier_for_pricing();
         let pricing_generation = crate::model_pricing::pricing_generation();
+        let source_key = self.billing_source_key(is_anthropic, is_openai);
+        // models.dev's own long-context rates are part of the price of this
+        // call, so the tier in force is part of the memo key: a long call must
+        // not leave its higher rates cached for the next short one.
+        let context_tier = crate::model_pricing::models_dev_context_tier_in_force(
+            &source_key,
+            model,
+            SystemTime::now(),
+            input_tokens,
+        );
         // Tier and pricing generation are both part of the memo key so toggling
         // `/fast on` re-prices, and so does a hand-edited `[pricing]` section.
         let price_key = match service_tier.as_deref() {
             Some(tier) => format!("{model}|{tier}|{pricing_generation}"),
             None => format!("{model}|{pricing_generation}"),
         };
+        let price_key = match context_tier {
+            Some(threshold) => format!("{price_key}|ctx{threshold}"),
+            None => price_key,
+        };
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {
             return;
         }
 
         let per_mtok = |micros: Option<u64>| micros.map(|m| m as f32 / 1_000_000.0);
-        let source_key = self.billing_source_key(is_anthropic, is_openai);
-        let estimate = crate::provider::pricing::derived_pricing_for_source(
+        let estimate = crate::provider::pricing::derived_pricing_for_source_at_size(
             &source_key,
             model,
             service_tier.as_deref(),
+            input_tokens,
         );
 
         if let Some(estimate) = estimate {
