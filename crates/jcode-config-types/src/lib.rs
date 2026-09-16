@@ -52,6 +52,74 @@ impl CompactionMode {
     }
 }
 
+/// Agent operating mode: controls what the agent is allowed to do.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// Default: autonomous implementation — read, write, build, commit.
+    #[default]
+    Execute,
+    /// Coordinator: plans, delegates via swarm, reviews worker output.
+    /// Cannot write files or run build commands directly.
+    Manager,
+    /// Read-only: research, analyze, suggest. Never modifies files.
+    Researcher,
+}
+
+impl AgentMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Execute => "execute",
+            Self::Manager => "manager",
+            Self::Researcher => "researcher",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Execute => "EXEC",
+            Self::Manager => "MGR",
+            Self::Researcher => "RES",
+        }
+    }
+
+    pub fn parse(input: &str) -> Option<Self> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "execute" | "exec" => Some(Self::Execute),
+            "manager" | "mgr" => Some(Self::Manager),
+            "researcher" | "research" | "res" => Some(Self::Researcher),
+            _ => None,
+        }
+    }
+
+    /// Returns true if the given tool name is blocked in this mode.
+    pub fn is_tool_blocked(&self, tool_name: &str) -> bool {
+        match self {
+            Self::Execute => false,
+            Self::Manager => {
+                matches!(
+                    tool_name,
+                    "write" | "edit" | "multiedit" | "apply_patch" | "patch" | "gmail"
+                )
+            }
+            Self::Researcher => {
+                matches!(
+                    tool_name,
+                    "write"
+                        | "edit"
+                        | "multiedit"
+                        | "apply_patch"
+                        | "patch"
+                        | "bash"
+                        | "gmail"
+                        | "browser"
+                        | "macos_computer_use"
+                )
+            }
+        }
+    }
+}
+
 /// Session picker Enter action: "current-terminal" (default) or "new-terminal".
 /// Ctrl+Enter performs the alternate action.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

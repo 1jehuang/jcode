@@ -415,6 +415,12 @@ pub fn build_system_prompt_full_with_capabilities(
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
 
+    // Agent mode prompt: enforce behavioral constraints for manager/researcher modes.
+    let mode_prompt = build_agent_mode_prompt();
+    if !mode_prompt.is_empty() {
+        parts.push(mode_prompt);
+    }
+
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
     if let Some(content) = overlay_content {
@@ -1061,6 +1067,47 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
         (None, 0)
     } else {
         (Some(contents.join("\n\n")), total_chars)
+    }
+}
+
+/// Build the agent mode system prompt section based on `JCODE_AGENT_MODE` env var.
+/// Returns an empty string when in default Execute mode (no extra constraints).
+fn build_agent_mode_prompt() -> String {
+    let mode_str = std::env::var("JCODE_AGENT_MODE").unwrap_or_default();
+    let mode = match jcode_config_types::AgentMode::parse(&mode_str) {
+        Some(m) => m,
+        None => return String::new(),
+    };
+    match mode {
+        jcode_config_types::AgentMode::Execute => String::new(),
+        jcode_config_types::AgentMode::Manager => {
+            "## MANAGER MODE\n\
+             You are in MANAGER mode. You MUST NOT:\n\
+             - Write or edit any files (write, edit, multiedit, apply_patch, patch tools are blocked)\n\
+             - You CANNOT do implementation work directly\n\n\
+             You MUST:\n\
+             - Analyze the task and create a plan (DAG/WBS)\n\
+             - Use the 'swarm' tool to spawn worker agents for implementation\n\
+             - Review worker outputs and approve/reject changes\n\
+             - Report progress using the SESSION STATUS format\n\n\
+             When blocked or the user asks you to implement, delegate to a worker:\n\
+             swarm(action='spawn', label='worker', prompt='...')"
+                .to_string()
+        }
+        jcode_config_types::AgentMode::Researcher => {
+            "## RESEARCHER MODE\n\
+             You are in RESEARCHER mode. This is a read-only session. You MUST NOT:\n\
+             - Write or edit any files\n\
+             - Run build, test, or install commands\n\
+             - Use browser or screenshot tools\n\
+             - Make any changes to the system\n\n\
+             You MUST:\n\
+             - Research the question using search, read, and grep tools\n\
+             - Analyze existing code and documentation\n\
+             - Provide recommendations with specific file references and line numbers\n\
+             - Suggest changes without applying them"
+                .to_string()
+        }
     }
 }
 

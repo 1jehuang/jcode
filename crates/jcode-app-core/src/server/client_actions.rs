@@ -378,6 +378,35 @@ pub(super) fn handle_run_subagent(
 
         let started = Instant::now();
         let tool_name_for_exec = tool_name.clone();
+
+        // Agent mode tool gating: block write/build tools in manager/researcher modes.
+        let mode_str = std::env::var("JCODE_AGENT_MODE").unwrap_or_default();
+        if let Some(mode) = crate::config::AgentMode::parse(&mode_str) {
+            if mode.is_tool_blocked(&tool_name_for_exec) {
+                let msg = format!(
+                    "Tool '{}' is blocked in {} mode. {}",
+                    tool_name_for_exec,
+                    mode.as_str(),
+                    match mode {
+                        crate::config::AgentMode::Manager => {
+                            "Use 'swarm' to delegate implementation to a worker agent."
+                        }
+                        crate::config::AgentMode::Researcher => {
+                            "Researcher mode is read-only. Suggest changes without applying them."
+                        }
+                        _ => "",
+                    }
+                );
+                let _ = tx.send(ServerEvent::ToolDone {
+                    id: tool_call_id.clone(),
+                    name: tool_name,
+                    output: msg.clone(),
+                    error: Some(msg),
+                });
+                return;
+            }
+        }
+
         let result = match crate::runtime_activity::spawn(async move {
             registry.execute(&tool_name_for_exec, tool_input, ctx).await
         }) {
