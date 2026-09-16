@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
-use crate::model_pricing::RuleOutOfEffect;
+use crate::model_pricing::OutOfEffectNotice;
 use jcode_provider_core::Currency;
 use misc_ui::PinnedCallPricing;
 
@@ -853,7 +853,8 @@ struct CostState {
     /// Why the *last priced call* was not priced by the user's own
     /// `[pricing.providers]` rule, when that rule was out of its validity
     /// window and `on_rule_expiry = "fallback"` sent the call to the next layer
-    /// (F8/F20).
+    /// (F8/F20). The same marker covers a `[[pricing.sources]]` sheet rule that
+    /// is out of effect, labelled with the sheet's `id`.
     ///
     /// The amount the widget shows is therefore a fallback price, and this is
     /// what lets the display say so: without it a user sees a models.dev number
@@ -866,7 +867,7 @@ struct CostState {
     ///
     /// Set at billing time, never at render time: the resolver logs a warning
     /// when it detects the expiry, and the render path runs every frame.
-    rule_out_of_effect: Option<RuleOutOfEffect>,
+    rule_out_of_effect: Option<OutOfEffectNotice>,
 }
 
 impl CostState {

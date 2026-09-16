@@ -32,6 +32,10 @@ pub(super) struct PricingReport<'a> {
     pub card: CardState<'a>,
     /// Why the `[pricing]` section was rejected, when it was.
     pub config_error: Option<&'a str>,
+    /// The user's own rule that covers this model but is out of its validity
+    /// window at the report instant: a `[pricing.providers]` card or a
+    /// `[[pricing.sources]]` sheet (whose label names the sheet).
+    pub out_of_effect: Option<&'a crate::model_pricing::OutOfEffectNotice>,
     pub fx_base: &'a jcode_provider_core::Currency,
     pub fx_rates: &'a std::collections::BTreeMap<jcode_provider_core::Currency, f64>,
     pub display_currency: &'a str,
@@ -87,6 +91,13 @@ impl PricingReport<'_> {
                 "\n- rate card: no `[pricing]` rule prices this model, so the cost comes from a lower layer \
                  (models.dev, a provider cache, or the fallback estimate)\n",
             ),
+        }
+
+        if let Some(notice) = self.out_of_effect {
+            out.push_str(&format!(
+                "- out of effect: {} - the cost above comes from a lower layer, not from your rule\n",
+                notice.label()
+            ));
         }
 
         if let Some(cost) = self.reference_cost {
@@ -172,6 +183,18 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         crate::model_pricing::ConfigCallRates::Priced(card) => Some(card.clone()),
         _ => None,
     };
+    // F8/F20: which of the user's own rules stopped applying to this model. The
+    // card first (it outranks a sheet), then the sheet layer, so `/pricing`
+    // answers "why is it this price" the same way the cost widget does.
+    let out_of_effect = match &rates_state {
+        crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
+            Some(crate::model_pricing::OutOfEffectNotice::ConfigCard(*reason))
+        }
+        crate::model_pricing::ConfigCallRates::Absent => {
+            crate::model_pricing::sheet_rule_out_of_effect(&source_key, &model, now)
+        }
+        _ => None,
+    };
     let card = match priced.as_ref() {
         Some(card) => CardState::Priced {
             card,
@@ -195,6 +218,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         model: &model,
         card,
         config_error: error.as_ref().map(|error| error.message.as_str()),
+        out_of_effect: out_of_effect.as_ref(),
         fx_base: &pricing.fx_base,
         fx_rates: &pricing.fx_rates,
         display_currency: &display_currency,
@@ -234,6 +258,7 @@ mod tests {
                 tariff: Some("peak"),
             },
             config_error: None,
+            out_of_effect: None,
             fx_base: &Currency::usd(),
             fx_rates: &rates,
             display_currency: "native",
@@ -264,6 +289,7 @@ mod tests {
             model: "deepseek-v4-pro",
             card: CardState::ConfiguredWithoutPrice,
             config_error: None,
+            out_of_effect: None,
             fx_base: &Currency::usd(),
             fx_rates: &rates,
             display_currency: "native",
@@ -290,6 +316,7 @@ mod tests {
             model: "gpt-5.5",
             card: CardState::Absent,
             config_error: Some("pricing.schedule[0].windows: window end must be after start"),
+            out_of_effect: None,
             fx_base: &Currency::usd(),
             fx_rates: &rates,
             display_currency: "CNY",
@@ -322,6 +349,7 @@ mod tests {
                 tariff: None,
             },
             config_error: None,
+            out_of_effect: None,
             fx_base: &Currency::usd(),
             fx_rates: &rates,
             display_currency: "native",
@@ -333,5 +361,51 @@ mod tests {
         assert!(text.contains(">200000 input tokens"), "{text}");
         assert!(text.contains(">500000 input tokens"), "{text}");
         assert!(text.contains("base tier"), "{text}");
+    }
+
+    /// F8/F20 for sheets: `/pricing` answers "why is it this price" the same way
+    /// the cost widget does, so an out-of-effect sheet rule must be named here
+    /// too - and the label must name *which* sheet stopped applying.
+    #[test]
+    fn an_out_of_effect_sheet_rule_is_reported_by_name() {
+        let notice = crate::model_pricing::OutOfEffectNotice::PriceSheet {
+            source_id: "deepseek-mirror".to_string(),
+            reason: crate::model_pricing::RuleOutOfEffect::Expired,
+        };
+        let rates = std::collections::BTreeMap::new();
+        let report = PricingReport {
+            provider: "DeepSeek",
+            model: "deepseek-v4-pro",
+            card: CardState::Absent,
+            config_error: None,
+            out_of_effect: Some(&notice),
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: None,
+            context_tier_thresholds: &[],
+        };
+        let text = report.render();
+
+        assert!(text.contains("out of effect"), "{text}");
+        assert!(text.contains("rule expired"), "{text}");
+        assert!(
+            text.contains("pricing source `deepseek-mirror`"),
+            "the report must name the sheet that stopped applying: {text}"
+        );
+        assert!(
+            text.contains("comes from a lower layer"),
+            "and say the price is another layer's: {text}"
+        );
+    }
+
+    /// The card's own marker still reads exactly as before: the sheet label is
+    /// an addition, not a change to the card's wording.
+    #[test]
+    fn a_config_card_marker_keeps_its_wording() {
+        let notice = crate::model_pricing::OutOfEffectNotice::ConfigCard(
+            crate::model_pricing::RuleOutOfEffect::NotYetEffective,
+        );
+        assert_eq!(notice.label(), "rule not in effect yet");
     }
 }

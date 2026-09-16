@@ -23,7 +23,7 @@
 //!   at validation time), never by map iteration order.
 
 use crate::config::{PricingSource, SourceLocation};
-use crate::model_pricing::entry::ModelPricingEntry;
+use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::sources;
 use crate::model_pricing::{catalog, models_dev_provider_id, normalize_model_id};
 use jcode_provider_core::Currency;
@@ -142,6 +142,48 @@ pub(super) fn source_card(source_key: &str, model: &str, at: SystemTime) -> Opti
         }
     }
     hit
+}
+
+/// The sheet rule that covers `(source_key, model)` and is out of effect at
+/// `at`, if any, together with the `id` of the sheet that states it.
+///
+/// This is the sheet-layer half of the F8/F20 marker: the caller prices the
+/// call from the next layer anyway (that is the fall-through), but a user who
+/// wrote a sheet has to learn that their rule stopped applying instead of
+/// silently reading a models.dev number.
+///
+/// Only the *first* sheet that states an entry for the pair can be that reason.
+/// An earlier covering sheet that states nothing for this model would not have
+/// priced the call even while in effect, and an earlier sheet that *is* in
+/// effect wins outright, so neither is reported. That is why this mirrors
+/// `source_card`'s iteration order rather than collecting every expired sheet.
+pub(super) fn out_of_effect_sheet(
+    source_key: &str,
+    model: &str,
+    at: SystemTime,
+) -> Option<(String, RuleOutOfEffect)> {
+    let config = sources::pricing_config();
+    if config.sources.is_empty() {
+        return None;
+    }
+
+    for source in &config.sources {
+        if !covers_provider(source, source_key) || !covers_model(source, model) {
+            continue;
+        }
+        let Some(cache) = usable_catalog(source) else {
+            continue;
+        };
+        let Some(entry) = entry_for(&cache, &source.id, source_key, model) else {
+            continue;
+        };
+        // The first sheet that states an entry for the pair decides: it either
+        // prices the call, or its expiry is what sent the price below.
+        return entry
+            .out_of_effect_reason(at)
+            .map(|reason| (source.id.clone(), reason));
+    }
+    None
 }
 
 /// Whether a source's `scope` lets it price `source_key`.

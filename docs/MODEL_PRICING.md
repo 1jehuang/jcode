@@ -240,6 +240,23 @@ sheet can carry peak/off-peak hours or a promotion that expires, and the call is
 priced at the rate in effect at the call's own instant, exactly like a rule you
 wrote yourself.
 
+**A sheet has no `fallback`/`no_price` choice: out of effect always means "the
+next layer prices the call".** A `[pricing.providers]` rule may set
+`on_rule_expiry = "no_price"` to refuse a price outright; a sheet may state
+`effective_from`/`effective_until` but that refusal semantics is deliberately not
+part of a sheet, so a sheet's out-of-effect rule always falls through to the next
+source (or models.dev). A sheet that states `on_rule_expiry = "no_price"` still
+falls through — the field is parsed but only the validity bounds decide anything
+for a sheet.
+
+**The fall-through is labelled where you read the price.** A sheet is your own
+configuration, so a sheet rule that is out of effect at the call's instant is
+surfaced exactly like an expired hand-written rule, with the sheet named:
+the cost line shows `(rule expired (pricing source \`corp-mirror\`))`, and
+`/pricing` prints an `out of effect:` line for the same reason. Without this the
+figure would silently switch from your sheet to models.dev's number. The next
+layer still prices the call at its own rate — the marker is what changes.
+
 **Failure degrades, it never fabricates.** A sheet that is unreachable,
 unparseable, stale, or out of effect simply does not price the call, and the next
 layer does. Nothing is invented to fill the gap, and a call that models.dev can
@@ -254,8 +271,9 @@ price is never left unpriced:
 * a sheet whose `refresh_secs` has elapsed is **not** used while its refresh is
   outstanding: a price that may be hours stale is not silently billed;
 * a sheet whose rule is out of effect at the call's instant (its
-  `effective_until` passed) is skipped, and the next source or models.dev prices
-  the call.
+  `effective_until` passed, or its `effective_from` has not arrived) is skipped,
+  and the next source or models.dev prices the call — and, as above, that price
+  carries a marker naming the sheet.
 
 **Currency follows the price here too.** A sheet that states `currency = "CNY"`
 prices in CNY and never inherits models.dev's USD numbers; a sheet that states

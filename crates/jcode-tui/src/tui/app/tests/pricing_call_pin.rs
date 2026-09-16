@@ -626,3 +626,82 @@ fn local_path_bills_the_context_tier_from_the_reported_input_count() {
         assert!((local_cost(300_000) - 3.0).abs() < 1e-4);
     });
 }
+
+// F8/F20 for `[[pricing.sources]]` sheets: a sheet is the user's own
+// configuration too, so a sheet rule that is out of effect must be labelled
+// where the user reads the price, exactly like a hand-written card. Without
+// this the price silently changes from the user's sheet to models.dev and
+// nothing on screen says why (the sheet only logged at `debug`).
+
+/// Write a sheet next to `config.toml` in the isolated home and return the
+/// `[[pricing.sources]]` section that points at it.
+fn write_source_sheet(id: &str, body: &str) -> String {
+    let home = std::env::var_os("JCODE_HOME").expect("test home is set");
+    let path = std::path::PathBuf::from(&home).join(format!("{id}.json"));
+    std::fs::write(&path, body).expect("write price sheet");
+    format!(
+        "\n[[pricing.sources]]\nid = \"{id}\"\nurl = \"file://{}\"\n",
+        path.display()
+    )
+}
+
+#[test]
+fn expired_sheet_rule_is_labelled_where_the_user_reads_the_price() {
+    with_temp_jcode_home(|| {
+        // No config at all: the number the fallback layer produces for this
+        // model, which the out-of-effect sheet must fall back to unchanged.
+        let (fallback_cost, unlabelled) = widget_cost_line();
+
+        let section = write_source_sheet(
+            "expired-sheet",
+            r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+                "cost":{"input":9.0,"output":18.0},
+                "effective_until":"2020-01-01T00:00:00Z"
+            }}}}"#,
+        );
+        write_pricing_config(&section);
+        let (sheet_cost, labelled) = widget_cost_line();
+
+        assert!(
+            (sheet_cost - fallback_cost).abs() < 1e-4,
+            "an out-of-effect sheet prices like the next layer, not at its own 9/18 rate: \
+             {sheet_cost} vs {fallback_cost}"
+        );
+        assert!(
+            !unlabelled.contains("pricing source"),
+            "sanity: nothing is labelled without a sheet: {unlabelled}"
+        );
+        assert!(
+            labelled.contains("expired"),
+            "the widget must say the sheet's rule stopped applying: {labelled}"
+        );
+        assert!(
+            labelled.contains("pricing source `expired-sheet`"),
+            "the marker must name the sheet that stopped applying: {labelled}"
+        );
+    });
+}
+
+#[test]
+fn an_in_effect_sheet_rule_is_not_labelled() {
+    with_temp_jcode_home(|| {
+        let section = write_source_sheet(
+            "live-sheet",
+            r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+                "cost":{"input":9.0,"output":18.0},
+                "effective_until":"2100-01-01T00:00:00Z"
+            }}}}"#,
+        );
+        write_pricing_config(&section);
+        let (cost, line) = widget_cost_line();
+
+        assert!(
+            (cost - 27.0).abs() < 1e-3,
+            "the in-effect sheet's own 9+18 rates price the call, got ${cost}: {line}"
+        );
+        assert!(
+            !line.contains("expired") && !line.contains("pricing source"),
+            "an in-effect sheet must not carry an out-of-effect marker: {line}"
+        );
+    });
+}
