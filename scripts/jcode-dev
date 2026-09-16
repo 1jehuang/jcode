@@ -1,0 +1,46 @@
+#!/bin/sh
+# jcode-dev — isolated development wrapper
+#
+# Uses separate config and runtime dirs so `cargo build` doesn't interrupt
+# production jcode sessions. See docs/sessions/20260916-jcode-dev-isolation/
+# for the full design.
+#
+# Usage:
+#   jcode-dev          # same args as jcode
+#   jcode-dev chat     # chat in dev mode
+#
+# The wrapper sets JCODE_RUNTIME_DIR and JCODE_HOME to isolate sockets,
+# config, and session history from the production jcode instance.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Resolve the jcode binary. Prefer cargo-built debug binary, fall back to PATH.
+find_jcode_bin() {
+    # Check for cargo-built binary first
+    if [ -x "$SCRIPT_DIR/target/debug/jcode" ]; then
+        echo "$SCRIPT_DIR/target/debug/jcode"
+        return
+    fi
+    # Fall back to jcode in PATH
+    if command -v jcode >/dev/null 2>&1; then
+        command -v jcode
+        return
+    fi
+    echo "error: jcode binary not found. Build with: cargo build --bin jcode" >&2
+    exit 1
+}
+
+JCODE_BIN="$(find_jcode_bin)"
+
+# Isolate runtime (sockets live here)
+export JCODE_RUNTIME_DIR="${JCODE_RUNTIME_DIR:-$(mktemp -d)/jcode-dev-$(id -u)}"
+
+# Isolate config and session data
+export JCODE_HOME="${JCODE_HOME:-$HOME/.jcode-dev}"
+
+# Ensure the runtime dir exists
+mkdir -p "$JCODE_RUNTIME_DIR" "$JCODE_HOME"
+
+exec "$JCODE_BIN" "$@"
