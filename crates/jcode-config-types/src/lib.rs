@@ -6,7 +6,7 @@ pub mod keybindings;
 pub mod pricing;
 pub use pricing::{
     ContextTierFile, CostFile, ModelPricingRuleFile, OnRuleExpiry, PricingConfigFile,
-    ProviderPricingFile, ScheduleRuleFile, TariffFile,
+    PricingSourceFile, ProviderPricingFile, ScheduleRuleFile, TariffFile,
 };
 mod serde_lenient;
 pub use keybindings::{

@@ -117,7 +117,7 @@ pub fn config_call_rates(
         ConfigPrice::Hit { entry, currency } => {
             let resolved =
                 sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
-            if !resolved.from_config {
+            if !resolved.owns_price {
                 // The card lost to the next layer (a foreign-currency card that
                 // cannot be completed, per F1). That is not this layer's answer:
                 // let the derived layers price the call and label it.

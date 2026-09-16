@@ -2,9 +2,11 @@
 //! that decide which layer owns a `(provider, model)` pair.
 //!
 //! This is the highest-priority price source (spec 4.4): it outranks the
-//! curated static tables, OpenRouter's own caches, and models.dev. The optional
-//! `[[pricing.sources]]` registry lands later and plugs in between this layer
-//! and models.dev.
+//! `[[pricing.sources]]` registry ([`super::source_registry`], which plugs in
+//! between this layer and models.dev), the curated static tables, OpenRouter's
+//! own caches, and models.dev. The registry shares this module's card resolver
+//! ([`resolve_card`]) so the two layers cannot disagree about merging or about
+//! currency.
 //!
 //! Two rules from the spec are enforced here and nowhere else:
 //!
@@ -248,7 +250,7 @@ pub(super) fn resolve_card(
     input_tokens: Option<u64>,
 ) -> ResolvedCard {
     let fallback = crate::model_pricing::lookup(provider, model);
-    let mut from_config = true;
+    let mut owns_price = true;
     // What the `[pricing]` card states for cache writes *on its own*, asked
     // before the merge below can fill the field from the next layer. Only a rate
     // the user wrote may replace the billing premium (see
@@ -270,7 +272,7 @@ pub(super) fn resolve_card(
         ));
         entry = ModelPricingEntry::from_model_cost(fallback);
         currency = Currency::usd();
-        from_config = false;
+        owns_price = false;
     } else {
         // Non-USD, incomplete, and nothing underneath it: neither direction may
         // borrow the other layer's numbers (F1), so this card can never price
@@ -309,7 +311,7 @@ pub(super) fn resolve_card(
     ResolvedCard {
         entry,
         currency,
-        from_config,
+        owns_price,
         config_cache_write,
     }
 }
@@ -332,9 +334,12 @@ fn declared_cache_write(
 pub(super) struct ResolvedCard {
     pub(super) entry: ModelPricingEntry,
     pub(super) currency: Currency,
-    /// `false` when the config card could not price the model and the rates are
-    /// the next layer's, so callers can keep labelling sources truthfully.
-    pub(super) from_config: bool,
+    /// `false` when the card could not price the model and the rates are the
+    /// next layer's, so callers can keep labelling sources truthfully. The name
+    /// says "the layer this card came from is the one that set the price"; it is
+    /// the same question for a `[pricing.providers]` card and for a
+    /// `[[pricing.sources]]` sheet, which share this resolver.
+    pub(super) owns_price: bool,
     /// The cache-write rate the `[pricing]` card itself states, when it states
     /// one. `None` also covers "the merge filled the field from models.dev":
     /// billing may only override its cache-write premium with a configured rate
@@ -368,7 +373,7 @@ fn find_provider<'a>(config: &'a PricingConfig, source_key: &str) -> Option<&'a 
 
 /// Whether a `[pricing.providers]` key refers to the same provider as
 /// `source_key`, using the three normalized identity forms of spec 4.2.1.
-fn provider_key_matches(config_key: &str, source_key: &str) -> bool {
+pub(super) fn provider_key_matches(config_key: &str, source_key: &str) -> bool {
     let key = config_key.trim();
     if key == source_key {
         return true;

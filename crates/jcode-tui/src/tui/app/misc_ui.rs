@@ -627,10 +627,12 @@ impl App {
         let service_tier = self.active_service_tier_for_pricing();
         let pricing_generation = crate::model_pricing::pricing_generation();
         let source_key = self.billing_source_key(is_anthropic, is_openai);
-        // models.dev's own long-context rates are part of the price of this
-        // call, so the tier in force is part of the memo key: a long call must
-        // not leave its higher rates cached for the next short one.
-        let context_tier = crate::model_pricing::models_dev_context_tier_in_force(
+        // The derived layers' long-context rates are part of the price of this
+        // call (models.dev's `context_over_200k`, or a `[[pricing.sources]]`
+        // sheet's own tiers), so the tier in force is part of the memo key: a
+        // long call must not leave its higher rates cached for the next short
+        // one.
+        let context_tier = crate::model_pricing::derived_context_tier_in_force(
             &source_key,
             model,
             SystemTime::now(),

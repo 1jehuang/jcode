@@ -887,7 +887,7 @@ pub mod pricing;
 
 pub use pricing::{
     ContextTier, CostFields, ModelPricingRule, OnRuleExpiry, PricingConfig, PricingConfigError,
-    ProviderPricing, ScheduleRule, Tariff, TimeWindow,
+    PricingSource, ProviderPricing, ScheduleRule, SourceLocation, Tariff, TimeWindow,
 };
 
 #[cfg(test)]
@@ -901,6 +901,10 @@ mod color_tests;
 #[cfg(test)]
 #[path = "config_save_tests.rs"]
 mod save_tests;
+
+#[cfg(test)]
+#[path = "config_pricing_source_tests.rs"]
+mod pricing_source_tests;
 
 /// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.

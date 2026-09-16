@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::entry::ModelPricingEntry;
 use crate::config::{ContextTier, CostFields, Tariff};
+use jcode_config_types::ModelPricingRuleFile;
 
 pub(super) const API_URL: &str = "https://models.dev/api.json";
 pub(super) const CACHE_FILE: &str = "models_dev_pricing.json";
@@ -147,28 +148,9 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         };
         let mut parsed_models = HashMap::new();
         for (model_id, model) in models {
-            // models.dev nests rates under a `cost` object; the entry keeps that
-            // wrapped shape so tariffs/schedule from custom sources can be
-            // attached without another cache migration.
-            let Some(cost) = model.get("cost") else {
-                continue;
-            };
-            let (Some(input), Some(output)) = (
-                cost.get("input").and_then(|v| v.as_f64()),
-                cost.get("output").and_then(|v| v.as_f64()),
-            ) else {
-                continue;
-            };
-            let mut entry = ModelPricingEntry::from_model_cost(ModelCost {
-                input_usd_per_mtok: input,
-                output_usd_per_mtok: output,
-                cache_read_usd_per_mtok: cost.get("cache_read").and_then(|v| v.as_f64()),
-                cache_write_usd_per_mtok: cost.get("cache_write").and_then(|v| v.as_f64()),
-            });
-            if let Some(tier) = context_over_200k_tier(cost) {
-                entry.context_tiers.push(tier);
+            if let Some(entry) = parse_model_entry(model, &format!("{provider_id}.{model_id}"))? {
+                parsed_models.insert(model_id.clone(), entry);
             }
-            parsed_models.insert(model_id.clone(), entry);
         }
         if !parsed_models.is_empty() {
             providers.insert(provider_id.clone(), parsed_models);
@@ -183,6 +165,45 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
         cached_at_unix_secs: now_unix_secs(),
         providers,
     })
+}
+
+/// One model object from a models.dev-shaped document, or `None` when it has
+/// nothing that can price a call.
+///
+/// The base rates are read from `cost.{input,output,cache_read,cache_write}`,
+/// and both `input` and `output` have to be present: half a card is not a price
+/// (`ModelCost` says USD and every catalog value is one). models.dev's own
+/// `cost.context_over_200k` becomes a long-context tier.
+///
+/// The extension fields are parsed through the *config* vocabulary
+/// (`tariffs`, `schedule`, `context_tiers`, `default_tariff`, `effective_*`,
+/// `on_rule_expiry`): a custom `[[pricing.sources]]` sheet is allowed to state
+/// the same things a hand-written rule can (spec 4.3), and sharing
+/// `config::pricing::convert_rule` is what keeps the two from drifting. A
+/// malformed extension is an error for the whole document, so a bad sheet is
+/// skipped with a warning instead of being half-applied.
+fn parse_model_entry(
+    model: &serde_json::Value,
+    path: &str,
+) -> anyhow::Result<Option<ModelPricingEntry>> {
+    let Some(cost) = model.get("cost") else {
+        return Ok(None);
+    };
+    if cost.get("input").and_then(|v| v.as_f64()).is_none()
+        || cost.get("output").and_then(|v| v.as_f64()).is_none()
+    {
+        return Ok(None);
+    }
+
+    let rule: ModelPricingRuleFile = serde_json::from_value(model.clone())
+        .map_err(|error| anyhow::anyhow!("{path}: {error}"))?;
+    let rule = crate::config::pricing::convert_rule(&rule, path)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut entry = ModelPricingEntry::from_rule(&rule);
+    if let Some(tier) = context_over_200k_tier(cost) {
+        entry.context_tiers.push(tier);
+    }
+    Ok(Some(entry))
 }
 
 /// models.dev's native long-context rates, as a tier above 200k input tokens.

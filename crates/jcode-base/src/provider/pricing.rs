@@ -211,6 +211,40 @@ fn config_price_estimate(
     )
 }
 
+/// Build a route estimate from an extra `[[pricing.sources]]` sheet.
+///
+/// A sheet sits below the user's own `[pricing.providers]` cards (which
+/// [`metered_pricing_for_source_at`] resolves first) and above every derived
+/// layer: the static tables, the OpenRouter caches, and models.dev. That is
+/// what "strictly between the config cards and models.dev" means in practice -
+/// a source the user configured outranks a catalog jcode ships, because
+/// otherwise pointing at your own mirror would be a no-op for exactly the
+/// providers jcode has curated.
+fn source_price_estimate(
+    source_key: &str,
+    model: &str,
+    at: std::time::SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<RouteCheapnessEstimate> {
+    let card = crate::model_pricing::source_card_at_size(source_key, model, at, input_tokens)?;
+    let input = card.entry.cost.input?;
+    let output = card.entry.cost.output?;
+    let (currency, source_id) = (card.currency, card.source_id);
+    Some(
+        RouteCheapnessEstimate::metered(
+            RouteCostSource::ExtraPriceSource,
+            RouteCostConfidence::Exact,
+            rate_to_micros(input),
+            rate_to_micros(output),
+            card.entry.cost.cache_read.map(rate_to_micros),
+            Some(format!(
+                "[[pricing.sources]] sheet `{source_id}` in {currency}"
+            )),
+        )
+        .with_currency(currency),
+    )
+}
+
 /// Unified metered per-token pricing resolver for any provider/model pair.
 ///
 /// `source_key` is the cross-provider activity key (see
@@ -289,12 +323,27 @@ pub fn derived_pricing_for_source(
 /// arm uses `input_tokens`: its native `context_over_200k` rates are applied
 /// there, which is what stops a >200k models.dev call from being billed at the
 /// base rate. `None` (a cheapness comparison) prices the base tier.
+///
+/// This runs *after* the hand-written `[pricing.providers]` layer (callers
+/// resolve that themselves at the call's own instant) and *before* every layer
+/// below: an extra `[[pricing.sources]]` sheet is the user's configuration too,
+/// so it outranks the catalogs jcode ships.
 pub fn derived_pricing_for_source_at_size(
     source_key: &str,
     model: &str,
     service_tier: Option<&str>,
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
+    // 1. Extra `[[pricing.sources]]` price sheets.
+    if let Some(estimate) = source_price_estimate(
+        source_key,
+        model,
+        std::time::SystemTime::now(),
+        input_tokens,
+    ) {
+        return Some(estimate);
+    }
+
     // 2. Curated static tables.
     let static_estimate = match source_key {
         "claude:api-key" => core_pricing::anthropic_api_pricing_with_tier(model, service_tier),

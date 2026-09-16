@@ -28,6 +28,7 @@ mod entry;
 mod fx;
 mod generation;
 mod rules;
+mod source_registry;
 mod sources;
 
 /// The per-model rate fields an entry carries, re-exported here so the billing
@@ -38,6 +39,8 @@ pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
 pub use fx::{FxTable, convert};
 pub use generation::pricing_generation;
+#[cfg(test)]
+pub(crate) use source_registry::save_test_source;
 pub use sources::{pricing_config, pricing_config_error, unmatchable_provider_keys};
 
 use catalog::PricingCache;
@@ -52,6 +55,9 @@ mod call_rates_tests;
 #[cfg(test)]
 #[path = "comparable_cost_tests.rs"]
 mod comparable_cost_tests;
+#[cfg(test)]
+#[path = "source_registry_tests.rs"]
+mod source_registry_tests;
 
 use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, Currency, Money,
@@ -111,6 +117,44 @@ fn normalize_model_id(model: &str) -> &str {
     model
         .rsplit_once('@')
         .map_or(model, |(bare, _)| bare.trim())
+}
+
+/// Case-insensitive glob matching with `*` (any run, including none) and `?`
+/// (exactly one character).
+///
+/// A hand-written `models = ["deepseek-v4-*"]` has to mean what a user expects
+/// without pulling a regex engine into the pricing path; anything that is not a
+/// wildcard is compared literally. Matching is ASCII case-insensitive because
+/// model ids are, and a pattern that differs only in case should not silently
+/// miss.
+pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.trim().to_ascii_lowercase().chars().collect();
+    let text: Vec<char> = text.trim().to_ascii_lowercase().chars().collect();
+    // Greedy backtracking: `star` remembers the last `*` and `resume` the text
+    // position it may re-expand from.
+    let (mut p, mut t) = (0, 0);
+    let mut star: Option<usize> = None;
+    let mut resume = 0;
+    while t < text.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
+            p += 1;
+            t += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            resume = t;
+            p += 1;
+        } else if let Some(star_index) = star {
+            p = star_index + 1;
+            resume += 1;
+            t = resume;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 /// Look up live pricing for `model` under a jcode provider key. Returns `None`
@@ -202,9 +246,64 @@ pub fn effective_entry_at_size(
         // written for this instant (the expiry itself is reported by
         // `config_call_rates`, which is the side that has to label it).
         sources::ConfigPrice::OutOfEffect(_) | sources::ConfigPrice::Absent => {
-            models_dev_card_at_size(provider, model, at, input_tokens)
+            // Extra `[[pricing.sources]]` sheets sit strictly between the
+            // hand-written cards and models.dev (spec 4.4).
+            match source_card_at_size(provider, model, at, input_tokens) {
+                Some(card) => Some((card.entry, card.currency)),
+                None => models_dev_card_at_size(provider, model, at, input_tokens),
+            }
         }
     }
+}
+
+/// The extra-source layer's card for `(provider, model)` at `at`, with the
+/// sheet's identity, or `None` when no source can price the model.
+///
+/// The merge and the currency rules are the config card's, not a second
+/// implementation: a sheet is a price card like any other, so
+/// [`sources::resolve_card`] fills what it leaves out from models.dev when the
+/// currencies agree and refuses to relabel a foreign-currency sheet's numbers
+/// when they do not (F1). `None` in that second case is what sends the call on
+/// to models.dev instead of pricing it from half a card.
+pub(crate) fn source_card_at_size(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<SourceCard> {
+    let hit = source_registry::source_card(provider, model, at)?;
+    let source_registry::SourceHit {
+        source_id,
+        entry,
+        currency,
+    } = hit;
+    // Asked before the merge below, and before the card is consumed: it is the
+    // sheet's own declaration, and it is what the billing memo has to key on.
+    let context_tier =
+        rules::resolve_tier(&entry, at, input_tokens).and_then(|tier| tier.context_tier);
+    let resolved = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
+    resolved.owns_price.then_some(SourceCard {
+        entry: resolved.entry,
+        currency: resolved.currency,
+        source_id,
+        context_tier,
+    })
+}
+
+/// The extra-source layer's card, with what a caller needs to label it.
+pub(crate) struct SourceCard {
+    pub(crate) entry: ModelPricingEntry,
+    pub(crate) currency: Currency,
+    /// The `id` of the sheet that supplied the rates.
+    pub(crate) source_id: String,
+    /// The sheet's long-context tier in force for the call's input token count,
+    /// if it declares one.
+    ///
+    /// A derived price is memoized per `(model, tariff, generation)`, so
+    /// without this a call billed at a sheet's higher long-context rates would
+    /// leave those rates cached for the next short call (the same trap the
+    /// models.dev `context_over_200k` tier has).
+    pub(crate) context_tier: Option<u64>,
 }
 
 /// The models.dev layer's card, always USD, with the long-context tier for
@@ -234,6 +333,25 @@ pub(crate) fn models_dev_card_at_size(
 /// The derived billing layer memoizes one price per model, so it has to know
 /// which tier it just priced: without this a long call would leave its higher
 /// rates cached for the next short call.
+/// The long-context tier the *derived* layers would bill this call at, if any.
+///
+/// The extra-source layer outranks models.dev, so a sheet's own tier is asked
+/// for first; only when no sheet prices the call does models.dev's
+/// `context_over_200k` tier answer. `None` means the call is on the base tier
+/// (or unpriced), and it is what a price memo keyed per call size must record,
+/// otherwise a long call's higher rates stay cached for the next short one.
+pub fn derived_context_tier_in_force(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<u64> {
+    if let Some(card) = source_card_at_size(provider, model, at, input_tokens) {
+        return card.context_tier;
+    }
+    models_dev_context_tier_in_force(provider, model, at, input_tokens)
+}
+
 pub fn models_dev_context_tier_in_force(
     provider: &str,
     model: &str,
@@ -260,7 +378,7 @@ pub(crate) fn configured_entry(
             // A card that could not price the model is not this layer's win;
             // let the chain reach models.dev and label it as such.
             resolved
-                .from_config
+                .owns_price
                 .then_some((resolved.entry, resolved.currency))
         }
         sources::ConfigPrice::Absent
@@ -367,20 +485,26 @@ pub fn comparable_reference_cost_micros(estimate: &RouteCheapnessEstimate) -> Op
     (micros.is_finite() && micros >= 0.0 && micros <= u64::MAX as f64).then_some(micros as u64)
 }
 
+/// Whether a background pricing refresh may start at all.
+///
+/// Tests must never reach the network (the `test-support` feature also covers
+/// downstream crates' test targets via feature unification), and users can opt
+/// out entirely. JCODE_FORCE_PRICING_REFRESH=1 re-enables the fetch for manual
+/// e2e checks (e.g. `cargo run --example pricing_e2e_check`, which builds with
+/// the `test-support` feature unified in). Shared by the models.dev catalog and
+/// the `[[pricing.sources]]` registry so the two cannot drift apart.
+pub(crate) fn background_refresh_allowed() -> bool {
+    if std::env::var_os("JCODE_FORCE_PRICING_REFRESH").is_some() {
+        return true;
+    }
+    !cfg!(any(test, feature = "test-support"))
+        && std::env::var_os("JCODE_DISABLE_PRICING_REFRESH").is_none()
+}
+
 /// Spawn one background refresh at a time. Safe to call from sync contexts;
 /// uses a thread + ad-hoc runtime when no Tokio runtime is active.
 pub fn schedule_refresh() {
-    // Keep tests hermetic: never hit the network from test builds (the
-    // `test-support` feature also covers downstream crates' test targets via
-    // feature unification), and let users opt out entirely.
-    // JCODE_FORCE_PRICING_REFRESH=1 re-enables the fetch for manual e2e checks
-    // (e.g. `cargo run --example pricing_e2e_check`, which builds with
-    // test-support unified in).
-    let forced = std::env::var_os("JCODE_FORCE_PRICING_REFRESH").is_some();
-    if !forced
-        && (cfg!(any(test, feature = "test-support"))
-            || std::env::var_os("JCODE_DISABLE_PRICING_REFRESH").is_some())
-    {
+    if !background_refresh_allowed() {
         return;
     }
     if REFRESH_IN_FLIGHT.swap(true, Ordering::SeqCst) {
