@@ -34,6 +34,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[cfg(target_os = "macos")]
+use chrono;
+
+#[cfg(target_os = "macos")]
 mod ax;
 #[cfg(target_os = "macos")]
 mod discover;
@@ -283,6 +286,25 @@ fn run(input: ComputerInput) -> Result<ToolOutput> {
 
 #[cfg(target_os = "macos")]
 fn dispatch(action: &str, input: &ComputerInput) -> Result<ToolOutput> {
+    // Screen capture security gate
+    const SCREENSHOT_ACTIONS: &[&str] = &["screenshot", "window_screenshot", "ocr"];
+    if SCREENSHOT_ACTIONS.contains(&action) {
+        // Check if screenshots are disabled via env var
+        if std::env::var("JCODE_SCREENSHOT_DISABLED").unwrap_or_default() == "1" {
+            bail!(
+                "Screen capture is disabled (JCODE_SCREENSHOT_DISABLED=1). \
+                 This agent does not have permission to capture screen content. \
+                 Use browser tool with 'screenshot' action for browser-only screenshots."
+            );
+        }
+        // Audit log
+        crate::logging::warn(&format!(
+            "[SCREEN_CAPTURE] action={action} pid={} time={}",
+            std::process::id(),
+            chrono::Utc::now().to_rfc3339(),
+        ));
+    }
+
     match action {
         // ---- discovery & setup ----
         "discover" => discover::discover(input.category.as_deref()),
