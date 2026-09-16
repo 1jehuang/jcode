@@ -1800,3 +1800,71 @@ fn documented_pricing_example_prices_as_documented() {
         "the documented peak multiplier doubles it, got {peak:?}"
     );
 }
+
+/// The `[[pricing.sources]]` example in `docs/MODEL_PRICING.md` is meant to be
+/// copied, so keep it executable the same way the quick-start example is: the
+/// config points at the sheet, and the sheet is the JSON block beside it.
+#[test]
+fn documented_sources_example_prices_as_documented() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/MODEL_PRICING.md"
+    ))
+    .expect("docs/MODEL_PRICING.md should exist");
+    let example = doc
+        .split("```toml")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("[[pricing.sources]]"))
+        .expect("the documented [[pricing.sources]] block");
+    let sheet = doc
+        .split("```json")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("deepseek-v4-pro"))
+        .expect("the documented sheet block");
+
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    // The document names the path the sheet is expected to live at; the test
+    // writes the documented JSON there.
+    let sheet_path = dir.path().join("documented-pricing.json");
+    std::fs::write(&sheet_path, sheet).expect("write documented sheet");
+    let config = example.replace(
+        "/opt/jcode/pricing.json",
+        sheet_path.to_str().expect("utf-8 temp path"),
+    );
+    std::fs::write(dir.path().join("config.toml"), config).expect("write documented config");
+    crate::config::invalidate_config_cache();
+
+    Config::load_strict().expect("the documented example must parse");
+
+    let instant = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // The same instants the quick-start example uses: 2030-06-22T02:00:00Z
+    // (Saturday) and 2030-06-24T02:00:00Z (Monday, inside the documented
+    // 01:00-04:00 UTC weekday peak window).
+    let off_peak =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_324_000))
+            .expect("the sheet prices an off-peak call");
+    let peak =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_496_800))
+            .expect("the sheet prices a peak call");
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    // 25k input at $4.5/Mtok plus 5k output at $13.5/Mtok.
+    assert!(
+        off_peak.currency.is_usd(),
+        "a sheet that states no currency is USD, like models.dev"
+    );
+    assert!(
+        (off_peak.amount - 0.18).abs() < 1e-9,
+        "off-peak should be $0.18 per reference request, got {off_peak:?}"
+    );
+    assert!(
+        (peak.amount - 0.36).abs() < 1e-9,
+        "the documented peak multiplier doubles it, got {peak:?}"
+    );
+}

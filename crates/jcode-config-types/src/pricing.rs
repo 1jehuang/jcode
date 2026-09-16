@@ -108,6 +108,39 @@ pub struct ProviderPricingFile {
     pub models: BTreeMap<String, ModelPricingRuleFile>,
 }
 
+/// One `[[pricing.sources]]` entry: an extra price sheet.
+///
+/// Written as an array of tables (`[[pricing.sources]]`) because a multi-line
+/// inline table is invalid TOML, the same reason `schedule` is. The sheet
+/// itself is a JSON document in models.dev's shape
+/// (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`); the fields
+/// here say *where* it comes from and *when* it applies.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PricingSourceFile {
+    /// Stable identity of this source. It is the tie-break key when two sources
+    /// share a `priority`, so it must be unique.
+    pub id: String,
+    /// `https://…` or `file:///…` (a bare path counts as a local file).
+    pub url: String,
+    /// Which provider identities this sheet may price; empty = every provider.
+    /// The same identity forms as a `[pricing.providers]` key (spec 4.2.1).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
+    /// Model globs this sheet may price; empty = every model under `scope`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// Sheet schema. Only `models_dev_v1` (the default) exists today.
+    pub format: Option<String>,
+    /// How long a fetched copy may be reused before the source is refreshed.
+    pub refresh_secs: Option<u64>,
+    /// Lower wins among sources; ties break on `id` in lexicographic order.
+    pub priority: Option<i64>,
+    /// Currency the sheet's numbers are denominated in; defaults to USD (the
+    /// models.dev catalog's currency), like an extra source that states nothing.
+    pub currency: Option<String>,
+}
+
 /// `[pricing]`: hand-written rate rules, which outrank every other source.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -117,12 +150,23 @@ pub struct PricingConfigFile {
     /// `1 fx_base = N <code>`. v1 has no automatic fetch; hand-written wins.
     pub fx_rates: BTreeMap<String, f64>,
     pub providers: BTreeMap<String, ProviderPricingFile>,
+    /// Extra price sheets, below `providers` and above models.dev.
+    ///
+    /// Never written back when empty, for the same reason as
+    /// `ModelPricingRuleFile::context_tiers`: `Config::save` serializes the whole
+    /// struct, so a default-valued field must not be baked into the user's file
+    /// (the lesson of commit `9da6f9831`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<PricingSourceFile>,
 }
 
 impl PricingConfigFile {
     /// Whether the user configured any rate rules at all.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.fx_rates.is_empty() && self.fx_base.is_none()
+        self.providers.is_empty()
+            && self.fx_rates.is_empty()
+            && self.fx_base.is_none()
+            && self.sources.is_empty()
     }
 }
 
@@ -135,6 +179,58 @@ mod tests {
         let parsed: PricingConfigFile = serde_json::from_str("{}").expect("parse");
         assert!(parsed.is_empty());
         assert!(parsed.providers.is_empty());
+        assert!(parsed.sources.is_empty());
+    }
+
+    #[test]
+    fn source_entries_parse_and_roundtrip() {
+        let json = r#"{
+            "sources": [
+                {
+                    "id": "corp-mirror",
+                    "url": "https://gitlab.internal/pricing/models_dev.mirror.json",
+                    "scope": ["deepseek", "openai-compatible:my-gateway"],
+                    "models": ["deepseek-v4-*"],
+                    "format": "models_dev_v1",
+                    "refresh_secs": 3600,
+                    "priority": 10,
+                    "currency": "CNY"
+                },
+                {"id": "local", "url": "file:///opt/jcode/pricing.json"}
+            ]
+        }"#;
+        let parsed: PricingConfigFile = serde_json::from_str(json).expect("parse");
+        assert!(
+            !parsed.is_empty(),
+            "sources alone make the section non-empty"
+        );
+        assert_eq!(parsed.sources.len(), 2);
+        let first = &parsed.sources[0];
+        assert_eq!(first.id, "corp-mirror");
+        assert_eq!(first.priority, Some(10));
+        assert_eq!(first.refresh_secs, Some(3600));
+        assert_eq!(first.currency.as_deref(), Some("CNY"));
+        assert_eq!(first.models, vec!["deepseek-v4-*".to_string()]);
+        // Optional fields default rather than fail: an entry with just an id
+        // and a url is the common case.
+        let second = &parsed.sources[1];
+        assert_eq!(second.scope, Vec::<String>::new());
+        assert_eq!(second.format, None);
+        assert_eq!(second.priority, None);
+
+        let again = serde_json::to_string(&parsed).expect("serialize");
+        assert!(again.contains("corp-mirror"));
+        let reparsed: PricingConfigFile = serde_json::from_str(&again).expect("reparse");
+        assert_eq!(reparsed.sources, parsed.sources);
+    }
+
+    /// The lesson of commit `9da6f9831`: a default-valued field must not be
+    /// baked into the user's file the next time anything saves.
+    #[test]
+    fn empty_sources_do_not_serialize_the_key() {
+        let parsed = PricingConfigFile::default();
+        let json = serde_json::to_string(&parsed).expect("serialize");
+        assert!(!json.contains("sources"), "{json}");
     }
 
     #[test]

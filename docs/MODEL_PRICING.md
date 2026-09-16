@@ -3,10 +3,12 @@
 jcode prices an API call from the layers below, highest priority first:
 
 1. a **hand-written `[pricing.providers]` rule** in `~/.jcode/config.toml` (this document),
-2. the curated static tables shipping with jcode,
-3. provider-specific caches (OpenRouter endpoints),
-4. the [models.dev](https://models.dev) catalog,
-5. a generic fallback estimate.
+2. an **extra `[[pricing.sources]]` price sheet** named in the same file: a URL or
+   a local file in models.dev's own JSON shape,
+3. the curated static tables shipping with jcode,
+4. provider-specific caches (OpenRouter endpoints),
+5. the [models.dev](https://models.dev) catalog,
+6. a generic fallback estimate.
 
 The config layer therefore outranks everything else, and an empty `[pricing]`
 section leaves the cost path exactly as it was before the section existed.
@@ -168,6 +170,107 @@ model), so the base rate is not mistaken for the only one.
 Once your own rule claims a model, it owns the whole card, tiers included:
 models.dev's `context_over_200k` rates are not merged into it, because a lower
 layer's absolute tier would silently overwrite the rates you wrote.
+
+### Extra price sheets: `[[pricing.sources]]`
+
+A source is a second price list you point jcode at: your own mirror of
+models.dev, a vendor's published rate sheet, a file you keep in a git repo.
+Sources sit **below your own rules and above every catalog jcode derives
+itself**, so pointing at your own sheet is never a no-op.
+
+Both halves of the example below are executable: the config names the sheet, and
+the sheet is a JSON document in models.dev's shape.
+
+```toml
+[[pricing.sources]]
+id = "corp-mirror"                                     # unique; ties break on this id
+url = "file:///opt/jcode/pricing.json"                 # or https://gitlab.internal/pricing.json
+scope = ["deepseek", "openai-compatible:my-gateway"]   # omit = every provider
+models = ["deepseek-v4-*"]                             # omit = every model under scope
+refresh_secs = 86400                                   # per-source TTL, default 24h
+priority = 10                                          # lower wins; default 0
+```
+
+```json
+{
+  "deepseek": {
+    "models": {
+      "deepseek-v4-pro": {
+        "cost": { "input": 4.5, "output": 13.5, "cache_read": 0.15 },
+        "tariffs": { "peak": { "multiplier": 2.0 } },
+        "schedule": [
+          {
+            "tariff": "peak",
+            "utc_offset_minutes": 0,
+            "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+            "windows": [["01:00", "04:00"]]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `id` | Name of this source. It is the tie-break key between two sources with the same `priority`, so it must be unique. |
+| `url` | `https://…` or a local file: `file:///path/to/pricing.json`, or a bare path. No other scheme is accepted. |
+| `scope` | Which provider identities this sheet may price. Omit it, or leave it empty, to cover every provider. |
+| `models` | Model globs (`*` any run, `?` one character, case-insensitive). Omit for every model under `scope`. |
+| `format` | Sheet schema. Only `models_dev_v1` exists, and it is the default. |
+| `refresh_secs` | How long a fetched copy may be reused before the source is refreshed. Default `86400` (24h), the same as models.dev. |
+| `priority` | Lower wins between sources. Default `0`; ties are broken by `id` in lexicographic order, so the merge never depends on map order. |
+| `currency` | Currency every number in the sheet is denominated in. Defaults to `USD`, the same implicit currency models.dev uses. |
+
+**Scope uses the same identity rules as a `[pricing.providers]` key.** One
+provider has several names, and `scope` accepts any of them:
+
+* the exact activity key: `scope = ["claude:api-key"]`, `["openrouter"]`;
+* the models.dev provider id: `scope = ["deepseek"]` covers both the fallback
+  slug `deepseek` and the compatible-profile route `openai-compatible:deepseek`;
+* a compatible profile's id, with or without its prefix: `["my-gateway"]` and
+  `["openai-compatible:my-gateway"]` are the same route.
+
+A sheet addresses providers the same way the upstream catalog does (by provider
+id, by model id under `models`), and its entries understand the same extension
+fields a hand-written rule does: `cost`, `tariffs`, `schedule`, `context_tiers`,
+`default_tariff`, `effective_from`/`effective_until`, `on_rule_expiry`. So a
+sheet can carry peak/off-peak hours or a promotion that expires, and the call is
+priced at the rate in effect at the call's own instant, exactly like a rule you
+wrote yourself.
+
+**Failure degrades, it never fabricates.** A sheet that is unreachable,
+unparseable, stale, or out of effect simply does not price the call, and the next
+layer does. Nothing is invented to fill the gap, and a call that models.dev can
+price is never left unpriced:
+
+* a `file://` sheet is read from disk; a file that is missing or is not valid
+  JSON is skipped for that lookup, with a warning in the log;
+* an `https://` sheet is read from a cache under `~/.jcode/cache/`. It is fetched
+  in the background, so a lookup never waits on the network. Until the fetch
+  succeeds the source is unused, and the last successful copy is kept rather than
+  discarded;
+* a sheet whose `refresh_secs` has elapsed is **not** used while its refresh is
+  outstanding: a price that may be hours stale is not silently billed;
+* a sheet whose rule is out of effect at the call's instant (its
+  `effective_until` passed) is skipped, and the next source or models.dev prices
+  the call.
+
+**Currency follows the price here too.** A sheet that states `currency = "CNY"`
+prices in CNY and never inherits models.dev's USD numbers; a sheet that states
+nothing is USD, like models.dev. A sheet that cannot price a call on its own is
+not relabelled with another layer's currency — the call goes to the next layer
+instead.
+
+An invalid `[[pricing.sources]]` entry is reported like any other invalid
+`[pricing]` field: the section is rejected as a whole, `/pricing` and the cost
+display say `invalid [pricing]: pricing.sources[0].url`, and a line naming the
+problem goes to the log.
+
+Two things a source does **not** do: it cannot change the cache-write premium
+billing applies for Anthropic models (that stays a hand-written card's
+privilege), and it cannot override a field your own rule wrote.
 
 ### Per-call pinning
 

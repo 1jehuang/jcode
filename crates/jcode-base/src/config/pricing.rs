@@ -8,15 +8,24 @@
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use jcode_config_types::{
-    ContextTierFile, CostFile, ModelPricingRuleFile, PricingConfigFile, ScheduleRuleFile,
-    TariffFile,
+    ContextTierFile, CostFile, ModelPricingRuleFile, PricingConfigFile, PricingSourceFile,
+    ScheduleRuleFile, TariffFile,
 };
 use jcode_provider_core::Currency;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 pub use jcode_config_types::OnRuleExpiry;
+
+/// Default TTL for a `[[pricing.sources]]` sheet: the same 24h the models.dev
+/// catalog uses.
+pub const DEFAULT_SOURCE_REFRESH_SECS: u64 = 24 * 60 * 60;
+
+/// The only `[[pricing.sources]].format` v1 understands: models.dev's own
+/// `{provider: {models: {id: {cost, ...}}}}` shape.
+pub const SOURCE_FORMAT_MODELS_DEV_V1: &str = "models_dev_v1";
 
 /// A validation failure, carrying the config path that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,12 +129,60 @@ pub struct ProviderPricing {
     pub models: BTreeMap<String, ModelPricingRule>,
 }
 
+/// Where a `[[pricing.sources]]` sheet is read from.
+///
+/// Only two kinds exist, and they differ in how a refresh is allowed to happen:
+/// a local file is cheap to read and is therefore re-read inline when its cache
+/// is stale, while a remote sheet is only ever fetched by the background
+/// refresher so a lookup can never block on the network (spec 4.4's fetch
+/// constraint: `https://` and `file://` only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceLocation {
+    /// `file:///opt/jcode/pricing.json`, or a bare filesystem path.
+    LocalFile(PathBuf),
+    /// `https://…`. `http://` is rejected: a price sheet decides what money is
+    /// spent, so it does not travel in the clear.
+    Remote(String),
+}
+
+impl SourceLocation {
+    /// The location as the user wrote it, for messages.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::LocalFile(path) => format!("file://{}", path.display()),
+            Self::Remote(url) => url.clone(),
+        }
+    }
+}
+
+/// A validated `[[pricing.sources]]` entry.
+///
+/// The validation that matters to the merge is done once, here: the list is
+/// kept in **resolution order** (priority ascending, ties broken by `id`), so
+/// lookups do not have to re-sort and the tie-break rule is visible in one
+/// place. `currency` is the currency every number the sheet states is
+/// denominated in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricingSource {
+    pub id: String,
+    pub location: SourceLocation,
+    /// Provider identities this sheet may price; empty means every provider.
+    pub scope: Vec<String>,
+    /// Model globs this sheet may price; empty means every model.
+    pub models: Vec<String>,
+    pub refresh_secs: u64,
+    pub priority: i64,
+    pub currency: Currency,
+}
+
 /// The validated runtime view of `[pricing]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricingConfig {
     pub fx_base: Currency,
     pub fx_rates: BTreeMap<Currency, f64>,
     pub providers: BTreeMap<String, ProviderPricing>,
+    /// Extra price sheets in resolution order (priority ascending, then `id`).
+    pub sources: Vec<PricingSource>,
 }
 
 impl Default for PricingConfig {
@@ -134,6 +191,7 @@ impl Default for PricingConfig {
             fx_base: Currency::usd(),
             fx_rates: BTreeMap::new(),
             providers: BTreeMap::new(),
+            sources: Vec::new(),
         }
     }
 }
@@ -142,7 +200,7 @@ impl PricingConfig {
     /// Whether the user configured anything at all. When empty, the pricing
     /// path must behave exactly as it did before this feature existed.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.fx_rates.is_empty()
+        self.providers.is_empty() && self.fx_rates.is_empty() && self.sources.is_empty()
     }
 }
 
@@ -193,8 +251,150 @@ pub fn validate(
         fx_base,
         fx_rates,
         providers,
+        sources: convert_sources(&file.sources, &mut warnings)?,
     };
     Ok((config, warnings))
+}
+
+/// Validate `[[pricing.sources]]` and put the entries in resolution order.
+///
+/// A malformed entry is a hard error carrying its config path, so the display
+/// can name the line to fix (`invalid [pricing]: pricing.sources[0].url`); it
+/// must not be a log-only warning, because a source that silently does not load
+/// looks exactly like a source that has nothing to say.
+///
+/// The order is `priority` ascending with ties broken by `id` lexicographically
+/// (spec 4.2.1's "同层确定性"): `HashMap` iteration order must never decide which
+/// of two sheets prices a model.
+fn convert_sources(
+    sources: &[PricingSourceFile],
+    warnings: &mut Vec<String>,
+) -> Result<Vec<PricingSource>, PricingConfigError> {
+    let mut converted: Vec<PricingSource> = Vec::with_capacity(sources.len());
+    for (index, source) in sources.iter().enumerate() {
+        let path = format!("pricing.sources[{index}]");
+        let id = source.id.trim();
+        if id.is_empty() {
+            return Err(PricingConfigError::new(
+                format!("{path}.id"),
+                "a pricing source needs a non-empty `id` (it is the tie-break key \
+                 when two sources share a `priority`)",
+            ));
+        }
+        if converted.iter().any(|existing| existing.id == id) {
+            return Err(PricingConfigError::new(
+                format!("{path}.id"),
+                format!("duplicate source id `{id}`; source ids must be unique"),
+            ));
+        }
+
+        let location = parse_source_location(&source.url, &format!("{path}.url"))?;
+
+        let mut scope = Vec::with_capacity(source.scope.len());
+        for (scope_index, entry) in source.scope.iter().enumerate() {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return Err(PricingConfigError::new(
+                    format!("{path}.scope[{scope_index}]"),
+                    "a scope entry must name a provider or profile; omit `scope` to \
+                     cover every provider",
+                ));
+            }
+            scope.push(entry.to_string());
+        }
+
+        let mut models = Vec::with_capacity(source.models.len());
+        for (model_index, pattern) in source.models.iter().enumerate() {
+            let pattern = pattern.trim();
+            if pattern.is_empty() {
+                return Err(PricingConfigError::new(
+                    format!("{path}.models[{model_index}]"),
+                    "a model glob must not be empty; omit `models` to cover every model",
+                ));
+            }
+            models.push(pattern.to_string());
+        }
+
+        match source.format.as_deref().map(str::trim) {
+            None | Some("") | Some(SOURCE_FORMAT_MODELS_DEV_V1) => {}
+            Some(other) => {
+                return Err(PricingConfigError::new(
+                    format!("{path}.format"),
+                    format!(
+                        "unknown source format `{other}`; only `{SOURCE_FORMAT_MODELS_DEV_V1}` is \
+                         supported"
+                    ),
+                ));
+            }
+        }
+
+        if source.refresh_secs == Some(0) {
+            return Err(PricingConfigError::new(
+                format!("{path}.refresh_secs"),
+                "a source TTL must be at least one second",
+            ));
+        }
+
+        let currency = parse_currency(
+            source.currency.as_deref().unwrap_or("USD"),
+            &format!("{path}.currency"),
+            warnings,
+        );
+
+        converted.push(PricingSource {
+            id: id.to_string(),
+            location,
+            scope,
+            models,
+            refresh_secs: source.refresh_secs.unwrap_or(DEFAULT_SOURCE_REFRESH_SECS),
+            priority: source.priority.unwrap_or(0),
+            currency,
+        });
+    }
+
+    // Stable and total: priority first, then the id, so the merge order is a
+    // property of the config rather than of the writer's file layout.
+    converted.sort_by(|left, right| {
+        left.priority
+            .cmp(&right.priority)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(converted)
+}
+
+/// Turn a `url` into a location, rejecting schemes jcode will not fetch.
+fn parse_source_location(raw: &str, path: &str) -> Result<SourceLocation, PricingConfigError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(PricingConfigError::new(
+            path,
+            "a pricing source needs a `url` (an `https://` URL or a local file)",
+        ));
+    }
+    if let Some(rest) = raw.strip_prefix("file://") {
+        if rest.trim().is_empty() {
+            return Err(PricingConfigError::new(
+                path,
+                "`file://` needs a path after it",
+            ));
+        }
+        return Ok(SourceLocation::LocalFile(PathBuf::from(rest)));
+    }
+    if let Some((scheme, _)) = raw.split_once("://") {
+        if scheme.eq_ignore_ascii_case("https") {
+            return Ok(SourceLocation::Remote(raw.to_string()));
+        }
+        return Err(PricingConfigError::new(
+            path,
+            format!(
+                "unsupported scheme `{scheme}://`; a price source must be `https://` or a local \
+                 file (`file:///path/to/pricing.json`)"
+            ),
+        ));
+    }
+    // No scheme at all: a local path, which is what the user means when they
+    // point at a file on disk.
+    Ok(SourceLocation::LocalFile(PathBuf::from(raw)))
 }
 
 /// Normalize a currency code, warning (not failing) on unknown codes.
@@ -209,7 +409,10 @@ fn parse_currency(code: &str, path: &str, warnings: &mut Vec<String>) -> Currenc
     currency
 }
 
-fn convert_rule(
+/// Shared with the `model_pricing` catalog parser: a custom `[[pricing.sources]]`
+/// sheet states its extension fields in this vocabulary too, so a sheet and a
+/// hand-written card validate identically.
+pub(crate) fn convert_rule(
     rule: &ModelPricingRuleFile,
     path: &str,
 ) -> Result<ModelPricingRule, PricingConfigError> {
