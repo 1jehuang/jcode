@@ -297,32 +297,50 @@ pub fn metered_pricing_for_source_at(
         return Some(estimate);
     }
 
-    derived_pricing_for_source(source_key, model, service_tier)
+    derived_pricing_for_source_at_size(source_key, model, service_tier, at, None)
 }
 
-/// The derived (time-independent) layers of the chain, without the config
-/// layer: curated static tables, then OpenRouter's own caches, then models.dev.
+/// The derived layers of the chain, without the config layer: curated static
+/// tables, then OpenRouter's own caches, then models.dev.
 ///
 /// Billing resolves the config layer itself, at the call's own instant, and
 /// only falls back here when no hand-written card claims the pair. Keeping the
-/// hand-written layer out of this function means a memoized derived rate can
-/// never serve a stale tariff, and a config rate can never be reported as a
-/// catalog rate.
+/// hand-written layer out of this function means a config rate can never be
+/// reported as a catalog rate.
+///
+/// This is the "right now" entry point the route catalog uses (see
+/// [`metered_pricing_for_source_with_tier`]); a caller that knows when the call
+/// happened uses [`derived_pricing_for_source_at_size`] so an extra
+/// `[[pricing.sources]]` sheet's peak/off-peak schedule is read at that instant.
 pub fn derived_pricing_for_source(
     source_key: &str,
     model: &str,
     service_tier: Option<&str>,
 ) -> Option<RouteCheapnessEstimate> {
-    derived_pricing_for_source_at_size(source_key, model, service_tier, None)
+    derived_pricing_for_source_at_size(
+        source_key,
+        model,
+        service_tier,
+        std::time::SystemTime::now(),
+        None,
+    )
 }
 
-/// [`derived_pricing_for_source`] with the call's reported input token count.
+/// [`derived_pricing_for_source`] with the call's own instant and reported input
+/// token count.
+///
+/// `at` is required because the layers below are not all time-independent any
+/// more: an extra `[[pricing.sources]]` sheet can state a `schedule` (and
+/// `effective_from`/`effective_until`), so the tariff it selects has to be the
+/// one in force at the *call's* instant, exactly like a hand-written card (F15).
+/// Reading the wall clock here was the bug that let a sheet's off-peak rate keep
+/// billing after the peak window opened (F-A).
 ///
 /// The curated static tables and the OpenRouter caches state one rate card each
-/// and have no long-context tiers, so they are unaffected. Only the models.dev
-/// arm uses `input_tokens`: its native `context_over_200k` rates are applied
-/// there, which is what stops a >200k models.dev call from being billed at the
-/// base rate. `None` (a cheapness comparison) prices the base tier.
+/// and have no long-context tiers, so `input_tokens` does not reach them. The
+/// sheet arm and the models.dev arm both use it: their long-context rates
+/// (`context_tiers` / `context_over_200k`) are what stop a long call from being
+/// billed at the base rate. `None` (a cheapness comparison) prices the base tier.
 ///
 /// This runs *after* the hand-written `[pricing.providers]` layer (callers
 /// resolve that themselves at the call's own instant) and *before* every layer
@@ -332,15 +350,11 @@ pub fn derived_pricing_for_source_at_size(
     source_key: &str,
     model: &str,
     service_tier: Option<&str>,
+    at: std::time::SystemTime,
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
     // 1. Extra `[[pricing.sources]]` price sheets.
-    if let Some(estimate) = source_price_estimate(
-        source_key,
-        model,
-        std::time::SystemTime::now(),
-        input_tokens,
-    ) {
+    if let Some(estimate) = source_price_estimate(source_key, model, at, input_tokens) {
         return Some(estimate);
     }
 
@@ -363,12 +377,8 @@ pub fn derived_pricing_for_source_at_size(
     }
 
     // 4. Live models.dev catalog (disk cache; refreshes in the background).
-    let (card, _currency) = crate::model_pricing::models_dev_card_at_size(
-        source_key,
-        model,
-        std::time::SystemTime::now(),
-        input_tokens,
-    )?;
+    let (card, _currency) =
+        crate::model_pricing::models_dev_card_at_size(source_key, model, at, input_tokens)?;
     let input = card.cost.input?;
     let output = card.cost.output?;
     Some(RouteCheapnessEstimate::metered(

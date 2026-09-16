@@ -516,10 +516,12 @@ impl App {
     /// Resolve the rate card for `model` as of `at`.
     ///
     /// Hand-written `[pricing.providers]` rules are authoritative *and* time
-    /// dependent (peak/off-peak), so they are resolved here, per call, and never
-    /// taken from the cross-call memo. Only when no rule claims the model do the
-    /// time-independent derived layers answer, and those still go through the
-    /// memo below.
+    /// dependent (peak/off-peak, validity windows), so they are resolved here,
+    /// per call, and never taken from the cross-call memo. Only when no rule
+    /// claims the model do the derived layers answer. Those are time-dependent
+    /// too once a `[[pricing.sources]]` sheet states a `schedule` or an expiry,
+    /// so the memo below is keyed on the tariff in force at `at`, not just the
+    /// model: it never hands back a window that has closed.
     fn resolve_call_pricing(
         &mut self,
         at: SystemTime,
@@ -534,7 +536,7 @@ impl App {
         // simply absent) clears whatever the previous call recorded (F8/F20).
         match crate::model_pricing::config_call_rates(&source_key, model, at, input_tokens) {
             crate::model_pricing::ConfigCallRates::Priced(card) => {
-                self.cost.rule_out_of_effect = None;
+                self.cost.pricing_notice = None;
                 return PinnedCallPricing::Priced(ResolvedTokenPricing::from_rate_card(
                     &card,
                     is_anthropic,
@@ -546,16 +548,20 @@ impl App {
                     "pricing rule for {source_key}/{model} cannot price this call; \
                      leaving it unpriced instead of billing the generic defaults"
                 ));
-                // Nothing is billed, so there is no fallback price that an
-                // "expired rule" marker could be explaining.
-                self.cost.rule_out_of_effect = None;
+                // Nothing is billed, so there is no fallback price for an
+                // "expired rule" marker to explain. But the zero this leaves on
+                // screen is not the truth either: the user's own rule refused to
+                // price the call, and the cost line has to say so rather than let
+                // `$0.0000` read as "this call was free" (F-C, spec 4.4).
+                self.cost.pricing_notice =
+                    Some(crate::model_pricing::PricingNotice::ConfiguredWithoutPrice);
                 return PinnedCallPricing::ConfiguredWithoutPrice;
             }
             crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
                 // The next layer prices the call, and the display has to say
                 // that the user's own rule stopped applying (F8/F20).
-                self.cost.rule_out_of_effect =
-                    Some(crate::model_pricing::OutOfEffectNotice::ConfigCard(reason));
+                self.cost.pricing_notice =
+                    Some(crate::model_pricing::PricingNotice::ConfigCard(reason));
             }
             crate::model_pricing::ConfigCallRates::Absent => {
                 // No hand-written card claims this model. A `[[pricing.sources]]`
@@ -563,7 +569,7 @@ impl App {
                 // that is out of effect is labelled the same way: without it the
                 // price silently changes from the user's sheet to the next
                 // layer, which is exactly the class of bug this feature removes.
-                self.cost.rule_out_of_effect =
+                self.cost.pricing_notice =
                     crate::model_pricing::sheet_rule_out_of_effect(&source_key, model, at);
             }
         }
@@ -575,7 +581,7 @@ impl App {
         // behaviour. Those layers state no cache-write rate either, so cache
         // writes keep the premium they always had (F1: the config layer is the
         // only one that can price a cache write differently).
-        self.refresh_cached_pricing(model, is_anthropic, is_openai, input_tokens);
+        self.refresh_cached_pricing(at, model, is_anthropic, is_openai, input_tokens);
         PinnedCallPricing::Priced(ResolvedTokenPricing {
             prompt_price: *self.cost.cached_prompt_price.get_or_insert(15.0),
             completion_price: *self.cost.cached_completion_price.get_or_insert(60.0),
@@ -623,9 +629,14 @@ impl App {
     ///
     /// Only the derived layers are memoized here: hand-written config cards are
     /// resolved separately, at each call's own instant, so this memo can never
-    /// hand back a stale tariff.
+    /// hand back a stale tariff. The derived layers themselves are not all
+    /// time-independent either - a `[[pricing.sources]]` sheet can state a
+    /// `schedule` - so the memo key carries the identity of the derived price at
+    /// `at` (the sheet and its tariff, plus the long-context tier). That is what
+    /// makes an off-peak memo re-resolve once the peak window opens.
     fn refresh_cached_pricing(
         &mut self,
+        at: SystemTime,
         model: &str,
         is_anthropic: bool,
         is_openai: bool,
@@ -634,25 +645,31 @@ impl App {
         let service_tier = self.active_service_tier_for_pricing();
         let pricing_generation = crate::model_pricing::pricing_generation();
         let source_key = self.billing_source_key(is_anthropic, is_openai);
-        // The derived layers' long-context rates are part of the price of this
-        // call (models.dev's `context_over_200k`, or a `[[pricing.sources]]`
-        // sheet's own tiers), so the tier in force is part of the memo key: a
-        // long call must not leave its higher rates cached for the next short
-        // one.
-        let context_tier = crate::model_pricing::derived_context_tier_in_force(
-            &source_key,
-            model,
-            SystemTime::now(),
-            input_tokens,
-        );
+        // The identity of the derived price in force at the call's instant. It
+        // has two time-dependent parts and both belong in the key:
+        //
+        // * the sheet + tariff a `[[pricing.sources]]` sheet's `schedule`
+        //   selects (F-A: without it a memo filled off-peak kept billing
+        //   off-peak rates after the window closed), and
+        // * the long-context tier the call's input count selects (models.dev's
+        //   `context_over_200k`, or a sheet's own tiers), so a long call must not
+        //   leave its higher rates cached for the next short one.
+        //
+        // Both are read at `at`, never the wall clock.
+        let identity =
+            crate::model_pricing::derived_price_identity(&source_key, model, at, input_tokens);
         // Tier and pricing generation are both part of the memo key so toggling
         // `/fast on` re-prices, and so does a hand-edited `[pricing]` section.
         let price_key = match service_tier.as_deref() {
             Some(tier) => format!("{model}|{tier}|{pricing_generation}"),
             None => format!("{model}|{pricing_generation}"),
         };
-        let price_key = match context_tier {
+        let price_key = match identity.context_tier {
             Some(threshold) => format!("{price_key}|ctx{threshold}"),
+            None => price_key,
+        };
+        let price_key = match identity.sheet.as_deref() {
+            Some(sheet) => format!("{price_key}|src{sheet}"),
             None => price_key,
         };
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {
@@ -664,6 +681,7 @@ impl App {
             &source_key,
             model,
             service_tier.as_deref(),
+            at,
             input_tokens,
         );
 

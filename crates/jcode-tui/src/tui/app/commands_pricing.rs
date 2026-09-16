@@ -35,7 +35,7 @@ pub(super) struct PricingReport<'a> {
     /// The user's own rule that covers this model but is out of its validity
     /// window at the report instant: a `[pricing.providers]` card or a
     /// `[[pricing.sources]]` sheet (whose label names the sheet).
-    pub out_of_effect: Option<&'a crate::model_pricing::OutOfEffectNotice>,
+    pub out_of_effect: Option<&'a crate::model_pricing::PricingNotice>,
     pub fx_base: &'a jcode_provider_core::Currency,
     pub fx_rates: &'a std::collections::BTreeMap<jcode_provider_core::Currency, f64>,
     pub display_currency: &'a str,
@@ -188,7 +188,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
     // answers "why is it this price" the same way the cost widget does.
     let out_of_effect = match &rates_state {
         crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
-            Some(crate::model_pricing::OutOfEffectNotice::ConfigCard(*reason))
+            Some(crate::model_pricing::PricingNotice::ConfigCard(*reason))
         }
         crate::model_pricing::ConfigCallRates::Absent => {
             crate::model_pricing::sheet_rule_out_of_effect(&source_key, &model, now)
@@ -368,7 +368,7 @@ mod tests {
     /// too - and the label must name *which* sheet stopped applying.
     #[test]
     fn an_out_of_effect_sheet_rule_is_reported_by_name() {
-        let notice = crate::model_pricing::OutOfEffectNotice::PriceSheet {
+        let notice = crate::model_pricing::PricingNotice::PriceSheet {
             source_id: "deepseek-mirror".to_string(),
             reason: crate::model_pricing::RuleOutOfEffect::Expired,
         };
@@ -403,7 +403,7 @@ mod tests {
     /// an addition, not a change to the card's wording.
     #[test]
     fn a_config_card_marker_keeps_its_wording() {
-        let notice = crate::model_pricing::OutOfEffectNotice::ConfigCard(
+        let notice = crate::model_pricing::PricingNotice::ConfigCard(
             crate::model_pricing::RuleOutOfEffect::NotYetEffective,
         );
         assert_eq!(notice.label(), "rule not in effect yet");

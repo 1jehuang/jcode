@@ -104,7 +104,7 @@ on_rule_expiry = "fallback"
 | `context_tiers` | Long-context rates. An array of tables: `[[pricing...context_tiers]]`, described below. |
 | `default_tariff` | Tariff used when no schedule window matches. Without it, `cost` applies as written. |
 | `effective_from` / `effective_until` | RFC 3339 instants bounding the rule's validity, e.g. `2026-12-31T23:59:59Z`. |
-| `on_rule_expiry` | What an out-of-validity rule does: `"fallback"` (default) lets the next layer price the call and marks the rule expired where the cost is shown, `"no_price"` refuses to price it at all. |
+| `on_rule_expiry` | What an out-of-validity rule does: `"fallback"` (default) lets the next layer price the call and marks the rule expired where the cost is shown, `"no_price"` refuses to price it at all (nothing is billed, and the cost line says `(rule cannot price this call)` so the resulting zero is not mistaken for a free call). |
 
 ### Schedule rules
 
@@ -333,8 +333,13 @@ These are worth reading once, because each one breaks more than it looks like:
   `[pricing]` section, and the rate table. Use it instead of guessing from the
   cost on screen.
 * Saving the file is enough: a running session reports `Config reloaded from disk`.
-* `/usage` lists the spend per currency and marks a rule that expired or was
-  rejected, so a rule that stopped applying is visible instead of silently
-  changing the price.
+* The **session cost line** (the amount under the context meter, and the same
+  figure in the info widget) carries a short note when the number on screen is
+  not what your config asked for: `(rule expired)` / `(rule not in effect yet)`
+  when a rule stopped applying and a lower layer priced the call, `(invalid
+  [pricing]: <path>)` when the section was rejected, and `(rule cannot price
+  this call)` when your own rule refused to price the call at all. `/pricing`
+  explains the same cases in more detail. `/usage` lists the spend per currency;
+  it does not carry these markers.
 * Write a rule you can verify by hand, then run one small request and compare the
   cost shown against the arithmetic above.

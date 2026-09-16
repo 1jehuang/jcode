@@ -40,7 +40,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
-use crate::model_pricing::OutOfEffectNotice;
+use crate::model_pricing::PricingNotice;
 use jcode_provider_core::Currency;
 use misc_ui::PinnedCallPricing;
 
@@ -850,24 +850,26 @@ struct CostState {
     /// boundary keeps the tier it started in. `None` until that call is first
     /// priced.
     pinned_call_pricing: Option<PinnedCallPricing>,
-    /// Why the *last priced call* was not priced by the user's own
-    /// `[pricing.providers]` rule, when that rule was out of its validity
-    /// window and `on_rule_expiry = "fallback"` sent the call to the next layer
-    /// (F8/F20). The same marker covers a `[[pricing.sources]]` sheet rule that
-    /// is out of effect, labelled with the sheet's `id`.
+    /// Why the *last priced call* was not priced the way the user's own
+    /// `[pricing]` configuration asked, in the form the cost line labels next to
+    /// the amount.
     ///
-    /// The amount the widget shows is therefore a fallback price, and this is
-    /// what lets the display say so: without it a user sees a models.dev number
-    /// where their hand-written rule should apply and never learns the rule
-    /// stopped. It describes the most recent pricing decision (the widget's
-    /// amount is the whole session) and is cleared by every pricing decision
-    /// that is not a fallback, so a fixed or in-window rule stops being
-    /// labelled. `on_rule_expiry = "no_price"` never sets it: that variant
-    /// refuses to price, so there is no fallback price to explain.
+    /// Two cases reach here. A rule that was out of its validity window and
+    /// whose `on_rule_expiry = "fallback"` sent the call to the next layer
+    /// (F8/F20) - a hand-written card, or a `[[pricing.sources]]` sheet rule
+    /// labelled with the sheet's `id` - makes the amount a fallback price. A
+    /// card that claims the pair but cannot price the call (spec 4.4) accrues
+    /// nothing, so the label is what stops a zero from reading as "free".
+    ///
+    /// This is what lets the display say so: without it a user sees a models.dev
+    /// number where their hand-written rule should apply and never learns the
+    /// rule stopped. It describes the most recent pricing decision (the widget's
+    /// amount is the whole session) and is cleared by every decision that is not
+    /// a fallback, so a fixed or in-window rule stops being labelled.
     ///
     /// Set at billing time, never at render time: the resolver logs a warning
     /// when it detects the expiry, and the render path runs every frame.
-    rule_out_of_effect: Option<OutOfEffectNotice>,
+    pricing_notice: Option<PricingNotice>,
 }
 
 impl CostState {
