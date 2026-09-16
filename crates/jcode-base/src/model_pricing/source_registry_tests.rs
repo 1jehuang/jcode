@@ -543,6 +543,55 @@ url = "{url}"
         crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
             .expect("models.dev still prices the call");
     assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
+
+    // F8/F20: falling through silently is exactly the silent-wrong-price class
+    // this feature removes, so the expiry is reported *by name* and the widget
+    // and `/pricing` can label the models.dev price with it.
+    let notice = crate::model_pricing::sheet_rule_out_of_effect(
+        "deepseek",
+        "deepseek-v4-pro",
+        SystemTime::now(),
+    )
+    .expect("the out-of-effect sheet is reported");
+    assert_eq!(
+        notice.label(),
+        "rule expired (pricing source `expired`)",
+        "the marker names the sheet whose rule stopped applying"
+    );
+}
+
+/// The counterpart of the test above: a sheet that *is* in effect must not be
+/// reported as out of effect, or every price from a sheet would carry a
+/// misleading marker.
+#[test]
+fn an_in_effect_sheet_rule_is_not_reported_out_of_effect() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "live.json",
+        &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
+    );
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+id = "live"
+url = "{url}"
+"#
+    ));
+
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+        Some("live")
+    );
+    assert_eq!(
+        crate::model_pricing::sheet_rule_out_of_effect(
+            "deepseek",
+            "deepseek-v4-pro",
+            SystemTime::now()
+        ),
+        None,
+        "an in-effect sheet is not out of effect"
+    );
 }
 
 #[test]

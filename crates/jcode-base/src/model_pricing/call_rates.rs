@@ -134,3 +134,55 @@ pub fn config_call_rates(
         }
     }
 }
+
+/// The user's own rule that stopped applying to one call, in the form the
+/// display labels next to the amount a *lower* layer produced (F8/F20).
+///
+/// Both layers that a user can write by hand are covered, and the sheet names
+/// itself: a user with several `[[pricing.sources]]` sheets has to be able to
+/// tell which of them stopped applying, so the marker carries the sheet's `id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutOfEffectNotice {
+    /// A hand-written `[pricing.providers]` card. Label: `rule expired` /
+    /// `rule not in effect yet`.
+    ConfigCard(RuleOutOfEffect),
+    /// A rule inside an extra `[[pricing.sources]]` sheet, named by its `id`.
+    ///
+    /// A sheet has no `on_rule_expiry` of its own: out of effect always means
+    /// "the next layer prices the call" (see `source_registry`), which is the
+    /// card's `fallback` behaviour. The label is the same class as the card's,
+    /// with the sheet appended.
+    PriceSheet {
+        source_id: String,
+        reason: RuleOutOfEffect,
+    },
+}
+
+impl OutOfEffectNotice {
+    /// The short marker shown next to the price, in the same style as the
+    /// `(no EUR rate)` note.
+    pub fn label(&self) -> String {
+        match self {
+            Self::ConfigCard(reason) => reason.label().to_string(),
+            Self::PriceSheet { source_id, reason } => {
+                format!("{} (pricing source `{source_id}`)", reason.label())
+            }
+        }
+    }
+}
+
+/// The `[[pricing.sources]]` sheet rule that covers this call but is out of
+/// effect at `at`, if the sheet layer is what sends the price below it.
+///
+/// This is the sheet's half of the F8/F20 marker. The call is still priced by
+/// the next layer (that is the existing fall-through); the notice is what tells
+/// the user their sheet stopped applying instead of a models.dev number taking
+/// over silently.
+pub fn sheet_rule_out_of_effect(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+) -> Option<OutOfEffectNotice> {
+    let (source_id, reason) = super::source_registry::out_of_effect_sheet(provider, model, at)?;
+    Some(OutOfEffectNotice::PriceSheet { source_id, reason })
+}

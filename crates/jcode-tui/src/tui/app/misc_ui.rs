@@ -554,10 +554,17 @@ impl App {
             crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
                 // The next layer prices the call, and the display has to say
                 // that the user's own rule stopped applying (F8/F20).
-                self.cost.rule_out_of_effect = Some(reason);
+                self.cost.rule_out_of_effect =
+                    Some(crate::model_pricing::OutOfEffectNotice::ConfigCard(reason));
             }
             crate::model_pricing::ConfigCallRates::Absent => {
-                self.cost.rule_out_of_effect = None;
+                // No hand-written card claims this model. A `[[pricing.sources]]`
+                // sheet is the user's own configuration too, so a sheet rule
+                // that is out of effect is labelled the same way: without it the
+                // price silently changes from the user's sheet to the next
+                // layer, which is exactly the class of bug this feature removes.
+                self.cost.rule_out_of_effect =
+                    crate::model_pricing::sheet_rule_out_of_effect(&source_key, model, at);
             }
         }
 

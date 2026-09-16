@@ -34,7 +34,9 @@ mod sources;
 /// The per-model rate fields an entry carries, re-exported here so the billing
 /// call sites can read a card without reaching into `config`.
 pub use crate::config::CostFields;
-pub use call_rates::{CallRateCard, ConfigCallRates, config_call_rates};
+pub use call_rates::{
+    CallRateCard, ConfigCallRates, OutOfEffectNotice, config_call_rates, sheet_rule_out_of_effect,
+};
 pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
 pub use fx::{FxTable, convert};
