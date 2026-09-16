@@ -2147,6 +2147,107 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
 }
 
 #[test]
+fn conifer_context_fallback_yields_to_live_and_disk_catalog_without_remapping_aliases() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _key = EnvVarGuard::set("CONIFER_API_KEY", "test-conifer-catalog");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "test-conifer-1274");
+    // Synthetic future catalog deliberately changes latest aliases in both
+    // directions and reintroduces the missing Together route with its own limit.
+    let (api_base, request_rx) = spawn_single_response_models_server(
+        r#"{"data":[
+            {"id":"mistral-large-latest","context_window":128000},
+            {"id":"mistral-medium-latest","context_window":512000},
+            {"id":"mistral-small-latest","context_window":64000},
+            {"id":"nemotron-3-ultra-together","context_window":131072}
+        ]}"#,
+    );
+    let make_provider = || {
+        let mut provider = OpenRouterProvider::new_openai_compatible_profile_runtime(
+            jcode_base::provider_catalog::CONIFER_PROFILE,
+        )
+        .expect("Conifer provider");
+        // Use the real constructor/metadata without sending any vendor requests.
+        provider.api_base = api_base.clone();
+        provider
+    };
+    let provider = make_provider();
+    for (model, expected) in [
+        ("seed-2.0-pro", 256_000),
+        ("gemma-4-31b", 128_000),
+        ("llama-4-scout", 327_680),
+        ("conifer:grok-4.6", 500_000),
+        ("mistral-large-latest", 256_000),
+        ("mistral-medium-latest", 256_000),
+        ("mistral-small-latest", 256_000),
+    ] {
+        provider.set_model(model).expect("select fallback model");
+        assert_eq!(provider.context_window(), expected, "{model}");
+    }
+    let alias = "nemotron-3-ultra-together";
+    assert!(!provider.static_models.iter().any(|model| model == alias));
+    provider
+        .set_model(&format!("conifer:{alias}"))
+        .expect("explicit legacy selection");
+    assert_eq!(
+        provider.model(),
+        alias,
+        "never remap to the DeepInfra route"
+    );
+    assert_eq!(
+        provider.context_window(),
+        jcode_provider_core::DEFAULT_CONTEXT_LIMIT
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let fetched = rt
+        .block_on(provider.refresh_models())
+        .expect("refresh Conifer catalog");
+    assert!(fetched.iter().any(|model| model.id == alias));
+    provider
+        .set_model("mistral-large-latest")
+        .expect("select another model before checking discovery");
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("catalog request");
+    assert!(request.starts_with("GET /v1/models "));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-conifer-catalog")
+    );
+    assert!(
+        provider
+            .available_models_display()
+            .iter()
+            .any(|model| model == alias)
+    );
+
+    let fresh = make_provider();
+    assert!(fresh.models_cache.try_read().unwrap().models.is_empty());
+    for (model, expected) in [
+        ("mistral-large-latest", 128_000),
+        ("mistral-medium-latest", 512_000),
+        ("mistral-small-latest", 64_000),
+        (alias, 131_072),
+    ] {
+        provider.set_model(model).expect("select live model");
+        fresh
+            .set_model(model)
+            .expect("restore model before in-memory hydration");
+        assert_eq!(provider.model(), model);
+        assert_eq!(provider.context_window(), expected, "live: {model}");
+        assert_eq!(fresh.context_window(), expected, "disk: {model}");
+    }
+}
+
+#[test]
 fn explicit_cached_context_window_precedes_zai_family_fallback() {
     let model = "glm-5.3-issue-1087";
     jcode_base::provider::populate_context_limits(HashMap::from([(model.to_string(), 1_000_000)]));
