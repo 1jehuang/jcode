@@ -111,6 +111,7 @@ impl Tool for EditTool {
 
         // Write back
         tokio::fs::write(&path, &new_content).await?;
+        super::edit_stats::record(&ctx, &content, &new_content, false).await;
 
         // Generate a diff with line numbers
         let diff = generate_diff(&params.old_string, &params.new_string, start_line);

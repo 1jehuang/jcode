@@ -49,6 +49,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 
 # Embeddings (local inference) live in jcode-base; this crate forwards the
 # `embeddings` feature to jcode-base rather than depending on jcode-embedding.
+jcode-harness-api = { path = "../jcode-harness-api" }
 jcode-import-core = { path = "../jcode-import-core" }
 
 # OAuth

@@ -96,7 +96,16 @@ impl Tool for ApplyPatchTool {
                     if let Some(parent) = resolved.parent() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
+                    let existed = resolved.exists();
+                    let old = tokio::fs::read_to_string(&resolved).await.ok();
                     tokio::fs::write(&resolved, contents).await?;
+                    super::edit_stats::record(
+                        &ctx,
+                        old.as_deref().unwrap_or(""),
+                        contents,
+                        existed && old.is_none(),
+                    )
+                    .await;
                     let diff = generate_diff_summary("", contents);
                     publish_file_touch(
                         &ctx,
@@ -130,10 +139,10 @@ impl Tool for ApplyPatchTool {
                         ));
                         continue;
                     }
-                    let old_contents = tokio::fs::read_to_string(&resolved)
-                        .await
-                        .unwrap_or_default();
+                    let old = tokio::fs::read_to_string(&resolved).await.ok();
+                    let old_contents = old.as_deref().unwrap_or("");
                     if tokio::fs::remove_file(&resolved).await.is_ok() {
+                        super::edit_stats::record(&ctx, old_contents, "", old.is_none()).await;
                         let diff = generate_diff_summary(&old_contents, "");
                         publish_file_touch(
                             &ctx,
@@ -167,8 +176,35 @@ impl Tool for ApplyPatchTool {
                                 if let Some(parent) = dest_resolved.parent() {
                                     tokio::fs::create_dir_all(parent).await?;
                                 }
+                                let dest_existed = dest_resolved.exists();
+                                let dest_old = tokio::fs::read_to_string(&dest_resolved).await.ok();
                                 tokio::fs::write(&dest_resolved, &new_contents).await?;
-                                let _ = tokio::fs::remove_file(&resolved).await;
+                                if tokio::fs::remove_file(&resolved).await.is_ok() {
+                                    super::edit_stats::record(
+                                        &ctx,
+                                        &old_contents,
+                                        &new_contents,
+                                        false,
+                                    )
+                                    .await;
+                                    if dest_existed {
+                                        super::edit_stats::record(
+                                            &ctx,
+                                            dest_old.as_deref().unwrap_or(""),
+                                            "",
+                                            dest_old.is_none(),
+                                        )
+                                        .await;
+                                    }
+                                } else {
+                                    super::edit_stats::record(
+                                        &ctx,
+                                        dest_old.as_deref().unwrap_or(""),
+                                        &new_contents,
+                                        dest_existed && dest_old.is_none(),
+                                    )
+                                    .await;
+                                }
                                 publish_file_touch(
                                     &ctx,
                                     &resolved,
@@ -205,6 +241,13 @@ impl Tool for ApplyPatchTool {
                                 }
                             } else {
                                 tokio::fs::write(&resolved, &new_contents).await?;
+                                super::edit_stats::record(
+                                    &ctx,
+                                    &old_contents,
+                                    &new_contents,
+                                    false,
+                                )
+                                .await;
                                 publish_file_touch(
                                     &ctx,
                                     &resolved,
