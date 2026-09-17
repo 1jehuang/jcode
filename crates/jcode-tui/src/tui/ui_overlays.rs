@@ -240,6 +240,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
     ));
     lines.push(help_entry("/usage", "Show connected provider usage limits"));
     lines.push(help_entry(
+        "/pricing",
+        "Explain which layer prices the current model, and why",
+    ));
+    lines.push(help_entry(
         "/support",
         "Email support with diagnostics prefilled",
     ));
