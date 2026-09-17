@@ -27,8 +27,14 @@ pub(super) enum CardState<'a> {
 /// Everything `/pricing` reports, gathered before formatting so the text can be
 /// asserted without an `App`.
 pub(super) struct PricingReport<'a> {
+    /// Display label of the provider, as the user sees it (`OpenRouter`).
     pub provider: &'a str,
     pub model: &'a str,
+    /// The activity/billing key the pricing layers were actually asked about,
+    /// e.g. `openrouter` or `openai-compatible:deepseek`. It can differ from
+    /// `provider`, and it is the key a `[pricing.providers]` rule or a sheet's
+    /// `scope` must match, so the report names it.
+    pub source_key: &'a str,
     pub card: CardState<'a>,
     /// Why the `[pricing]` section was rejected, when it was.
     pub config_error: Option<&'a str>,
@@ -58,6 +64,10 @@ pub(super) struct PricingReport<'a> {
 impl PricingReport<'_> {
     pub(super) fn render(&self) -> String {
         let mut out = format!("**Pricing · {} / {}**\n", self.provider, self.model);
+        // The provider label and the key the layers were asked about can differ
+        // (`OpenRouter` vs `openrouter`), and a rule that "does not work" is
+        // usually a rule keyed for the wrong name. Name the key.
+        out.push_str(&format!("- looked up as `{}`\n", self.source_key));
 
         match &self.card {
             CardState::Priced { card, tariff } => {
@@ -94,10 +104,12 @@ impl PricingReport<'_> {
                  No other layer is substituted.\n",
             ),
             CardState::Absent => {
-                out.push_str(
-                    "\n- rate card: no `[pricing]` rule prices this model, so the cost comes from a lower layer \
-                     (a `[[pricing.sources]]` sheet, models.dev, a provider cache, or the fallback estimate)\n",
-                );
+                out.push_str(&format!(
+                    "\n- rate card: no `[pricing]` rule prices this model under the key `{}`, so the cost comes from a lower layer \
+                     (a `[[pricing.sources]]` sheet, models.dev, a provider cache, or the fallback estimate); a rule must be keyed by \
+                     a provider identity this key matches (see `[pricing.providers.<key>]`)\n",
+                    self.source_key
+                ));
                 if let Some((sheet_id, currency)) = self.sheet.as_ref() {
                     out.push_str(&format!(
                         "- from: [[pricing.sources]] sheet `{sheet_id}` ({})\n",
@@ -237,6 +249,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
     let report = PricingReport {
         provider: &provider,
         model: &model,
+        source_key: &source_key,
         card,
         config_error: error.as_ref().map(|error| error.message.as_str()),
         out_of_effect: out_of_effect.as_ref(),
@@ -275,6 +288,7 @@ mod tests {
         let report = PricingReport {
             provider: "DeepSeek",
             model: "deepseek-flash",
+            source_key: "deepseek",
             card: CardState::Priced {
                 card: &card,
                 tariff: Some("peak"),
@@ -310,6 +324,7 @@ mod tests {
         let report = PricingReport {
             provider: "DeepSeek",
             model: "deepseek-v4-pro",
+            source_key: "deepseek",
             card: CardState::ConfiguredWithoutPrice,
             config_error: None,
             out_of_effect: None,
@@ -338,6 +353,7 @@ mod tests {
         let report = PricingReport {
             provider: "OpenAI",
             model: "gpt-5.5",
+            source_key: "openai:api-key",
             card: CardState::Absent,
             config_error: Some("pricing.schedule[0].windows: window end must be after start"),
             out_of_effect: None,
@@ -369,6 +385,7 @@ mod tests {
         let report = PricingReport {
             provider: "DeepSeek",
             model: "deepseek-v4-pro",
+            source_key: "deepseek",
             card: CardState::Priced {
                 card: &card,
                 tariff: None,
@@ -402,6 +419,7 @@ mod tests {
         let report = PricingReport {
             provider: "DeepSeek",
             model: "deepseek-v4-pro",
+            source_key: "deepseek",
             card: CardState::Absent,
             config_error: None,
             out_of_effect: Some(&notice),
@@ -446,6 +464,7 @@ mod tests {
         let report = PricingReport {
             provider: "DeepSeek",
             model: "deepseek-v4-pro",
+            source_key: "deepseek",
             card: CardState::Absent,
             config_error: None,
             out_of_effect: None,
@@ -465,6 +484,39 @@ mod tests {
         assert!(
             text.contains("a `[[pricing.sources]]` sheet,"),
             "and it must appear in the list of lower layers: {text}"
+        );
+    }
+
+    /// The provider label and the lookup key can differ (`OpenRouter` vs
+    /// `openrouter`), and a card that "does not work" is usually keyed for the
+    /// wrong name, so the report names the key and the no-card line refers to it.
+    #[test]
+    fn the_report_names_the_looked_up_key_and_the_provider_label() {
+        let rates = std::collections::BTreeMap::new();
+        let report = PricingReport {
+            provider: "OpenRouter",
+            model: "deepseek-flash",
+            source_key: "openrouter",
+            card: CardState::Absent,
+            config_error: None,
+            out_of_effect: None,
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: None,
+            context_tier_thresholds: &[],
+            sheet: None,
+        };
+        let text = report.render();
+
+        assert!(
+            text.contains("**Pricing · OpenRouter / deepseek-flash**"),
+            "{text}"
+        );
+        assert!(text.contains("looked up as `openrouter`"), "{text}");
+        assert!(
+            text.contains("no `[pricing]` rule prices this model under the key `openrouter`"),
+            "the no-card line must say which key was looked up: {text}"
         );
     }
 }

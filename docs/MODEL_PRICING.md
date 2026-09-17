@@ -76,6 +76,22 @@ compatible profile's id or display name; `openai-compatible:foo` and `foo` are
 the same profile. A key that matches nothing is reported once in the log, so a
 typo does not silently do nothing.
 
+**Cards match by provider *key*, not by model vendor.** Nothing here inspects
+which company made the model: a card applies to the route whose activity key
+matches, and the same model on a different route is a different key. A
+`[pricing.providers.deepseek]` card prices the DeepSeek provider (and
+`openai-compatible:deepseek`), but a DeepSeek model reached through
+`openrouter` is keyed `openrouter`, so the card does not apply and that route
+falls through to models.dev (in USD). If you want the card to cover both, write
+a second entry under the other key (or `[[pricing.sources]]` with a `scope` that
+lists both forms). `/pricing` prints the key it looked up, which is the fastest
+way to see why a card did not take effect.
+
+**Rates must be finite and non-negative.** `nan`, `inf`, or a negative number in
+any rate field is rejected at load with the field path, for a hand-written card
+and for a sheet alike: one `NaN` would otherwise poison the session total (it
+renders as `NaN` and never recovers) and a negative rate would read as free.
+
 | Key | Meaning |
 | --- | --- |
 | `currency` | ISO 4217 code for every rate written under this provider. Defaults to `USD`. |
