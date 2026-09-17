@@ -1071,19 +1071,20 @@ url = "file://{}"
 }
 
 /// Two provider keys in one sheet can both match the caller's identity
-/// (`claude` and `claude-api` both map to models.dev `anthropic`, which the
+/// (`claude` and `anthropic-api` both map to models.dev `anthropic`, which the
 /// sheet does not key), so the last-resort match has to be deterministic. A
 /// fresh `Env` per iteration gives the sheet's provider map a fresh `HashMap`
 /// seed, so hash-order dependence would show up as disagreement between
-/// iterations; the documented choice is the lexicographically smallest key.
+/// iterations; the documented choice is the lexicographically smallest key
+/// (`anthropic-api`).
 #[test]
 fn two_matching_sheet_provider_keys_always_pick_the_same_section() {
-    for iteration in 0..12 {
+    for iteration in 0..16 {
         let env = Env::new();
         let url = env.sheet_url(
             "mirror.json",
-            r#"{"claude":{"models":{"claude-fable-5":{"cost":{"input":1.0,"output":2.0}}}},
-                "claude-api":{"models":{"claude-fable-5":{"cost":{"input":9.0,"output":9.0}}}}}"#,
+            r#"{"claude":{"models":{"claude-fable-5":{"cost":{"input":9.0,"output":9.0}}}},
+                "anthropic-api":{"models":{"claude-fable-5":{"cost":{"input":1.0,"output":2.0}}}}}"#,
         );
         env.write_config(&format!(
             r#"
@@ -1097,7 +1098,7 @@ url = "{url}"
         assert_eq!(
             hit.entry.cost.input,
             Some(1.0),
-            "iteration {iteration}: the lexicographically smallest matching key (`claude`) must win"
+            "iteration {iteration}: the lexicographically smallest matching key (`anthropic-api`) must win"
         );
     }
 }
