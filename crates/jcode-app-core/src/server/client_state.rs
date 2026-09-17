@@ -68,10 +68,44 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
         "bedrock" => "Bedrock".to_string(),
         "antigravity" => "Antigravity".to_string(),
         "jcode" => "Jcode".to_string(),
-        other => other.to_string(),
+        // A direct OpenAI-compatible profile is persisted either bare
+        // (`deepseek`, the session vocabulary) or as its source key
+        // (`openai-compatible:deepseek`). Both name the same profile, so report
+        // its display name like every other arm here; a raw key would otherwise
+        // reach the header, and `source_key_for_provider_label` maps the
+        // prefixed shape away from `openai:api-key` only by accident (#1286).
+        other => {
+            // Import-source codes are stored in the same field but are not
+            // profile routes; `opencode` in particular collides with the
+            // `OpenCode Zen` profile id, so it must stay verbatim.
+            const IMPORT_SOURCE_CODES: &[&str] = &["opencode", "claude-code", "openai-codex"];
+            if IMPORT_SOURCE_CODES.contains(&other) {
+                other.to_string()
+            } else {
+                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
+                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                    .map(|profile| profile.display_name.to_string())
+                    .unwrap_or_else(|| other.to_string())
+            }
+        }
     };
 
     Some(label)
+}
+
+/// The provider name a `History` payload reports.
+///
+/// The persisted session key wins when there is one. Otherwise ask for the
+/// profile-aware label: `Provider::name()` is the stable machine id for the
+/// provider *class* (`OpenRouter` for the multiplexing slot, `openrouter` for
+/// a concrete runtime instance), and that slot also serves every direct
+/// OpenAI-compatible profile, so it must not be shown as this session's
+/// provider (issue #1286).
+fn history_provider_name(
+    session: &crate::session::Session,
+    provider: &dyn Provider,
+) -> Option<String> {
+    history_provider_name_from_session(session).or_else(|| Some(provider.display_name()))
 }
 
 pub(super) async fn handle_get_state(
@@ -219,7 +253,12 @@ pub(super) async fn handle_get_model_catalog(
                 let mut model_routes = provider.model_routes();
                 crate::model_usage::enrich_routes(&mut model_routes);
                 (
-                    Some(provider.name().to_string()),
+                    // Same field the non-busy path builds: it must name the
+                    // profile, not the multiplexing slot (#1286). This fallback
+                    // is exactly the lock-contention case a client cannot
+                    // correct, so `provider.name()` here reached the header and
+                    // the spend ledger as `OpenRouter`.
+                    Some(provider.display_name()),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
                     model_routes,
@@ -499,8 +538,7 @@ async fn send_history_from_persisted_session(
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
-    let provider_name =
-        history_provider_name_from_session(&session).or_else(|| Some(provider.name().to_string()));
+    let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
@@ -888,10 +926,105 @@ mod tests {
 
     #[test]
     fn history_provider_name_preserves_unknown_runtime_profile() {
-        let session = session_with_provider_key(Some("opencode-go"));
+        let session = session_with_provider_key(Some("remote-catalog"));
         assert_eq!(
             history_provider_name_from_session(&session).as_deref(),
-            Some("opencode-go")
+            Some("remote-catalog")
+        );
+    }
+
+    /// A direct OpenAI-compatible profile is persisted as its source key.
+    /// Clients must receive a display label, not the raw key: passing the key
+    /// through would make the spend ledger bill it to `openai:api-key` (#1286).
+    #[test]
+    fn history_provider_name_maps_a_compatible_profile_key_to_its_label() {
+        let session = session_with_provider_key(Some("openai-compatible:deepseek"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("DeepSeek")
+        );
+
+        let session = session_with_provider_key(Some("openai-compatible:nvidia-nim"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("NVIDIA NIM")
+        );
+    }
+
+    /// The same profile is also persisted bare (`deepseek`, the session
+    /// vocabulary). Both shapes must report the profile's display name instead
+    /// of the raw key (#1286).
+    #[test]
+    fn history_provider_name_maps_a_bare_compatible_profile_key() {
+        for (key, label) in [
+            ("deepseek", "DeepSeek"),
+            ("openai-compatible", "OpenAI-compatible"),
+            ("opencode-go", "OpenCode Go"),
+            ("nvidia-nim", "NVIDIA NIM"),
+        ] {
+            let session = session_with_provider_key(Some(key));
+            assert_eq!(
+                history_provider_name_from_session(&session).as_deref(),
+                Some(label),
+                "provider key {key} must report its profile label"
+            );
+        }
+    }
+
+    /// Import-source codes live in the same field but are not profile routes:
+    /// `opencode` collides with the `OpenCode Zen` profile id, and a session
+    /// imported from that CLI must not be relabelled as the gateway.
+    #[test]
+    fn history_provider_name_keeps_import_source_codes_verbatim() {
+        for key in ["opencode", "claude-code", "openai-codex"] {
+            let session = session_with_provider_key(Some(key));
+            assert_eq!(
+                history_provider_name_from_session(&session).as_deref(),
+                Some(key),
+                "import source {key} must stay verbatim"
+            );
+        }
+    }
+
+    /// With no persisted key, the fallback must be the profile-aware label.
+    /// `Provider::name()` is the multiplexing slot (`openrouter`) that serves
+    /// every direct OpenAI-compatible profile, so it tagged DeepSeek sessions
+    /// as OpenRouter (#1286).
+    struct SlotOnlyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for SlotOnlyProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            Err(anyhow::anyhow!(
+                "the history fallback test never sends a request"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "OpenRouter"
+        }
+
+        fn display_name(&self) -> String {
+            "DeepSeek".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(SlotOnlyProvider)
+        }
+    }
+
+    #[test]
+    fn history_provider_name_falls_back_to_the_profile_label() {
+        let session = session_with_provider_key(None);
+        assert_eq!(
+            history_provider_name(&session, &SlotOnlyProvider).as_deref(),
+            Some("DeepSeek")
         );
     }
 }
