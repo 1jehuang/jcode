@@ -1,7 +1,7 @@
 use super::{Tool, ToolContext, ToolOutput};
 use crate::ambient::{
-    AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, ScheduleRequest,
-    ScheduleTarget, ScheduledItem,
+    AmbientCycleResult, AmbientManager, AmbientState, CycleStatus, Priority, Recurrence,
+    ScheduleRequest, ScheduleTarget, ScheduledItem,
 };
 use crate::ambient_runner::AmbientRunnerHandle;
 use crate::safety::{self, PermissionRequest, PermissionResult, SafetySystem, Urgency};
@@ -215,6 +215,7 @@ impl Tool for EndAmbientCycleTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            recurrence: Recurrence::default(),
         });
 
         let now = Utc::now();
@@ -358,6 +359,7 @@ impl Tool for ScheduleAmbientTool {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            recurrence: Recurrence::default(),
         };
 
         let mut manager = AmbientManager::new()?;
@@ -893,6 +895,7 @@ impl ScheduleTool {
                 parts.push(format!("Scheduled by session: {}", ctx.session_id));
                 Some(parts.join("\n"))
             },
+            recurrence: Recurrence::default(),
         };
 
         let mut manager = AmbientManager::new()?;

@@ -70,7 +70,7 @@ pub const ZAI_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_key_env: "ZHIPU_API_KEY",
     env_file: "zai.env",
     setup_url: "https://docs.z.ai/devpack/quick-start",
-    default_model: Some("glm-4.5"),
+    default_model: Some("glm-5.3"),
     requires_api_key: true,
 };
 
@@ -383,7 +383,7 @@ pub const MINIMAX_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
     api_key_env: "MINIMAX_API_KEY",
     env_file: "minimax.env",
     setup_url: "https://platform.minimax.io/docs/guides/text-generation",
-    default_model: Some("MiniMax-M2.7"),
+    default_model: Some("MiniMax-M3"),
     requires_api_key: true,
 };
 

@@ -230,7 +230,7 @@ fn show_loop_status(app: &mut App) -> bool {
     true
 }
 
-fn find_loop_mut(store: &mut LoopStore, id: &str) -> Option<&mut LoopItem> {
+fn find_loop_mut<'a>(store: &'a mut LoopStore, id: &str) -> Option<&'a mut LoopItem> {
     store.loops.iter_mut().find(|l| l.id == id)
 }
 
