@@ -1791,6 +1791,26 @@ async fn generate_compaction_artifact(
         }
     }
 
+    // Custom summarizer first when configured (documented precedence): a
+    // successful custom summary returns before the native path is attempted.
+    if crate::config::config()
+        .compaction
+        .summary_command
+        .as_ref()
+        .is_some_and(|command| !command.trim().is_empty())
+        && let Some(summary_text) =
+            run_summary_command(&messages, existing_summary.as_ref(), mode_label).await
+    {
+        return Ok(CompactionResult {
+            summary_text,
+            openai_encrypted_content: None,
+            covers_up_to_turn: messages.len(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            summarized_messages: messages.len(),
+            summarizer: "custom",
+        });
+    }
+
     if let Ok(native) = provider
         .native_compact(
             &messages,
@@ -1822,19 +1842,8 @@ async fn generate_compaction_artifact(
         }
     }
 
-    if let Some(summary_text) =
-        run_summary_command(&messages, existing_summary.as_ref(), mode_label).await
-    {
-        return Ok(CompactionResult {
-            summary_text,
-            openai_encrypted_content: None,
-            covers_up_to_turn: messages.len(),
-            duration_ms: start.elapsed().as_millis() as u64,
-            summarized_messages: messages.len(),
-            summarizer: "custom",
-        });
-    }
-
+    // (Custom summarizer already attempted first, above; reaching here means
+    // it is unconfigured or failed open.)
     let max_prompt_chars = provider.context_window().saturating_sub(4000) * CHARS_PER_TOKEN;
     let prompt = build_compaction_prompt(&messages, existing_summary.as_ref(), max_prompt_chars);
 
@@ -1912,19 +1921,60 @@ async fn run_summary_command(
             return None;
         }
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(request_json.as_bytes()).await;
-        drop(stdin);
-    }
+    // One deadline covers the whole interaction: a child that never reads
+    // stdin can no longer wedge the write before the timeout starts, and
+    // stdout is capped while reading so a runaway child is killed at the
+    // limit instead of buffered without bound.
     let timeout = std::time::Duration::from_millis(
         crate::config::config()
             .compaction
             .summary_command_timeout_ms
             .max(1),
     );
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
+    let deadline = tokio::time::Instant::now() + timeout;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let write_result = tokio::time::timeout_at(deadline, async {
+            stdin.write_all(request_json.as_bytes()).await?;
+            stdin.shutdown().await
+        })
+        .await;
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                crate::logging::warn(&format!(
+                    "Summary command '{command_line}' stdin write failed: {error} (using built-in summarizer)"
+                ));
+                return None;
+            }
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                crate::logging::warn(&format!(
+                    "Summary command '{command_line}' stdin write timed out after {}ms (using built-in summarizer)",
+                    timeout.as_millis()
+                ));
+                return None;
+            }
+        }
+    }
+    let mut capped: Vec<u8> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        use tokio::io::AsyncReadExt;
+        let mut limited = stdout.take((SUMMARY_COMMAND_STDOUT_LIMIT + 1) as u64);
+        if tokio::time::timeout_at(deadline, limited.read_to_end(&mut capped))
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+            crate::logging::warn(&format!(
+                "Summary command '{command_line}' stdout read timed out after {}ms (using built-in summarizer)",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    }
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status,
         Ok(Err(error)) => {
             crate::logging::warn(&format!(
                 "Summary command '{command_line}' failed: {error} (using built-in summarizer)"
@@ -1932,6 +1982,7 @@ async fn run_summary_command(
             return None;
         }
         Err(_elapsed) => {
+            let _ = child.kill().await;
             crate::logging::warn(&format!(
                 "Summary command '{command_line}' timed out after {}ms (using built-in summarizer)",
                 timeout.as_millis()
@@ -1939,29 +1990,39 @@ async fn run_summary_command(
             return None;
         }
     };
-    if !output.status.success() {
+    let output_truncated = capped.len() > SUMMARY_COMMAND_STDOUT_LIMIT;
+    if output_truncated {
+        capped.truncate(SUMMARY_COMMAND_STDOUT_LIMIT);
+    }
+    // Over-limit output closed the pipe early, so the child typically dies
+    // of SIGPIPE with a nonzero status; the truncation is the documented
+    // outcome, not a failure. The exit check applies only when all output
+    // was read.
+    if !output_truncated && !status.success() {
         crate::logging::warn(&format!(
             "Summary command '{command_line}' exited with {:?} (using built-in summarizer)",
-            output.status.code()
+            status.code()
         ));
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    if output_truncated {
+        crate::logging::warn(&format!(
+            "Summary command output exceeds {} bytes; truncating",
+            SUMMARY_COMMAND_STDOUT_LIMIT
+        ));
+    }
+    // capped is already cut at the byte limit; trim to a char boundary so no
+    // split UTF-8 sequence survives (lossy conversion would inflate it back
+    // over the limit with replacement chars).
+    let mut end = capped.len();
+    while end > 0 && std::str::from_utf8(&capped[..end]).is_err() {
+        end -= 1;
+    }
+    capped.truncate(end);
+    let stdout = String::from_utf8_lossy(&capped);
     let summary = stdout.trim();
     if summary.is_empty() {
         return None;
-    }
-    if summary.len() > SUMMARY_COMMAND_STDOUT_LIMIT {
-        crate::logging::warn(&format!(
-            "Summary command output ({} bytes) exceeds {} bytes; truncating",
-            summary.len(),
-            SUMMARY_COMMAND_STDOUT_LIMIT
-        ));
-        let mut end = SUMMARY_COMMAND_STDOUT_LIMIT;
-        while end > 0 && !summary.is_char_boundary(end) {
-            end -= 1;
-        }
-        return Some(summary[..end].to_string());
     }
     Some(summary.to_string())
 }

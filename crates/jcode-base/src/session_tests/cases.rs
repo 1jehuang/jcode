@@ -2634,6 +2634,9 @@ fn restored_tool_image_boundaries_follow_returned_history_rows() {
         covers_up_to_turn: 1,
         original_turn_count: 1,
         compacted_count: 1,
+        trigger: None,
+        summarizer: None,
+        mode: None,
     });
     let (messages, images, _) =
         render_messages_and_images_with_compacted_history(&session, usize::MAX);

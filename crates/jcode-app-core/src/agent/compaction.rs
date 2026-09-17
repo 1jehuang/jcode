@@ -160,9 +160,9 @@ impl Agent {
         let context_limit = self.provider.context_window() as u64;
         let compaction = self.registry.compaction();
 
-        let (dropped, usage_pct) = match compaction.try_write() {
+        let (dropped, usage_pct, mode) = match compaction.try_write() {
             Ok(mut manager) => {
-                let (dropped, usage_pct) = {
+                let (dropped, usage_pct, mode) = {
                     let all_messages = self.session.provider_messages();
                     manager.update_observed_input_tokens(context_limit);
                     let usage_pct = manager.context_usage_with(all_messages) * 100.0;
@@ -176,10 +176,10 @@ impl Agent {
                             return false;
                         }
                     };
-                    (dropped, usage_pct)
+                    (dropped, usage_pct, manager.mode().as_str().to_string())
                 };
                 self.sync_session_compaction_state_from_manager(&manager);
-                (dropped, usage_pct)
+                (dropped, usage_pct, mode)
             }
             Err(_) => {
                 logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
@@ -203,6 +203,7 @@ impl Agent {
             "compaction_emergency",
             &[
                 ("TRIGGER", "context_limit".to_string()),
+                ("MODE", mode),
                 ("MESSAGES_DROPPED", dropped.to_string()),
                 ("USAGE_PCT", format!("{usage_pct:.1}")),
             ],

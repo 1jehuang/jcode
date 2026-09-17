@@ -1284,6 +1284,31 @@ async fn summary_command_timeout_falls_through() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn summary_command_blocked_stdin_times_out() {
+    // A child that never reads stdin must not wedge the write past the
+    // deadline: the whole interaction shares one timeout and the child is
+    // killed on expiry.
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let stuck = write_summary_script(temp.path(), "stuck.sh", "#!/bin/sh\nsleep 30\n");
+    let _env = SummaryCommandEnv::set(Some(&stuck.to_string_lossy()), Some("200"));
+    // Payload well over the 64 KiB pipe buffer so the write genuinely blocks
+    // against a child that never reads stdin.
+    let mut bulky = two_messages();
+    for _ in 0..64 {
+        bulky.push(make_text_message(Role::User, &"y".repeat(4096)));
+    }
+    let start = std::time::Instant::now();
+    let result = run_summary_command(&bulky, None, "reactive").await;
+    assert!(result.is_none());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(25),
+        "blocked stdin must not outlive the deadline"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn summary_command_oversize_output_truncates() {
     let _lock = crate::storage::lock_test_env();
     let temp = tempfile::TempDir::new().expect("temp dir");
