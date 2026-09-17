@@ -188,7 +188,10 @@ impl Config {
             },
             Err(_) => serialized,
         };
-        std::fs::write(&path, content)?;
+        // A torn write here would destroy the user's comments and unmodeled
+        // sections, so use the atomic (temp file + rename, fsync'd) writer the
+        // storage layer documents for exactly this case.
+        crate::storage::write_bytes(&path, content.as_bytes())?;
         Self::invalidate_cache();
         Ok(())
     }
@@ -918,16 +921,12 @@ pub(crate) fn merge_into_existing(
 
 /// Whether a merged document still round-trips back into [`Config`].
 ///
-/// A preserving merge can assemble a file that jcode itself refuses. The
-/// clearest case is a key-level serde alias: the config types put
-/// `alias = "context-window"` (and friends) on fields inside
-/// `[[providers.<name>.models]]` entries, and an existing file may already spell
-/// that key with the alias. The overlay keeps the file's alias key (the struct
-/// does not model it, so it is "unmodeled") and adds the serialized canonical
-/// name, and serde's derived deserializer maps both names to one field and
-/// reports `duplicate field`; the whole config then stops parsing and every
-/// setting reverts to its default. Rather than let a merge produce that, the
-/// caller falls back to the plain serialized write.
+/// A preserving merge can assemble a file that jcode itself refuses, and the
+/// caller must never publish one: a merged document that does not parse makes
+/// every setting revert to its default. The alias hazard that originally
+/// motivated this is now handled directly (see [`field_aliases_for`] and
+/// [`merge_table`]), but the check stays as a general safety net for the next
+/// shape the overlay gets wrong.
 pub(crate) fn merged_document_parses(merged: &str) -> bool {
     toml::from_str::<Config>(merged).is_ok()
 }
@@ -942,6 +941,31 @@ pub(crate) fn merged_document_parses(merged: &str) -> bool {
 /// distinguish "deliberately emptied" from "not modeled".
 fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
     for (key, source_item) in source.iter() {
+        // Reconcile any alias spelling of `key` before writing the canonical
+        // name, or both would survive and serde would report `duplicate field`
+        // (see `merged_document_parses`). The canonical-to-alias map lives in
+        // `jcode-config-types`, next to the `#[serde(alias = ...)]` attributes
+        // it mirrors.
+        //
+        // When the canonical name is not there yet, the alias entry is replaced
+        // by the *serialized* one (so its shape matches every other save) and
+        // the user's comment rides along: on the key for a key-value line, on
+        // the table for a nested `[header]` - a comment in a key's decor would
+        // otherwise be rendered *inside* the header and break the document.
+        for alias in field_aliases_for(key) {
+            if target.get(key).is_some() {
+                target.remove(alias);
+            } else if let Some((alias_key, _)) = target.remove_entry(alias) {
+                let comment = alias_key.decor().clone();
+                let mut canonical_key = toml_edit::Key::new(key);
+                let mut item = source_item.clone();
+                match &mut item {
+                    toml_edit::Item::Table(table) => *table.decor_mut() = comment,
+                    _ => *canonical_key.decor_mut() = comment,
+                }
+                target.insert_formatted(&canonical_key, item);
+            }
+        }
         match target.get_mut(key) {
             Some(target_item) => merge_item(target_item, source_item),
             None => {
@@ -949,6 +973,15 @@ fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
             }
         }
     }
+}
+
+/// The alias spellings serde accepts for the canonical config key `canonical`.
+fn field_aliases_for(canonical: &str) -> &'static [&'static str] {
+    jcode_config_types::field_aliases()
+        .iter()
+        .find(|(name, _)| *name == canonical)
+        .map(|(_, aliases)| *aliases)
+        .unwrap_or(&[])
 }
 
 fn merge_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {

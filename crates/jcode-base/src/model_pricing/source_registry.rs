@@ -41,6 +41,9 @@ const SOURCES_SCHEMA_VERSION: u32 = 1;
 /// A price sheet that decides what money is spent does not get read without a
 /// bound; this is the same ceiling models.dev's own catalog comfortably fits in.
 const MAX_SHEET_BYTES: usize = 32 * 1024 * 1024;
+/// The bound above, exposed to the tests that build a body just past it.
+#[cfg(test)]
+pub(super) const MAX_SHEET_BYTES_TEST: usize = MAX_SHEET_BYTES;
 
 /// One fetched sheet, plus what it was fetched from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +75,14 @@ impl Default for SourcesCache {
 }
 
 static SOURCES_CACHE: Mutex<Option<(PathBuf, Arc<SourcesCache>)>> = Mutex::new(None);
+/// Serializes the read-modify-write of the on-disk/in-memory sources cache.
+///
+/// [`SOURCES_CACHE`]'s own lock only covers the memory assignment, and
+/// [`SOURCES_REFRESHING`] single-flights one source id, so without this two
+/// different sources' background refreshes could interleave and drop a sheet.
+/// It is deliberately a separate lock from [`SOURCES_CACHE`] because
+/// `save_catalog` takes both, in this order, and nothing takes them reversed.
+static SOURCES_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// Ids whose background refresh is already running, so a burst of lookups
 /// launches one fetch per source (the per-source shape of the single-flight
 /// flag the models.dev refresh uses).
@@ -220,7 +231,7 @@ fn covers_model(source: &PricingSource, model: &str) -> bool {
 fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
     let cache = load_cache();
     if let Some(catalog) = cache.sources.get(&source.id)
-        && catalog.location == source.location.describe()
+        && catalog.location == source.location.describe_for_log()
         && is_fresh(source, catalog)
     {
         return Some(cache);
@@ -234,7 +245,7 @@ fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
         SourceLocation::LocalFile(path) => match read_local_sheet(path) {
             Ok(providers) => {
                 clear_failure(&source.id);
-                save_catalog(&source.id, &source.location.describe(), providers);
+                save_catalog(&source.id, &source.location, providers);
                 Some(load_cache())
             }
             Err(error) => {
@@ -243,7 +254,7 @@ fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
                     "pricing source `{}` ({}) is unavailable: {error}; \
                      falling through to the next price source",
                     source.id,
-                    source.location.describe()
+                    source.location.describe_for_log()
                 ));
                 None
             }
@@ -310,10 +321,30 @@ fn clear_failure(id: &str) {
 }
 
 /// Read one sheet from a local path, enforcing the size ceiling.
-fn read_local_sheet(
+///
+/// The `stat` runs before the `open` on purpose: a `file://` path can name a
+/// FIFO, and opening one with no writer blocks a price lookup forever. A
+/// non-regular file is refused outright, and the size is checked from metadata
+/// and again while reading (`take`) so an oversized file is never fully
+/// buffered.
+pub(super) fn read_local_sheet(
     path: &std::path::Path,
 ) -> anyhow::Result<HashMap<String, HashMap<String, ModelPricingEntry>>> {
-    let body = std::fs::read_to_string(path)
+    use std::io::Read as _;
+
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| anyhow::anyhow!("cannot stat {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    if metadata.len() > MAX_SHEET_BYTES as u64 {
+        anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
+    }
+    let file = std::fs::File::open(path)
+        .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
+    let mut body = String::new();
+    file.take((MAX_SHEET_BYTES + 1) as u64)
+        .read_to_string(&mut body)
         .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
     parse_sheet(&body)
 }
@@ -369,11 +400,18 @@ fn sheet_provider<'a>(
     }
     // Last resort, and the only way a sheet keyed by an `openai-compatible:`
     // profile id the models.dev map does not know can be reached at all.
+    //
+    // Two keys can both match (`claude` and `claude-api` both map to models.dev
+    // `anthropic`), so this picks the lexicographically smallest instead of
+    // whichever `HashMap` iteration reaches first: the config layer's own
+    // provider map is a `BTreeMap`, and "which section prices the model" must
+    // not depend on hash order (the module doc's determinism promise).
     source
         .providers
-        .iter()
-        .find(|(key, _)| super::sources::provider_key_matches(key, source_key))
-        .map(|(_, models)| models)
+        .keys()
+        .filter(|key| super::sources::provider_key_matches(key, source_key))
+        .min()
+        .and_then(|key| source.providers.get(key))
 }
 
 /// Fill rate fields the winning sheet left unset from a lower-priority sheet of
@@ -412,13 +450,37 @@ fn load_cache() -> Arc<SourcesCache> {
 ///
 /// Only ever called with a successfully parsed sheet, so a failed refresh
 /// leaves the last good copy (and its timestamp) exactly as it was.
-fn save_catalog(
+///
+/// The whole read-modify-write runs under [`SOURCES_WRITE_LOCK`], and the
+/// in-memory `Arc` is the base when it is already for this path. Without that,
+/// two different sources' background refreshes could interleave
+/// (`read{}`, `read{}`, `mem={A}`, `mem={B}`, `write{A}`, `write{B}`) and drop
+/// one sheet from disk *and* memory; the next lookup would re-fetch it, and in
+/// the meantime a call could be priced from the wrong layer.
+///
+/// This is in-process only: a second process sharing the cache file can still
+/// race this one and win, and the loser's sheet is simply re-read on its next
+/// stale lookup, so the state converges rather than corrupts.
+pub(super) fn save_catalog(
     id: &str,
-    location: &str,
+    location: &SourceLocation,
     providers: HashMap<String, HashMap<String, ModelPricingEntry>>,
 ) {
     let path = cache_path();
-    let mut cache: SourcesCache = crate::storage::read_json(&path).unwrap_or_default();
+    let location = location.describe_for_log();
+    // Serialize the entire read-modify-write, not just the memory assignment.
+    let _guard = SOURCES_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut cache: SourcesCache = match SOURCES_CACHE.lock() {
+        Ok(memory) => match memory.as_ref() {
+            // The in-memory copy is the freshest in-process state for this path
+            // (every writer holds the same lock), so base the update on it.
+            Some((cached_path, cache)) if cached_path == &path => (**cache).clone(),
+            _ => crate::storage::read_json(&path).unwrap_or_default(),
+        },
+        Err(_) => crate::storage::read_json(&path).unwrap_or_default(),
+    };
     cache.schema_version = SOURCES_SCHEMA_VERSION;
     let changed = cache
         .sources
@@ -428,7 +490,7 @@ fn save_catalog(
     cache.sources.insert(
         id.to_string(),
         SourceCatalog {
-            location: location.to_string(),
+            location,
             fetched_at_unix_secs: catalog::now_unix_secs(),
             providers,
         },
@@ -442,6 +504,7 @@ fn save_catalog(
             "could not persist pricing sources cache: {error:#}"
         ));
     }
+    drop(_guard);
     if changed {
         // The rates a lookup would resolve just changed, and the memos
         // downstream (route catalog, TUI per-model price) decide freshness from
@@ -474,7 +537,8 @@ fn schedule_source_refresh(source: &PricingSource) {
     }
 
     let id = source.id.clone();
-    let location = source.location.describe();
+    let location = source.location.clone();
+    let log_location = source.location.describe_for_log();
     let work = move || async move {
         let result = fetch_remote(&url).await;
         match result {
@@ -485,7 +549,7 @@ fn schedule_source_refresh(source: &PricingSource) {
             Err(error) => {
                 note_failure(&id);
                 crate::logging::warn(&format!(
-                    "pricing source `{id}` ({url}) could not be refreshed: {error:#}; \
+                    "pricing source `{id}` ({log_location}) could not be refreshed: {error:#}; \
                      keeping the last successful copy"
                 ));
             }
@@ -508,10 +572,39 @@ fn schedule_source_refresh(source: &PricingSource) {
     }
 }
 
-async fn fetch_remote(
+/// How many redirects a price-sheet fetch will follow. Small on purpose: a
+/// sheet URL is configured, not discovered, so a long redirect chain is either
+/// a mistake or an attempt to move the fetch somewhere the config layer did not
+/// approve.
+const MAX_SHEET_REDIRECTS: usize = 3;
+
+/// The client price sheets are fetched with: same transport as the shared
+/// provider client, but with a bounded redirect policy so the FINAL url can be
+/// checked to still be `https`.
+fn sheet_http_client() -> reqwest::Client {
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(crate::provider::JCODE_USER_AGENT)
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::limited(MAX_SHEET_REDIRECTS))
+                .build()
+                .unwrap_or_else(|_| {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::limited(MAX_SHEET_REDIRECTS))
+                        .build()
+                        .unwrap_or_default()
+                })
+        })
+        .clone()
+}
+
+pub(super) async fn fetch_remote(
     url: &str,
 ) -> anyhow::Result<HashMap<String, HashMap<String, ModelPricingEntry>>> {
-    let client = crate::provider::shared_http_client();
+    let client = sheet_http_client();
     let response = client
         .get(url)
         .header("Accept", "application/json")
@@ -521,8 +614,35 @@ async fn fetch_remote(
     if !response.status().is_success() {
         anyhow::bail!("HTTP {}", response.status());
     }
-    let body = response.text().await?;
+    // The config layer rejects `http://`, but reqwest follows redirects, so a
+    // 302 could smuggle the sheet back onto cleartext transport. A price sheet
+    // decides what money is spent, so the FINAL url must still be https.
+    if response.url().scheme() != "https" {
+        anyhow::bail!(
+            "refusing a price sheet redirected to `{}`: only https is allowed",
+            response.url()
+        );
+    }
+    let body = read_body_limited(response).await?;
     parse_sheet(&body)
+}
+
+/// Read a response body with [`MAX_SHEET_BYTES`] enforced while streaming, so an
+/// oversized body is rejected without being fully buffered.
+pub(super) async fn read_body_limited(mut response: reqwest::Response) -> anyhow::Result<String> {
+    if let Some(length) = response.content_length()
+        && length > MAX_SHEET_BYTES as u64
+    {
+        anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len() + chunk.len() > MAX_SHEET_BYTES {
+            anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|error| anyhow::anyhow!("sheet is not valid UTF-8: {error}"))
 }
 
 #[cfg(test)]
@@ -556,6 +676,13 @@ pub(crate) fn save_test_source(
     if let Err(error) = crate::storage::write_json(&path, cache.as_ref()) {
         panic!("could not persist test sources cache: {error:#}");
     }
+}
+
+#[cfg(test)]
+pub(crate) fn cached_source_ids_for_tests() -> Vec<String> {
+    let mut ids: Vec<String> = load_cache().sources.keys().cloned().collect();
+    ids.sort();
+    ids
 }
 
 #[cfg(test)]

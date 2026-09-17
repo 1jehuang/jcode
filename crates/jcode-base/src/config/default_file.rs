@@ -304,15 +304,14 @@ prompt_entry_animation = true
 # [pricing.providers."deepseek".models."deepseek-v4-pro"]
 # cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
 # tariffs = { peak = { multiplier = 2.0 } }
+# effective_until = "2026-12-31T23:59:59Z"
+# on_rule_expiry = "fallback"
 #
 # [[pricing.providers."deepseek".models."deepseek-v4-pro".schedule]]
 # tariff = "peak"
 # utc_offset_minutes = 0
 # weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 # windows = [["01:00", "04:00"], ["06:00", "10:00"]]
-#
-# effective_until = "2026-12-31T23:59:59Z"
-# on_rule_expiry = "fallback"
 #
 # [[pricing.providers."deepseek".models."deepseek-v4-pro".context_tiers]]
 # min_input_tokens = 200_000
@@ -901,6 +900,42 @@ mod tests {
                 .any(|source| source.id == "corp-mirror"),
             "the example should demonstrate an extra price sheet, got {:?}",
             parsed.pricing.sources
+        );
+
+        // Field placement matters: `effective_until`/`on_rule_expiry` must land
+        // on the *model rule*, not be swallowed by the `[[...schedule]]` entry
+        // that follows them. `ScheduleRuleFile` has no `deny_unknown_fields`, so
+        // putting these lines after the schedule header silently drops them
+        // once the example is uncommented; this asserts WHERE they land, on
+        // both the typed parse and the raw TOML.
+        let model_rule = parsed
+            .pricing
+            .providers
+            .get("deepseek")
+            .and_then(|provider| provider.models.get("deepseek-v4-pro"))
+            .expect("the example configures the deepseek-v4-pro model rule");
+        assert_eq!(
+            model_rule.effective_until.as_deref(),
+            Some("2026-12-31T23:59:59Z"),
+            "effective_until must land on the model rule, got {:?}",
+            model_rule.effective_until
+        );
+        assert_eq!(
+            model_rule.on_rule_expiry,
+            Some(crate::config::OnRuleExpiry::Fallback),
+            "on_rule_expiry must land on the model rule, got {:?}",
+            model_rule.on_rule_expiry
+        );
+
+        let raw: toml::Value =
+            toml::from_str(&example).expect("uncommented [pricing] example must parse");
+        let models = &raw["pricing"]["providers"]["deepseek"]["models"]["deepseek-v4-pro"];
+        let schedule = &models["schedule"]
+            .as_array()
+            .expect("the example demonstrates a schedule array")[0];
+        assert!(
+            schedule.get("effective_until").is_none() && schedule.get("on_rule_expiry").is_none(),
+            "the schedule entry must not carry the rule-level fields, got {schedule:?}"
         );
     }
 }

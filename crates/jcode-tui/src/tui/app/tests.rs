@@ -59,6 +59,7 @@ include!("tests/prompt_history_cross_session.rs");
 include!("tests/pricing_call_pin.rs");
 include!("tests/config_parse_notice.rs");
 include!("tests/pricing_config_reload.rs");
+include!("tests/pricing_sheet_report.rs");
 include!("tests/ssh_remote.rs");
 include!("tests/skill_startup.rs");
 #[test]

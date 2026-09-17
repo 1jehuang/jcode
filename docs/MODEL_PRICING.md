@@ -286,6 +286,23 @@ An invalid `[[pricing.sources]]` entry is reported like any other invalid
 display say `invalid [pricing]: pricing.sources[0].url`, and a line naming the
 problem goes to the log.
 
+**A sheet entry is all-or-nothing, unlike your own card.** A hand-written
+`[pricing.providers]` rule may be partial, and the missing fields fall through to
+the next layer of the same currency. A sheet entry may not: it must state both
+`cost.input` and `cost.output`, and an entry that states only one is dropped
+entirely (the source simply does not price that model, and the next layer does).
+That restricts how much of a sheet a broken field can affect, at the cost of
+having to write both directions.
+
+**The sheet URL is recorded, redacted.** jcode persists what it fetched from in
+`~/.jcode/cache/pricing_sources.json`, and writes the URL as `scheme://host/path`
+with the query string and any userinfo removed, so a token in the query is never
+logged or saved. The schema has no header field yet, so a mirror that needs
+authentication has to put the credential in the URL — which means the credential
+still lives in your `config.toml` in the clear. Prefer a private network or an
+unauthenticated path today, and move the secret into a header field once one
+exists.
+
 Two things a source does **not** do: it cannot change the cache-write premium
 billing applies for Anthropic models (that stays a hand-written card's
 privilege), and it cannot override a field your own rule wrote.
@@ -296,6 +313,20 @@ The rate card and its tariff are resolved once, at the instant of a call's first
 usage snapshot, and pinned to that call. A call that starts off-peak and finishes
 during peak bills entirely at the rate it started with, and a config edit
 mid-call does not re-price a call in flight.
+
+### Rollback: the `*_usd` mirrors
+
+`~/.jcode/provider_activity.json` is shared with older jcode binaries, which only
+know one USD figure per window. Every spend window therefore keeps a `*_usd`
+mirror beside its per-currency buckets: the **naive sum** of that window's
+amounts, written only so an older reader sees a total instead of zero when it
+rewrites the file. It is deliberately *not* a converted total. With a single
+currency in the window the mirror is exact; with mixed currencies it is not, so a
+rollback re-labels the window as USD (`{CNY 30, USD 5}` is read back by the older
+binary as one `USD 35` bucket). This build never treats the mirror as USD while
+the buckets are present — the buckets are the source of truth — and this trade-off
+stays: a reader that only understands USD cannot be handed a correct conversion it
+has no rates for.
 
 ## TOML gotchas
 

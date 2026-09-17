@@ -8,9 +8,12 @@
 use super::ModelCost;
 use super::entry::ModelPricingEntry;
 use super::source_registry::{
-    cached_fetched_at_for_tests, clear_sources_cache_for_tests, forget_failures_for_tests,
-    in_backoff_for_tests, source_card,
+    MAX_SHEET_BYTES_TEST as MAX_SHEET_BYTES, cached_fetched_at_for_tests,
+    cached_source_ids_for_tests, clear_sources_cache_for_tests, fetch_remote,
+    forget_failures_for_tests, in_backoff_for_tests, read_body_limited, read_local_sheet,
+    save_catalog, source_card,
 };
+use crate::config::SourceLocation;
 use crate::model_pricing::{clear_memory_cache_for_tests, save_test_cache, save_test_source};
 use jcode_provider_core::Currency;
 use std::ffi::OsString;
@@ -1064,5 +1067,322 @@ url = "file://{}"
     assert_eq!(
         priced_by("deepseek", "deepseek-v4-pro").as_deref(),
         Some("missing")
+    );
+}
+
+/// Two provider keys in one sheet can both match the caller's identity
+/// (`claude` and `claude-api` both map to models.dev `anthropic`, which the
+/// sheet does not key), so the last-resort match has to be deterministic. A
+/// fresh `Env` per iteration gives the sheet's provider map a fresh `HashMap`
+/// seed, so hash-order dependence would show up as disagreement between
+/// iterations; the documented choice is the lexicographically smallest key.
+#[test]
+fn two_matching_sheet_provider_keys_always_pick_the_same_section() {
+    for iteration in 0..12 {
+        let env = Env::new();
+        let url = env.sheet_url(
+            "mirror.json",
+            r#"{"claude":{"models":{"claude-fable-5":{"cost":{"input":1.0,"output":2.0}}}},
+                "claude-api":{"models":{"claude-fable-5":{"cost":{"input":9.0,"output":9.0}}}}}"#,
+        );
+        env.write_config(&format!(
+            r#"
+[[pricing.sources]]
+id = "mirror"
+url = "{url}"
+"#
+        ));
+        let hit = source_card("claude:api-key", "claude-fable-5", SystemTime::now())
+            .expect("a sheet prices the pair");
+        assert_eq!(
+            hit.entry.cost.input,
+            Some(1.0),
+            "iteration {iteration}: the lexicographically smallest matching key (`claude`) must win"
+        );
+    }
+}
+
+/// F1's field-level fallback, one layer down: a USD `[pricing.providers]` card
+/// that leaves a field unwritten takes the `[[pricing.sources]]` sheet's value
+/// before models.dev's, because a sheet outranks models.dev.
+#[test]
+fn a_partial_usd_config_card_is_filled_from_a_sheet_before_models_dev() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "mirror.json",
+        &sheet_body("deepseek", "deepseek-v4-pro", 3.0, 7.0),
+    );
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+id = "mirror"
+url = "{url}"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 1.5
+"#
+    ));
+
+    let (entry, currency) =
+        crate::model_pricing::effective_entry("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("the card prices the model");
+
+    assert_eq!(entry.cost.input, Some(1.5), "the written field still wins");
+    assert_eq!(
+        entry.cost.output,
+        Some(7.0),
+        "the sheet fills the blank before models.dev's 1.98"
+    );
+    assert!(currency.is_usd());
+}
+
+/// The sheet layer must not re-enter itself through the new field-level
+/// fallback: a sheet's own card takes models.dev's numbers, never another
+/// sheet's.
+#[test]
+fn a_sheet_card_fills_from_models_dev_and_not_another_sheet() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "mirror.json",
+        r#"{"deepseek":{"models":{"deepseek-v4-pro":{"cost":{"input":3.0,"output":7.0}}}}}"#,
+    );
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+id = "mirror"
+url = "{url}"
+"#
+    ));
+
+    let card = crate::model_pricing::source_card_at_size(
+        "deepseek",
+        "deepseek-v4-pro",
+        SystemTime::now(),
+        None,
+    )
+    .expect("the sheet prices the model");
+    assert_eq!(card.source_id, "mirror");
+    assert_eq!(card.entry.cost.input, Some(3.0));
+    assert_eq!(card.entry.cost.output, Some(7.0));
+}
+
+/// A one-model sheet body for the cache tests below.
+fn providers_for(
+    model: &str,
+) -> std::collections::HashMap<String, std::collections::HashMap<String, ModelPricingEntry>> {
+    let mut models = std::collections::HashMap::new();
+    models.insert(model.to_string(), cost(1.0, 2.0));
+    std::collections::HashMap::from([("deepseek".to_string(), models)])
+}
+
+fn cache_file(env: &Env) -> std::path::PathBuf {
+    env.dir.path().join("cache").join("pricing_sources.json")
+}
+
+/// Two different sources' saves must not lose each other. The in-memory `Arc`
+/// is the base when it matches the path, so a save that finds the disk file
+/// cleared (a second process rewriting it, say) still keeps the sheet this
+/// process already holds instead of dropping it.
+#[test]
+fn a_save_bases_on_memory_and_never_drops_the_other_source() {
+    let env = Env::new();
+    let location = SourceLocation::LocalFile(env.dir.path().join("sheet.json"));
+    save_catalog("a", &location, providers_for("m-a"));
+    // The disk file disappears under us; the process still holds `a`.
+    std::fs::remove_file(cache_file(&env)).expect("remove cache file");
+    save_catalog("b", &location, providers_for("m-b"));
+
+    assert_eq!(
+        cached_source_ids_for_tests(),
+        vec!["a".to_string(), "b".to_string()],
+        "the in-memory view must keep both sources"
+    );
+    let raw = std::fs::read_to_string(cache_file(&env)).expect("cache file written again");
+    assert!(raw.contains("\"a\"") && raw.contains("\"b\""), "{raw}");
+}
+
+/// The threaded shape of the same guarantee: a burst of saves of different
+/// sources all survive in memory and on disk.
+#[test]
+fn concurrent_saves_of_different_sources_all_survive() {
+    let env = Env::new();
+    let location = SourceLocation::LocalFile(env.dir.path().join("sheet.json"));
+    let handles: Vec<_> = (0..12)
+        .map(|index| {
+            let id = format!("s{index}");
+            let location = location.clone();
+            std::thread::spawn(move || save_catalog(&id, &location, providers_for("m")))
+        })
+        .collect();
+    for handle in handles {
+        handle.join().expect("save thread");
+    }
+
+    let ids = cached_source_ids_for_tests();
+    let raw = std::fs::read_to_string(cache_file(&env)).expect("cache file");
+    for index in 0..12 {
+        let id = format!("s{index}");
+        assert!(ids.contains(&id), "memory lost {id}: {ids:?}");
+        assert!(raw.contains(&format!("\"{id}\"")), "disk lost {id}: {raw}");
+    }
+}
+
+/// An oversized local sheet is refused from its metadata, before `open` and
+/// before any bytes are buffered. The trap byte past the ceiling means a
+/// full read would fail as invalid UTF-8 instead: the size error proves the
+/// stat precheck ran.
+#[test]
+fn an_oversized_local_sheet_is_refused_before_it_is_buffered() {
+    let env = Env::new();
+    let path = env.dir.path().join("huge.json");
+    let mut bytes = vec![b' '; MAX_SHEET_BYTES + 1];
+    bytes[MAX_SHEET_BYTES] = 0xFF;
+    std::fs::write(&path, &bytes).expect("write oversized sheet");
+
+    let error = read_local_sheet(&path).expect_err("oversized sheet is refused");
+    assert!(
+        error.to_string().contains("larger than"),
+        "the size precheck must fire, got: {error}"
+    );
+}
+
+/// A `file://` path that names something other than a regular file is refused
+/// without being opened: opening a FIFO with no writer would block a lookup
+/// forever. A directory is the easily-created stand-in.
+#[test]
+fn a_non_regular_sheet_path_is_refused_without_being_opened() {
+    let env = Env::new();
+    let path = env.dir.path().join("sheet-dir");
+    std::fs::create_dir(&path).expect("create dir");
+
+    let error = read_local_sheet(&path).expect_err("a directory is not a sheet");
+    assert!(
+        error.to_string().contains("not a regular file"),
+        "the stat precheck must reject it, got: {error}"
+    );
+}
+
+/// The remote shape: a body whose `Content-Length` is past the ceiling is
+/// refused from the header, so the body is never read into memory. A tiny local
+/// HTTP fixture stands in for the network.
+#[test]
+fn an_oversized_remote_body_is_refused_without_being_buffered() {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut request = [0u8; 1024];
+        let _ = stream.read(&mut request);
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            MAX_SHEET_BYTES + 10
+        );
+        let _ = stream.write_all(header.as_bytes());
+        let _ = stream.write_all(b"{}");
+        let _ = stream.flush();
+    });
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let result = runtime.block_on(async {
+        let response = reqwest::Client::new()
+            .get(format!("http://{addr}/sheet.json"))
+            .send()
+            .await
+            .expect("response");
+        read_body_limited(response).await
+    });
+    let error = result.expect_err("the content-length precheck must refuse it");
+    assert!(
+        error.to_string().contains("larger than"),
+        "expected the size error, got: {error}"
+    );
+    let _ = handle.join();
+}
+
+/// A redirect must not smuggle the sheet back onto cleartext transport: the
+/// config layer rejects `http://`, so the FINAL url must still be `https`. The
+/// fixture serves both the 302 and the cleartext target, so reqwest completes
+/// the redirect and the scheme check is what refuses it.
+#[test]
+fn a_redirected_sheet_url_must_still_be_https() {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        for step in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            let response = if step == 0 {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{addr}/cleartext.json\r\nContent-Length: 0\r\n\r\n"
+                )
+            } else {
+                let body = r#"{"deepseek":{"models":{"m":{"cost":{"input":1.0,"output":2.0}}}}}"#;
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let result = runtime.block_on(fetch_remote(&format!("http://{addr}/sheet.json")));
+    let error = result.expect_err("a cleartext redirect must be refused");
+    assert!(
+        error.to_string().contains("only https"),
+        "expected the https refusal, got: {error}"
+    );
+    let _ = handle.join();
+}
+
+/// A sheet URL is persisted and logged in a redacted form: no query (where a
+/// GitLab token lives, since the schema has no header field) and no userinfo.
+#[test]
+fn a_sheet_url_with_a_token_is_redacted_in_the_cache_file() {
+    let env = Env::new();
+    let location = SourceLocation::Remote(
+        "https://gitlab.internal/api/v4/projects/1/repository/files/p.json/raw\
+         ?ref=main&private_token=glpat-SUPERSECRET"
+            .to_string(),
+    );
+
+    let redacted = location.describe_for_log();
+    assert_eq!(
+        redacted,
+        "https://gitlab.internal/api/v4/projects/1/repository/files/p.json/raw"
+    );
+    assert!(!redacted.contains("glpat"), "no token in {redacted}");
+    assert!(
+        !redacted.contains("private_token"),
+        "no query in {redacted}"
+    );
+    assert_eq!(
+        SourceLocation::Remote("https://user:pass@host/x.json?a=1".to_string()).describe_for_log(),
+        "https://host/x.json",
+        "userinfo is dropped too"
+    );
+
+    save_catalog("mirror", &location, providers_for("m"));
+    let raw = std::fs::read_to_string(cache_file(&env)).expect("cache file");
+    assert!(
+        !raw.contains("glpat"),
+        "the token must not be persisted: {raw}"
+    );
+    assert!(
+        !raw.contains("private_token"),
+        "nor the query string: {raw}"
+    );
+    assert!(
+        raw.contains("gitlab.internal"),
+        "the host still names it: {raw}"
     );
 }

@@ -182,6 +182,22 @@ fn rate_to_micros(rate: f64) -> u64 {
     (rate * 1_000_000.0).round() as u64
 }
 
+/// What the hand-written `[pricing.providers]` layer says about a route.
+enum ConfigPriceEstimate {
+    /// A config card prices the route.
+    Priced(RouteCheapnessEstimate),
+    /// The user's own rule claims the pair but refuses to price it (an expired
+    /// `on_rule_expiry = "no_price"` rule, or a card whose currency cannot be
+    /// reconciled with the next layer). The derived layers must not substitute
+    /// an estimate here: the picker would then show a models.dev/tables figure
+    /// while `/usage` and the widget correctly show "unknown" (spec 4.4).
+    Refuse,
+    /// No config card claims the pair (or its rule is out of effect with
+    /// `fallback`, which sends the call to the next layer). Ask the derived
+    /// layers.
+    Absent,
+}
+
 /// Build a route estimate straight from a hand-written `[pricing.providers]`
 /// card. The card is the authoritative source (spec 4.4), so this runs before
 /// the curated static tables, OpenRouter's caches, and models.dev.
@@ -190,25 +206,38 @@ fn rate_to_micros(rate: f64) -> u64 {
 /// below are the peak/off-peak tier in effect at that instant. Route-catalog
 /// callers pass the wall clock; the billing call sites pass the instant of the
 /// API call they are pricing.
+///
+/// The answer is three-valued, not an `Option`: asking
+/// [`crate::model_pricing::config_call_rates`] (the same source of truth the
+/// billing path uses) is what keeps "the user's rule cannot price this" apart
+/// from "no rule claims this", so the picker cannot show an estimate for a call
+/// the widget refuses to price.
 fn config_price_estimate(
     source_key: &str,
     model: &str,
     at: std::time::SystemTime,
-) -> Option<RouteCheapnessEstimate> {
-    let (entry, currency) = crate::model_pricing::configured_entry(source_key, model, at)?;
-    let input = entry.cost.input?;
-    let output = entry.cost.output?;
-    Some(
-        RouteCheapnessEstimate::metered(
-            RouteCostSource::ConfigPriceSheet,
-            RouteCostConfidence::Exact,
-            rate_to_micros(input),
-            rate_to_micros(output),
-            entry.cost.cache_read.map(rate_to_micros),
-            Some(format!("config [pricing.providers] card in {currency}")),
-        )
-        .with_currency(currency),
-    )
+) -> ConfigPriceEstimate {
+    match crate::model_pricing::config_call_rates(source_key, model, at, None) {
+        crate::model_pricing::ConfigCallRates::Priced(card) => ConfigPriceEstimate::Priced(
+            RouteCheapnessEstimate::metered(
+                RouteCostSource::ConfigPriceSheet,
+                RouteCostConfidence::Exact,
+                rate_to_micros(card.input_per_mtok),
+                rate_to_micros(card.output_per_mtok),
+                card.cache_read_per_mtok.map(rate_to_micros),
+                Some(format!(
+                    "config [pricing.providers] card in {}",
+                    card.currency
+                )),
+            )
+            .with_currency(card.currency),
+        ),
+        crate::model_pricing::ConfigCallRates::ConfiguredWithoutPrice => {
+            ConfigPriceEstimate::Refuse
+        }
+        crate::model_pricing::ConfigCallRates::Absent
+        | crate::model_pricing::ConfigCallRates::OutOfEffect(_) => ConfigPriceEstimate::Absent,
+    }
 }
 
 /// Build a route estimate from an extra `[[pricing.sources]]` sheet.
@@ -292,9 +321,15 @@ pub fn metered_pricing_for_source_at(
     at: std::time::SystemTime,
 ) -> Option<RouteCheapnessEstimate> {
     // 1. Config is authoritative: a hand-written card outranks every derived
-    //    source, including the curated tables below.
-    if let Some(estimate) = config_price_estimate(source_key, model, at) {
-        return Some(estimate);
+    //    source, including the curated tables below. A card that claims the
+    //    pair but cannot price it (`on_rule_expiry = "no_price"`, or a currency
+    //    that cannot be reconciled with the next layer) refuses the route
+    //    outright - the derived layers must not substitute an estimate the
+    //    billing path would refuse to charge (spec 4.4).
+    match config_price_estimate(source_key, model, at) {
+        ConfigPriceEstimate::Priced(estimate) => return Some(estimate),
+        ConfigPriceEstimate::Refuse => return None,
+        ConfigPriceEstimate::Absent => {}
     }
 
     derived_pricing_for_source_at_size(source_key, model, service_tier, at, None)
@@ -449,10 +484,13 @@ pub(crate) fn cheapness_for_route(
                 model.to_string()
             };
             // Config is authoritative here too, ahead of OpenRouter's own
-            // per-endpoint caches.
-            config_price_estimate("openrouter", &model_id, std::time::SystemTime::now())
-                .or_else(|| openrouter_route_pricing(&model_id, provider))
-                .or_else(|| metered_pricing_for_source("openrouter", &model_id))
+            // per-endpoint caches. A `no_price` rule refuses the route outright.
+            match config_price_estimate("openrouter", &model_id, std::time::SystemTime::now()) {
+                ConfigPriceEstimate::Priced(estimate) => Some(estimate),
+                ConfigPriceEstimate::Refuse => None,
+                ConfigPriceEstimate::Absent => openrouter_route_pricing(&model_id, provider)
+                    .or_else(|| metered_pricing_for_source("openrouter", &model_id)),
+            }
         }
         _ => None,
     }
