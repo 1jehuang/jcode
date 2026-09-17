@@ -76,11 +76,7 @@ pub(super) async fn apply_pre_request_transform<'a>(
             "Hook 'pre_request' returned system_static: the static prefix is core-owned, ignoring",
         );
     }
-    let new_dynamic = if out.system_dynamic.is_empty() {
-        system_dynamic.to_string()
-    } else {
-        out.system_dynamic
-    };
+    let new_dynamic = out.system_dynamic.unwrap_or_else(|| system_dynamic.to_string());
 
     let messages: Vec<Message> = match serde_json::from_value(messages_value.clone()) {
         Ok(messages) => messages,
@@ -235,5 +231,102 @@ mod tests {
         let out = apply_pre_request_transform("ses_x", None, &messages, &[], "s", "d").await;
         assert!(!out.rewritten);
         assert_eq!(out.messages.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chained_partial_result_merges_instead_of_replacing() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let seen = temp.path().join("second_stdin.json");
+        // First hook appends a message but returns messages only; the second
+        // must still see tools and system keys (merge), not just what the
+        // first repeated.
+        let first = write_script(
+            temp.path(),
+            "first.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'tagged'}]})\njson.dump({'messages': req['messages']},sys.stdout)\n",
+        );
+        let second = write_script(
+            temp.path(),
+            "second.py",
+            &format!(
+                "#!/usr/bin/env python3\nimport json,sys\nraw=sys.stdin.read()\nopen('{}','w').write(raw)\nsys.stdout.write(raw)\n",
+                seen.display()
+            ),
+        );
+        let chain = serde_json::to_string(&vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize chain");
+        let _env = HookEnv::set(Some(&chain));
+        let messages = vec![Message::user("hi")];
+        let out = apply_pre_request_transform("ses_x", None, &messages, &[], "s", "d").await;
+        assert!(out.rewritten);
+        assert_eq!(out.messages.len(), 2);
+        let recorded: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&seen).expect("second hook must record stdin"),
+        )
+        .expect("valid json");
+        assert!(recorded.get("tools").is_some(), "merge keeps tools");
+        assert!(
+            recorded.get("system_dynamic").is_some(),
+            "merge keeps system_dynamic"
+        );
+        assert_eq!(out.system_dynamic, "d");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_empty_dynamic_clears_context() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let script = write_script(
+            temp.path(),
+            "clear.py",
+            "#!/usr/bin/env python3\nimport json,sys\njson.dump({'system_dynamic': ''},sys.stdout)\n",
+        );
+        let _env = HookEnv::set(Some(&script.to_string_lossy()));
+        let messages = vec![Message::user("hi")];
+        let out = apply_pre_request_transform("ses_x", None, &messages, &[], "s", "d").await;
+        assert!(out.rewritten);
+        assert_eq!(out.system_dynamic, "");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blocked_stdin_and_runaway_stdout_fail_open_fast() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Never reads stdin: the write must hit the deadline, not the pipe.
+        let stuck = write_script(temp.path(), "stuck.sh", "#!/bin/sh\nsleep 30\n");
+        // Emits far over the 64 MiB cap: killed at the limit, not buffered.
+        let gusher = write_script(
+            temp.path(),
+            "gusher.sh",
+            "#!/bin/sh\nhead -c 70000000 /dev/zero | tr '\\0' 'x'\n",
+        );
+        let messages = vec![Message::user("hi")];
+        let start = std::time::Instant::now();
+        let _env = HookEnv::set(Some(&stuck.to_string_lossy()));
+        // NOTE: HookEnv pins the timeout to 5000ms; re-apply the short deadline after.
+        crate::env::set_var("JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS", "300");
+        crate::config::invalidate_config_cache();
+        // Payload over the 64 KiB pipe buffer so the write genuinely blocks
+        // against the non-reading child.
+        let mut bulky = messages.clone();
+        for _ in 0..64 {
+            bulky.push(Message::user(&"y".repeat(4096)));
+        }
+        let out = apply_pre_request_transform("ses_x", None, &bulky, &[], "s", "d").await;
+        assert!(!out.rewritten, "stuck hook must fail open");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(25),
+            "blocked stdin must not outlive the deadline"
+        );
+        drop(_env);
+        let _env2 = HookEnv::set(Some(&gusher.to_string_lossy()));
+        crate::env::set_var("JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS", "30000");
+        crate::config::invalidate_config_cache();
+        let out = apply_pre_request_transform("ses_x", None, &messages, &[], "s", "d").await;
+        assert!(!out.rewritten, "runaway stdout must fail open");
     }
 }

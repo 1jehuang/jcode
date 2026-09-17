@@ -228,15 +228,26 @@ impl Agent {
             let send_messages = stamped.as_deref().unwrap_or(&messages_with_memory);
             // Same pre_request stage as the blocking turn loop: last-chance
             // rewrite, cache re-seeded when the wire array changes.
-            let outgoing = super::pre_request::apply_pre_request_transform(
-                &self.session.id,
-                self.session.working_dir.as_deref(),
-                send_messages,
-                &tools,
-                &split_prompt.static_part,
-                &split_prompt.dynamic_part,
-            )
-            .await;
+            // Raced against shutdown: a slow hook must not delay turn
+            // cancellation until its timeout. Dropping the future kills the
+            // hook child (kill_on_drop), and the turn stops here before any
+            // provider call is issued.
+            let outgoing = tokio::select! {
+                out = super::pre_request::apply_pre_request_transform(
+                    &self.session.id,
+                    self.session.working_dir.as_deref(),
+                    send_messages,
+                    &tools,
+                    &split_prompt.static_part,
+                    &split_prompt.dynamic_part,
+                ) => out,
+                _ = self.graceful_shutdown.notified() => {
+                    logging::info(
+                        "Graceful shutdown/cancel during pre_request transform - stopping turn",
+                    );
+                    return Ok(());
+                }
+            };
             if outgoing.rewritten {
                 logging::info(&format!(
                     "pre_request hook rewrote the provider-bound request ({} messages)",

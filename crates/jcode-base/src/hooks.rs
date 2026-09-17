@@ -380,6 +380,33 @@ async fn run_pre_tool_command(
     }
 }
 
+/// Merge a hook's partial result into the running request: object keys in
+/// the patch win, everything else is preserved. A non-object or invalid
+/// patch is ignored (fail-open keeps the previous command's output).
+fn merge_request_json(current: &str, patch: &str, command_line: &str) -> String {
+    let mut base: serde_json::Value = match serde_json::from_str(current) {
+        Ok(value) => value,
+        Err(_) => return current.to_string(),
+    };
+    let overlay: serde_json::Value = match serde_json::from_str(patch) {
+        Ok(value) => value,
+        Err(error) => {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' produced invalid JSON ({error}); keeping previous output"
+            ));
+            return current.to_string();
+        }
+    };
+    if let (Some(base_map), Some(patch_map)) = (base.as_object_mut(), overlay.as_object()) {
+        for (key, value) in patch_map {
+            base_map.insert(key.clone(), value.clone());
+        }
+        base.to_string()
+    } else {
+        current.to_string()
+    }
+}
+
 /// A rewritten provider-bound request returned by the `pre_request` hook.
 #[derive(Debug, Clone)]
 pub struct TransformedRequest {
@@ -389,7 +416,10 @@ pub struct TransformedRequest {
     pub messages: serde_json::Value,
     pub tools: serde_json::Value,
     pub system_static: String,
-    pub system_dynamic: String,
+    /// Present (even empty) means "apply", so a hook can intentionally
+    /// clear dynamic context with `"system_dynamic":""`. Absent (None)
+    /// keeps the original value.
+    pub system_dynamic: Option<String>,
     /// True when stdout carried a usable rewrite. False means "send the
     /// original request" (no hook, empty stdout, or any fail-open path).
     pub changed: bool,
@@ -420,7 +450,7 @@ pub async fn run_pre_request_transform(
         messages: serde_json::Value::Null,
         tools: serde_json::Value::Null,
         system_static: String::new(),
-        system_dynamic: String::new(),
+        system_dynamic: None,
         changed: false,
     };
     let command_lines = hook_commands("pre_request");
@@ -435,15 +465,23 @@ pub async fn run_pre_request_transform(
 
     // Chain commands in order: each sees the previous command's output, so
     // composable transforms (tag, then drop, then watermark) just work.
+    // Each successful result merges into the running request: a partial
+    // result (e.g. only `messages`) overrides just those keys instead of
+    // discarding everything the hook did not repeat.
     let mut current_json = request_json.to_string();
     let mut changed = false;
     for command_line in command_lines {
         // None keeps the input: empty stdout means "unchanged", and any
-        // fail-open outcome preserves the previous command's output.
+        // fail-open outcome preserves the previous command's output. A
+        // result that merges to identical bytes (echo, garbage) is also
+        // unchanged: only real differences flip the flag.
         if let Some(rewritten) = run_pre_request_command(&command_line, &event, &current_json).await
         {
-            current_json = rewritten;
-            changed = true;
+            let merged = merge_request_json(&current_json, &rewritten, &command_line);
+            if merged != current_json {
+                current_json = merged;
+                changed = true;
+            }
         }
     }
     if !changed {
@@ -467,8 +505,7 @@ pub async fn run_pre_request_transform(
             system_dynamic: value
                 .get("system_dynamic")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+                .map(str::to_string),
             changed: true,
         },
         Err(error) => {
@@ -513,49 +550,92 @@ async fn run_pre_request_command(
         }
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(request_json.as_bytes()).await;
-        // Closing stdin signals EOF to hooks that read the whole input.
-        drop(stdin);
-    }
-
+    // One deadline covers stdin, stdout, and wait: a hook that never reads
+    // stdin can no longer wedge the write before the timeout starts, and
+    // stdout is capped while reading so a runaway hook is killed at the
+    // limit instead of buffered without bound. Every exit fails open.
     let timeout = std::time::Duration::from_millis(
         crate::config::config().hooks.pre_request_timeout_ms.max(1),
     );
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            crate::logging::warn(&format!(
-                "Hook 'pre_request' command '{command_line}' failed: {error} (sending original request)"
-            ));
-            return None;
-        }
-        Err(_elapsed) => {
+    let deadline = tokio::time::Instant::now() + timeout;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let write_result = tokio::time::timeout_at(deadline, async {
+            stdin.write_all(request_json.as_bytes()).await?;
+            // Closing stdin signals EOF to hooks that read the whole input.
+            stdin.shutdown().await
+        })
+        .await;
+        if write_result.is_err() {
+            let _ = child.kill().await;
             crate::logging::warn(&format!(
                 "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
                 timeout.as_millis()
             ));
             return None;
         }
-    };
-
-    if !output.status.success() {
-        crate::logging::warn(&format!(
-            "Hook 'pre_request' command '{command_line}' exited with {:?} (sending original request)",
-            output.status.code()
-        ));
-        return None;
+        if let Ok(Err(error)) = write_result {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' stdin write failed: {error} (sending original request)"
+            ));
+            return None;
+        }
     }
-    if output.stdout.len() > TRANSFORM_STDOUT_LIMIT {
+
+    let mut capped: Vec<u8> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        use tokio::io::AsyncReadExt;
+        let mut limited = stdout.take((TRANSFORM_STDOUT_LIMIT + 1) as u64);
+        if tokio::time::timeout_at(deadline, limited.read_to_end(&mut capped))
+            .await
+            .is_err()
+        {
+            let _ = child.kill().await;
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    }
+    // Over-limit output closed the pipe early, so the child typically dies
+    // of SIGPIPE; its exit status is meaningless. Either way the outcome is
+    // the same fail-open None, so skip the status check on that path.
+    let over_limit = capped.len() > TRANSFORM_STDOUT_LIMIT;
+    if !over_limit {
+        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                crate::logging::warn(&format!(
+                    "Hook 'pre_request' command '{command_line}' failed: {error} (sending original request)"
+                ));
+                return None;
+            }
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                crate::logging::warn(&format!(
+                    "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                    timeout.as_millis()
+                ));
+                return None;
+            }
+        };
+        if !status.success() {
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' exited with {:?} (sending original request)",
+                status.code()
+            ));
+            return None;
+        }
+    }
+    if over_limit {
         crate::logging::warn(&format!(
-            "Hook 'pre_request' command '{command_line}' emitted {} bytes (limit {}); sending original request",
-            output.stdout.len(),
+            "Hook 'pre_request' command '{command_line}' emitted over {} bytes (sending original request)",
             TRANSFORM_STDOUT_LIMIT
         ));
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&capped);
     if stdout.trim().is_empty() {
         return None;
     }
@@ -721,7 +801,7 @@ mod tests {
         // Untouched keys pass through: tools was echoed back by the script.
         assert!(out.tools.is_array());
         assert_eq!(out.system_static, "static");
-        assert_eq!(out.system_dynamic, "dynamic");
+        assert_eq!(out.system_dynamic, Some("dynamic".to_string()));
     }
 
     #[cfg(unix)]
@@ -729,17 +809,21 @@ mod tests {
     async fn pre_request_partial_stdout_keeps_original_keys() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::TempDir::new().expect("temp dir");
-        // Returns only messages: tools/system fall back to the originals.
+        // Appends a message but returns only the messages key: anything the
+        // hook did not repeat merges in from the running request, so
+        // untouched keys keep original values.
         let script = write_executable_script(
             temp.path(),
             "partial.py",
-            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\njson.dump({'messages': req['messages']},sys.stdout)\n",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'tagged'}]})\njson.dump({'messages': req['messages']},sys.stdout)\n",
         );
         let _env = transform_test_config(&script.to_string_lossy(), 5000);
         let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
         assert!(out.changed);
-        assert!(out.tools.is_null());
-        assert_eq!(out.system_static, "");
+        assert_eq!(out.messages.as_array().expect("array").len(), 2);
+        assert!(out.tools.is_array());
+        assert_eq!(out.system_static, "static");
+        assert_eq!(out.system_dynamic, Some("dynamic".to_string()));
     }
 
     #[cfg(unix)]
