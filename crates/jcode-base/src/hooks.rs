@@ -195,11 +195,18 @@ pub async fn transform_tool_input(
                 continue;
             }
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(serialized.as_bytes()).await;
-        }
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        // A child that never reads stdin can block `write_all` once the pipe
+        // fills. Keep that write under the same deadline as process completion
+        // so a transformer always fails open within its configured timeout.
+        let output = match tokio::time::timeout(timeout, async {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                stdin.write_all(serialized.as_bytes()).await?;
+            }
+            child.wait_with_output().await
+        })
+        .await
+        {
             Ok(Ok(output)) if output.status.success() => output,
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => continue,
         };
@@ -617,6 +624,29 @@ mod tests {
         assert_eq!(
             transform_tool_input("ses_transform", None, "bash", input.clone()).await,
             input
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tool_transformer_timeout_includes_stdin_delivery() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Keep stdin open but never consume it, causing an oversized write to
+        // block once the pipe fills.
+        let hang = write_executable_script(temp.path(), "hang.sh", "#!/bin/sh\nsleep 5\n");
+        let _env = transform_test_config(&hang.to_string_lossy(), 100);
+        let input = serde_json::json!({"command": "x".repeat(1024 * 1024)});
+
+        let started = std::time::Instant::now();
+        assert_eq!(
+            transform_tool_input("ses_transform", None, "bash", input.clone()).await,
+            input
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "stdin delivery exceeded the transformer timeout: {:?}",
+            started.elapsed()
         );
     }
 
