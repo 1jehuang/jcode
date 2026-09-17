@@ -124,6 +124,9 @@ pub(super) fn picker_route_model_spec(entry: &PickerEntry, route: &PickerOption)
     let api_method = crate::provider::ModelRouteApiMethod::parse(&route.api_method);
     match api_method {
         crate::provider::ModelRouteApiMethod::Copilot => format!("copilot:{}", bare_name),
+        crate::provider::ModelRouteApiMethod::GrokBuild => {
+            crate::provider::grok_build_model_spec(&bare_name)
+        }
         crate::provider::ModelRouteApiMethod::ClaudeOAuth => {
             format!("claude-oauth:{}", bare_name)
         }
@@ -307,6 +310,16 @@ mod tests {
                 route("Copilot", "copilot"),
                 "copilot:claude-sonnet-4-6",
             ),
+            (
+                "grok-4.6",
+                route("Grok Build", "grok-build-acp"),
+                "grok-build:grok-4.6",
+            ),
+            (
+                "grok-build:grok-4.6",
+                route("Grok Build", "grok-build-acp"),
+                "grok-build:grok-4.6",
+            ),
         ] {
             let entry = entry(model, route.clone());
             assert_eq!(picker_route_model_spec(&entry, &route), expected);
@@ -327,5 +340,18 @@ mod tests {
                 profile_id: Some("nvidia-nim".to_string())
             }
         );
+    }
+
+    #[test]
+    fn model_picker_grok_build_route_selection_is_wire_safe() {
+        let route = route("Grok Build", "grok-build-acp");
+        let entry = entry("grok-build:grok-4.6", route.clone());
+        let selection = picker_route_selection(&entry, &route);
+        assert_eq!(
+            selection.runtime_key,
+            crate::provider::RuntimeKey::GrokBuild
+        );
+        assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
+        serde_json::to_string(&selection).expect("Grok Build route selection must serialize");
     }
 }

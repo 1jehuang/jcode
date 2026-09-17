@@ -804,6 +804,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
                 crate::provider::ModelRouteApiMethod::JcodeSubscription
             );
         }
+        "grok-build" => {
+            return matches!(api_method, crate::provider::ModelRouteApiMethod::GrokBuild);
+        }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
             // env), so its routes carry the `openrouter` api_method while keeping
