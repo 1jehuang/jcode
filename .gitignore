@@ -10,6 +10,9 @@ __pycache__/
 /telemetry-worker/backups/
 target-ttest/
 target-ttest*/
+target-jcode-build/
+target-check2/
+target-check*/
 
 # Local capture artefacts are not committed baselines.
 captures/
