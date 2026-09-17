@@ -15,6 +15,7 @@
 //! * **currency follows the price** (F1): a card in a currency other than the
 //!   next layer's never inherits that layer's numbers.
 
+use crate::config::CostFields;
 use crate::config::PricingConfig;
 use crate::config::pricing::{PricingConfigError, ProviderPricing, validate};
 use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
@@ -227,13 +228,52 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
     }
 }
 
-/// Merge what the config card leaves out with the next layer, honoring F1.
+/// Accept a price only if it is a finite, non-negative number.
 ///
-/// * A card already in USD (the models.dev layer's currency) merges field by
-///   field, so "only `input` written" keeps models.dev's output price.
-/// * A card in any other currency never inherits models.dev's numbers, because
-///   a USD figure would be relabelled as, say, CNY. If such a card cannot price
-///   the model on its own, the next layer wins outright.
+/// The config layer's `validate` already rejects such a rate for the layers the
+/// user writes by hand, but a sheet is parsed by `catalog::parse_model_entry`
+/// through the same `convert_rule`, so both sides are covered there too. This
+/// is the last-line guard on the resolved card, and it exists because a single
+/// `NaN` reaching `CostState::accrue` would poison a session total for good.
+fn sane_rate(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Which layers a card may borrow the rate fields it leaves unset from.
+///
+/// This is explicit rather than "always ask everything" so the sheet layer can
+/// never re-enter itself: a `[pricing.providers]` card falls back to the sheets
+/// and then models.dev, while a sheet's own card falls back to models.dev only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CardFallback {
+    /// A hand-written `[pricing.providers]` card (the highest layer).
+    ConfigCard,
+    /// A `[[pricing.sources]]` sheet's card.
+    Sheet,
+}
+
+/// Fill rate fields `entry` leaves unset from a sheet's card, per field only.
+///
+/// The sheet's tariff, schedule and long-context tiers are deliberately not
+/// copied: those describe the sheet's own rate card, and the winning card's
+/// tier selection already ran on its own rules.
+fn fill_missing_from_entry(entry: &mut ModelPricingEntry, fallback: &ModelPricingEntry) {
+    entry.cost.input = entry.cost.input.or(fallback.cost.input);
+    entry.cost.output = entry.cost.output.or(fallback.cost.output);
+    entry.cost.cache_read = entry.cost.cache_read.or(fallback.cost.cache_read);
+    entry.cost.cache_write = entry.cost.cache_write.or(fallback.cost.cache_write);
+}
+
+/// Merge what the card leaves out with the layers below it, honoring F1.
+///
+/// * A card already in USD (the next layers' currency) merges field by field,
+///   so "only `input` written" keeps the next layer's output price. A
+///   `[pricing.providers]` card asks the `[[pricing.sources]]` sheets first and
+///   models.dev second (see [`CardFallback`]); a sheet's card asks models.dev
+///   only, so resolving a sheet never re-enters the sheet layer.
+/// * A card in any other currency never inherits USD numbers, because a USD
+///   figure would be relabelled as, say, CNY. If such a card cannot price the
+///   model on its own, the next layer wins outright.
 ///
 /// `input_tokens` is the call's reported input token count from its first usage
 /// snapshot, if the caller has one: it decides the long-context overlay (see
@@ -248,8 +288,16 @@ pub(super) fn resolve_card(
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
+    fallback: CardFallback,
 ) -> ResolvedCard {
-    let fallback = crate::model_pricing::lookup(provider, model);
+    // Sheets outrank models.dev, so a hand-written card's unwritten fields are
+    // filled from the sheet layer first (spec 4.4's one-layer-down fallback).
+    // A sheet's own card asks for nothing here: it must not re-enter itself.
+    let sheet_card = match fallback {
+        CardFallback::ConfigCard => crate::model_pricing::sheet_card_raw(provider, model, at),
+        CardFallback::Sheet => None,
+    };
+    let models_dev = crate::model_pricing::lookup(provider, model);
     let mut owns_price = true;
     // What the `[pricing]` card states for cache writes *on its own*, asked
     // before the merge below can fill the field from the next layer. Only a rate
@@ -260,12 +308,28 @@ pub(super) fn resolve_card(
 
     if currency.is_usd() {
         // Same currency as the next layer, so missing fields merge per field.
-        if let Some(fallback) = fallback {
+        // The sheet layer comes first: it outranks models.dev, and a blank the
+        // user's own rule left must take the highest-numbered layer that has it.
+        if let Some((sheet_entry, sheet_currency)) = &sheet_card
+            && sheet_currency.is_usd()
+        {
+            fill_missing_from_entry(&mut entry, sheet_entry);
+        }
+        if let Some(fallback) = models_dev {
             merge_same_currency(&mut entry, &fallback);
         }
+        // A rate that survived validation could still be non-finite if it
+        // arrived from a layer that did not go through `validate`; drop it here
+        // so it can never reach the session accumulator.
+        entry.cost = CostFields {
+            input: sane_rate(entry.cost.input),
+            output: sane_rate(entry.cost.output),
+            cache_read: sane_rate(entry.cost.cache_read),
+            cache_write: sane_rate(entry.cost.cache_write),
+        };
     } else if entry.cost.input.is_some() && entry.cost.output.is_some() {
         // A complete foreign-currency card stands on its own.
-    } else if let Some(fallback) = fallback {
+    } else if let Some(fallback) = models_dev {
         crate::logging::warn(&format!(
             "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
              using models.dev values (USD) instead of relabelling them"

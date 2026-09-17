@@ -522,6 +522,36 @@ mod tests {
         assert_eq!(tier(&entry, at(2026, 9, 11, 1, 0, 0)), "off_peak");
     }
 
+    /// F23 plus a fixed offset: the offset shifts the instant before the day
+    /// attribution, so the after-midnight half of a wrapping window is still
+    /// credited to the *local* start day.
+    #[test]
+    fn a_wrapping_window_with_an_offset_uses_the_local_start_day() {
+        let mut entry = deepseek_entry();
+        // Beijing (+08:00) Monday 22:00 through Tuesday 01:59:59.
+        entry.schedule = vec![rule(
+            "peak",
+            480,
+            &[Weekday::Mon],
+            vec![window((22, 0, 0), (2, 0, 0))],
+        )];
+
+        // 2026-09-14T13:59:59Z == Monday 21:59:59 Beijing: before the window.
+        assert_eq!(tier(&entry, at(2026, 9, 14, 13, 59, 59)), "off_peak");
+        // 2026-09-14T14:00:00Z == Monday 22:00 Beijing: the window opens.
+        assert_eq!(tier(&entry, at(2026, 9, 14, 14, 0, 0)), "peak");
+        // 2026-09-14T17:59:59Z == Tuesday 01:59:59 Beijing: the after-midnight
+        // half, still Monday's window.
+        assert_eq!(tier(&entry, at(2026, 9, 14, 17, 59, 59)), "peak");
+        // 2026-09-14T18:00:00Z == Tuesday 02:00 Beijing: closed.
+        assert_eq!(tier(&entry, at(2026, 9, 14, 18, 0, 0)), "off_peak");
+        // 2026-09-13T17:00:00Z == Monday 01:00 Beijing, the after-midnight half
+        // of *Sunday's* window: Sunday is not an enabled start day.
+        assert_eq!(tier(&entry, at(2026, 9, 13, 17, 0, 0)), "off_peak");
+        // 2026-09-13T14:00:00Z == Sunday 22:00 Beijing: Sunday is not enabled.
+        assert_eq!(tier(&entry, at(2026, 9, 13, 14, 0, 0)), "off_peak");
+    }
+
     #[test]
     fn first_matching_schedule_rule_wins() {
         let mut entry = deepseek_entry();
@@ -783,7 +813,15 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
         input_tokens: Option<u64>,
     ) -> Option<(ModelPricingEntry, Currency)> {
         let (entry, currency) = hit(sources::config_price(provider, model, at))?;
-        let card = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
+        let card = sources::resolve_card(
+            entry,
+            currency,
+            provider,
+            model,
+            at,
+            input_tokens,
+            sources::CardFallback::ConfigCard,
+        );
         Some((card.entry, card.currency))
     }
 

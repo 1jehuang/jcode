@@ -239,8 +239,15 @@ pub fn effective_entry_at_size(
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::NoPrice => None,
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved =
-                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
+            let resolved = sources::resolve_card(
+                *entry,
+                currency,
+                provider,
+                model,
+                at,
+                input_tokens,
+                sources::CardFallback::ConfigCard,
+            );
             Some((resolved.entry, resolved.currency))
         }
         // A rule that is out of effect is not this layer's answer either: the
@@ -285,7 +292,15 @@ pub(crate) fn source_card_at_size(
     let selected = rules::resolve_tier(&entry, at, input_tokens);
     let context_tier = selected.as_ref().and_then(|tier| tier.context_tier);
     let tariff = selected.and_then(|tier| tier.tariff);
-    let resolved = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
+    let resolved = sources::resolve_card(
+        entry,
+        currency,
+        provider,
+        model,
+        at,
+        input_tokens,
+        sources::CardFallback::Sheet,
+    );
     resolved.owns_price.then_some(SourceCard {
         entry: resolved.entry,
         currency: resolved.currency,
@@ -404,29 +419,31 @@ pub fn models_dev_context_tier_in_force(
     rules::resolve_tier(&entry, at, input_tokens)?.context_tier
 }
 
-/// The hand-written `[pricing.providers]` card for `(provider, model)`, if the
-/// user configured one that is in effect at `at`.
+/// The `[[pricing.sources]]` sheet's *own* stated card for `(provider, model)`
+/// at `at`, before any fields are filled from models.dev.
 ///
-/// Unlike [`effective_cost`] this never falls back to models.dev, so the route
-/// pricing chain can keep labelling each layer separately.
-pub(crate) fn configured_entry(
+/// A hand-written `[pricing.providers]` card uses this to fill the rate fields
+/// it leaves unset (spec 4.4's field-level fallback, one layer down): a sheet
+/// outranks models.dev, so a blank in the user's own rule must first take the
+/// sheet's number, and only then models.dev's. The raw entry (not the resolved
+/// one) is returned so the card does not inherit a sheet tariff it never named.
+pub(super) fn sheet_card_raw(
     provider: &str,
     model: &str,
     at: SystemTime,
 ) -> Option<(ModelPricingEntry, Currency)> {
-    match sources::config_price(provider, model, at) {
-        sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(*entry, currency, provider, model, at, None);
-            // A card that could not price the model is not this layer's win;
-            // let the chain reach models.dev and label it as such.
-            resolved
-                .owns_price
-                .then_some((resolved.entry, resolved.currency))
-        }
-        sources::ConfigPrice::Absent
-        | sources::ConfigPrice::OutOfEffect(_)
-        | sources::ConfigPrice::NoPrice => None,
-    }
+    source_registry::source_card(provider, model, at).map(|hit| (hit.entry, hit.currency))
+}
+
+/// The `[[pricing.sources]]` sheet that prices `(provider, model)` at `at`, as
+/// `(sheet_id, currency)`, or `None` when no sheet can price it.
+///
+/// This exists so `/pricing` can name the sheet layer in exactly the case its
+/// own "no `[pricing.providers]` rule prices this model" text is about: without
+/// it the report listed only "models.dev, a provider cache, or the fallback
+/// estimate" while the `reference request` figure beside it came from a sheet.
+pub fn source_sheet_for(provider: &str, model: &str, at: SystemTime) -> Option<(String, Currency)> {
+    source_card_at_size(provider, model, at, None).map(|card| (card.source_id, card.currency))
 }
 
 /// What one canonical request costs on this route at `at`, in the currency the
@@ -1128,6 +1145,83 @@ output = 13.5
         } else {
             crate::env::remove_var("JCODE_HOME");
         }
+    }
+
+    /// A `[[pricing.sources]]` sheet states its rates in the same vocabulary a
+    /// hand-written card does, so it must be held to the same finite,
+    /// non-negative rule and fail with the field path that caused it.
+    #[test]
+    fn a_sheet_stating_a_negative_rate_is_rejected_with_its_path() {
+        let body = r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+            "cost":{"input":-5.0,"output":1.0}
+        }}}}"#;
+        let error = parse_api_response(body).expect_err("a negative sheet rate is rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("deepseek.deepseek-v4-pro.cost.input"),
+            "the sheet error must name the field: {message}"
+        );
+    }
+
+    /// A `no_price` rule refuses the call, and the route/picker path must refuse
+    /// it too: a models.dev estimate there would contradict `/usage` and the cost
+    /// widget, which correctly show "unknown" (spec 4.4).
+    #[test]
+    fn a_no_price_rule_yields_no_route_estimate() {
+        let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+effective_until = "2020-01-01T00:00:00Z"
+on_rule_expiry = "no_price"
+"#;
+        with_pricing_env(Some(config), DEEPSEEK_CACHE, || {
+            let at = SystemTime::now();
+            assert!(matches!(
+                config_call_rates("deepseek", "deepseek-v4-pro", at, None),
+                ConfigCallRates::ConfiguredWithoutPrice
+            ));
+            assert!(
+                crate::provider::pricing::metered_pricing_for_source_at(
+                    "deepseek",
+                    "deepseek-v4-pro",
+                    None,
+                    at,
+                )
+                .is_none(),
+                "the picker must not show a models.dev estimate for a no_price rule"
+            );
+        });
+    }
+
+    /// The route/picker path refuses a card that cannot price the call even when
+    /// a *derived* layer (here the curated tables, since there is no models.dev
+    /// cache) could; the `!owns_price`/incomplete-card case is the same refusal
+    /// as `no_price`.
+    #[test]
+    fn an_incomplete_card_suppresses_the_route_estimate_even_when_a_catalog_could_price_it() {
+        let config = r#"
+[pricing.providers.claude]
+currency = "CNY"
+
+[pricing.providers.claude.models."claude-sonnet-4-6".cost]
+input = 4.5
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            assert!(matches!(
+                config_call_rates("claude:api-key", "claude-sonnet-4-6", at, None),
+                ConfigCallRates::ConfiguredWithoutPrice
+            ));
+            assert!(
+                crate::provider::pricing::metered_pricing_for_source_at(
+                    "claude:api-key",
+                    "claude-sonnet-4-6",
+                    None,
+                    at,
+                )
+                .is_none(),
+                "no layer may price a route the user's own incomplete card claims"
+            );
+        });
     }
 
     /// An unconfigured provider keeps the pre-feature behaviour: models.dev

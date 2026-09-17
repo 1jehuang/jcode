@@ -153,6 +153,44 @@ impl SourceLocation {
             Self::Remote(url) => url.clone(),
         }
     }
+
+    /// The location safe to log and to persist: `scheme://host/path` with any
+    /// query and userinfo stripped.
+    ///
+    /// A sheet URL is how a user points jcode at a private mirror, and the
+    /// schema has no header field yet, so credentials go in the query string
+    /// (`?private_token=glpat-…`). `crate::message::redact_secrets` does not
+    /// recognise those, and both the warning lines and the persisted
+    /// `pricing_sources.json` used to carry the URL verbatim, so this is the one
+    /// form the registry is allowed to write down. It is *not* what is fetched:
+    /// the request still uses [`Self::describe`].
+    pub fn describe_for_log(&self) -> String {
+        match self {
+            Self::LocalFile(path) => format!("file://{}", path.display()),
+            Self::Remote(url) => redact_url(url),
+        }
+    }
+}
+
+/// Strip a URL down to `scheme://host/path`, dropping the query, the fragment,
+/// and any userinfo. A URL without a `scheme://` is returned with its query and
+/// fragment dropped, so nothing unrecognised leaks.
+fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    let without_suffix = rest.split_once(['?', '#']).map_or(rest, |(head, _)| head);
+    let authority_end = without_suffix.find('/').unwrap_or(without_suffix.len());
+    let (authority, path) = without_suffix.split_at(authority_end);
+    // Drop any `user:password@` prefix in the authority.
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    match scheme {
+        Some(scheme) => format!("{scheme}://{authority}{path}"),
+        None => format!("{authority}{path}"),
+    }
 }
 
 /// A validated `[[pricing.sources]]` entry.
@@ -230,6 +268,19 @@ pub fn validate(
             ));
         }
         fx_rates.insert(currency, *rate);
+    }
+
+    // Cross-currency ordering converts every estimate into `fx_base`. Every
+    // route jcode ships is USD, so a non-USD `fx_base` with no USD rate leaves
+    // those routes unconvertible: they keep their native currency and sort
+    // below every comparable route, which is a silent-looking change in the
+    // model picker. Say so once, without failing (the config is still usable).
+    if !fx_base.is_usd() && !fx_rates.contains_key(&Currency::usd()) {
+        warnings.push(format!(
+            "pricing.fx_base: fx_base is `{fx_base}` but `pricing.fx_rates` has no `USD` entry, \
+             so cross-currency ordering is disabled for every USD-priced route (they keep their \
+             native currency and sort last); add `USD = <rate>` to compare them"
+        ));
     }
 
     let mut providers = BTreeMap::new();
@@ -466,6 +517,27 @@ pub(crate) fn convert_rule(
     })
 }
 
+/// Reject a rate that is not a finite, non-negative number.
+///
+/// A rate can be written four ways (a `cost` table, a named tariff, a
+/// `context_tiers` entry, or the same shape inside a `[[pricing.sources]]`
+/// sheet), and every one of them funnels through here so the whole pricing
+/// surface shares one rule. `NaN` is rejected along with the infinities and
+/// negatives because `CostState::accrue` has no finite guard: a single `NaN`
+/// would poison a session total permanently and a negative rate would truncate
+/// to zero and read as "free".
+fn validate_rate(value: Option<f64>, path: &str) -> Result<Option<f64>, PricingConfigError> {
+    if let Some(value) = value
+        && (!value.is_finite() || value < 0.0)
+    {
+        return Err(PricingConfigError::new(
+            path,
+            format!("a rate must be a finite, non-negative number, got {value}"),
+        ));
+    }
+    Ok(value)
+}
+
 fn convert_cost(cost: &CostFile, path: &str) -> Result<CostFields, PricingConfigError> {
     if cost.input.is_none()
         && cost.output.is_none()
@@ -478,10 +550,10 @@ fn convert_cost(cost: &CostFile, path: &str) -> Result<CostFields, PricingConfig
         ));
     }
     Ok(CostFields {
-        input: cost.input,
-        output: cost.output,
-        cache_read: cost.cache_read,
-        cache_write: cost.cache_write,
+        input: validate_rate(cost.input, &format!("{path}.input"))?,
+        output: validate_rate(cost.output, &format!("{path}.output"))?,
+        cache_read: validate_rate(cost.cache_read, &format!("{path}.cache_read"))?,
+        cache_write: validate_rate(cost.cache_write, &format!("{path}.cache_write"))?,
     })
 }
 
@@ -505,10 +577,10 @@ fn convert_tariff(tariff: &TariffFile, path: &str) -> Result<Tariff, PricingConf
             "a tariff is either a `multiplier` or absolute prices, not both",
         )),
         (None, true) => Ok(Tariff::Absolute(CostFields {
-            input: tariff.input,
-            output: tariff.output,
-            cache_read: tariff.cache_read,
-            cache_write: tariff.cache_write,
+            input: validate_rate(tariff.input, &format!("{path}.input"))?,
+            output: validate_rate(tariff.output, &format!("{path}.output"))?,
+            cache_read: validate_rate(tariff.cache_read, &format!("{path}.cache_read"))?,
+            cache_write: validate_rate(tariff.cache_write, &format!("{path}.cache_write"))?,
         })),
         (None, false) => Err(PricingConfigError::new(
             path,
@@ -751,6 +823,42 @@ mod tests {
             .copied()
             .expect("CNY rate");
         assert!((cny - 7.2).abs() < 1e-12);
+    }
+
+    /// A non-USD `fx_base` with no USD rate leaves every built-in (USD) route
+    /// unconvertible, which silently disables cross-currency ordering. It is a
+    /// warning, not an error: the section still works.
+    #[test]
+    fn non_usd_fx_base_without_a_usd_rate_warns() {
+        let file = parse_toml(
+            r#"
+            fx_base = "CNY"
+            [fx_rates]
+            EUR = 0.92
+            "#,
+        );
+        let (config, warnings) = validate(&file).expect("validates");
+        assert_eq!(config.fx_base.as_str(), "CNY");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("fx_base") && warning.contains("USD")),
+            "the missing USD rate must be reported: {warnings:?}"
+        );
+
+        // With a USD rate the warning is gone: the ordering can convert.
+        let file = parse_toml(
+            r#"
+            fx_base = "CNY"
+            [fx_rates]
+            USD = 0.14
+            "#,
+        );
+        let (_, warnings) = validate(&file).expect("validates");
+        assert!(
+            !warnings.iter().any(|warning| warning.contains("fx_base")),
+            "a USD rate makes the comparison possible: {warnings:?}"
+        );
     }
 
     #[test]
@@ -1102,6 +1210,75 @@ mod tests {
         );
         let err = validate(&file).expect_err("bad timestamp is rejected");
         assert!(err.field_path.contains("effective_until"), "path: {err}");
+    }
+
+    /// Every rate a hand-written card can state must be a finite,
+    /// non-negative number, and the error must name the offending field:
+    /// `nan`/`-inf` would otherwise poison a session total (`CostState::accrue`
+    /// has no finite guard) and a negative rate would truncate to zero and read
+    /// as "free".
+    #[test]
+    fn non_finite_or_negative_cost_rates_are_rejected_with_their_path() {
+        for (spelling, expected) in [
+            ("nan", "cost.input"),
+            ("-inf", "cost.output"),
+            ("-1.0", "cost.cache_read"),
+        ] {
+            let field = expected.rsplit('.').next().unwrap();
+            let mut body = String::new();
+            for name in ["input", "output", "cache_read"] {
+                let value = if name == field { spelling } else { "1.0" };
+                body.push_str(&format!("{name} = {value}\n"));
+            }
+            let file = parse_toml(&format!("[providers.p.models.m.cost]\n{body}"));
+            let err = validate(&file).expect_err("a non-finite or negative rate is rejected");
+            assert!(
+                err.field_path.ends_with(expected),
+                "expected path ending in {expected}, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_or_negative_tariff_and_tier_rates_are_rejected() {
+        for spelling in ["nan", "-inf", "-1.0"] {
+            let file = parse_toml(&format!(
+                r#"
+                [providers.p.models.m.tariffs.peak]
+                input = {spelling}
+                output = 2.0
+                "#,
+            ));
+            let err = validate(&file).expect_err("a bad tariff rate is rejected");
+            assert!(err.field_path.contains("tariffs.peak.input"), "path: {err}");
+
+            let file = parse_toml(&format!(
+                r#"
+                [[providers.p.models.m.context_tiers]]
+                min_input_tokens = 200_000
+                output = {spelling}
+                "#,
+            ));
+            let err = validate(&file).expect_err("a bad tier rate is rejected");
+            assert!(
+                err.field_path.contains("context_tiers[0].output"),
+                "path: {err}"
+            );
+        }
+    }
+
+    /// A zero rate is legitimate (`input = 0` is a free tier), and the check is
+    /// `>= 0`, so this must stay accepted.
+    #[test]
+    fn a_zero_rate_is_accepted() {
+        let file = parse_toml(
+            r#"
+            [providers.p.models.m.cost]
+            input = 0.0
+            output = 0
+            "#,
+        );
+        validate(&file).expect("zero is a valid rate");
     }
 
     #[test]

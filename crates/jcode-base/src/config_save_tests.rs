@@ -367,13 +367,14 @@ fn merged_document_that_serde_refuses_is_detected() {
     );
 }
 
-/// A provider field with a key-level alias (`supports-reasoning-effort`) that the
-/// overlay keeps beside the serialized canonical name makes the merged document
-/// unparseable (serde: `duplicate field`). The save must detect that and use the
-/// plain serialized write, which keeps the config usable even though comments in
-/// unmodeled sections are lost.
+/// A provider field written with a key-level alias (`extra-body`) must be
+/// *normalized*, not dropped: the preserving save writes the canonical name,
+/// removes the alias spelling, and keeps the user's comment and every unmodeled
+/// section. Falling back to the plain write would also drop the alias, but it
+/// would take the comment and the unmodeled section with it, which is exactly
+/// the loss this test rules out.
 #[test]
-fn overlay_that_cannot_round_trip_falls_back_to_the_plain_write() {
+fn a_provider_table_with_an_alias_key_keeps_its_comment_and_unmodeled_sections() {
     let _guard = crate::storage::lock_test_env();
     let home = HomeGuard::new();
     home.write(
@@ -382,13 +383,13 @@ fn overlay_that_cannot_round_trip_falls_back_to_the_plain_write() {
          [providers.acme]\n\
          type = \"openai-compatible\"\n\
          base_url = \"https://example.test/v1\"\n\
-         supports-reasoning-effort = true\n",
+         # keep this note\n\
+         extra-body = { thinking = true }\n",
     );
 
     let mut cfg = load_for_update();
-    assert_eq!(
-        cfg.providers["acme"].supports_reasoning_effort,
-        Some(true),
+    assert!(
+        cfg.providers["acme"].extra_body.is_some(),
         "the alias must parse on load"
     );
     cfg.display.centered = true;
@@ -396,18 +397,63 @@ fn overlay_that_cannot_round_trip_falls_back_to_the_plain_write() {
 
     let written = home.read();
     assert!(
-        !written.contains("supports-reasoning-effort"),
-        "the unparseable merge must be discarded for the plain write: {written}"
+        !written.contains("extra-body"),
+        "the alias spelling must not survive: {written}"
+    );
+    assert_eq!(
+        written.matches("extra_body").count(),
+        1,
+        "the canonical name must be written exactly once: {written}"
     );
     assert!(
-        !written.contains("[from_a_newer_build]"),
-        "the plain write drops unmodeled sections, which is the observable fallback: {written}"
+        written.contains("# keep this note"),
+        "the comment attached to the alias key must survive the rename: {written}"
+    );
+    assert!(
+        written.contains("[from_a_newer_build]"),
+        "the merge must succeed rather than fall back to a plain write: {written}"
     );
 
     let parsed = Config::load_strict().expect("the saved config must parse");
-    assert_eq!(
-        parsed.providers["acme"].supports_reasoning_effort,
-        Some(true)
-    );
+    assert!(parsed.providers["acme"].extra_body.is_some());
     assert!(parsed.display.centered, "the write must still persist");
+}
+
+/// A config save must be atomic: a torn write would destroy the user's comments
+/// and every unmodeled section, which is the whole point of the preserving save.
+/// `storage::write_bytes` writes a temp file and renames it over the target, so
+/// the target's inode changes and the previous content is kept as `config.bak`.
+/// A plain `std::fs::write` would truncate the same inode in place.
+#[test]
+fn a_config_save_replaces_the_file_by_rename() {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n");
+    let path = home.path();
+    let before = std::fs::metadata(&path).expect("metadata before");
+
+    let mut cfg = load_for_update();
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let after = std::fs::metadata(&path).expect("metadata after");
+    #[cfg(unix)]
+    assert_ne!(
+        after.ino(),
+        before.ino(),
+        "an atomic save renames a new file over the old one"
+    );
+    assert!(
+        path.with_extension("bak").exists(),
+        "the atomic writer keeps the previous file as `.bak`"
+    );
+    assert!(
+        Config::load_strict()
+            .expect("the saved config must parse")
+            .display
+            .centered
+    );
 }

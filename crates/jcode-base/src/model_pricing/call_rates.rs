@@ -115,8 +115,15 @@ pub fn config_call_rates(
         ConfigPrice::OutOfEffect(reason) => ConfigCallRates::OutOfEffect(reason),
         ConfigPrice::Absent => ConfigCallRates::Absent,
         ConfigPrice::Hit { entry, currency } => {
-            let resolved =
-                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
+            let resolved = sources::resolve_card(
+                *entry,
+                currency,
+                provider,
+                model,
+                at,
+                input_tokens,
+                sources::CardFallback::ConfigCard,
+            );
             if !resolved.owns_price {
                 // The card lost to the next layer (a foreign-currency card that
                 // cannot be completed, per F1). That is not this layer's answer:

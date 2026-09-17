@@ -47,6 +47,12 @@ pub(super) struct PricingReport<'a> {
     /// Listing the thresholds is what keeps that honest: the user learns which
     /// tiers a real call can cross instead of reading the figure as the only one.
     pub context_tier_thresholds: &'a [u64],
+    /// The `[[pricing.sources]]` sheet that prices the model at the report
+    /// instant, as `(sheet_id, currency)`, when no `[pricing.providers]` card
+    /// does. The sheet layer sits between the card and models.dev, so a report
+    /// whose `reference request` figure came from a sheet must name it here
+    /// rather than claim only models.dev/provider caches could be the source.
+    pub sheet: Option<(&'a str, jcode_provider_core::Currency)>,
 }
 
 impl PricingReport<'_> {
@@ -87,10 +93,18 @@ impl PricingReport<'_> {
                  (an incomplete card in its own currency, or a rule that expired with `on_rule_expiry = \"no_price\"`). \
                  No other layer is substituted.\n",
             ),
-            CardState::Absent => out.push_str(
-                "\n- rate card: no `[pricing]` rule prices this model, so the cost comes from a lower layer \
-                 (models.dev, a provider cache, or the fallback estimate)\n",
-            ),
+            CardState::Absent => {
+                out.push_str(
+                    "\n- rate card: no `[pricing]` rule prices this model, so the cost comes from a lower layer \
+                     (a `[[pricing.sources]]` sheet, models.dev, a provider cache, or the fallback estimate)\n",
+                );
+                if let Some((sheet_id, currency)) = self.sheet.as_ref() {
+                    out.push_str(&format!(
+                        "- from: [[pricing.sources]] sheet `{sheet_id}` ({})\n",
+                        currency.as_str()
+                    ));
+                }
+            }
         }
 
         if let Some(notice) = self.out_of_effect {
@@ -212,6 +226,13 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
     let error = crate::model_pricing::pricing_config_error();
     let reference = crate::model_pricing::effective_cost(&source_key, &model, now);
     let display_currency = crate::config::config().display.currency.clone();
+    // The sheet layer sits between the card and models.dev; name it when it is
+    // the layer that priced the model, so the report cannot deny a source its
+    // own `reference request` figure came from.
+    let sheet = crate::model_pricing::source_sheet_for(&source_key, &model, now);
+    let sheet_label = sheet
+        .as_ref()
+        .map(|(id, currency)| (id.as_str(), currency.clone()));
 
     let report = PricingReport {
         provider: &provider,
@@ -224,6 +245,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         display_currency: &display_currency,
         reference_cost: reference.as_ref(),
         context_tier_thresholds: &context_tier_thresholds,
+        sheet: sheet_label,
     };
     app.push_display_message(DisplayMessage::system(report.render()));
     true
@@ -264,6 +286,7 @@ mod tests {
             display_currency: "native",
             reference_cost: Some(&Money::new(0.09, Currency::new("CNY"))),
             context_tier_thresholds: &[],
+            sheet: None,
         };
         let text = report.render();
 
@@ -295,6 +318,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &[],
+            sheet: None,
         };
         let text = report.render();
 
@@ -322,6 +346,7 @@ mod tests {
             display_currency: "CNY",
             reference_cost: None,
             context_tier_thresholds: &[],
+            sheet: None,
         };
         let text = report.render();
 
@@ -355,6 +380,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &thresholds,
+            sheet: None,
         };
         let text = report.render();
 
@@ -384,6 +410,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &[],
+            sheet: None,
         };
         let text = report.render();
 
@@ -407,5 +434,37 @@ mod tests {
             crate::model_pricing::RuleOutOfEffect::NotYetEffective,
         );
         assert_eq!(notice.label(), "rule not in effect yet");
+    }
+
+    /// When no card prices the model but a `[[pricing.sources]]` sheet does, the
+    /// report must name that sheet: otherwise it lists only "models.dev, a
+    /// provider cache, or the fallback estimate" while the `reference request`
+    /// figure right beside it came from the sheet.
+    #[test]
+    fn an_absent_card_names_the_sheet_that_priced_the_model() {
+        let rates = std::collections::BTreeMap::new();
+        let report = PricingReport {
+            provider: "DeepSeek",
+            model: "deepseek-v4-pro",
+            card: CardState::Absent,
+            config_error: None,
+            out_of_effect: None,
+            fx_base: &Currency::usd(),
+            fx_rates: &rates,
+            display_currency: "native",
+            reference_cost: Some(&Money::new(0.005, Currency::new("CNY"))),
+            context_tier_thresholds: &[],
+            sheet: Some(("corp-mirror", Currency::new("CNY"))),
+        };
+        let text = report.render();
+
+        assert!(
+            text.contains("[[pricing.sources]] sheet `corp-mirror` (CNY)"),
+            "the sheet layer must be named: {text}"
+        );
+        assert!(
+            text.contains("a `[[pricing.sources]]` sheet,"),
+            "and it must appear in the list of lower layers: {text}"
+        );
     }
 }
