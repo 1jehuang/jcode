@@ -582,6 +582,32 @@ async fn run_pre_request_command(
         }
     }
 
+    // Stderr drains concurrently into a small capped buffer: a hook that
+    // logs diagnostics must never wedge on a full unread pipe and lose an
+    // otherwise valid rewrite. The tail survives for failure diagnostics.
+    const STDERR_TAIL_LIMIT: usize = 16 * 1024;
+    let stderr_drain = child.stderr.take().map(|stderr| {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut tail = Vec::new();
+            let mut buf = [0u8; 8192];
+            let mut reader = stderr;
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        let overflow = tail.len().saturating_sub(STDERR_TAIL_LIMIT);
+                        if overflow > 0 {
+                            tail.drain(..overflow);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            tail
+        })
+    });
     let mut capped: Vec<u8> = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         use tokio::io::AsyncReadExt;
@@ -598,6 +624,26 @@ async fn run_pre_request_command(
             return None;
         }
     }
+    // The drain ends when the child closes stderr (exit) or the deadline
+    // below fires first; either way it never outlives this function, so no
+    // orphan task survives the call.
+    let stderr_tail = match stderr_drain {
+        Some(handle) => {
+            match tokio::time::timeout_at(deadline, handle).await {
+                Ok(Ok(tail)) => String::from_utf8_lossy(&tail).into_owned(),
+                Ok(Err(_)) => String::new(),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    crate::logging::warn(&format!(
+                        "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                        timeout.as_millis()
+                    ));
+                    return None;
+                }
+            }
+        }
+        None => String::new(),
+    };
     // Over-limit output closed the pipe early, so the child typically dies
     // of SIGPIPE; its exit status is meaningless. Either way the outcome is
     // the same fail-open None, so skip the status check on that path.
@@ -621,9 +667,15 @@ async fn run_pre_request_command(
             }
         };
         if !status.success() {
+            let stderr_note = if stderr_tail.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" stderr: {}", stderr_tail.trim())
+            };
             crate::logging::warn(&format!(
-                "Hook 'pre_request' command '{command_line}' exited with {:?} (sending original request)",
-                status.code()
+                "Hook 'pre_request' command '{command_line}' exited with {:?}{} (sending original request)",
+                status.code(),
+                stderr_note
             ));
             return None;
         }
@@ -824,6 +876,24 @@ mod tests {
         assert!(out.tools.is_array());
         assert_eq!(out.system_static, "static");
         assert_eq!(out.system_dynamic, Some("dynamic".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_chatty_stderr_keeps_rewrite() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // 200KB of diagnostics on stderr (over the 64KB pipe buffer) plus a
+        // valid rewrite on stdout: the rewrite must apply, not wedge.
+        let script = write_executable_script(
+            temp.path(),
+            "chatty.py",
+            "#!/usr/bin/env python3\nimport json,sys\nreq=json.load(sys.stdin)\nsys.stderr.write('d' * 200000)\nreq['messages'].append({'role':'user','content':[{'type':'text','text':'tagged'}]})\njson.dump(req,sys.stdout)\n",
+        );
+        let _env = transform_test_config(&script.to_string_lossy(), 10000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(out.changed);
+        assert_eq!(out.messages.as_array().expect("array").len(), 2);
     }
 
     #[cfg(unix)]
