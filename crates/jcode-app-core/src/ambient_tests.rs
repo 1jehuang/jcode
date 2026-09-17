@@ -496,6 +496,86 @@ fn test_scheduled_queue_items_accessor() {
 // Recurrence
 // ---------------------------------------------------------------------------
 
+/// Guards a directory's writability across a test: read-only for the body,
+/// restored on drop so the temp dir cleans up.
+#[cfg(unix)]
+struct ReadOnlyDir {
+    path: std::path::PathBuf,
+}
+impl ReadOnlyDir {
+    fn lock(dir: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))
+            .expect("lock dir");
+        Self {
+            path: dir.to_path_buf(),
+        }
+    }
+}
+impl Drop for ReadOnlyDir {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn test_stale_snapshot_cancel_cannot_resurrect_series() {
+    // Two loads of the same file: A pops (advancing the chain), then B —
+    // holding the pre-pop snapshot — cancels the series. The cancel must
+    // win; B's stale write must not restore the popped occurrence.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut a = ScheduledQueue::load(path.clone());
+    a.push(recurring_item("first", Some(3)));
+    let mut b = ScheduledQueue::load(path.clone());
+    let popped = a.pop_ready();
+    assert_eq!(popped.len(), 1);
+    let removed = b.remove_by_recurrence("recur_test").expect("cancel retries");
+    assert_eq!(removed, 1, "cancel sees the requeued occurrence");
+    let disk = ScheduledQueue::load(path);
+    assert!(
+        disk.items().iter().all(|item| item
+            .repeat
+            .as_ref()
+            .is_none_or(|repeat| repeat.recurrence_id != "recur_test")),
+        "no series item survives on disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_failed_dequeue_save_delivers_nothing() {
+    // Save failures must not deliver: the popped items stay queued and the
+    // runner retries on a later poll instead of redelivering after restart.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path);
+    queue.push(recurring_item("first", Some(3)));
+    let _lock = ReadOnlyDir::lock(tmp.path());
+    let ready = queue.pop_ready();
+    assert!(ready.is_empty(), "nothing delivered without a durable dequeue");
+    assert_eq!(queue.len(), 1, "the popped item stays queued via reload");
+    assert_eq!(queue.items()[0].id, "first");
+}
+
+#[test]
+fn test_legacy_bare_array_loads_as_v0() {
+    // Pre-version queue files (a bare JSON array) load with version 0 and
+    // upgrade to the envelope on the next save.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let legacy = serde_json::to_string(&vec![recurring_item("old", Some(2))]).unwrap();
+    std::fs::write(&path, legacy).unwrap();
+    let mut queue = ScheduledQueue::load(path.clone());
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "old");
+    queue.push(recurring_item("new", None));
+    let disk = ScheduledQueue::load(path);
+    assert_eq!(disk.len(), 2);
+}
+
 fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
     ScheduledItem {
         id: id.into(),

@@ -927,6 +927,15 @@ impl ScheduleTool {
         let mut manager = AmbientManager::new()?;
         let id = manager.schedule(request)?;
         nudge_schedule_runner();
+        // Surface the series ID so whole-series cancellation needs no
+        // separate list-and-parse round trip.
+        let series = manager
+            .queue()
+            .items()
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.repeat.as_ref())
+            .map(|repeat| repeat.recurrence_id.clone());
 
         let when = if let Some(ref ts) = params.wake_at {
             ts.clone()
@@ -937,6 +946,9 @@ impl ScheduleTool {
         };
 
         let mut summary = format!("Scheduled task '{}' for {} (id: {})", task, when, id);
+        if let Some(series) = series {
+            summary.push_str(&format!("\nSeries ID: {} (cancel the whole series)", series));
+        }
         if let Some(ref wd) = working_dir {
             summary.push_str(&format!("\nWorking directory: {}", wd));
         }
