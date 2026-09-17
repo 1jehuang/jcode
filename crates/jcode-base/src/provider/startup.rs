@@ -347,6 +347,10 @@ impl MultiProvider {
         let runtimes_ms = runtimes_start.elapsed().as_millis();
         let route_start = std::time::Instant::now();
         result.spawn_openai_catalog_refresh_if_needed();
+        // Start the background catalog sweeper early so all configured
+        // OpenAI-compatible profile catalogs are refreshed proactively,
+        // not only after the first `/model` render triggers the lazy start.
+        crate::provider::catalog_scheduler::ensure_started();
         if !preserve_config_default {
             result.select_fresh_session_pool_route();
         }

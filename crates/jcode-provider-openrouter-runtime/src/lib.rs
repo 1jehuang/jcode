@@ -657,6 +657,10 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
     }
 
     let Some(api_base) = normalize_api_base(&resolved.api_base) else {
+        jcode_base::logging::info(&format!(
+            "Skipping {} catalog refresh ({}): api_base '{}' failed to normalize",
+            resolved.display_name, context, resolved.api_base
+        ));
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
@@ -670,11 +674,19 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             label: "local endpoint (no auth)".to_string(),
         }
     } else {
+        jcode_base::logging::info(&format!(
+            "Skipping {} catalog refresh ({}): {} not configured",
+            resolved.display_name, context, resolved.api_key_env
+        ));
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
 
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        jcode_base::logging::info(&format!(
+            "Skipping {} catalog refresh ({}): no tokio runtime available",
+            resolved.display_name, context
+        ));
         finish_profile_catalog_refresh(&resolved.id);
         return false;
     };
