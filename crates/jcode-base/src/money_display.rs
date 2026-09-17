@@ -144,17 +144,30 @@ impl DisplayTarget {
     }
 
     /// [`Self::resolve_buckets`] for a session total that has not billed
-    /// anything yet: an empty total still renders as `$0.0000` (or the target
-    /// currency) rather than collapsing the widget line.
+    /// anything yet: an empty total still renders as a zero rather than
+    /// collapsing the widget line.
+    ///
+    /// A configured display currency names itself, so `[display] currency =
+    /// "CNY"` keeps rendering `CNY 0.0000`. In native mode there is no currency
+    /// to name - nothing was spent in *any* currency - and labelling the zero
+    /// `$` would read as "zero dollars" rather than "no spend recorded", so the
+    /// row is left unlabelled.
     pub fn resolve_totals<V: Into<f64> + Copy>(
         &self,
         buckets: &BTreeMap<Currency, V>,
     ) -> Vec<DisplayAmount> {
         if buckets.is_empty() {
-            return vec![DisplayAmount {
-                amount: 0.0,
-                currency: self.zero_currency(),
-                note: None,
+            return vec![match self.target.as_ref() {
+                Some(target) => DisplayAmount {
+                    amount: 0.0,
+                    currency: target.clone(),
+                    note: None,
+                },
+                None => DisplayAmount {
+                    amount: 0.0,
+                    currency: Currency::new(""),
+                    note: None,
+                },
             }];
         }
         self.resolve_buckets(buckets)
@@ -219,7 +232,11 @@ pub fn note_pricing_problems(
 /// currency is prefixed with its ISO code, because no symbol is unambiguous
 /// across currencies (`¥` is both CNY and JPY).
 pub fn format_amount(amount: f64, currency: &Currency, decimals: usize) -> String {
-    if currency.is_usd() {
+    if currency.as_str().is_empty() {
+        // No currency to name (native mode before anything was billed): the
+        // bare number, never a `$` that would read as dollars.
+        format!("{:.*}", decimals, amount)
+    } else if currency.is_usd() {
         format!("${:.*}", decimals, amount)
     } else {
         format!("{} {:.*}", currency.as_str(), decimals, amount)
@@ -420,9 +437,11 @@ mod tests {
     fn empty_session_still_renders_zero_in_a_named_currency() {
         let native = DisplayTarget::native();
         assert_eq!(native.zero_currency().as_str(), "USD");
-        assert_eq!(
-            summarize(&native.resolve_totals(&BTreeMap::<Currency, f64>::new()), 4),
-            "$0.0000"
+        let native_zero = summarize(&native.resolve_totals(&BTreeMap::<Currency, f64>::new()), 4);
+        assert_eq!(native_zero, "0.0000");
+        assert!(
+            !native_zero.contains('$'),
+            "native mode must not invent a dollar sign for an empty total: {native_zero}"
         );
 
         let target = DisplayTarget::new(Some(Currency::new("CNY")), usd_table());
