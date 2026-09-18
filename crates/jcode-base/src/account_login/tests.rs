@@ -52,7 +52,7 @@ fn server(
 async fn account_only_start_and_approval_use_expected_wire_contract() {
     let (base, requests) = server(vec![(200, "", DEVICE.into()), (200, "", APPROVED.into())]);
     let client = client();
-    let flow = start_with(&client, &base).await.unwrap();
+    let flow = start_with_api_base(&client, &base).await.unwrap();
     assert_eq!(flow.auth_url(), "https://jcode.sh/account?flow=public-flow");
     assert_eq!(flow.interval(), Duration::from_secs(3));
     assert_eq!(flow.expires_in(), Duration::from_secs(600));
@@ -92,7 +92,7 @@ async fn pending_slowdown_denial_and_expiry_are_separate_results() {
         (400, "", r#"{"error":"expired_token"}"#.into()),
     ]);
     let client = client();
-    let mut flow = start_with(&client, &base).await.unwrap();
+    let mut flow = start_with_api_base(&client, &base).await.unwrap();
     assert!(matches!(
         poll(&client, &flow).await.unwrap(),
         LoginPoll::Pending
@@ -152,7 +152,7 @@ async fn malicious_error_bodies_and_malformed_responses_are_redacted() {
         ),
     ] {
         let (base, _requests) = server(vec![(status, "", body.into())]);
-        let error = start_with(&client(), &base).await.unwrap_err();
+        let error = start_with_api_base(&client(), &base).await.unwrap_err();
         assert!(!format!("{error:?} {error}").contains("fixture-account-secret"));
     }
     let error = AccountLoginError::from(AccountApiError::Offline(
@@ -219,6 +219,21 @@ async fn explicit_save_and_current_account_are_sandboxed_without_paid_plan() {
     save(&approved).unwrap();
     assert!(has_credentials());
     assert!(!subscription_catalog::is_runtime_mode_enabled());
+    // Simulate a fresh client's credential lookup: persistence must survive
+    // removal of the process values populated while saving the account.
+    for key in [
+        "JCODE_API_KEY",
+        "JCODE_ACCOUNT_ID",
+        "JCODE_ACCOUNT_EMAIL",
+        "JCODE_TIER",
+    ] {
+        crate::env::remove_var(key);
+    }
+    assert!(has_credentials());
+    assert_eq!(
+        subscription_catalog::configured_api_key().as_deref(),
+        Some("fixture-account-secret")
+    );
     let path = subscription_catalog::account_credential_path().unwrap();
     assert!(path.starts_with(home.path()));
     #[cfg(unix)]
@@ -285,4 +300,21 @@ async fn in_flight_poll_is_cancellable_without_a_detached_worker() {
         .unwrap_err();
     assert!(error.is_cancelled());
     peer.abort();
+}
+
+/// Explicit opt-in contract check. No browser, email, account credential read,
+/// token approval, or credential persistence occurs. The unapproved flow expires.
+#[tokio::test]
+#[ignore = "set JCODE_ACCOUNT_TEST_API_BASE to opt into live device start/pending validation"]
+async fn deployed_account_start_and_pending_are_compatible() {
+    let base = std::env::var("JCODE_ACCOUNT_TEST_API_BASE").expect("explicit account API base");
+    let client = reqwest::Client::new();
+    let flow = start_with_api_base(&client, &base).await.unwrap();
+    assert!(flow.auth_url().starts_with("https://"));
+    assert!(!flow.is_expired());
+    tokio::time::sleep(flow.interval()).await;
+    assert!(matches!(
+        poll(&client, &flow).await.unwrap(),
+        LoginPoll::Pending
+    ));
 }

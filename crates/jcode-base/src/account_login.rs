@@ -139,10 +139,15 @@ pub enum LoginPoll {
 /// Start a device flow against the configured account API, without selecting a
 /// tier or launching a browser. No email is sent until the user signs in there.
 pub async fn start(client: &reqwest::Client) -> Result<LoginFlow, AccountLoginError> {
-    start_with(client, &subscription_api::configured_api_base()).await
+    start_with_api_base(client, &subscription_api::configured_api_base()).await
 }
 
-async fn start_with(
+/// Start against an explicitly selected, trusted account API instead of the
+/// process-wide configuration. The flow retains this endpoint for subsequent
+/// polls. Browser URLs still require the same public account URL validation.
+/// This also lets clients exercise their network lifecycle with an isolated API
+/// without changing environment variables shared by other login operations.
+pub async fn start_with_api_base(
     client: &reqwest::Client,
     api_base: &str,
 ) -> Result<LoginFlow, AccountLoginError> {
