@@ -59,12 +59,24 @@ flowchart TD
 ```
 
 The order matters. The light/dark pass exists because jcode's *built-in* palette
-is designed for dark terminals, so it flips luminance to make those colors work
-on light ones. A color the user configured is already the color they want, so it
+is designed for dark terminals. On light terminals it flips luminance, then
+repairs foreground and underline colors to meet a **4.5:1 contrast floor** on
+their cell's adapted background. Default terminal backgrounds use a conservative
+off-white reference (`#e0e0e0`), so muted labels stay readable on tinted and
+inactive light panes, not only pure white. Panel fills keep their light tints.
+Reverse-video cells use their visible foreground/background roles, and the
+contrast check includes 256-color quantization. Dark themes are unchanged.
+
+This avoids simple inversion turning muted `#505050` text into washed-out
+`#afafaf` text. The default-surface muted ink is now `#636363` instead.
+
+A color the user configured is already the color they want, so it
 runs last and is never flipped: otherwise a deliberately dark red for errors on a
 white terminal would come out an unreadable pale pink. Because incoming literals
 have already been flipped by then, role defaults are pre-flipped the same way
-before matching.
+before matching, including any foreground contrast repair on that cell's
+pre-override surface. Explicit color overrides remain exact, even if a user
+deliberately chooses a low-contrast color.
 
 Three consequences worth knowing:
 
