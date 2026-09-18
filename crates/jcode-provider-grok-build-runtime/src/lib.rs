@@ -150,6 +150,12 @@ impl Provider for GrokBuildProvider {
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if grok_should_ignore_turn(messages) {
+            // Jcode todo-gates inject `[auto] Continue the work…` after a finished
+            // turn. Skipping them used to fall back to the last real user text
+            // and Grok would redo/restate the same result (panda 339 vs 600).
+            return Ok(skipped_auto_followup_stream());
+        }
         if let Some(http) = &self.http {
             http.set_model(&self.model())?;
             let messages = sanitize_grok_turn_messages(messages);
@@ -360,6 +366,11 @@ struct RepeatGuardStream {
     inner: EventStream,
     buf: String,
     stopped: bool,
+}
+
+fn skipped_auto_followup_stream() -> EventStream {
+    let (_tx, rx) = mpsc::channel(1);
+    Box::pin(ReceiverStream::new(rx))
 }
 
 fn wrap_repeat_guard(inner: EventStream) -> EventStream {
@@ -1746,6 +1757,33 @@ fn latest_user_text(messages: &[Message]) -> Option<String> {
     })
 }
 
+fn triggering_user_text(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != Role::User {
+            return None;
+        }
+        if message
+            .content
+            .iter()
+            .any(|block| matches!(block, JcodeContentBlock::ToolResult { .. }))
+            && user_plain_text(message).is_empty()
+        {
+            return None;
+        }
+        let text = user_plain_text(message);
+        (!text.is_empty()).then_some(text)
+    })
+}
+
+fn grok_should_ignore_turn(messages: &[Message]) -> bool {
+    triggering_user_text(messages).is_some_and(|text| {
+        jcode_base::todo::is_auto_poke_message(&text)
+            && text
+                .to_ascii_lowercase()
+                .contains("do not reply or wait for the user")
+    })
+}
+
 fn user_plain_text(message: &Message) -> String {
     message
         .content
@@ -1893,6 +1931,32 @@ mod tests {
         ];
         let prompt = build_prompt(&messages, true).unwrap();
         assert_eq!(prompt, "print degrees");
+    }
+
+    #[test]
+    fn ignores_ownership_auto_poke_instead_of_redoing_last_user_request() {
+        let messages = vec![
+            Message::user("rồi quay lại vụ dashboard"),
+            Message::assistant_text("339 khớp ô 338. List 600 là hai NV."),
+            Message::user(
+                "[auto] Continue the work below. Keep the todo up to date; do not reply or wait for the user.\n- Goal \"ungrouped goal\": clarify the goal and track the work.",
+            ),
+        ];
+        assert!(grok_should_ignore_turn(&messages));
+        assert_eq!(
+            latest_user_text(&messages).as_deref(),
+            Some("rồi quay lại vụ dashboard")
+        );
+    }
+
+    #[test]
+    fn still_runs_real_user_turns_and_final_response_handoff() {
+        assert!(!grok_should_ignore_turn(&[Message::user(
+            "rồi quay lại vụ dashboard"
+        )]));
+        assert!(!grok_should_ignore_turn(&[Message::user(
+            jcode_base::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE
+        )]));
     }
 
     #[test]
