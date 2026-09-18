@@ -147,13 +147,10 @@ async fn start_with(
     api_base: &str,
 ) -> Result<LoginFlow, AccountLoginError> {
     let started_at = Instant::now();
-    let device = subscription_api::request_device_authorization_for_client(
-        client,
-        api_base,
-        None,
-        "jcode-desktop",
-    )
-    .await?;
+    // The deployed API currently requires the protocol client name `jcode-cli`,
+    // even for Desktop. It rejects `jcode-desktop` with HTTP 400. Reuse the
+    // supported shared contract rather than inventing an unrecognized name.
+    let device = subscription_api::request_device_authorization(client, api_base, None).await?;
     let auth_url = public_auth_url(&device.verification_uri_complete)?;
     Ok(LoginFlow {
         api_base: api_base.to_owned(),

@@ -61,7 +61,7 @@ async fn account_only_start_and_approval_use_expected_wire_contract() {
     assert!(request.starts_with("POST /v1/auth/device "));
     let body: serde_json::Value =
         serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
-    assert_eq!(body, serde_json::json!({"client_name":"jcode-desktop"}));
+    assert_eq!(body, serde_json::json!({"client_name":"jcode-cli"}));
     assert!(!format!("{flow:?}").contains("fixture-device-secret"));
     let result = poll(&client, &flow).await.unwrap();
     assert!(!format!("{result:?}").contains("fixture-account-secret"));
