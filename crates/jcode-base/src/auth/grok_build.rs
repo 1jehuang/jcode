@@ -229,6 +229,34 @@ pub fn cli_available() -> bool {
     super::command_exists(cli_path().to_string_lossy().as_ref())
 }
 
+/// Version string the CLI chat proxy expects in `User-Agent: grok-cli/<ver>`.
+/// Missing this header makes the proxy report version `(none)` and return 426.
+pub fn cli_version_string() -> String {
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            if let Ok(version) = std::env::var("JCODE_GROK_CLI_VERSION") {
+                let version = version.trim();
+                if !version.is_empty() {
+                    return version.to_string();
+                }
+            }
+            std::process::Command::new(cli_path())
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    text.split_whitespace()
+                        .nth(1)
+                        .map(|part| part.trim().to_string())
+                        .filter(|part| !part.is_empty())
+                })
+                .unwrap_or_else(|| "1.0.34".to_string())
+        })
+        .clone()
+}
+
 /// Whether the managed backend has a credential that it can attempt to use.
 /// Backend presence alone is not authentication and must not make `/login` or
 /// `jcode auth status` claim that Grok Build is ready.
@@ -389,6 +417,17 @@ mod tests {
         assert!(!valid_version("latest"));
         assert!(!valid_version("1.2.3/../../bad"));
         assert!(!valid_version("1.2"));
+    }
+
+    #[test]
+    fn cli_version_string_is_a_single_token() {
+        let version = super::cli_version_string();
+        assert!(!version.is_empty(), "CLI chat proxy treats empty as (none)");
+        assert!(
+            !version.contains(char::is_whitespace),
+            "User-Agent grok-cli/<ver> cannot contain whitespace: {version:?}"
+        );
+        assert_ne!(version, "none");
     }
 
     #[test]

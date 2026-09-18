@@ -459,6 +459,35 @@ fn apply_opencode_session_header(
     }
 }
 
+fn is_grok_cli_proxy(api_base: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(api_base) else {
+        return api_base.contains("cli-chat-proxy.grok.com");
+    };
+    matches!(
+        url.host_str(),
+        Some(host) if host == "cli-chat-proxy.grok.com" || host.ends_with(".grok.com") && host.contains("cli-chat-proxy")
+    )
+}
+
+/// CLI chat proxy rejects requests without a grok-cli User-Agent (426, version
+/// `(none)`). Mirror the headers the official CLI sends with `grok login`.
+pub(crate) fn apply_grok_cli_proxy_headers(
+    req: reqwest::RequestBuilder,
+    api_base: &str,
+    model: Option<&str>,
+) -> reqwest::RequestBuilder {
+    if !is_grok_cli_proxy(api_base) {
+        return req;
+    }
+    let version = jcode_base::auth::grok_build::cli_version_string();
+    let model = model.unwrap_or("grok-4.6");
+    req.header("User-Agent", format!("grok-cli/{version}"))
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .header("x-grok-model-override", model)
+        .header("x-grok-client-version", &version)
+        .header("x-grok-client-surface", "cli")
+}
+
 pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
 
 #[derive(Debug, Clone)]
@@ -545,7 +574,11 @@ async fn fetch_models_from_api(
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
     let response =
-        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None)
+        apply_grok_cli_proxy_headers(
+            apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None),
+            &api_base,
+            None,
+        )
             .send()
             .await
             .with_context(|| {
@@ -1804,9 +1837,8 @@ impl OpenRouterProvider {
     /// Auth is the Grok CLI OIDC token (`~/.grok/auth.json`), not `XAI_API_KEY`.
     /// Jcode owns tools (same loop as Opus); Grok is the model.
     pub fn new_grok_build_subscription(token: String) -> Result<Self> {
-        let api_base = normalize_api_base("https://cli-chat-proxy.grok.com/v1").ok_or_else(|| {
-            anyhow::anyhow!("invalid Grok Build CLI chat proxy base URL")
-        })?;
+        let api_base = normalize_api_base("https://cli-chat-proxy.grok.com/v1")
+            .ok_or_else(|| anyhow::anyhow!("invalid Grok Build CLI chat proxy base URL"))?;
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new("grok-4.6".to_string())),

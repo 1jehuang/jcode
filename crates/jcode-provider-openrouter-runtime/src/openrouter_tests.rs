@@ -2548,6 +2548,71 @@ fn test_openrouter_kimi_chat_request_includes_compat_user_agent() {
 }
 
 #[test]
+fn grok_cli_proxy_host_detection() {
+    assert!(is_grok_cli_proxy("https://cli-chat-proxy.grok.com/v1"));
+    assert!(is_grok_cli_proxy(
+        "https://cli-chat-proxy.grok.com/v1/chat/completions"
+    ));
+    assert!(!is_grok_cli_proxy("https://openrouter.ai/api/v1"));
+    assert!(!is_grok_cli_proxy("https://api.x.ai/v1"));
+}
+
+#[test]
+fn grok_cli_proxy_headers_match_official_cli() {
+    let request = apply_grok_cli_proxy_headers(
+        Client::new().post("https://cli-chat-proxy.grok.com/v1/chat/completions"),
+        "https://cli-chat-proxy.grok.com/v1",
+        Some("grok-4.6"),
+    )
+    .build()
+    .expect("build grok proxy request");
+    let headers = request.headers();
+    let ua = headers
+        .get("User-Agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ua.starts_with("grok-cli/"),
+        "CLI chat proxy requires grok-cli User-Agent, got {ua:?}"
+    );
+    assert_ne!(
+        ua, "grok-cli/none",
+        "proxy reports version (none) when User-Agent has no version"
+    );
+    assert_eq!(
+        headers.get("X-XAI-Token-Auth").and_then(|v| v.to_str().ok()),
+        Some("xai-grok-cli")
+    );
+    assert_eq!(
+        headers
+            .get("x-grok-model-override")
+            .and_then(|v| v.to_str().ok()),
+        Some("grok-4.6")
+    );
+    assert_eq!(
+        headers
+            .get("x-grok-client-surface")
+            .and_then(|v| v.to_str().ok()),
+        Some("cli")
+    );
+}
+
+#[test]
+fn grok_cli_proxy_headers_skip_other_hosts() {
+    let request = apply_grok_cli_proxy_headers(
+        Client::new().post("https://openrouter.ai/api/v1/chat/completions"),
+        "https://openrouter.ai/api/v1",
+        Some("grok-4.6"),
+    )
+    .build()
+    .expect("build non-grok request");
+    assert!(
+        request.headers().get("X-XAI-Token-Auth").is_none(),
+        "must not spoof grok-cli auth headers on other OpenAI-compatible hosts"
+    );
+}
+
+#[test]
 fn test_parse_next_event_accepts_compact_sse_data_and_reasoning_content() {
     let bytes = Bytes::from_static(
         b"data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"}}]}\n\n",
