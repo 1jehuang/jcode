@@ -39,6 +39,12 @@ impl BgTool {
     }
 }
 
+impl Default for BgTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct BgInput {
     /// Action to perform: list, status, output, tail, cancel, cleanup, watch, delivery, subscribe, wait

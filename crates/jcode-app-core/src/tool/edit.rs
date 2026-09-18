@@ -18,6 +18,12 @@ impl EditTool {
     }
 }
 
+impl Default for EditTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct EditInput {
     #[serde(default)]

@@ -4,6 +4,7 @@ use std::fmt;
 
 /// Supported shell types.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::enum_variant_names)]
 pub enum Shell {
     Fish,
     Zsh,

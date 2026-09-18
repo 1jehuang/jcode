@@ -778,6 +778,12 @@ impl BashTool {
     }
 }
 
+impl Default for BashTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct BashInput {
     command: String,

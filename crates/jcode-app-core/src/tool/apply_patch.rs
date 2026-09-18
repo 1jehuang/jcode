@@ -18,6 +18,12 @@ impl ApplyPatchTool {
     }
 }
 
+impl Default for ApplyPatchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct ApplyPatchInput {
     #[serde(default)]

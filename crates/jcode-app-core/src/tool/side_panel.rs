@@ -16,6 +16,12 @@ impl SidePanelTool {
     }
 }
 
+impl Default for SidePanelTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SidePanelInput {
     action: String,

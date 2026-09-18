@@ -54,6 +54,12 @@ impl MemoryTool {
     }
 }
 
+impl Default for MemoryTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct MemoryInput {
     action: String,

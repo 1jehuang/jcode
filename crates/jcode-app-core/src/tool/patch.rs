@@ -14,6 +14,12 @@ impl PatchTool {
     }
 }
 
+impl Default for PatchTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct PatchInput {
     patch_text: String,

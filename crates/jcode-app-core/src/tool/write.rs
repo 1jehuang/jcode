@@ -18,6 +18,12 @@ impl WriteTool {
     }
 }
 
+impl Default for WriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Deserialize)]
 struct WriteInput {
     #[serde(default)]

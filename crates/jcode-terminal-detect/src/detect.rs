@@ -100,7 +100,7 @@ fn features_for(em: &TerminalEmulator) -> FeatureSet {
         };
 
     // Truecolor heuristic: if COLORTERM is set to truecolor/24bit
-    let tc = truecolor || env("COLORTERM").map_or(false, |v| v == "truecolor" || v == "24bit");
+    let tc = truecolor || env("COLORTERM").is_some_and(|v| v == "truecolor" || v == "24bit");
 
     // Read terminal size from env (curses/terminfo).
     let (cols, rows) = (

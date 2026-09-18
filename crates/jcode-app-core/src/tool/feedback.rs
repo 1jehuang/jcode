@@ -15,6 +15,12 @@ impl MaintainerFeedbackTool {
     }
 }
 
+impl Default for MaintainerFeedbackTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct FeedbackInput {
