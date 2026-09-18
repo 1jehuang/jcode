@@ -34,8 +34,17 @@ pub struct SubscriptionUsage {
     pub resets_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SubscriptionCapabilities {
+    #[serde(default)]
+    pub voice_transcription: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubscriptionMe {
+    /// Older servers advertise no optional capabilities.
+    #[serde(default)]
+    pub capabilities: SubscriptionCapabilities,
     pub account_id: String,
     pub email: String,
     /// Stable wire tier value: "none", "plus", "pro", "max", "ultra", or "flagship".
@@ -555,6 +564,7 @@ mod tests {
         }"#;
         let me: SubscriptionMe = serde_json::from_str(json).expect("parse");
         assert_eq!(me.parsed_tier(), Some(JcodeTier::Flagship));
+        assert!(!me.capabilities.voice_transcription);
         assert!(me.has_active_paid_plan());
         assert_eq!(me.manage_url.as_deref(), Some("https://jcode.sh/account"));
     }

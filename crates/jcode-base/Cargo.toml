@@ -26,7 +26,7 @@ futures = "0.3"
 async-trait = "0.1"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "blocking", "charset", "http2", "system-proxy", "rustls-tls", "rustls-tls-native-roots"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 # Serialization
@@ -87,6 +87,9 @@ jcode-terminal-image = { path = "../jcode-terminal-image" }
 jcode-telemetry-core = { path = "../jcode-telemetry-core" }
 jcode-usage-types = { path = "../jcode-usage-types" }
 
+# Native microphone input is opt-in so CLI builds need no audio development libraries.
+cpal = { version = "0.15", optional = true }
+
 # Streaming
 
 # Terminal I/O (event stream for interactive auth/secret prompts). NOTE: the
@@ -127,6 +130,7 @@ default = ["embeddings", "bedrock"]
 # dev-dependency feature by jcode-app-core / jcode / etc.; never in normal
 # (non-test) builds.
 test-support = []
+voice-capture = ["dep:cpal"]
 jemalloc = [
     "dep:tikv-jemalloc-ctl",
     "dep:tikv-jemalloc-sys",
