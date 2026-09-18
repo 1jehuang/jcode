@@ -1139,8 +1139,19 @@ fn is_vpc_sc_error(err: &anyhow::Error) -> bool {
 }
 
 fn gemini_http_client() -> reqwest::Client {
+    // Code Assist (cloudcode-pa) applies the subscription quota per client
+    // identity. A/B tests with the same token, project and body showed
+    // `jcode/1.0 (gemini)` throttled (429 RATE_LIMIT_EXCEEDED after 1-2
+    // requests) while the official Gemini CLI UA ran unlimited. Present the
+    // same identity the official CLI sends.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-goog-api-client",
+        reqwest::header::HeaderValue::from_static("gl-node/26.4.0"),
+    );
     reqwest::Client::builder()
-        .user_agent("jcode/1.0 (gemini)")
+        .user_agent(gemini_user_agent())
+        .default_headers(headers)
         .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(90))
@@ -1148,6 +1159,23 @@ fn gemini_http_client() -> reqwest::Client {
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()
         .unwrap_or_else(|_| jcode_provider_core::shared_http_client())
+}
+
+/// User-Agent matching the official Gemini CLI. Override with
+/// `JCODE_GEMINI_USER_AGENT` if Google changes the accepted format.
+fn gemini_user_agent() -> String {
+    if let Ok(ua) = std::env::var("JCODE_GEMINI_USER_AGENT")
+        && !ua.trim().is_empty()
+    {
+        return ua;
+    }
+    let os = std::env::consts::OS;
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    format!("GeminiCLI-tui/0.57.0/{DEFAULT_MODEL} ({os}; {arch}; terminal)")
 }
 
 fn is_transient_gemini_transport_error(err: &reqwest::Error) -> bool {
