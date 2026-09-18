@@ -325,14 +325,16 @@ fn vscdb_read_machine_id() {
 fn vscdb_missing_key_returns_error() {
     let dir = TempDir::new().unwrap();
     let db = create_mock_vscdb(dir.path(), &[("other/key", "value")]);
-    let result = read_vscdb_key(&db, "cursorAuth/accessToken");
-    assert!(result.is_err());
+    let error = read_vscdb_key(&db, "cursorAuth/accessToken").unwrap_err();
     assert!(
-        result
-            .unwrap_err()
+        error
             .to_string()
-            .contains("not found or empty")
+            .contains("Key 'cursorAuth/accessToken' not found")
     );
+    assert!(matches!(
+        error.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::QueryReturnedNoRows)
+    ));
 }
 
 #[test]
