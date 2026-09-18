@@ -394,32 +394,40 @@ fn clear_failure(id: &str) {
     }
 }
 
-/// Read one sheet from a local path, enforcing the size ceiling.
+/// A sheet's parsed providers paired with the fingerprint of the bytes read.
+type FingerprintedSheet = (
+    FileFingerprint,
+    HashMap<String, HashMap<String, ModelPricingEntry>>,
+);
+
+/// Test-only thin wrapper over [`read_local_sheet_fingerprinted`] that drops the
+/// fingerprint.
 ///
-/// The `stat` runs before the `open` on purpose: a `file://` path can name a
-/// FIFO, and opening one with no writer blocks a price lookup forever. A
-/// non-regular file is refused outright, and the size is checked from metadata
-/// and again while reading (`take`) so an oversized file is never fully
-/// buffered.
+/// Production callers go through [`read_local_sheet_fingerprinted`] directly
+/// because they need the fingerprint to decide whether a cached copy is still
+/// fresh; the tests that only care about parse/size behaviour use this.
+#[cfg(test)]
 pub(super) fn read_local_sheet(
     path: &std::path::Path,
 ) -> anyhow::Result<HashMap<String, HashMap<String, ModelPricingEntry>>> {
     read_local_sheet_fingerprinted(path).map(|(_, providers)| providers)
 }
 
-/// [`read_local_sheet`], also returning the fingerprint of the bytes it read.
+/// Read one sheet from a local path, enforcing the size ceiling, and also
+/// return the fingerprint of the bytes it read.
+///
+/// The `stat` runs before the `open` on purpose: a `file://` path can name a
+/// FIFO, and opening one with no writer blocks a price lookup forever. A
+/// non-regular file is refused outright, and the size is checked from metadata
+/// and again while reading (`take`) so an oversized file is never fully
+/// buffered.
 ///
 /// The fingerprint comes from the same `stat` that gates the open, so a copy is
 /// recorded as "this exact version of the file" without a second syscall. It is
 /// taken *before* the read: an edit that lands mid-read leaves the recorded
 /// fingerprint behind the file, so the next lookup re-reads rather than trusting
 /// a half-old copy.
-fn read_local_sheet_fingerprinted(
-    path: &std::path::Path,
-) -> anyhow::Result<(
-    FileFingerprint,
-    HashMap<String, HashMap<String, ModelPricingEntry>>,
-)> {
+fn read_local_sheet_fingerprinted(path: &std::path::Path) -> anyhow::Result<FingerprintedSheet> {
     use std::io::Read as _;
 
     #[cfg(test)]
