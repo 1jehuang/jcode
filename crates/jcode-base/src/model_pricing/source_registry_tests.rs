@@ -9,9 +9,10 @@ use super::ModelCost;
 use super::entry::ModelPricingEntry;
 use super::source_registry::{
     MAX_SHEET_BYTES_TEST as MAX_SHEET_BYTES, cached_fetched_at_for_tests,
-    cached_source_ids_for_tests, clear_sources_cache_for_tests, fetch_remote,
-    forget_failures_for_tests, in_backoff_for_tests, read_body_limited, read_local_sheet,
-    save_catalog, source_card,
+    cached_fingerprint_for_tests, cached_source_ids_for_tests, clear_sources_cache_for_tests,
+    fetch_remote, forget_failures_for_tests, in_backoff_for_tests, local_sheet_reads_for_tests,
+    read_body_limited, read_local_sheet, reset_local_sheet_reads_for_tests, save_catalog,
+    source_card,
 };
 use crate::config::SourceLocation;
 use crate::model_pricing::{clear_memory_cache_for_tests, save_test_cache, save_test_source};
@@ -367,11 +368,16 @@ fn a_lower_priority_sheet_fills_fields_the_winner_leaves_unset() {
         "complete.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
+    // The winner's card is primed (the parser refuses a card with no output
+    // rate), so its file has to exist for the primed copy to be fresh.
+    let winner_path = env.dir.path().join("winner.json");
+    std::fs::write(&winner_path, "{}").expect("write the winner's file");
+    let winner_url = format!("file://{}", winner_path.display());
     env.write_config(&format!(
         r#"
 [[pricing.sources]]
 id = "winner"
-url = "file:///nonexistent-winner.json"
+url = "{winner_url}"
 priority = 0
 
 [[pricing.sources]]
@@ -382,7 +388,7 @@ priority = 10
     ));
     save_test_source(
         "winner",
-        "file:///nonexistent-winner.json",
+        &winner_url,
         super::catalog::now_unix_secs(),
         &[(
             "deepseek",
@@ -648,17 +654,23 @@ currency = "CNY"
 fn an_incomplete_foreign_currency_sheet_does_not_relabel_models_dev() {
     let env = Env::new();
     env.save_models_dev();
-    env.write_config(
+    // The entry is primed rather than parsed (the parser refuses a card with no
+    // output rate), so the file it is primed against has to exist for the cache
+    // to look like a copy this process just read.
+    let path = env.dir.path().join("incomplete.json");
+    std::fs::write(&path, "{}").expect("write the primed sheet's file");
+    let location = format!("file://{}", path.display());
+    env.write_config(&format!(
         r#"
 [[pricing.sources]]
 id = "incomplete"
-url = "file:///nonexistent-incomplete.json"
+url = "{location}"
 currency = "CNY"
-"#,
-    );
+"#
+    ));
     save_test_source(
         "incomplete",
-        "file:///nonexistent-incomplete.json",
+        &location,
         super::catalog::now_unix_secs(),
         &[(
             "deepseek",
@@ -1190,10 +1202,10 @@ fn cache_file(env: &Env) -> std::path::PathBuf {
 fn a_save_bases_on_memory_and_never_drops_the_other_source() {
     let env = Env::new();
     let location = SourceLocation::LocalFile(env.dir.path().join("sheet.json"));
-    save_catalog("a", &location, providers_for("m-a"));
+    save_catalog("a", &location, None, providers_for("m-a"));
     // The disk file disappears under us; the process still holds `a`.
     std::fs::remove_file(cache_file(&env)).expect("remove cache file");
-    save_catalog("b", &location, providers_for("m-b"));
+    save_catalog("b", &location, None, providers_for("m-b"));
 
     assert_eq!(
         cached_source_ids_for_tests(),
@@ -1214,7 +1226,7 @@ fn concurrent_saves_of_different_sources_all_survive() {
         .map(|index| {
             let id = format!("s{index}");
             let location = location.clone();
-            std::thread::spawn(move || save_catalog(&id, &location, providers_for("m")))
+            std::thread::spawn(move || save_catalog(&id, &location, None, providers_for("m")))
         })
         .collect();
     for handle in handles {
@@ -1372,7 +1384,7 @@ fn a_sheet_url_with_a_token_is_redacted_in_the_cache_file() {
         "userinfo is dropped too"
     );
 
-    save_catalog("mirror", &location, providers_for("m"));
+    save_catalog("mirror", &location, None, providers_for("m"));
     let raw = std::fs::read_to_string(cache_file(&env)).expect("cache file");
     assert!(
         !raw.contains("glpat"),
@@ -1386,4 +1398,177 @@ fn a_sheet_url_with_a_token_is_redacted_in_the_cache_file() {
         raw.contains("gitlab.internal"),
         "the host still names it: {raw}"
     );
+}
+
+/// The single-source case: `[[pricing.sources]]` with a `url` and nothing else.
+/// The derived id (`prices`, from `prices.json`) is the cache key and the label
+/// `/pricing` and the cost line print, so it must be the same on every load.
+#[test]
+fn an_id_less_local_source_prices_the_call_under_a_stable_derived_id() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "prices.json",
+        &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
+    );
+    let config = format!("[[pricing.sources]]\nurl = \"{url}\"\n");
+    env.write_config(&config);
+
+    let priced =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("the sheet prices the model");
+    assert!(
+        (priced.amount - reference_amount(9.0, 18.0)).abs() < 1e-12,
+        "an id-less source must still price the call, got {priced:?}"
+    );
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+        Some("prices")
+    );
+
+    // Loading the same config again derives the same id and reads the same
+    // cache entry instead of creating a second one.
+    crate::config::invalidate_config_cache();
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+        Some("prices")
+    );
+    assert_eq!(
+        cached_source_ids_for_tests(),
+        vec!["prices".to_string()],
+        "one id-less source must produce exactly one cache key"
+    );
+}
+
+/// A local price file is the user's own file, so editing it has to take effect
+/// at the next lookup. `refresh_secs` is a *remote* concept: a local read is not
+/// network I/O, so the TTL must not hold an edit back for a day.
+#[test]
+fn an_edited_local_sheet_is_picked_up_without_waiting_the_ttl() {
+    let env = Env::new();
+    env.save_models_dev();
+    let path = env.dir.path().join("prices.json");
+    std::fs::write(&path, sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0))
+        .expect("write the price file");
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+url = "file://{}"
+refresh_secs = 86400
+"#,
+        path.display()
+    ));
+
+    let before =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("the sheet prices the model");
+    assert!(
+        (before.amount - reference_amount(9.0, 18.0)).abs() < 1e-12,
+        "the first read uses the file, got {before:?}"
+    );
+
+    // The user edits their price file and saves. The mtime is forced forward so
+    // the test does not depend on the filesystem's timestamp granularity.
+    std::fs::write(&path, sheet_body("deepseek", "deepseek-v4-pro", 3.0, 6.0))
+        .expect("rewrite the price file");
+    set_modified(&path, 1_900_000_000);
+
+    let after =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("the sheet still prices the model");
+    assert!(
+        (after.amount - reference_amount(3.0, 6.0)).abs() < 1e-12,
+        "an edited local sheet must be re-read without waiting refresh_secs, got {after:?}"
+    );
+}
+
+/// Force a file's mtime so freshness tests do not depend on clock granularity.
+fn set_modified(path: &std::path::Path, secs: u64) {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open the sheet to set its mtime");
+    file.set_times(
+        std::fs::FileTimes::new()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)),
+    )
+    .expect("set the sheet's mtime");
+}
+
+/// The freshness check costs a `stat`, never a re-read: an unchanged local file
+/// must not be opened again on every price lookup, because the route catalog
+/// asks for a price once per route.
+#[test]
+fn an_unchanged_local_sheet_is_not_reread_on_every_lookup() {
+    let env = Env::new();
+    env.save_models_dev();
+    let url = env.sheet_url(
+        "prices.json",
+        &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
+    );
+    env.write_config(&format!(
+        "[[pricing.sources]]\nurl = \"{url}\"\nrefresh_secs = 3600\n"
+    ));
+
+    reset_local_sheet_reads_for_tests();
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+        Some("prices")
+    );
+    let reads_after_first = local_sheet_reads_for_tests();
+    assert!(
+        reads_after_first >= 1,
+        "the first lookup reads the file, got {reads_after_first}"
+    );
+
+    for _ in 0..8 {
+        assert_eq!(
+            priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+            Some("prices")
+        );
+    }
+    assert_eq!(
+        local_sheet_reads_for_tests(),
+        reads_after_first,
+        "an unchanged local sheet must be stat'ed, not re-read"
+    );
+    let (mtime, size) = cached_fingerprint_for_tests("prices").expect("the copy is fingerprinted");
+    assert!(mtime > 0 && size > 0, "mtime {mtime}, size {size}");
+}
+
+/// A source that cannot be read at all must not cost a syscall per lookup: the
+/// failure backoff is what bounds a missing file, exactly as it bounds a failing
+/// fetch.
+#[test]
+fn a_missing_local_sheet_costs_one_attempt_per_backoff_not_one_per_lookup() {
+    let env = Env::new();
+    env.save_models_dev();
+    let missing = env.dir.path().join("not-there.json");
+    env.write_config(&format!(
+        "[[pricing.sources]]\nurl = \"file://{}\"\n",
+        missing.display()
+    ));
+
+    reset_local_sheet_reads_for_tests();
+    assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
+    let attempts = local_sheet_reads_for_tests();
+    assert_eq!(attempts, 1, "the first lookup attempts the file once");
+    assert!(
+        in_backoff_for_tests("not-there"),
+        "the failure buys a backoff"
+    );
+
+    for _ in 0..8 {
+        assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
+    }
+    assert_eq!(
+        local_sheet_reads_for_tests(),
+        attempts,
+        "the backoff window prevents re-reading a missing file"
+    );
+
+    // Once the window is over, the attempt is made again rather than never.
+    forget_failures_for_tests();
+    assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
+    assert_eq!(local_sheet_reads_for_tests(), attempts + 1);
 }

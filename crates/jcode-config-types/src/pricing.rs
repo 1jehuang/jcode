@@ -119,8 +119,14 @@ pub struct ProviderPricingFile {
 #[serde(default)]
 pub struct PricingSourceFile {
     /// Stable identity of this source. It is the tie-break key when two sources
-    /// share a `priority`, so it must be unique.
-    pub id: String,
+    /// share a `priority`, so an explicit id must be unique.
+    ///
+    /// Optional: when absent, the id is derived from the location at validation
+    /// time (see `jcode-base::config::pricing::convert_sources`) so the
+    /// single-source case is one line. An id-less entry re-saves without an
+    /// `id` key, because the derived form is a runtime detail, not user config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// `https://…` or `file:///…` (a bare path counts as a local file).
     pub url: String,
     /// Which provider identities this sheet may price; empty = every provider.
@@ -206,14 +212,15 @@ mod tests {
         );
         assert_eq!(parsed.sources.len(), 2);
         let first = &parsed.sources[0];
-        assert_eq!(first.id, "corp-mirror");
+        assert_eq!(first.id.as_deref(), Some("corp-mirror"));
         assert_eq!(first.priority, Some(10));
         assert_eq!(first.refresh_secs, Some(3600));
         assert_eq!(first.currency.as_deref(), Some("CNY"));
         assert_eq!(first.models, vec!["deepseek-v4-*".to_string()]);
-        // Optional fields default rather than fail: an entry with just an id
-        // and a url is the common case.
+        // Optional fields default rather than fail: an entry with just a `url`
+        // is the common single-source case.
         let second = &parsed.sources[1];
+        assert_eq!(second.id.as_deref(), Some("local"));
         assert_eq!(second.scope, Vec::<String>::new());
         assert_eq!(second.format, None);
         assert_eq!(second.priority, None);
@@ -222,6 +229,22 @@ mod tests {
         assert!(again.contains("corp-mirror"));
         let reparsed: PricingConfigFile = serde_json::from_str(&again).expect("reparse");
         assert_eq!(reparsed.sources, parsed.sources);
+    }
+
+    #[test]
+    fn a_source_without_an_id_parses_as_none() {
+        // The single-source case: `url` alone. Deriving an id belongs to
+        // validation in jcode-base; the DTO must simply accept the shape.
+        let parsed: PricingConfigFile =
+            serde_json::from_str(r#"{"sources":[{"url":"file:///home/me/prices.json"}]}"#)
+                .expect("parse");
+        assert_eq!(parsed.sources.len(), 1);
+        assert_eq!(parsed.sources[0].id, None);
+        assert!(!parsed.is_empty());
+
+        // ... and an id-less entry re-saves without inventing an `id` key.
+        let again = serde_json::to_string(&parsed).expect("serialize");
+        assert!(!again.contains("\"id\""), "{again}");
     }
 
     /// The lesson of commit `9da6f9831`: a default-valued field must not be

@@ -47,19 +47,104 @@ fn sources_resolve_by_priority_then_id_whatever_the_file_order_is() {
 }
 
 #[test]
-fn a_source_needs_an_id_and_a_location() {
-    let err = validate(&parse_toml(
-        "[[sources]]\nurl = \"https://x.test/a.json\"\n",
-    ))
-    .expect_err("an id-less source is rejected");
-    assert_eq!(err.field_path, "pricing.sources[0].id");
+fn a_source_needs_a_location_but_an_id_is_optional() {
+    // The single-source case: `url` alone. Deriving the id is what the next
+    // tests pin down.
+    let sources = sources_of("[[sources]]\nurl = \"file:///home/me/prices.json\"\n");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].id, "prices");
 
     let err = validate(&parse_toml("[[sources]]\nid = \"a\"\n")).expect_err("a url-less source");
     assert_eq!(err.field_path, "pricing.sources[0].url");
+    let err =
+        validate(&parse_toml("[[sources]]\nid = \"a\"\nurl = \"\"\n")).expect_err("an empty url");
+    assert_eq!(err.field_path, "pricing.sources[0].url");
+
+    // An explicit id is still allowed to be written, and an explicitly empty
+    // one is a mistake rather than a request to derive: deriving silently there
+    // would hide a half-deleted line.
+    let sources = sources_of("[[sources]]\nid = \"corp\"\nurl = \"file:///home/me/prices.json\"\n");
+    assert_eq!(sources[0].id, "corp");
+    let err = validate(&parse_toml(
+        "[[sources]]\nid = \"\"\nurl = \"https://x.test/a.json\"\n",
+    ))
+    .expect_err("an explicitly empty id is rejected");
+    assert_eq!(err.field_path, "pricing.sources[0].id");
+}
+
+/// A derived id is the cache key and the label users see, so it must be a
+/// property of the location, not of the file's declaration order or of anything
+/// ambient. Loading the same config twice must produce the same id, and two
+/// different id-less entries must each get their own.
+#[test]
+fn an_id_is_derived_from_the_location_and_is_stable_across_loads() {
+    // The URL keeps its last path segment, without the extension or the query.
+    let section = "[[sources]]\nurl = \"https://pricing.test/models_dev.mirror.json?token=x\"\n";
+    assert_eq!(sources_of(section)[0].id, "models_dev.mirror");
+    assert_eq!(sources_of(section)[0].id, "models_dev.mirror");
+
+    // A local file uses its file stem, scheme or not.
+    assert_eq!(
+        sources_of("[[sources]]\nurl = \"file:///opt/jcode/prices.json\"\n")[0].id,
+        "prices"
+    );
+    assert_eq!(
+        sources_of("[[sources]]\nurl = \"/opt/jcode/prices.json\"\n")[0].id,
+        "prices"
+    );
+
+    // A location that names no file at all still gets a recognisable,
+    // deterministic id rather than an empty cache key.
+    assert_eq!(
+        sources_of("[[sources]]\nurl = \"https://pricing.test/\"\n")[0].id,
+        "source1"
+    );
+
+    // Two id-less entries keep two distinct ids: the second is suffixed in
+    // declaration order, so neither sheet is silently merged under one key.
+    let sources = sources_of(
+        r#"
+        [[sources]]
+        url = "file:///one/prices.json"
+
+        [[sources]]
+        url = "file:///two/prices.json"
+        "#,
+    );
+    let ids: Vec<&str> = sources.iter().map(|source| source.id.as_str()).collect();
+    assert_eq!(ids, vec!["prices", "prices-2"], "{ids:?}");
+}
+
+/// A derived id must yield to an explicit one, wherever the explicit entry is
+/// declared: the explicit form is what the user wrote down, so it wins the name.
+#[test]
+fn a_derived_id_never_collides_with_an_explicit_id() {
+    let sources = sources_of(
+        r#"
+        [[sources]]
+        url = "file:///one/prices.json"
+
+        [[sources]]
+        id = "prices"
+        url = "https://other.test/prices.json"
+        "#,
+    );
+    // Ordered by priority (both 0), then id: `prices` before `prices-2`.
+    let ids: Vec<&str> = sources.iter().map(|source| source.id.as_str()).collect();
+    assert_eq!(ids, vec!["prices", "prices-2"], "{ids:?}");
+    let derived = sources
+        .iter()
+        .find(|source| source.id == "prices-2")
+        .expect("the derived one is disambiguated");
+    assert_eq!(
+        derived.location,
+        SourceLocation::LocalFile(std::path::PathBuf::from("/one/prices.json")),
+        "the replaced name lands on the derived entry"
+    );
 }
 
 #[test]
-fn duplicate_source_ids_are_rejected() {
+fn duplicate_explicit_source_ids_are_rejected() {
     let err = validate(&parse_toml(
         r#"
         [[sources]]
@@ -71,7 +156,7 @@ fn duplicate_source_ids_are_rejected() {
         url = "https://x.test/b.json"
         "#,
     ))
-    .expect_err("ids must be unique");
+    .expect_err("explicit ids must be unique");
     assert_eq!(err.field_path, "pricing.sources[1].id");
     assert!(err.message.contains("duplicate"), "{err}");
 }
@@ -225,7 +310,7 @@ fn a_configured_source_is_written_back() {
         .pricing
         .sources
         .push(jcode_config_types::PricingSourceFile {
-            id: "mirror".to_string(),
+            id: Some("mirror".to_string()),
             url: "https://x.test/a.json".to_string(),
             ..Default::default()
         });

@@ -14,6 +14,13 @@
 //!   on-disk cache; a missing or stale copy is refreshed by the background task
 //!   and the source is simply unused until that succeeds. A `file://` sheet is
 //!   re-read inline, because a local read is not network I/O.
+//! * **A local sheet is fresh while its file is unchanged.** A cached copy of a
+//!   local file records the file's mtime and size; an edit makes the copy stale
+//!   immediately, so "my price file" means "saving it changes the price", not
+//!   "wait out `refresh_secs`". `refresh_secs` and its failure backoff are a
+//!   remote concern. The check costs one `stat` per lookup (never a re-read), and
+//!   a file that is missing or unreadable is left alone for the failure backoff
+//!   so a broken source costs one attempt per window, not one per lookup.
 //! * **A source never fabricates a rate.** Unreachable, unparseable, empty, or
 //!   stale all mean "this source has nothing to say", so the next layer prices
 //!   the model. The previous good copy stays on disk: degradation is per
@@ -45,6 +52,11 @@ const MAX_SHEET_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(test)]
 pub(super) const MAX_SHEET_BYTES_TEST: usize = MAX_SHEET_BYTES;
 
+/// How many times a local sheet file was actually opened, for the test that
+/// pins "an unchanged file is stat'ed but not re-read".
+#[cfg(test)]
+static LOCAL_SHEET_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// One fetched sheet, plus what it was fetched from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SourceCatalog {
@@ -53,8 +65,46 @@ pub(super) struct SourceCatalog {
     /// runs out, so a mismatch is treated as "no copy yet".
     pub(super) location: String,
     pub(super) fetched_at_unix_secs: u64,
+    /// The local file this copy was read from, identified by mtime and size.
+    ///
+    /// `None` for a remote sheet, and for a cache written by a build that
+    /// predates this field; either way the copy is treated as stale once, read
+    /// again, and fingerprinted. A local sheet is fresh exactly while this
+    /// matches the file on disk, which is why an edit takes effect at the next
+    /// lookup instead of after `refresh_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) fingerprint: Option<FileFingerprint>,
     /// provider id -> model id -> entry, exactly like the models.dev cache.
     pub(super) providers: HashMap<String, HashMap<String, ModelPricingEntry>>,
+}
+
+/// What "the same local file" means for cache freshness: modification time plus
+/// size.
+///
+/// mtime alone is enough to notice an edit whose byte length did not change (a
+/// changed rate is often the same width), and size catches the rare edit the
+/// filesystem's timestamp granularity hides. Nanoseconds since the epoch, `0`
+/// when the platform will not report a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FileFingerprint {
+    pub(super) mtime_nanos: u64,
+    pub(super) size: u64,
+}
+
+impl FileFingerprint {
+    /// The fingerprint of a stat'ed file.
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        let mtime_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0);
+        Self {
+            mtime_nanos,
+            size: metadata.len(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,10 +274,12 @@ fn covers_model(source: &PricingSource, model: &str) -> bool {
 
 /// The copy of `source` a lookup may use right now.
 ///
-/// Fresh means "fetched within this source's own TTL". A local file is re-read
-/// inline when its copy is stale (or missing); a remote sheet is only ever
-/// fetched by the background refresher, so this returns `None` in the meantime
-/// and the lookup falls through to the next layer instead of blocking.
+/// Fresh means "the same sheet this source still points at": for a local file,
+/// the copy was read from that file unchanged (same mtime and size); for a
+/// remote sheet, it was fetched within this source's own TTL. A local file is
+/// re-read inline when its copy is stale (or missing); a remote sheet is only
+/// ever fetched by the background refresher, so this returns `None` in the
+/// meantime and the lookup falls through to the next layer instead of blocking.
 fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
     let cache = load_cache();
     if let Some(catalog) = cache.sources.get(&source.id)
@@ -242,10 +294,10 @@ fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
     }
 
     match &source.location {
-        SourceLocation::LocalFile(path) => match read_local_sheet(path) {
-            Ok(providers) => {
+        SourceLocation::LocalFile(path) => match read_local_sheet_fingerprinted(path) {
+            Ok((fingerprint, providers)) => {
                 clear_failure(&source.id);
-                save_catalog(&source.id, &source.location, providers);
+                save_catalog(&source.id, &source.location, Some(fingerprint), providers);
                 Some(load_cache())
             }
             Err(error) => {
@@ -266,8 +318,30 @@ fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
     }
 }
 
+/// Whether a cached copy still describes what the source points at.
+///
+/// A local copy is fresh while the file it recorded is unchanged; a remote copy
+/// is fresh while its TTL has not elapsed. The two are deliberately different:
+/// `refresh_secs` bounds how stale a *fetch* may be, and a local file is not
+/// fetched.
 fn is_fresh(source: &PricingSource, catalog: &SourceCatalog) -> bool {
-    catalog::now_unix_secs().saturating_sub(catalog.fetched_at_unix_secs) < source.refresh_secs
+    match &source.location {
+        SourceLocation::LocalFile(path) => {
+            local_fingerprint(path).is_some_and(|current| catalog.fingerprint == Some(current))
+        }
+        SourceLocation::Remote(_) => {
+            catalog::now_unix_secs().saturating_sub(catalog.fetched_at_unix_secs)
+                < source.refresh_secs
+        }
+    }
+}
+
+/// The fingerprint of the file at `path`, or `None` when it cannot be stat'ed
+/// (missing, unreadable, or gone).
+fn local_fingerprint(path: &std::path::Path) -> Option<FileFingerprint> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| FileFingerprint::of(&meta))
 }
 
 /// How long a source that just failed is left alone before being tried again.
@@ -330,7 +404,26 @@ fn clear_failure(id: &str) {
 pub(super) fn read_local_sheet(
     path: &std::path::Path,
 ) -> anyhow::Result<HashMap<String, HashMap<String, ModelPricingEntry>>> {
+    read_local_sheet_fingerprinted(path).map(|(_, providers)| providers)
+}
+
+/// [`read_local_sheet`], also returning the fingerprint of the bytes it read.
+///
+/// The fingerprint comes from the same `stat` that gates the open, so a copy is
+/// recorded as "this exact version of the file" without a second syscall. It is
+/// taken *before* the read: an edit that lands mid-read leaves the recorded
+/// fingerprint behind the file, so the next lookup re-reads rather than trusting
+/// a half-old copy.
+fn read_local_sheet_fingerprinted(
+    path: &std::path::Path,
+) -> anyhow::Result<(
+    FileFingerprint,
+    HashMap<String, HashMap<String, ModelPricingEntry>>,
+)> {
     use std::io::Read as _;
+
+    #[cfg(test)]
+    LOCAL_SHEET_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let metadata = std::fs::metadata(path)
         .map_err(|error| anyhow::anyhow!("cannot stat {}: {error}", path.display()))?;
@@ -340,13 +433,14 @@ pub(super) fn read_local_sheet(
     if metadata.len() > MAX_SHEET_BYTES as u64 {
         anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
     }
+    let fingerprint = FileFingerprint::of(&metadata);
     let file = std::fs::File::open(path)
         .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
     let mut body = String::new();
     file.take((MAX_SHEET_BYTES + 1) as u64)
         .read_to_string(&mut body)
         .map_err(|error| anyhow::anyhow!("cannot read {}: {error}", path.display()))?;
-    parse_sheet(&body)
+    Ok((fingerprint, parse_sheet(&body)?))
 }
 
 /// Parse a sheet body through the same parser the models.dev catalog uses, so
@@ -464,6 +558,7 @@ fn load_cache() -> Arc<SourcesCache> {
 pub(super) fn save_catalog(
     id: &str,
     location: &SourceLocation,
+    fingerprint: Option<FileFingerprint>,
     providers: HashMap<String, HashMap<String, ModelPricingEntry>>,
 ) {
     let path = cache_path();
@@ -492,6 +587,7 @@ pub(super) fn save_catalog(
         SourceCatalog {
             location,
             fetched_at_unix_secs: catalog::now_unix_secs(),
+            fingerprint,
             providers,
         },
     );
@@ -544,7 +640,7 @@ fn schedule_source_refresh(source: &PricingSource) {
         match result {
             Ok(providers) => {
                 clear_failure(&id);
-                save_catalog(&id, &location, providers);
+                save_catalog(&id, &location, None, providers);
             }
             Err(error) => {
                 note_failure(&id);
@@ -659,6 +755,14 @@ pub(crate) fn save_test_source(
             .or_default()
             .insert((*model).to_string(), entry.clone());
     }
+    // A primed local source has to look like one this process just read, or the
+    // mtime check would treat it as stale and re-read the (usually absent) file.
+    // The fingerprint comes from the file the caller points at, so priming a
+    // local source means writing that file.
+    let fingerprint = location
+        .strip_prefix("file://")
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| FileFingerprint::of(&metadata));
     let path = cache_path();
     let mut cache: SourcesCache = crate::storage::read_json(&path).unwrap_or_default();
     cache.sources.insert(
@@ -666,6 +770,7 @@ pub(crate) fn save_test_source(
         SourceCatalog {
             location: location.to_string(),
             fetched_at_unix_secs,
+            fingerprint,
             providers,
         },
     );
@@ -718,4 +823,27 @@ pub(crate) fn cached_fetched_at_for_tests(id: &str) -> Option<u64> {
         .sources
         .get(id)
         .map(|catalog| catalog.fetched_at_unix_secs)
+}
+
+/// How many local sheet files have been opened since the counter was reset, so
+/// a test can prove an unchanged file is stat'ed rather than re-read.
+#[cfg(test)]
+pub(crate) fn local_sheet_reads_for_tests() -> usize {
+    LOCAL_SHEET_READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_local_sheet_reads_for_tests() {
+    LOCAL_SHEET_READS.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the cache recorded as the file fingerprint for `id`, for tests that
+/// assert a copy is bound to the version of the file it was read from.
+#[cfg(test)]
+pub(crate) fn cached_fingerprint_for_tests(id: &str) -> Option<(u64, u64)> {
+    load_cache()
+        .sources
+        .get(id)
+        .and_then(|catalog| catalog.fingerprint)
+        .map(|fingerprint| (fingerprint.mtime_nanos, fingerprint.size))
 }
