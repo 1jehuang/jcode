@@ -14,11 +14,11 @@ use jcode_message_types::{
 };
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -581,6 +581,8 @@ where
     let client = GrokAcpClient {
         tx: event_tx,
         received_message: Arc::clone(&received_message),
+        started_tools: Mutex::new(HashSet::new()),
+        finished_tools: Mutex::new(HashSet::new()),
     };
     let (connection, io) =
         acp::ClientSideConnection::new(client, stdin.compat_write(), stdout.compat(), |future| {
@@ -652,6 +654,8 @@ async fn capture_stderr(
 struct GrokAcpClient {
     tx: mpsc::Sender<Result<StreamEvent>>,
     received_message: Arc<AtomicBool>,
+    started_tools: Mutex<HashSet<String>>,
+    finished_tools: Mutex<HashSet<String>>,
 }
 
 #[async_trait(?Send)]
@@ -679,27 +683,290 @@ impl acp::Client for GrokAcpClient {
         &self,
         notification: acp::SessionNotification,
     ) -> acp::Result<()> {
-        let event = match notification.update {
+        let events = match notification.update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
                 self.received_message.store(true, Ordering::Release);
-                text_from_acp_content(chunk.content).map(StreamEvent::TextDelta)
+                text_from_acp_content(chunk.content)
+                    .map(StreamEvent::TextDelta)
+                    .into_iter()
+                    .collect()
             }
-            acp::SessionUpdate::AgentThoughtChunk(chunk) => {
-                text_from_acp_content(chunk.content).map(StreamEvent::ThinkingDelta)
-            }
+            acp::SessionUpdate::AgentThoughtChunk(chunk) => text_from_acp_content(chunk.content)
+                .map(StreamEvent::ThinkingDelta)
+                .into_iter()
+                .collect(),
             acp::SessionUpdate::ToolCall(call) => {
-                Some(StreamEvent::StatusDetail { detail: call.title })
+                let id = call.tool_call_id.0.to_string();
+                self.events_for_acp_tool(
+                    id,
+                    Some(call.kind),
+                    Some(call.title),
+                    Some(call.status),
+                    call.content,
+                    call.locations,
+                    call.raw_input,
+                )
             }
-            acp::SessionUpdate::ToolCallUpdate(update) => update
-                .fields
-                .title
-                .map(|detail| StreamEvent::StatusDetail { detail }),
-            _ => None,
+            acp::SessionUpdate::ToolCallUpdate(update) => {
+                let id = update.tool_call_id.0.to_string();
+                self.events_for_acp_tool(
+                    id,
+                    update.fields.kind,
+                    update.fields.title,
+                    update.fields.status,
+                    update.fields.content.unwrap_or_default(),
+                    update.fields.locations.unwrap_or_default(),
+                    update.fields.raw_input,
+                )
+            }
+            _ => Vec::new(),
         };
-        if let Some(event) = event {
+        for event in events {
             let _ = self.tx.send(Ok(event)).await;
         }
         Ok(())
+    }
+}
+
+impl GrokAcpClient {
+    fn events_for_acp_tool(
+        &self,
+        id: String,
+        kind: Option<acp::ToolKind>,
+        title: Option<String>,
+        status: Option<acp::ToolCallStatus>,
+        content: Vec<acp::ToolCallContent>,
+        locations: Vec<acp::ToolCallLocation>,
+        raw_input: Option<Value>,
+    ) -> Vec<StreamEvent> {
+        let diffs = acp_tool_diffs(&content);
+        let file_path = diffs
+            .first()
+            .map(|(path, _, _)| path.clone())
+            .or_else(|| {
+                locations
+                    .first()
+                    .map(|location| location.path.display().to_string())
+            })
+            .or_else(|| {
+                raw_input.as_ref().and_then(|value| {
+                    value
+                        .get("file_path")
+                        .or_else(|| value.get("path"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+            });
+        let name = acp_tool_name(kind, title.as_deref(), &diffs);
+        let input = acp_tool_input(name, file_path.as_deref(), &diffs, raw_input);
+        let completed = matches!(
+            status,
+            Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+        ) || !diffs.is_empty();
+        let failed = matches!(status, Some(acp::ToolCallStatus::Failed));
+
+        let mut started = self
+            .started_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut finished = self
+            .finished_tools
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if finished.contains(&id) {
+            return Vec::new();
+        }
+
+        let mut events = Vec::new();
+        if !started.contains(&id) {
+            started.insert(id.clone());
+            events.push(StreamEvent::ToolUseStart {
+                id: id.clone(),
+                name: name.to_string(),
+            });
+            if let Some(detail) = title.clone() {
+                events.push(StreamEvent::StatusDetail { detail });
+            }
+        }
+        if completed {
+            finished.insert(id.clone());
+            drop(started);
+            drop(finished);
+            events.push(StreamEvent::ToolInputDelta(
+                serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
+            ));
+            events.push(StreamEvent::ToolUseEnd);
+            events.push(StreamEvent::ToolResult {
+                tool_use_id: id,
+                content: acp_tool_result_text(title.as_deref(), &diffs),
+                is_error: failed,
+            });
+        } else {
+            drop(started);
+            drop(finished);
+        }
+        events
+    }
+}
+
+fn acp_tool_name(
+    kind: Option<acp::ToolKind>,
+    title: Option<&str>,
+    diffs: &[(String, Option<String>, String)],
+) -> &'static str {
+    if diffs.iter().any(|(_, old, _)| old.is_none()) && diffs.len() == 1 {
+        return "write";
+    }
+    if !diffs.is_empty() {
+        return "edit";
+    }
+    match kind {
+        Some(acp::ToolKind::Edit | acp::ToolKind::Delete | acp::ToolKind::Move) => "edit",
+        Some(acp::ToolKind::Read) => "read",
+        Some(acp::ToolKind::Execute) => "bash",
+        Some(acp::ToolKind::Search) => "grep",
+        Some(acp::ToolKind::Fetch) => "webfetch",
+        _ => {
+            let title = title.unwrap_or_default().to_ascii_lowercase();
+            if title.contains("edit") || title.contains("write") || title.contains("patch") {
+                "edit"
+            } else if title.contains("read") {
+                "read"
+            } else if title.contains("bash") || title.contains("shell") || title.contains("run") {
+                "bash"
+            } else {
+                "tool"
+            }
+        }
+    }
+}
+
+fn acp_tool_diffs(content: &[acp::ToolCallContent]) -> Vec<(String, Option<String>, String)> {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            acp::ToolCallContent::Diff(diff) => Some((
+                diff.path.display().to_string(),
+                diff.old_text.clone(),
+                diff.new_text.clone(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn acp_tool_input(
+    name: &str,
+    file_path: Option<&str>,
+    diffs: &[(String, Option<String>, String)],
+    raw_input: Option<Value>,
+) -> Value {
+    if let Some(Value::Object(mut object)) = raw_input {
+        if let Some(path) = file_path
+            && !object.contains_key("file_path")
+            && !object.contains_key("path")
+        {
+            object.insert("file_path".to_string(), Value::String(path.to_string()));
+        }
+        if name == "edit"
+            && let Some((_, old, new)) = diffs.first()
+        {
+            object
+                .entry("old_string")
+                .or_insert_with(|| Value::String(old.clone().unwrap_or_default()));
+            object
+                .entry("new_string")
+                .or_insert_with(|| Value::String(new.clone()));
+        }
+        if name == "write"
+            && let Some((_, _, new)) = diffs.first()
+        {
+            object
+                .entry("content")
+                .or_insert_with(|| Value::String(new.clone()));
+        }
+        return Value::Object(object);
+    }
+
+    let mut object = Map::new();
+    if let Some(path) = file_path {
+        object.insert("file_path".to_string(), Value::String(path.to_string()));
+    }
+    match (name, diffs.first()) {
+        ("edit", Some((_, old, new))) => {
+            object.insert(
+                "old_string".to_string(),
+                Value::String(old.clone().unwrap_or_default()),
+            );
+            object.insert("new_string".to_string(), Value::String(new.clone()));
+        }
+        ("write", Some((_, _, new))) => {
+            object.insert("content".to_string(), Value::String(new.clone()));
+        }
+        _ => {}
+    }
+    Value::Object(object)
+}
+
+fn acp_tool_result_text(title: Option<&str>, diffs: &[(String, Option<String>, String)]) -> String {
+    if diffs.is_empty() {
+        return title.unwrap_or("ok").to_string();
+    }
+    diffs
+        .iter()
+        .map(|(path, old, new)| format_unified_diff(path, old.as_deref().unwrap_or(""), new))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_unified_diff(path: &str, old: &str, new: &str) -> String {
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    for line in old.lines() {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in new.lines() {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod acp_tool_display_tests {
+    use super::*;
+
+    #[test]
+    fn edit_diff_becomes_edit_tool_with_old_and_new_strings() {
+        let diffs = vec![(
+            "src/lib.rs".to_string(),
+            Some("fn old() {}\n".to_string()),
+            "fn new() {}\n".to_string(),
+        )];
+        assert_eq!(
+            acp_tool_name(Some(acp::ToolKind::Edit), Some("Editing"), &diffs),
+            "edit"
+        );
+        let input = acp_tool_input("edit", Some("src/lib.rs"), &diffs, None);
+        assert_eq!(input["file_path"], "src/lib.rs");
+        assert_eq!(input["old_string"], "fn old() {}\n");
+        assert_eq!(input["new_string"], "fn new() {}\n");
+        let result = acp_tool_result_text(Some("Editing"), &diffs);
+        assert!(result.contains("-fn old() {}"));
+        assert!(result.contains("+fn new() {}"));
+    }
+
+    #[test]
+    fn new_file_diff_becomes_write_tool() {
+        let diffs = vec![("new.rs".to_string(), None, "hello\n".to_string())];
+        assert_eq!(
+            acp_tool_name(Some(acp::ToolKind::Edit), None, &diffs),
+            "write"
+        );
+        let input = acp_tool_input("write", Some("new.rs"), &diffs, None);
+        assert_eq!(input["content"], "hello\n");
     }
 }
 

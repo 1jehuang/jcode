@@ -113,6 +113,29 @@ fn main() {
                         }
                     }
                 }));
+                if std::env::var_os("JCODE_FAKE_GROK_ACP_EDIT").is_some() {
+                    send(json!({
+                        "jsonrpc":"2.0",
+                        "method":"session/update",
+                        "params":{
+                            "sessionId":"fake-session-new",
+                            "update":{
+                                "sessionUpdate":"tool_call",
+                                "toolCallId":"edit-1",
+                                "title":"Editing src/lib.rs",
+                                "kind":"edit",
+                                "status":"completed",
+                                "locations":[{"path":"src/lib.rs"}],
+                                "content":[{
+                                    "type":"diff",
+                                    "path":"src/lib.rs",
+                                    "oldText":"fn old() {}\n",
+                                    "newText":"fn new() {}\n"
+                                }]
+                            }
+                        }
+                    }));
+                }
                 send(json!({
                     "jsonrpc":"2.0",
                     "method":"session/update",

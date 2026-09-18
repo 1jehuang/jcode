@@ -95,6 +95,55 @@ async fn fake_subprocess_covers_handshake_models_new_prompt_and_auth_isolation()
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn fake_subprocess_surfaces_acp_file_diffs_as_edit_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("edit.jsonl");
+    let mut process = fake_process(&log);
+    process
+        .env
+        .insert("JCODE_FAKE_GROK_ACP_EDIT".into(), "1".into());
+    let provider = GrokBuildProvider::with_process(process);
+    provider.prefetch_models().await.unwrap();
+
+    let mut stream = provider
+        .complete(&[Message::user("edit the file")], &[], "", None)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.unwrap());
+    }
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(event, StreamEvent::ToolUseStart { id, name } if id == "edit-1" && name == "edit")
+        }),
+        "missing ToolUseStart: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolInputDelta(delta) if delta.contains("src/lib.rs") && delta.contains("fn new() {}")
+        )),
+        "missing edit input: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolUseEnd)),
+        "missing ToolUseEnd: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "edit-1" && !*is_error && content.contains("-fn old() {}") && content.contains("+fn new() {}")
+        )),
+        "missing ToolResult diff: {events:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn fake_subprocess_resumes_without_history_replay_or_model_reset() {
     let temp = tempfile::tempdir().unwrap();
     let log = temp.path().join("resume.jsonl");
