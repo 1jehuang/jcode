@@ -1,22 +1,255 @@
 # Model pricing and costs
 
-jcode prices an API call from the layers below, highest priority first:
+jcode can price API calls from **your** price list instead of guessing. The
+model is one idea:
 
-1. a **hand-written `[pricing.providers]` rule** in `~/.jcode/config.toml` (this document),
-2. an **extra `[[pricing.sources]]` price sheet** named in the same file: a URL or
-   a local file in models.dev's own JSON shape,
-3. the curated static tables shipping with jcode,
-4. provider-specific caches (OpenRouter endpoints),
-5. the [models.dev](https://models.dev) catalog,
-6. a generic fallback estimate.
+> **`config.toml` holds a pointer, not prices.** You say which price source to
+> read, covering which providers and models, and who wins; the rates themselves
+> live in a file (or a URL) in models.dev's JSON shape.
 
-The config layer therefore outranks everything else, and an empty `[pricing]`
-section leaves the cost path exactly as it was before the section existed.
+So the answer to "why is it this price?" has **two layers**:
 
-## Quick start: DeepSeek billed in CNY with peak/off-peak
+1. **Your sources.** A `[[pricing.sources]]` entry points at a sheet: a local
+   file or an `https://` URL. Sources resolve by `priority` (lower wins, ties by
+   `id`), and a sheet only covers the providers/models its `scope` and `models`
+   allow. A `[pricing.providers]` card written inline in `config.toml` still
+   outranks every source; it is the escape hatch for the two things a sheet
+   cannot say (below), not the main path.
+2. **jcode's own chain**, used for anything your sources do not price: the
+   curated static tables shipping with jcode, then provider-specific caches
+   (OpenRouter endpoints), then the [models.dev](https://models.dev) catalog,
+   then a generic fallback estimate.
 
-DeepSeek publishes CNY prices and charges double during peak hours. This is the
-whole rule, and every field in it is explained below:
+An empty `[pricing]` section leaves the cost path exactly as it was before the
+section existed.
+
+## Quick start: point jcode at your price file
+
+One line in `~/.jcode/config.toml`:
+
+```toml
+[[pricing.sources]]
+url = "file:///home/me/prices.json"
+```
+
+and your price file, in models.dev's shape:
+
+```json
+{
+  "deepseek": {
+    "models": {
+      "deepseek-v4-pro": {
+        "cost": { "input": 4.5, "output": 13.5, "cache_read": 0.15 },
+        "tariffs": { "peak": { "multiplier": 2.0 } },
+        "schedule": [
+          {
+            "tariff": "peak",
+            "utc_offset_minutes": 0,
+            "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+            "windows": [["01:00", "04:00"]]
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+That is the whole configuration: no `id` is needed (jcode derives one from the
+file name, so the sheet above is labelled `prices` in `/pricing` and in the
+"rule expired" marker). Editing `prices.json` takes effect at the next lookup,
+because a local file is re-read when it changes — there is nothing to wait for
+and no command to run. Any provider or model the sheet does not mention keeps
+falling through to jcode's own chain.
+
+## Reference
+
+### `[pricing]`
+
+| Key | Meaning |
+| --- | --- |
+| `fx_base` | Base currency for the rate table. Defaults to `USD`. |
+| `fx_rates` | `1 {fx_base} = N {currency}` for every currency you use, e.g. `CNY = 7.20`. |
+
+There is **no automatic rate fetching** in v1: you write the rates you want to be
+billed and compared by. They are used in two places, and nowhere else:
+
+* `[display] currency = "CNY"` converts every cost into that currency for display;
+  `"native"` (the default) shows each provider in its own currency.
+* The model picker orders routes by price. Estimates denominated in different
+  currencies are compared **after conversion**. A currency with no rate is never
+  guessed: those routes keep their native currency and sort below every
+  comparable route, instead of being ordered as if `¥7` and `$7` were the same
+  number.
+
+### `[[pricing.sources]]`
+
+A source is a price list you point jcode at: your own mirror of models.dev, a
+vendor's published rate sheet, a file you keep in a git repo. Sources sit
+**below an inline `[pricing.providers]` card and above every catalog jcode
+derives itself**, so pointing at your own sheet is never a no-op.
+
+```toml
+[[pricing.sources]]
+id = "corp-mirror"                                     # optional; derived from the URL when absent
+url = "https://gitlab.internal/pricing/models_dev.mirror.json"  # or file:///opt/jcode/prices.json
+scope = ["deepseek", "openai-compatible:my-gateway"]   # omit = every provider
+models = ["deepseek-v4-*"]                             # omit = every model under scope
+refresh_secs = 86400                                   # remote TTL, default 24h
+priority = 10                                          # lower wins; default 0
+currency = "USD"                                       # currency of the sheet's numbers; default USD
+```
+
+| Key | Meaning |
+| --- | --- |
+| `id` | Name of this source. Optional: omit it and jcode derives a stable one from the location (the file stem for a local path, the last path segment without its extension for a URL, e.g. `prices` from `…/prices.json`, `models_dev.mirror` from `…/models_dev.mirror.json`). It is the tie-break key when two sources share a `priority`, so it must be unique; an id you write wins over a derived one, and two sources that would derive the same id get `-2`, `-3`, … in declaration order. |
+| `url` | `https://…` or a local file: `file:///path/to/prices.json`, or a bare path. No other scheme is accepted, and `http://` is refused: a price sheet decides what money is spent. |
+| `scope` | Which provider identities this sheet may price. Omit it, or leave it empty, to cover every provider. |
+| `models` | Model globs (`*` any run, `?` one character, case-insensitive). Omit for every model under `scope`. |
+| `format` | Sheet schema. Only `models_dev_v1` exists, and it is the default. |
+| `refresh_secs` | How long a fetched copy of a **remote** sheet may be reused before it is refreshed in the background. Default `86400` (24h), the same as models.dev. A local file ignores this and is re-read whenever it changes. |
+| `priority` | Lower wins between sources. Default `0`; ties are broken by `id` in lexicographic order, so the merge never depends on map order. |
+| `currency` | Currency every number in the sheet is denominated in. Defaults to `USD`, the same implicit currency models.dev uses. |
+
+**Scope uses the same identity rules as a `[pricing.providers]` key.** One
+provider has several names, and `scope` accepts any of them:
+
+* the exact activity key: `scope = ["claude:api-key"]`, `["openrouter"]`;
+* the models.dev provider id: `scope = ["deepseek"]` covers both the fallback
+  slug `deepseek` and the compatible-profile route `openai-compatible:deepseek`;
+* a compatible profile's id, with or without its prefix: `["my-gateway"]` and
+  `["openai-compatible:my-gateway"]` are the same route.
+
+A sheet addresses providers the same way the upstream catalog does (by provider
+id, by model id under `models`), and its entries understand the same extension
+fields an inline rule does: `cost`, `tariffs`, `schedule`, `context_tiers`,
+`default_tariff`, `effective_from`/`effective_until`, `on_rule_expiry`. So a
+sheet can carry peak/off-peak hours or a promotion that expires, and the call is
+priced at the rate in effect at the call's own instant, exactly like a rule you
+wrote yourself. The vocabulary is described under
+[A model rule](#a-model-rule) below.
+
+**A sheet has no `fallback`/`no_price` choice: out of effect always means "the
+next layer prices the call".** An inline rule may set
+`on_rule_expiry = "no_price"` to refuse a price outright; a sheet may state
+`effective_from`/`effective_until` but that refusal semantics is deliberately not
+part of a sheet, so a sheet's out-of-effect rule always falls through to the next
+source (or models.dev). A sheet that states `on_rule_expiry = "no_price"` still
+falls through — the field is parsed but only the validity bounds decide anything
+for a sheet.
+
+**The fall-through is labelled where you read the price.** A sheet is your own
+configuration, so a sheet rule that is out of effect at the call's instant is
+surfaced exactly like an expired inline rule, with the sheet named: the cost line
+shows `(rule expired (pricing source \`corp-mirror\`))`, and `/pricing` prints an
+`out of effect:` line for the same reason. Without this the figure would silently
+switch from your sheet to models.dev's number. The next layer still prices the
+call at its own rate — the marker is what changes.
+
+**Failure degrades, it never fabricates.** A sheet that is unreachable,
+unparseable, stale, or out of effect simply does not price the call, and the next
+layer does. Nothing is invented to fill the gap, and a call that models.dev can
+price is never left unpriced:
+
+* a `file://` sheet is read from disk; a file that is missing or is not valid
+  JSON is skipped for that lookup, with a warning in the log. A local file is
+  **not** governed by `refresh_secs`: its cached copy records the file's mtime
+  and size, and editing the file makes it stale immediately, so saving your price
+  file changes the price at the next lookup. A missing file is left alone for a
+  short failure backoff rather than re-attempted on every lookup;
+* an `https://` sheet is read from a cache under `~/.jcode/cache/`. It is fetched
+  in the background, so a lookup never waits on the network. Until the fetch
+  succeeds the source is unused, and the last successful copy is kept rather than
+  discarded;
+* a **remote** sheet whose `refresh_secs` has elapsed is **not** used while its
+  refresh is outstanding: a price that may be hours stale is not silently billed
+  (`refresh_secs` is a fetch-staleness bound, so it does not apply to a local
+  file);
+* a sheet whose rule is out of effect at the call's instant (its
+  `effective_until` passed, or its `effective_from` has not arrived) is skipped,
+  and the next source or models.dev prices the call — and, as above, that price
+  carries a marker naming the sheet.
+
+**Currency follows the price here too.** A sheet that states `currency = "CNY"`
+prices in CNY and never inherits models.dev's USD numbers; a sheet that states
+nothing is USD, like models.dev. A sheet that cannot price a call on its own is
+not relabelled with another layer's currency — the call goes to the next layer
+instead.
+
+An invalid `[[pricing.sources]]` entry is reported like any other invalid
+`[pricing]` field: the section is rejected as a whole, `/pricing` and the cost
+display say `invalid [pricing]: pricing.sources[0].url`, and a line naming the
+problem goes to the log.
+
+**A sheet entry is all-or-nothing, unlike an inline card.** An inline
+`[pricing.providers]` rule may be partial, and the missing fields fall through to
+the next layer of the same currency. A sheet entry may not: it must state both
+`cost.input` and `cost.output`, and an entry that states only one is dropped
+entirely (the source simply does not price that model, and the next layer does).
+That restricts how much of a sheet a broken field can affect, at the cost of
+having to write both directions.
+
+**The sheet URL is recorded, redacted.** jcode persists what it fetched from in
+`~/.jcode/cache/pricing_sources.json`, and writes the URL as `scheme://host/path`
+with the query string and any userinfo removed, so a token in the query is never
+logged or saved. The schema has no header field yet, so a mirror that needs
+authentication has to put the credential in the URL — which means the credential
+still lives in your `config.toml` in the clear. Prefer a private network or an
+unauthenticated path today, and move the secret into a header field once one
+exists.
+
+Two things a source does **not** do: it cannot change the cache-write premium
+billing applies for Anthropic models (that stays an inline card's privilege), and
+it cannot override a field your own inline rule wrote.
+
+### An inline `[pricing.providers]` card: the escape hatch
+
+A sheet is the intended way to price a model, and covers everything the
+two-layer model needs. One specific card is still worth knowing, because it is
+the only way to express two things a models.dev-shaped sheet cannot:
+
+1. **Field-level partial override.** A sheet entry must state `cost.input` *and*
+   `cost.output`. An inline card may state just `input` and keep the sheet's or
+   models.dev's `output` for the same currency, which is what a single rate
+   change usually looks like.
+2. **Refusing a price.** `on_rule_expiry = "no_price"` makes an expired rule
+   refuse to price the call instead of falling through to a worse estimate.
+
+Everything else about a card — schedules, tiers, `effective_until` — a sheet can
+express too, and the fields below are the shared vocabulary for both.
+
+The key identifies a provider. It accepts the runtime provider key (`deepseek`),
+the scoped runtime key (`openai-compatible:deepseek`), and a compatible profile's
+id or display name; `openai-compatible:foo` and `foo` are the same profile. A key
+that matches nothing is reported once in the log, so a typo does not silently do
+nothing.
+
+**Cards match by provider *key*, not by model vendor.** Nothing here inspects
+which company made the model: a card applies to the route whose activity key
+matches, and the same model on a different route is a different key. A
+`[pricing.providers.deepseek]` card prices the DeepSeek provider (and
+`openai-compatible:deepseek`), but a DeepSeek model reached through `openrouter`
+is keyed `openrouter`, so the card does not apply and that route falls through to
+models.dev (in USD). A `[[pricing.sources]]` `scope` that lists both forms avoids
+that. `/pricing` prints the key it looked up, which is the fastest way to see why
+a card did not take effect.
+
+**Rates must be finite and non-negative.** `nan`, `inf`, or a negative number in
+any rate field is rejected at load with the field path, for an inline card and
+for a sheet alike: one `NaN` would otherwise poison the session total (it renders
+as `NaN` and never recovers) and a negative rate would read as free.
+
+| Key | Meaning |
+| --- | --- |
+| `currency` | ISO 4217 code for every rate written under this provider. Defaults to `USD`. |
+| `models.<model>` | A rule for one model, described next. |
+
+**Currency follows the price.** A card written in CNY never inherits USD numbers
+from the layer below it, and vice versa: if a card cannot price a call (say it
+lists `input` but no `output`), the call is reported as unpriced rather than
+being topped up with another currency's rates.
+
+The full card example — DeepSeek billed in CNY with peak/off-peak hours:
 
 ```toml
 [pricing]
@@ -46,63 +279,12 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
 With this in place a flash call costs ¥1/¥4 per million input/output tokens
 (¥2/¥8 during peak), the widget and `/usage` show the amounts in CNY, and the
 model picker orders this route by its converted cost next to USD-priced models.
-Any model or provider not named here keeps falling through to the layers above.
-
-## Reference
-
-### `[pricing]`
-
-| Key | Meaning |
-| --- | --- |
-| `fx_base` | Base currency for the rate table. Defaults to `USD`. |
-| `fx_rates` | `1 {fx_base} = N {currency}` for every currency you use, e.g. `CNY = 7.20`. |
-
-There is **no automatic rate fetching** in v1: you write the rates you want to be
-billed and compared by. They are used in two places, and nowhere else:
-
-* `[display] currency = "CNY"` converts every cost into that currency for display;
-  `"native"` (the default) shows each provider in its own currency.
-* The model picker orders routes by price. Estimates denominated in different
-  currencies are compared **after conversion**. A currency with no rate is never
-  guessed: those routes keep their native currency and sort below every
-  comparable route, instead of being ordered as if `¥7` and `$7` were the same
-  number.
-
-### `[pricing.providers.<key>]`
-
-The key identifies a provider. It accepts the runtime provider key
-(`deepseek`), the scoped runtime key (`openai-compatible:deepseek`), and a
-compatible profile's id or display name; `openai-compatible:foo` and `foo` are
-the same profile. A key that matches nothing is reported once in the log, so a
-typo does not silently do nothing.
-
-**Cards match by provider *key*, not by model vendor.** Nothing here inspects
-which company made the model: a card applies to the route whose activity key
-matches, and the same model on a different route is a different key. A
-`[pricing.providers.deepseek]` card prices the DeepSeek provider (and
-`openai-compatible:deepseek`), but a DeepSeek model reached through
-`openrouter` is keyed `openrouter`, so the card does not apply and that route
-falls through to models.dev (in USD). If you want the card to cover both, write
-a second entry under the other key (or `[[pricing.sources]]` with a `scope` that
-lists both forms). `/pricing` prints the key it looked up, which is the fastest
-way to see why a card did not take effect.
-
-**Rates must be finite and non-negative.** `nan`, `inf`, or a negative number in
-any rate field is rejected at load with the field path, for a hand-written card
-and for a sheet alike: one `NaN` would otherwise poison the session total (it
-renders as `NaN` and never recovers) and a negative rate would read as free.
-
-| Key | Meaning |
-| --- | --- |
-| `currency` | ISO 4217 code for every rate written under this provider. Defaults to `USD`. |
-| `models.<model>` | A rule for one model, described next. |
-
-**Currency follows the price.** A card written in CNY never inherits USD numbers
-from the layer below it, and vice versa: if a card cannot price a call (say it
-lists `input` but no `output`), the call is reported as unpriced rather than
-being topped up with another currency's rates.
+Any model or provider not named here keeps falling through to the layers below.
 
 ### A model rule
+
+The shape below is what `models.<model>` in a card means, and the same keys are
+what a sheet entry's `models.<id>` may carry.
 
 ```toml
 [pricing.providers.deepseek.models."deepseek-v4-pro"]
@@ -114,13 +296,13 @@ on_rule_expiry = "fallback"
 
 | Key | Meaning |
 | --- | --- |
-| `cost` | Rates per **million tokens**, in the provider's `currency`. All four components (`input`, `output`, `cache_read`, `cache_write`) are optional; an unpriced component means "this card cannot price that part of the call". |
+| `cost` | Rates per **million tokens**, in the provider's `currency`. All four components (`input`, `output`, `cache_read`, `cache_write`) are optional; an unpriced component means "this card cannot price that part of the call". A sheet entry must write `input` and `output`. |
 | `tariffs.<name>` | A named rate card: `multiplier = 2.0` multiplies `cost`, or write explicit `input`/`output`/`cache_read`/`cache_write` rates. |
 | `schedule` | When a tariff applies. An array of tables, please: `[[pricing...schedule]]`. |
 | `context_tiers` | Long-context rates. An array of tables: `[[pricing...context_tiers]]`, described below. |
 | `default_tariff` | Tariff used when no schedule window matches. Without it, `cost` applies as written. |
 | `effective_from` / `effective_until` | RFC 3339 instants bounding the rule's validity, e.g. `2026-12-31T23:59:59Z`. |
-| `on_rule_expiry` | What an out-of-validity rule does: `"fallback"` (default) lets the next layer price the call and marks the rule expired where the cost is shown, `"no_price"` refuses to price it at all (nothing is billed, and the cost line says `(rule cannot price this call)` so the resulting zero is not mistaken for a free call). |
+| `on_rule_expiry` | What an out-of-validity rule does: `"fallback"` (default) lets the next layer price the call and marks the rule expired where the cost is shown, `"no_price"` refuses to price it at all (nothing is billed, and the cost line says `(rule cannot price this call)` so the resulting zero is not mistaken for a free call). Sheets ignore it: their out-of-effect rules always fall through. |
 
 ### Schedule rules
 
@@ -187,148 +369,6 @@ Once your own rule claims a model, it owns the whole card, tiers included:
 models.dev's `context_over_200k` rates are not merged into it, because a lower
 layer's absolute tier would silently overwrite the rates you wrote.
 
-### Extra price sheets: `[[pricing.sources]]`
-
-A source is a second price list you point jcode at: your own mirror of
-models.dev, a vendor's published rate sheet, a file you keep in a git repo.
-Sources sit **below your own rules and above every catalog jcode derives
-itself**, so pointing at your own sheet is never a no-op.
-
-Both halves of the example below are executable: the config names the sheet, and
-the sheet is a JSON document in models.dev's shape.
-
-```toml
-[[pricing.sources]]
-id = "corp-mirror"                                     # unique; ties break on this id
-url = "file:///opt/jcode/pricing.json"                 # or https://gitlab.internal/pricing.json
-scope = ["deepseek", "openai-compatible:my-gateway"]   # omit = every provider
-models = ["deepseek-v4-*"]                             # omit = every model under scope
-refresh_secs = 86400                                   # per-source TTL, default 24h
-priority = 10                                          # lower wins; default 0
-```
-
-```json
-{
-  "deepseek": {
-    "models": {
-      "deepseek-v4-pro": {
-        "cost": { "input": 4.5, "output": 13.5, "cache_read": 0.15 },
-        "tariffs": { "peak": { "multiplier": 2.0 } },
-        "schedule": [
-          {
-            "tariff": "peak",
-            "utc_offset_minutes": 0,
-            "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri"],
-            "windows": [["01:00", "04:00"]]
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-| Key | Meaning |
-| --- | --- |
-| `id` | Name of this source. It is the tie-break key between two sources with the same `priority`, so it must be unique. |
-| `url` | `https://…` or a local file: `file:///path/to/pricing.json`, or a bare path. No other scheme is accepted. |
-| `scope` | Which provider identities this sheet may price. Omit it, or leave it empty, to cover every provider. |
-| `models` | Model globs (`*` any run, `?` one character, case-insensitive). Omit for every model under `scope`. |
-| `format` | Sheet schema. Only `models_dev_v1` exists, and it is the default. |
-| `refresh_secs` | How long a fetched copy may be reused before the source is refreshed. Default `86400` (24h), the same as models.dev. |
-| `priority` | Lower wins between sources. Default `0`; ties are broken by `id` in lexicographic order, so the merge never depends on map order. |
-| `currency` | Currency every number in the sheet is denominated in. Defaults to `USD`, the same implicit currency models.dev uses. |
-
-**Scope uses the same identity rules as a `[pricing.providers]` key.** One
-provider has several names, and `scope` accepts any of them:
-
-* the exact activity key: `scope = ["claude:api-key"]`, `["openrouter"]`;
-* the models.dev provider id: `scope = ["deepseek"]` covers both the fallback
-  slug `deepseek` and the compatible-profile route `openai-compatible:deepseek`;
-* a compatible profile's id, with or without its prefix: `["my-gateway"]` and
-  `["openai-compatible:my-gateway"]` are the same route.
-
-A sheet addresses providers the same way the upstream catalog does (by provider
-id, by model id under `models`), and its entries understand the same extension
-fields a hand-written rule does: `cost`, `tariffs`, `schedule`, `context_tiers`,
-`default_tariff`, `effective_from`/`effective_until`, `on_rule_expiry`. So a
-sheet can carry peak/off-peak hours or a promotion that expires, and the call is
-priced at the rate in effect at the call's own instant, exactly like a rule you
-wrote yourself.
-
-**A sheet has no `fallback`/`no_price` choice: out of effect always means "the
-next layer prices the call".** A `[pricing.providers]` rule may set
-`on_rule_expiry = "no_price"` to refuse a price outright; a sheet may state
-`effective_from`/`effective_until` but that refusal semantics is deliberately not
-part of a sheet, so a sheet's out-of-effect rule always falls through to the next
-source (or models.dev). A sheet that states `on_rule_expiry = "no_price"` still
-falls through — the field is parsed but only the validity bounds decide anything
-for a sheet.
-
-**The fall-through is labelled where you read the price.** A sheet is your own
-configuration, so a sheet rule that is out of effect at the call's instant is
-surfaced exactly like an expired hand-written rule, with the sheet named:
-the cost line shows `(rule expired (pricing source \`corp-mirror\`))`, and
-`/pricing` prints an `out of effect:` line for the same reason. Without this the
-figure would silently switch from your sheet to models.dev's number. The next
-layer still prices the call at its own rate — the marker is what changes.
-
-**Failure degrades, it never fabricates.** A sheet that is unreachable,
-unparseable, stale, or out of effect simply does not price the call, and the next
-layer does. Nothing is invented to fill the gap, and a call that models.dev can
-price is never left unpriced:
-
-* a `file://` sheet is read from disk; a file that is missing or is not valid
-  JSON is skipped for that lookup, with a warning in the log. A local file is
-  **not** governed by `refresh_secs`: its cached copy records the file's mtime
-  and size, and editing the file makes it stale immediately, so saving your
-  price file changes the price at the next lookup. A missing file is left alone
-  for a short failure backoff rather than re-attempted on every lookup;
-* an `https://` sheet is read from a cache under `~/.jcode/cache/`. It is fetched
-  in the background, so a lookup never waits on the network. Until the fetch
-  succeeds the source is unused, and the last successful copy is kept rather than
-  discarded;
-* a **remote** sheet whose `refresh_secs` has elapsed is **not** used while its
-  refresh is outstanding: a price that may be hours stale is not silently
-  billed (`refresh_secs` is a fetch-staleness bound, so it does not apply to a
-  local file);
-* a sheet whose rule is out of effect at the call's instant (its
-  `effective_until` passed, or its `effective_from` has not arrived) is skipped,
-  and the next source or models.dev prices the call — and, as above, that price
-  carries a marker naming the sheet.
-
-**Currency follows the price here too.** A sheet that states `currency = "CNY"`
-prices in CNY and never inherits models.dev's USD numbers; a sheet that states
-nothing is USD, like models.dev. A sheet that cannot price a call on its own is
-not relabelled with another layer's currency — the call goes to the next layer
-instead.
-
-An invalid `[[pricing.sources]]` entry is reported like any other invalid
-`[pricing]` field: the section is rejected as a whole, `/pricing` and the cost
-display say `invalid [pricing]: pricing.sources[0].url`, and a line naming the
-problem goes to the log.
-
-**A sheet entry is all-or-nothing, unlike your own card.** A hand-written
-`[pricing.providers]` rule may be partial, and the missing fields fall through to
-the next layer of the same currency. A sheet entry may not: it must state both
-`cost.input` and `cost.output`, and an entry that states only one is dropped
-entirely (the source simply does not price that model, and the next layer does).
-That restricts how much of a sheet a broken field can affect, at the cost of
-having to write both directions.
-
-**The sheet URL is recorded, redacted.** jcode persists what it fetched from in
-`~/.jcode/cache/pricing_sources.json`, and writes the URL as `scheme://host/path`
-with the query string and any userinfo removed, so a token in the query is never
-logged or saved. The schema has no header field yet, so a mirror that needs
-authentication has to put the credential in the URL — which means the credential
-still lives in your `config.toml` in the clear. Prefer a private network or an
-unauthenticated path today, and move the secret into a header field once one
-exists.
-
-Two things a source does **not** do: it cannot change the cache-write premium
-billing applies for Anthropic models (that stays a hand-written card's
-privilege), and it cannot override a field your own rule wrote.
-
 ### Per-call pinning
 
 The rate card and its tariff are resolved once, at the instant of a call's first
@@ -356,7 +396,8 @@ These are worth reading once, because each one breaks more than it looks like:
 
 * **Inline tables must be on one line.** `cost = { input = 4.5, output = 13.5 }`
   is valid; spreading it across lines with a trailing comma is not. TOML 1.0 has
-  no multi-line inline tables.
+  no multi-line inline tables. (This is why the card syntax is verbose; a JSON
+  sheet has no such rule.)
 * **Schedules are arrays of tables** (`[[...schedule]]`), not a `schedule = [ {…} ]`
   inline array.
 * **A syntax error anywhere in the file makes jcode ignore the whole file**, not
@@ -368,7 +409,8 @@ These are worth reading once, because each one breaks more than it looks like:
   newer build wrote are kept, and only the keys jcode models are rewritten. The
   one thing a save can still drop is a setting you deliberately reset (for
   example a cleared `/colors` or a cleared default model), because "empty" and
-  "not written by this build" look identical in the file.
+  "not written by this build" look identical in the file. An `id` you did not
+  write is not invented on save: the source stays a `url` line.
 * **Entries inside an array of tables are rewritten wholesale.** A
   `[[providers.<name>.models]]` or `[[...schedule]]` entry is a value, not a
   sub-table jcode patches key by key, so comments *inside* such an entry are
@@ -382,10 +424,11 @@ These are worth reading once, because each one breaks more than it looks like:
 ## Checking that it took effect
 
 * **`/pricing`** answers "why is it this price?" for the current model: which
-  layer priced it, the tariff in force right now, the currency, the state of the
-  `[pricing]` section, and the rate table. Use it instead of guessing from the
-  cost on screen.
-* Saving the file is enough: a running session reports `Config reloaded from disk`.
+  layer priced it (including the source `id`), the tariff in force right now, the
+  currency, the state of the `[pricing]` section, and the rate table. Use it
+  instead of guessing from the cost on screen.
+* Saving your price file is enough: a local sheet is re-read when it changes, and
+  saving `config.toml` makes a running session report `Config reloaded from disk`.
 * The **session cost line** (the amount under the context meter, and the same
   figure in the info widget) carries a short note when the number on screen is
   not what your config asked for: `(rule expired)` / `(rule not in effect yet)`
