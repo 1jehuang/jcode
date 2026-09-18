@@ -15,6 +15,7 @@ mod desktop_selfdev;
 mod discover;
 mod discover_secrets;
 mod edit;
+mod edit_stats;
 mod feedback;
 mod gmail;
 mod goal;

@@ -76,6 +76,13 @@ impl Tool for WriteTool {
 
         // Write the file
         tokio::fs::write(&path, &params.content).await?;
+        super::edit_stats::record(
+            &ctx,
+            old_content.as_deref().unwrap_or(""),
+            &params.content,
+            existed && old_content.is_none(),
+        )
+        .await;
 
         let _new_len = params.content.len();
         let line_count = params.content.lines().count();
