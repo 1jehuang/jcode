@@ -2997,10 +2997,10 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
 
 #[test]
 fn render_tool_message_inline_mode_truncates_large_diffs() {
-    let old = (1..=7)
+    let old = (1..=50)
         .map(|i| format!("old line {i}\n"))
         .collect::<String>();
-    let new = (1..=7)
+    let new = (1..=50)
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
@@ -3029,14 +3029,17 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("... 2 more changes ..."), "plain={plain}");
+    assert!(plain.contains("... 20 more changes ..."), "plain={plain}");
     assert!(plain.contains("old line 3"), "plain={plain}");
-    assert!(!plain.contains("old line 7"), "plain={plain}");
+    assert!(!plain.contains("old line 50"), "plain={plain}");
     assert!(
         !plain.contains("new line 1 suffix_1_abcdefghijklmnopqrstuvwxyz0123456789"),
         "plain={plain}"
     );
-    assert!(plain.contains("suffix_2_abcdefghijklm…"), "plain={plain}");
+    assert!(
+        plain.contains("suffix_50_") || plain.contains("new line 50"),
+        "plain={plain}"
+    );
 }
 
 #[test]

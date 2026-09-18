@@ -11,7 +11,7 @@ use cache_support::{centered_wrap_width, left_pad_lines_for_centered_mode};
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
 
-const MAX_INLINE_DIFF_LINES: usize = 12;
+const MAX_INLINE_DIFF_LINES: usize = 80;
 const MAX_DISCOVERY_DETAIL_LINES: usize = 2;
 const MAX_DISCOVERY_SETUP_LINES: usize = 3;
 
@@ -3352,11 +3352,14 @@ pub(crate) fn render_swarm_message(
 }
 
 fn edit_tool_inline_diff_lines(tc: &ToolCall, content: &str) -> Option<Vec<ParsedDiffLine>> {
-    let from_content = collect_diff_lines(content);
-    let change_lines = if !from_content.is_empty() {
-        from_content
+    // Prefer old_string/new_string/content on the tool input. ACP tool results
+    // are often truncated or wrapped (`[edit] --- a/...`), which would otherwise
+    // hide the rest of a large write behind a 12-line preview.
+    let from_input = generate_diff_lines_from_tool_input(tc);
+    let change_lines = if !from_input.is_empty() {
+        from_input
     } else {
-        generate_diff_lines_from_tool_input(tc)
+        collect_diff_lines(content)
     };
     (!change_lines.is_empty()).then_some(change_lines)
 }
