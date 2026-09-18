@@ -196,9 +196,9 @@ fn test_same_provider_account_candidates_include_other_openai_accounts() {
         })
         .unwrap();
 
-        crate::auth::codex::set_active_account("openai-1").unwrap();
+        crate::auth::codex::set_active_account("openai-otter").unwrap();
         let candidates = MultiProvider::same_provider_account_candidates(ActiveProvider::OpenAI);
-        assert_eq!(candidates, vec!["openai-2".to_string()]);
+        assert_eq!(candidates, vec!["openai-fox".to_string()]);
     });
 }
 
