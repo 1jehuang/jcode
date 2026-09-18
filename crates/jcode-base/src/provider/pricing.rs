@@ -703,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn config_price_sheet_outranks_static_tables_and_catalog() {
+    fn config_price_card_outranks_static_tables_and_catalog() {
         let _guard = crate::storage::lock_test_env();
         let temp = tempfile::tempdir().expect("tempdir");
         let prev_home = std::env::var_os("JCODE_HOME");
@@ -801,7 +801,7 @@ input = 4.5
     }
 
     #[test]
-    fn config_price_sheet_outranks_openrouter_endpoint_caches() {
+    fn config_price_card_outranks_openrouter_endpoint_caches() {
         // OpenRouter's own per-endpoint prices are more precise than a catalog
         // average, but the user's card still wins (spec 4.4).
         let _guard = crate::storage::lock_test_env();

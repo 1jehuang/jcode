@@ -202,7 +202,7 @@ pub fn note_primary(rows: &mut [DisplayAmount], note: &str) {
 ///
 /// * a rule that is out of effect, where the figure is the next layer's
 ///   (F8/F20) — an inline card *or* a `[pricing.providers.<vendor>].file`, whose
-///   notice names the sheet,
+///   notice names the vendor,
 /// * a `[pricing]` section that failed validation, where the resolver dropped
 ///   every rule in it and the figure may be models.dev's (I-2), and
 /// * a card that claims the pair but cannot price the call, where nothing was

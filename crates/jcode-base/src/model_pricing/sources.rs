@@ -185,8 +185,8 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
 /// Accept a price only if it is a finite, non-negative number.
 ///
 /// The config layer's `validate` already rejects such a rate for the layers the
-/// user writes by hand, but a sheet is parsed by `catalog::parse_model_entry`
-/// through the same `convert_rule`, so both sides are covered there too. This
+/// user writes by hand, and a vendor file's rules go through the same
+/// `config::pricing::convert_rule`, so both sides are covered there too. This
 /// is the last-line guard on the resolved card, and it exists because a single
 /// `NaN` reaching `CostState::accrue` would poison a session total for good.
 fn sane_rate(value: Option<f64>) -> Option<f64> {

@@ -270,20 +270,21 @@ prompt_entry_animation = true
 # warning = "#ffc864"
 # error = "#ff6464"
 
-# Hand-written rate rules and price sources.
+# Hand-written rate rules and per-vendor price files.
 #
-# The main path is a *price source*: one line in this file pointing at a
-# models.dev-shaped JSON file, and jcode prices every provider and model that
-# sheet covers from it. A source is always a **local file**. A bare name like
-# `prices.json` resolves under ~/.jcode/cache/; any other value is a path (`~`
-# expanded). The file is re-read when it changes, so saving it takes effect at
-# the next lookup, and a source that cannot be read (missing, malformed) is
-# skipped, never guessed at.
+# A `[pricing.providers.<vendor>]` entry either writes rate cards inline or
+# points at a local JSON price file. The vendor key is your own label, not a
+# route: rules are matched by model id, so they price that model no matter which
+# route a call uses. A bare `file` name (`deepseek.json`) resolves under
+# ~/.jcode/cache/; anything else is a path (`~` expanded). The file is re-read
+# when it changes, so saving it takes effect at the next lookup, and a file that
+# cannot be read (missing, malformed) is skipped, never guessed at. It holds only
+# `{"models": {"<model-id>": {cost|tariffs|schedule|...}}}`, with no outer vendor
+# key.
 #
-# An inline `[pricing.providers]` card outranks a source. It is the escape
-# hatch, not the usual configuration: it is the only way to override one rate
-# field and keep the rest from the sheet, and the only way to refuse to price a
-# call with `on_rule_expiry = "no_price"`.
+# An inline card outranks the vendor's file. It is the only way to override one
+# rate field and keep the rest from the next layer, and the only way to refuse to
+# price a call with `on_rule_expiry = "no_price"`.
 #
 # Examples only — uncomment what you need. Every commented line below is valid
 # TOML on its own; `schedule` and `context_tiers` are written as arrays of
@@ -295,15 +296,7 @@ prompt_entry_animation = true
 # rates (a `multiplier`, or explicit prices) instead of the base rates. Tiers
 # are matched in declaration order, first match wins.
 #
-# `fx_base`/`fx_rates` only matter for a card written in another currency.
-#
-# A `[pricing.providers.<vendor>]` entry either writes model cards inline (see
-# the card example below) or points at a local JSON price file with `file`. The
-# vendor key is your own label, not a route: rules are matched by model id, so
-# they price that model no matter which route a call uses. A bare `file` name
-# (`deepseek.json`) resolves under `~/.jcode/cache/`; anything else is a path.
-# The file holds only `{"models": {"<model-id>": {cost|tariffs|schedule|...}}}`,
-# with no outer vendor key.
+# `fx_base`/`fx_rates` only matter for a rule written in another currency.
 #
 # The card example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC,
 # Mon-Fri.
