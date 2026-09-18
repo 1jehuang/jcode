@@ -242,19 +242,55 @@ pub fn adapt_buffer_for_theme(buf: &mut Buffer) {
     adapt_buffer(buf, theme_mode());
 }
 
+/// Final display pipeline. Attribute user overrides on the original colors,
+/// before contrast repair can make distinct muted grays converge to one ink.
+pub fn adapt_buffer_for_display(buf: &mut Buffer) {
+    let palette = crate::palette::configured_palette();
+    adapt_buffer_impl(buf, theme_mode(), palette.as_ref());
+}
+
+/// The same ordering for a foreground patched outside a full-frame redraw.
+pub fn adapt_foreground_for_display(color: Color, background: Color) -> Color {
+    if let Some(palette) = crate::palette::configured_palette() {
+        if let Some(chosen) = crate::palette::configured_native_color(&palette, color) {
+            return chosen;
+        }
+    }
+    adapt_foreground_for_theme(color, background)
+}
+
 /// Explicit-mode variant of [`adapt_buffer_for_theme`]. Useful for tests and
 /// callers that already resolved the mode.
 pub fn adapt_buffer(buf: &mut Buffer, mode: ThemeMode) {
-    if mode != ThemeMode::Light {
+    adapt_buffer_impl(buf, mode, None);
+}
+
+fn adapt_buffer_impl(buf: &mut Buffer, mode: ThemeMode, palette: Option<&crate::palette::Palette>) {
+    if mode != ThemeMode::Light && palette.is_none() {
         return;
     }
     // Frames contain few distinct colors; memoize the flip per unique color.
-    let mut cache: std::collections::HashMap<Color, Color> = std::collections::HashMap::new();
-    let mut adapt = |c: Color| -> Color {
+    let mut cache = std::collections::HashMap::new();
+    let mut adapt = |c: Color| -> (Color, bool) {
         if c == Color::Reset {
-            return c;
+            return (c, false);
         }
-        *cache.entry(c).or_insert_with(|| adapt_color_for_light(c))
+        *cache.entry(c).or_insert_with(|| {
+            if let Some(chosen) =
+                palette.and_then(|palette| crate::palette::configured_native_color(palette, c))
+            {
+                (chosen, true)
+            } else {
+                (
+                    if mode == ThemeMode::Light {
+                        adapt_color_for_light(c)
+                    } else {
+                        c
+                    },
+                    false,
+                )
+            }
+        })
     };
     let mut foreground_cache = std::collections::HashMap::new();
     let mut readable = |color, background| {
@@ -263,9 +299,15 @@ pub fn adapt_buffer(buf: &mut Buffer, mode: ThemeMode) {
             .or_insert_with(|| readable_light_foreground(color, background))
     };
     for cell in buf.content.iter_mut() {
-        cell.fg = adapt(cell.fg);
-        cell.bg = adapt(cell.bg);
-        cell.underline_color = adapt(cell.underline_color);
+        let (fg, fg_override) = adapt(cell.fg);
+        let (bg, bg_override) = adapt(cell.bg);
+        let (underline, underline_override) = adapt(cell.underline_color);
+        cell.fg = fg;
+        cell.bg = bg;
+        cell.underline_color = underline;
+        if mode != ThemeMode::Light {
+            continue;
+        }
         if cell.modifier.contains(Modifier::REVERSED) {
             // With reverse video, the logical background is the visible ink.
             let surface = if cell.fg == Color::Reset {
@@ -273,11 +315,19 @@ pub fn adapt_buffer(buf: &mut Buffer, mode: ThemeMode) {
             } else {
                 cell.fg
             };
-            cell.bg = readable(cell.bg, surface);
-            cell.underline_color = readable(cell.underline_color, surface);
+            if !bg_override {
+                cell.bg = readable(cell.bg, surface);
+            }
+            if !underline_override {
+                cell.underline_color = readable(cell.underline_color, surface);
+            }
         } else {
-            cell.fg = readable(cell.fg, cell.bg);
-            cell.underline_color = readable(cell.underline_color, cell.bg);
+            if !fg_override {
+                cell.fg = readable(cell.fg, cell.bg);
+            }
+            if !underline_override {
+                cell.underline_color = readable(cell.underline_color, cell.bg);
+            }
         }
     }
 }
@@ -488,6 +538,35 @@ mod tests {
                 let cell = &buf.content[0];
                 assert!(contrast(as_rgb(cell.fg), as_rgb(cell.bg)) >= MIN_TEXT_CONTRAST);
             }
+        }
+    }
+
+    #[test]
+    fn configured_panel_surface_drives_unconfigured_text_contrast() {
+        let mut palette = crate::palette::Palette::default();
+        palette.set(crate::palette::Role::UserBg, (32, 32, 32));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        buf.content[0].fg = Color::Rgb(245, 245, 245);
+        buf.content[0].bg = Color::Rgb(35, 40, 50);
+        adapt_buffer_impl(&mut buf, ThemeMode::Light, Some(&palette));
+        assert_eq!(buf.content[0].bg, crate::color::rgb(32, 32, 32));
+        assert!(
+            contrast(as_rgb(buf.content[0].fg), as_rgb(buf.content[0].bg)) >= MIN_TEXT_CONTRAST
+        );
+    }
+
+    #[test]
+    fn explicit_low_contrast_choices_remain_exact_in_both_theme_modes() {
+        let mut palette = crate::palette::Palette::default();
+        palette.set(crate::palette::Role::Dim, (210, 210, 210));
+        palette.set(crate::palette::Role::UserBg, (220, 220, 220));
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            buf.content[0].fg = Color::Rgb(80, 80, 80);
+            buf.content[0].bg = Color::Rgb(35, 40, 50);
+            adapt_buffer_impl(&mut buf, mode, Some(&palette));
+            assert_eq!(buf.content[0].fg, crate::color::rgb(210, 210, 210));
+            assert_eq!(buf.content[0].bg, crate::color::rgb(220, 220, 220));
         }
     }
 

@@ -327,6 +327,27 @@ pub fn palette() -> Palette {
     .unwrap_or_default()
 }
 
+/// Avoid locking/copying the palette on the default render path.
+pub(crate) fn configured_palette() -> Option<Palette> {
+    HAS_OVERRIDES.load(Ordering::Relaxed).then(palette)
+}
+
+/// Resolve an override from the original, native-palette color, before light
+/// contrast repair can collapse two distinct muted roles to the same ink.
+pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option<Color> {
+    let source = match color {
+        Color::Reset => return None,
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index) => crate::color::indexed_to_rgb(index),
+        named => {
+            let mapped = remap_named_with(palette, named);
+            return (mapped != named).then_some(mapped);
+        }
+    };
+    remap_literal_using(palette, source, Role::default_rgb)
+        .map(|(r, g, b)| crate::color::rgb(r, g, b))
+}
+
 /// Resolve a role to a renderable color.
 ///
 /// This deliberately returns the role's *default* color, not the configured
@@ -362,31 +383,19 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
     }
     let palette = palette();
     // A frame holds few distinct colors; memoize the substitution per color.
-    let mut cache = std::collections::HashMap::new();
-    let mut adapt = |color: Color, surface: Option<Color>| -> Color {
+    let mut cache: std::collections::HashMap<Color, Color> = std::collections::HashMap::new();
+    let mut adapt = |color: Color| -> Color {
         if color == Color::Reset {
             return color;
         }
         *cache
-            .entry((color, surface))
-            .or_insert_with(|| adapt_color_on_surface(&palette, color, surface))
+            .entry(color)
+            .or_insert_with(|| adapt_color(&palette, color))
     };
     for cell in buf.content.iter_mut() {
-        // Match using the pre-override surface: a user-chosen background must
-        // not change how we recognize the foreground's built-in default.
-        let reversed = cell.modifier.contains(ratatui::style::Modifier::REVERSED);
-        let surface = if reversed {
-            if cell.fg == Color::Reset {
-                Color::Rgb(32, 32, 32)
-            } else {
-                cell.fg
-            }
-        } else {
-            cell.bg
-        };
-        cell.fg = adapt(cell.fg, (!reversed).then_some(surface));
-        cell.bg = adapt(cell.bg, reversed.then_some(surface));
-        cell.underline_color = adapt(cell.underline_color, Some(surface));
+        cell.fg = adapt(cell.fg);
+        cell.bg = adapt(cell.bg);
+        cell.underline_color = adapt(cell.underline_color);
     }
 }
 
@@ -395,15 +404,9 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
 /// Literals arriving at substitution have already been through the light-theme
 /// flip, so they must be matched against equally flipped defaults. On dark
 /// themes this is the identity.
-fn match_target(role: Role, surface: Option<Color>) -> (u8, u8, u8) {
+fn match_target(role: Role) -> (u8, u8, u8) {
     let (r, g, b) = role.default_rgb();
-    let mut color = crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b));
-    if crate::theme_mode::is_light_theme() {
-        if let Some(surface) = surface {
-            color = crate::theme_mode::readable_light_foreground(color, surface);
-        }
-    }
-    match color {
+    match crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b)) {
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(index) => crate::color::indexed_to_rgb(index),
         _ => (r, g, b),
@@ -412,19 +415,14 @@ fn match_target(role: Role, surface: Option<Color>) -> (u8, u8, u8) {
 
 /// Substitute one rendered color using `palette`.
 pub fn adapt_color(palette: &Palette, color: Color) -> Color {
-    adapt_color_on_surface(palette, color, None)
-}
-
-fn adapt_color_on_surface(palette: &Palette, color: Color, surface: Option<Color>) -> Color {
     match color {
         Color::Rgb(r, g, b) => {
-            let (r, g, b) = remap_literal_on_surface(palette, (r, g, b), surface);
+            let (r, g, b) = remap_literal_with(palette, (r, g, b));
             crate::color::rgb(r, g, b)
         }
         Color::Indexed(index) => {
             // 256-color terminals: map through the same logic in RGB space.
-            let (r, g, b) =
-                remap_literal_on_surface(palette, crate::color::indexed_to_rgb(index), surface);
+            let (r, g, b) = remap_literal_with(palette, crate::color::indexed_to_rgb(index));
             crate::color::rgb(r, g, b)
         }
         named => remap_named_with(palette, named),
@@ -510,43 +508,43 @@ pub fn role_for_rendered(color: Color) -> Option<Role> {
 
 /// Palette-explicit variant of [`remap_literal`], for tests and tooling.
 pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
-    remap_literal_on_surface(palette, rgb, None)
+    remap_literal_using(palette, rgb, match_target).unwrap_or(rgb)
 }
 
-fn remap_literal_on_surface(
+fn remap_literal_using(
     palette: &Palette,
     rgb: (u8, u8, u8),
-    surface: Option<Color>,
-) -> (u8, u8, u8) {
+    target_default: fn(Role) -> (u8, u8, u8),
+) -> Option<(u8, u8, u8)> {
     let source = crate::harmony::Oklab::from_rgb(rgb);
     let mut best: Option<(f32, Role)> = None;
     for role in ALL_ROLES.iter().copied() {
         if !palette.is_overridden(role) {
             continue;
         }
-        let default = crate::harmony::Oklab::from_rgb(match_target(role, surface));
+        let default = crate::harmony::Oklab::from_rgb(target_default(role));
         let distance = source.distance(default);
         if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
             best = Some((distance, role));
         }
     }
 
-    let Some((_, role)) = best else {
-        return rgb;
-    };
+    let (_, role) = best?;
 
     // Re-express the literal relative to the new role color, keeping its
     // lightness/chroma offset from the role default. The configured color is
     // used exactly as given: the user picked it for their own terminal, so it
     // must not be luminance-flipped.
-    let default = crate::harmony::Oklab::from_rgb(match_target(role, surface));
+    let default = crate::harmony::Oklab::from_rgb(target_default(role));
     let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
-    crate::harmony::Oklab {
-        l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
-        a: target.a + (source.a - default.a),
-        b: target.b + (source.b - default.b),
-    }
-    .to_rgb()
+    Some(
+        crate::harmony::Oklab {
+            l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
+            a: target.a + (source.a - default.a),
+            b: target.b + (source.b - default.b),
+        }
+        .to_rgb(),
+    )
 }
 
 #[cfg(test)]
@@ -751,7 +749,7 @@ mod buffer_tests {
 #[cfg(test)]
 mod light_theme_interaction {
     use super::*;
-    use crate::theme_mode::{ThemeMode, adapt_buffer};
+    use crate::theme_mode::{ThemeMode, adapt_buffer_for_display};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -786,9 +784,8 @@ mod light_theme_interaction {
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         buf.content[0].fg = Color::Rgb(255, 100, 100); // the error default
-        // Same order as `ui::draw`: theme adaptation first, palette last.
-        adapt_buffer(&mut buf, ThemeMode::Light);
-        adapt_buffer_for_palette(&mut buf);
+        // The actual display pipeline attributes overrides before contrast repair.
+        adapt_buffer_for_display(&mut buf);
 
         let rendered = match buf.content[0].fg {
             Color::Rgb(r, g, b) => (r, g, b),
@@ -800,25 +797,31 @@ mod light_theme_interaction {
             "the user's configured color must reach the terminal unmodified"
         );
 
-        // The same guarantee holds for muted text, whose new contrast repair
-        // depends on whether it is on the default surface or a tinted panel.
-        for background in [Color::Reset, Color::Rgb(35, 40, 50)] {
-            let mut palette = Palette::default();
-            let chosen = (75, 85, 95);
-            palette.set(Role::Dim, chosen);
-            palette.set(Role::UserBg, (232, 235, 238));
-            set_palette(palette);
-            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-            buf.content[0].fg = role_color(Role::Dim);
-            buf.content[0].bg = background;
-            adapt_buffer(&mut buf, ThemeMode::Light);
-            adapt_buffer_for_palette(&mut buf);
-            assert_eq!(
-                buf.content[0].fg,
-                crate::color::rgb(chosen.0, chosen.1, chosen.2)
-            );
-            if background != Color::Reset {
-                assert_eq!(buf.content[0].bg, crate::color::rgb(232, 235, 238));
+        // These three native grays all need contrast repair. Matching after
+        // clamping loses their identities and sends all three to Tool's color.
+        let roles = [
+            (Role::Tool, (171, 60, 58)),
+            (Role::Dim, (20, 80, 100)),
+            (Role::Pending, (125, 64, 110)),
+        ];
+        let mut palette = Palette::default();
+        for (role, chosen) in roles {
+            palette.set(role, chosen);
+        }
+        palette.set(Role::UserBg, (232, 235, 238));
+        set_palette(palette);
+        for background in [Color::Reset, role_color(Role::UserBg)] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 3, 1));
+            for (cell, (role, _)) in buf.content.iter_mut().zip(roles) {
+                cell.fg = role_color(role);
+                cell.bg = background;
+            }
+            adapt_buffer_for_display(&mut buf);
+            for (cell, (_, (r, g, b))) in buf.content.iter().zip(roles) {
+                assert_eq!(cell.fg, crate::color::rgb(r, g, b));
+                if background != Color::Reset {
+                    assert_eq!(cell.bg, crate::color::rgb(232, 235, 238));
+                }
             }
         }
     }
