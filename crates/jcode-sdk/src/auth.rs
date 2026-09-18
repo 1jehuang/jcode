@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 const INPUT_LIMIT: usize = 16 * 1024;
 const OUTPUT_LIMIT: usize = 64 * 1024;
 
+mod callback;
+
 #[derive(Clone, Debug)]
 pub struct AuthOptions {
     /// Trusted local executable. No shell is used.
@@ -124,6 +126,7 @@ impl AuthClient {
             finished: AtomicBool::new(false),
             state: Mutex::new(State::Created),
             child: Mutex::new(None),
+            callback: Mutex::new(None),
         })))
     }
 }
@@ -176,6 +179,7 @@ struct FlowInner {
     // Serializes begin/completion/cancel; cancel flag and child lock remain independent.
     state: Mutex<State>,
     child: Mutex<Option<Child>>,
+    callback: Mutex<Option<Arc<callback::CallbackListener>>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -246,6 +250,14 @@ impl AuthFlow {
             .as_str()
             .filter(|s| s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
             .map(str::to_owned);
+        if matches!(
+            input_kind,
+            AuthInputKind::CallbackUrl | AuthInputKind::AuthCodeOrCallbackUrl
+        ) {
+            // Bind before the caller can open the browser. A busy loopback port
+            // is not fatal: the existing manual callback input remains available.
+            *self.0.callback.lock().unwrap() = callback::CallbackListener::bind(&url).map(Arc::new);
+        }
         *state = State::Pending(input_kind);
         Ok(AuthPrompt {
             auth_url: auth_url.to_owned(),
@@ -263,6 +275,34 @@ impl AuthFlow {
     }
     pub fn complete_device(&self) -> Result<AuthResult> {
         self.complete(Operation::Complete, None)
+    }
+
+    /// Whether `start` bound the OAuth redirect's loopback port. If false, use
+    /// the prompt's manual input method. No listener is used for hosted redirects.
+    pub fn has_callback_listener(&self) -> bool {
+        self.0.callback.lock().unwrap().is_some()
+    }
+
+    /// Wait off the UI thread for a browser redirect and complete via the same
+    /// CLI exchange as manual input. Keep manual input and Cancel available.
+    /// Cancellation or manual completion interrupts the wait. Callback state is
+    /// checked here before forwarding and validated again by the CLI.
+    pub fn wait_for_callback(&self) -> Result<AuthResult> {
+        let listener = self
+            .0
+            .callback
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| invalid("This login has no automatic browser callback"))?;
+        let input = match listener.wait(&self.0) {
+            Ok(input) => input,
+            Err(error) => {
+                self.0.callback.lock().unwrap().take();
+                return Err(error);
+            }
+        };
+        self.submit_callback(&input)
     }
 
     fn complete(&self, operation: Operation, input: Option<&str>) -> Result<AuthResult> {
@@ -298,6 +338,7 @@ impl AuthFlow {
         }
         *state = State::Completed;
         self.0.finished.store(true, Ordering::Release);
+        self.0.callback.lock().unwrap().take();
         if !success {
             // CLI validation errors happen after token persistence but before its
             // normal notification. Use the existing daemon control protocol so
@@ -316,6 +357,7 @@ impl AuthFlow {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.kill_child();
         let _state = self.0.state.lock().unwrap();
+        self.0.callback.lock().unwrap().take();
         let (value, success) = self.0.execute(Operation::Cancel, None)?;
         if !success || value["status"] != "cancelled" {
             return Err(failed("Could not clean up pending login"));

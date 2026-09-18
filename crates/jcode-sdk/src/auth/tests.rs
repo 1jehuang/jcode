@@ -90,7 +90,7 @@ if '--print-auth-url' in args:
         print('private-fixture-secret')
         sys.exit(1)
     print(json.dumps(dict(status='pending', provider=provider,
-        auth_url='https://example.com/oauth?state=private-fixture-secret',
+        auth_url=(home / 'auth-url').read_text() if (home / 'auth-url').exists() else 'https://example.com/oauth?state=private-fixture-secret',
         input_kind='complete' if provider == 'copilot' else 'callback_url',
         user_code='ABCD-1234', expires_at_ms=9999999999999)))
     sys.exit(0)
@@ -99,6 +99,7 @@ if mode == 'hang':
     time.sleep(60)
     sys.exit(1)
 payload = sys.stdin.read()
+(home / 'callback-input').write_text(payload)
 (home / 'stdin-ok').write_text(str(payload == 'private-fixture-secret'))
 print('private-fixture-secret', file=sys.stderr)
 print(json.dumps(dict(status='authenticated', provider=provider)))
@@ -253,5 +254,167 @@ sys.exit(1 if mode == 'warning' else 0)
             thread::sleep(Duration::from_millis(10));
         }
         assert!(marker.exists());
+    }
+
+    fn loopback_fixture() -> (tempfile::TempDir, AuthClient, std::net::TcpListener) {
+        let (dir, client) = fixture("success");
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        let mut url = url::Url::parse("https://example.com/oauth").unwrap();
+        url.query_pairs_mut()
+            .append_pair(
+                "redirect_uri",
+                &format!("http://localhost:{port}/auth/callback"),
+            )
+            .append_pair("state", "fixture-state");
+        std::fs::write(dir.path().join("auth-url"), url.as_str()).unwrap();
+        (dir, client, reserved)
+    }
+
+    fn send_callback(port: u16, target: &str) -> String {
+        use std::net::TcpStream;
+        let mut stream = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        if let Err(error) = stream.read_to_string(&mut response) {
+            // Rejecting an oversized request can reset its unread remainder.
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        response
+    }
+
+    #[test]
+    fn browser_callback_rejects_unrelated_requests_then_completes_over_stdin() {
+        let (dir, client, reserved) = loopback_fixture();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        assert!(flow.has_callback_listener());
+        let worker = flow.clone();
+        let task = thread::spawn(move || worker.wait_for_callback());
+        for target in [
+            "/favicon.ico",
+            "/wrong?state=fixture-state&code=secret",
+            "/auth/callback?state=wrong&code=secret",
+            "/auth/callback?state=fixture-state&state=wrong&code=secret",
+            "/auth/callback?state=fixture-state&code=secret&code=duplicate",
+            "/auth/callback?state=fixture-state",
+            "/\\evil.invalid/auth/callback?state=fixture-state&code=secret",
+        ] {
+            let response = send_callback(port, target);
+            assert!(response.starts_with("HTTP/1.1 400"));
+            assert!(!response.contains("secret"));
+            assert!(!dir.path().join("callback-input").exists());
+        }
+        let oversized = format!(
+            "/auth/callback?state=fixture-state&code={}",
+            "x".repeat(INPUT_LIMIT)
+        );
+        assert!(send_callback(port, &oversized).starts_with("HTTP/1.1 400"));
+        assert!(!dir.path().join("callback-input").exists());
+        let target = "/auth/callback?state=fixture-state&code=fixture-code";
+        let response = send_callback(port, target);
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(!response.contains("fixture-code"));
+        assert!(!task.join().unwrap().unwrap().validation_warning);
+        assert!(!flow.has_callback_listener());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("callback-input")).unwrap(),
+            format!("http://localhost:{port}{target}")
+        );
+        assert!(
+            !std::fs::read_to_string(dir.path().join("argv"))
+                .unwrap()
+                .contains("fixture-code")
+        );
+        // Repeated logins on a provider's fixed port must work immediately,
+        // even while the prior HTTP connection is in TIME_WAIT.
+        let next = client.begin("openai", None).unwrap();
+        next.start().unwrap();
+        assert!(next.has_callback_listener());
+        next.cancel().unwrap();
+    }
+
+    #[test]
+    fn busy_callback_port_keeps_manual_completion_available() {
+        let (_dir, client, _reserved) = loopback_fixture();
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        assert!(!flow.has_callback_listener());
+        assert!(flow.wait_for_callback().is_err());
+        assert!(flow.submit_callback("private-fixture-secret").is_ok());
+    }
+
+    #[test]
+    fn hosted_redirects_never_bind_local_listener() {
+        let (dir, client) = fixture("success");
+        for redirect in [
+            "https://example.com/callback",
+            "http://192.0.2.1:1234/callback",
+            "http://user@localhost:1234/callback",
+        ] {
+            let mut url = url::Url::parse("https://example.com/oauth").unwrap();
+            url.query_pairs_mut()
+                .append_pair("redirect_uri", redirect)
+                .append_pair("state", "fixture-state");
+            std::fs::write(dir.path().join("auth-url"), url.as_str()).unwrap();
+            let flow = client.begin("openai", None).unwrap();
+            flow.start().unwrap();
+            assert!(!flow.has_callback_listener());
+            flow.cancel().unwrap();
+        }
+    }
+
+    #[test]
+    fn callback_wait_is_interrupted_by_cancel_and_manual_completion() {
+        for cancel in [true, false] {
+            let (_dir, client, reserved) = loopback_fixture();
+            let port = reserved.local_addr().unwrap().port();
+            drop(reserved);
+            let flow = client.begin("openai", None).unwrap();
+            flow.start().unwrap();
+            let worker = flow.clone();
+            let task = thread::spawn(move || worker.wait_for_callback());
+            // A stalled HTTP peer cannot prevent cancellation or manual input.
+            let _peer =
+                std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+            let started = Instant::now();
+            if cancel {
+                flow.cancel().unwrap();
+            } else {
+                flow.submit_callback("private-fixture-secret").unwrap();
+            }
+            assert!(task.join().unwrap().is_err());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(!flow.has_callback_listener());
+            assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok());
+        }
+    }
+
+    #[test]
+    fn callback_timeout_keeps_manual_completion_available() {
+        let (_dir, mut client, reserved) = loopback_fixture();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        client.options.timeout = Duration::from_millis(300);
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        let _peer = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            flow.wait_for_callback().unwrap_err().kind,
+            ErrorKind::Timeout
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!flow.has_callback_listener());
+        assert!(flow.submit_callback("private-fixture-secret").is_ok());
     }
 }

@@ -3876,6 +3876,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "url",
  "uuid",
