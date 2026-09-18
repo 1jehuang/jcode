@@ -893,10 +893,10 @@ impl GrokAcpClient {
             tracked.name = "write".to_string();
         }
 
-        let completed = status_done
-            || !tracked.diffs.is_empty()
-            || (tracked.name == "read" && tracked.result_text.is_some())
-            || (tracked.name == "bash" && tracked.result_text.is_some());
+        // Edits can finish from rawInput diffs. Reads/bash wait for ACP
+        // `completed` so we do not emit the tool title/description as output
+        // and then feed that string back as the next user prompt.
+        let completed = status_done || !tracked.diffs.is_empty();
         if tracked.name.is_empty() {
             tracked.name = "tool".to_string();
         }
@@ -1468,16 +1468,14 @@ fn text_from_acp_content(content: acp::ContentBlock) -> Option<String> {
 }
 
 fn build_prompt(messages: &[Message], system: &str, resumed: bool) -> Result<String> {
-    let latest_user = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == Role::User)
-        .map(message_text)
-        .filter(|text| !text.trim().is_empty())
+    let latest_user = latest_user_text(messages)
         .ok_or_else(|| anyhow!("No user prompt found for Grok Build request"))?;
 
     let mut sections = Vec::new();
-    if !system.trim().is_empty() {
+    // On resume the Grok ACP session already has the system prompt. Sending
+    // Jcode's identity dump again wraps it as a new <user_query> and can
+    // restart the previous task in a harness loop.
+    if !resumed && !system.trim().is_empty() {
         sections.push(format!("<system>\n{}\n</system>", system.trim()));
     }
     if !resumed {
@@ -1502,6 +1500,26 @@ fn build_prompt(messages: &[Message], system: &str, resumed: bool) -> Result<Str
     }
     sections.push(latest_user);
     Ok(sections.join("\n\n"))
+}
+
+fn latest_user_text(messages: &[Message]) -> Option<String> {
+    messages.iter().rev().find_map(|message| {
+        if message.role != Role::User {
+            return None;
+        }
+        let text = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                JcodeContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
 }
 
 fn message_text(message: &Message) -> String {
@@ -1577,15 +1595,35 @@ mod tests {
     }
 
     #[test]
-    fn resumed_prompt_sends_only_outer_system_and_latest_user() {
+    fn resumed_prompt_sends_only_latest_user_text() {
         let messages = vec![
             Message::user("old"),
             Message::assistant_text("old answer"),
             Message::user("new"),
         ];
         let prompt = build_prompt(&messages, "outer", true).unwrap();
-        assert!(prompt.contains("outer"));
-        assert!(prompt.ends_with("new"));
-        assert!(!prompt.contains("old answer"));
+        assert!(!prompt.contains("outer"), "{prompt}");
+        assert!(!prompt.contains("<system>"), "{prompt}");
+        assert_eq!(prompt, "new");
+    }
+
+    #[test]
+    fn prompt_ignores_tool_result_user_messages() {
+        let messages = vec![
+            Message::user("print degrees"),
+            Message::assistant_text("ok"),
+            Message {
+                role: Role::User,
+                content: vec![JcodeContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "print degrees".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+        let prompt = build_prompt(&messages, "outer", true).unwrap();
+        assert_eq!(prompt, "print degrees");
     }
 }
