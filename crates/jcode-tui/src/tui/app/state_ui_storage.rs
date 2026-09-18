@@ -57,13 +57,68 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                     .unwrap_or(serde_json::Value::Null),
             ),
         ]),
-        "write" | "edit" | "multiedit" => obj(vec![(
-            "file_path",
-            input
-                .get("file_path")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        )]),
+        "edit" => obj(vec![
+            (
+                "file_path",
+                input
+                    .get("file_path")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "old_string",
+                input
+                    .get("old_string")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "new_string",
+                input
+                    .get("new_string")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "replace_all",
+                input
+                    .get("replace_all")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+        ]),
+        "write" => obj(vec![
+            (
+                "file_path",
+                input
+                    .get("file_path")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "content",
+                input
+                    .get("content")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+        ]),
+        "multiedit" => obj(vec![
+            (
+                "file_path",
+                input
+                    .get("file_path")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "edits",
+                input
+                    .get("edits")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+        ]),
         "patch" | "apply_patch" => {
             let file_path = input.get("file_path").cloned().or_else(|| {
                 input
@@ -86,10 +141,19 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                     })
                     .map(serde_json::Value::String)
             });
-            obj(vec![(
-                "file_path",
-                file_path.unwrap_or(serde_json::Value::Null),
-            )])
+            obj(vec![
+                (
+                    "file_path",
+                    file_path.unwrap_or(serde_json::Value::Null),
+                ),
+                (
+                    "patch_text",
+                    input
+                        .get("patch_text")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                ),
+            ])
         }
         "glob" => obj(vec![(
             "pattern",
@@ -510,6 +574,50 @@ mod tests {
                 thought_signature: None,
             }),
         }
+    }
+
+    #[test]
+    fn compaction_keeps_edit_old_and_new_strings_for_inline_diff() {
+        let mut message = tool_message(
+            "edit",
+            serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "fn a() {}\n",
+                "new_string": "fn a() { ok() }\n",
+                "intent": "return ok"
+            }),
+        );
+        compact_display_message_tool_data(&mut message);
+        let tool = message.tool_data.expect("tool data");
+        assert_eq!(
+            tool.input.get("old_string").and_then(|v| v.as_str()),
+            Some("fn a() {}\n")
+        );
+        assert_eq!(
+            tool.input.get("new_string").and_then(|v| v.as_str()),
+            Some("fn a() { ok() }\n")
+        );
+        assert_eq!(
+            tool.input.get("file_path").and_then(|v| v.as_str()),
+            Some("src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_write_content_for_inline_diff() {
+        let mut message = tool_message(
+            "write",
+            serde_json::json!({
+                "file_path": "src/new.rs",
+                "content": "pub fn n() {}\n"
+            }),
+        );
+        compact_display_message_tool_data(&mut message);
+        let tool = message.tool_data.expect("tool data");
+        assert_eq!(
+            tool.input.get("content").and_then(|v| v.as_str()),
+            Some("pub fn n() {}\n")
+        );
     }
 
     #[test]
