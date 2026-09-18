@@ -370,12 +370,23 @@ fn wrap_repeat_guard(inner: EventStream) -> EventStream {
     })
 }
 
+fn utf8_suffix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut idx = s.len() - max_bytes;
+    while idx < s.len() && !s.is_char_boundary(idx) {
+        idx += 1;
+    }
+    &s[idx..]
+}
+
 fn repeated_assistant_phrase(buf: &str) -> bool {
     if buf.len() < REPEAT_NEEDLE_CHARS * REPEAT_LIMIT {
         return false;
     }
-    let needle = &buf[buf.len() - REPEAT_NEEDLE_CHARS..];
-    if needle.chars().all(char::is_whitespace) {
+    let needle = utf8_suffix(buf, REPEAT_NEEDLE_CHARS);
+    if needle.is_empty() || needle.chars().all(char::is_whitespace) {
         return false;
     }
     let mut count = 0usize;
@@ -1930,6 +1941,21 @@ mod tests {
         let looping = sentence.repeat(8);
         assert!(repeated_assistant_phrase(&looping));
         assert!(!repeated_assistant_phrase("I'll dump the 312 excluded rows once."));
+    }
+
+    #[test]
+    fn repeated_assistant_phrase_does_not_panic_inside_vietnamese_char() {
+        // 'ú' is 2 bytes. A 72-byte suffix that starts on its second byte used
+        // to panic: "start byte index 389 is not a char boundary".
+        let mut buf = "n".repeat(388);
+        buf.push('ú');
+        buf.push_str(&"y".repeat(71));
+        assert_eq!(buf.len(), 461);
+        assert!(!buf.is_char_boundary(buf.len() - REPEAT_NEEDLE_CHARS));
+        let _ = repeated_assistant_phrase(&buf);
+
+        let sentence = "Huyền xử lý cardigan, khách đã đến, số liệu vẫn lệch.";
+        assert!(repeated_assistant_phrase(&sentence.repeat(10)));
     }
 
     #[test]
