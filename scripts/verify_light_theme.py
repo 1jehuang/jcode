@@ -128,13 +128,13 @@ def main() -> int:
         return 1
 
     # Simple inversion used to turn dim rgb(80,80,80) into unreadable pale
-    # rgb(175,175,175). Contrast repair now yields rgb(99,99,99) on the default
+    # rgb(175,175,175). Contrast repair now yields rgb(71,71,71) on the default
     # light surface. Dark mode must retain its original palette.
     if (80, 80, 80) not in dark:
         print("FAIL: dark run missing native dim color (80,80,80)")
         return 1
-    if (99, 99, 99) not in light:
-        print(f"FAIL: light run missing readable dim color (99,99,99); got {sorted(light)}")
+    if (71, 71, 71) not in light:
+        print(f"FAIL: light run missing readable dim color (71,71,71); got {sorted(light)}")
         return 1
     if (80, 80, 80) in light:
         print("FAIL: light run still emits native dim color (80,80,80)")

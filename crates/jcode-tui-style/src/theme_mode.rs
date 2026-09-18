@@ -7,7 +7,7 @@
 //!
 //! When the theme mode is [`ThemeMode::Light`], [`adapt_buffer_for_theme`]
 //! rewrites each cell's colors with a hue-preserving luminance flip, then
-//! darkens washed-out text to meet a 4.5:1 contrast floor against its surface.
+//! darkens washed-out text to meet a 7:1 contrast target against its surface.
 //! Dark panel backgrounds remain light tints. `Color::Reset` is left alone so
 //! the terminal's own (light) default background shows through, exactly like
 //! it does on dark themes today.
@@ -108,7 +108,8 @@ fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
 // Use a conservative light surface for terminal-default backgrounds. This
 // covers off-white themes and recessed/inactive panes, not just pure white.
 const LIGHT_SURFACE: (u8, u8, u8) = (224, 224, 224);
-const MIN_TEXT_CONTRAST: f32 = 4.5;
+// Enhanced contrast keeps small terminal glyphs and muted labels clearly legible.
+const TARGET_TEXT_CONTRAST: f32 = 7.0;
 
 fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
     let linear = |channel: u8| {
@@ -136,11 +137,11 @@ pub(crate) fn readable_light_foreground(color: Color, background: Color) -> Colo
         return color;
     };
     let surface = color_rgb(background).unwrap_or(LIGHT_SURFACE);
-    if contrast(rgb, surface) >= MIN_TEXT_CONTRAST {
+    if contrast(rgb, surface) >= TARGET_TEXT_CONTRAST {
         return color;
     }
     let (h, s, l) = rgb_to_hsl(rgb.0, rgb.1, rgb.2);
-    let endpoint = if relative_luminance(surface) > 0.179 {
+    let endpoint = if contrast((0, 0, 0), surface) >= contrast((255, 255, 255), surface) {
         0.
     } else {
         1.
@@ -156,7 +157,7 @@ pub(crate) fn readable_light_foreground(color: Color, background: Color) -> Colo
         let candidate = (failing + passing) / 2.;
         let (r, g, b) = hsl_to_rgb(h, s, candidate);
         let quantized = crate::color::rgb(r, g, b);
-        if contrast(color_rgb(quantized).unwrap(), surface) >= MIN_TEXT_CONTRAST {
+        if contrast(color_rgb(quantized).unwrap(), surface) >= TARGET_TEXT_CONTRAST {
             passing = candidate;
             result = quantized;
         } else {
@@ -473,17 +474,33 @@ mod tests {
         );
         for cell in &buf.content {
             let surface = color_rgb(cell.bg).unwrap_or(LIGHT_SURFACE);
-            assert!(contrast(as_rgb(cell.fg), surface) >= MIN_TEXT_CONTRAST);
-            assert!(contrast(as_rgb(cell.underline_color), surface) >= MIN_TEXT_CONTRAST);
+            assert!(contrast(as_rgb(cell.fg), surface) >= TARGET_TEXT_CONTRAST);
+            assert!(contrast(as_rgb(cell.underline_color), surface) >= TARGET_TEXT_CONTRAST);
             assert!(
-                as_rgb(cell.fg).0 < 110,
-                "muted labels must not become pale gray"
+                as_rgb(cell.fg).0 < 80,
+                "muted labels must remain dark, not merely pass minimum contrast"
             );
         }
         assert!(
             contrast((175, 175, 175), LIGHT_SURFACE) < 2.0,
             "pin the original failure"
         );
+    }
+
+    #[test]
+    fn stronger_light_contrast_rejects_the_previous_muted_ink() {
+        assert!(contrast((99, 99, 99), LIGHT_SURFACE) < TARGET_TEXT_CONTRAST);
+        let ink = readable_light_foreground(Color::Rgb(99, 99, 99), Color::Reset);
+        assert!(contrast(as_rgb(ink), LIGHT_SURFACE) >= TARGET_TEXT_CONTRAST);
+        assert!(as_rgb(ink).0 <= 71);
+    }
+
+    #[test]
+    fn intermediate_surfaces_use_the_best_possible_contrast() {
+        // Neither black nor white can reach 7:1 on a midtone surface.
+        let surface = Color::Rgb(128, 128, 128);
+        let ink = readable_light_foreground(surface, surface);
+        assert_eq!(as_rgb(ink), (0, 0, 0));
     }
 
     #[test]
@@ -508,7 +525,7 @@ mod tests {
             for (cell, original) in buf.content.iter().zip(literals) {
                 let surface = color_rgb(cell.bg).unwrap_or(LIGHT_SURFACE);
                 assert!(
-                    contrast(as_rgb(cell.fg), surface) >= MIN_TEXT_CONTRAST,
+                    contrast(as_rgb(cell.fg), surface) >= TARGET_TEXT_CONTRAST,
                     "{original:?} on {background:?} became {:?} on {:?}",
                     cell.fg,
                     cell.bg
@@ -536,7 +553,11 @@ mod tests {
                 }
                 adapt_buffer(&mut buf, ThemeMode::Light);
                 let cell = &buf.content[0];
-                assert!(contrast(as_rgb(cell.fg), as_rgb(cell.bg)) >= MIN_TEXT_CONTRAST);
+                let surface = as_rgb(if reversed { cell.fg } else { cell.bg });
+                let attainable = contrast((0, 0, 0), surface)
+                    .max(contrast((255, 255, 255), surface))
+                    .min(TARGET_TEXT_CONTRAST);
+                assert!(contrast(as_rgb(cell.fg), as_rgb(cell.bg)) >= attainable);
             }
         }
     }
@@ -551,7 +572,7 @@ mod tests {
         adapt_buffer_impl(&mut buf, ThemeMode::Light, Some(&palette));
         assert_eq!(buf.content[0].bg, crate::color::rgb(32, 32, 32));
         assert!(
-            contrast(as_rgb(buf.content[0].fg), as_rgb(buf.content[0].bg)) >= MIN_TEXT_CONTRAST
+            contrast(as_rgb(buf.content[0].fg), as_rgb(buf.content[0].bg)) >= TARGET_TEXT_CONTRAST
         );
     }
 
