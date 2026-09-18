@@ -122,7 +122,7 @@ impl SshConnectOptions {
         Ok(())
     }
 
-    pub(crate) fn command(&self) -> Result<Command> {
+    fn base_command(&self) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
         command.args([
@@ -164,14 +164,72 @@ impl SshConnectOptions {
         if let Some(user) = &self.user {
             command.arg("-l").arg(user);
         }
+        Ok(command)
+    }
+
+    /// `env` is a single bare command, valid source under every login shell
+    /// (fish, POSIX sh, csh). Its output carries `SHELL=<login shell path>`.
+    fn probe_command(&self) -> Result<Command> {
+        let mut command = self.base_command()?;
+        command.arg("--").arg(&self.host).arg("env");
+        Ok(command)
+    }
+
+    /// Blocking probe of the remote login shell. Failures fall back to POSIX,
+    /// matching previous behavior. Bounded by ssh ConnectTimeout.
+    pub(crate) fn probe_shell(&self) -> RemoteShell {
+        let output = self.probe_command().ok().and_then(|mut command| {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+        });
+        match output.filter(|o| o.status.success()) {
+            Some(output) => parse_remote_shell(&output.stdout),
+            None => RemoteShell::Posix,
+        }
+    }
+
+    pub(crate) fn command(&self, shell: RemoteShell) -> Result<Command> {
+        let mut command = self.base_command()?;
         // SSH joins remote arguments into shell source. Supply exactly one,
-        // quoting the executable as a literal POSIX shell word.
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
-            shell_quote(&self.remote_binary)
-        );
+        // quoting the executable as a literal shell word.
+        let remote = match shell {
+            // fish: `set PATH a b $PATH` assigns a path list, exported
+            // colon-joined. `PATH="...$PATH"` POSIX syntax is a fish error.
+            RemoteShell::Fish => format!(
+                "set PATH \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" $PATH; exec {} --no-update api --stdio",
+                shell_quote(&self.remote_binary)
+            ),
+            RemoteShell::Posix => format!(
+                "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
+                shell_quote(&self.remote_binary)
+            ),
+        };
         command.arg("--").arg(&self.host).arg(remote);
         Ok(command)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteShell {
+    Posix,
+    Fish,
+}
+
+fn parse_remote_shell(output: &[u8]) -> RemoteShell {
+    let text = String::from_utf8_lossy(output);
+    let name = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SHELL="))
+        .map(|path| path.rsplit('/').next().unwrap_or_default())
+        .unwrap_or_default();
+    if name == "fish" {
+        RemoteShell::Fish
+    } else {
+        RemoteShell::Posix
     }
 }
 
@@ -275,7 +333,8 @@ pub(crate) struct SshTransport {
 
 impl SshTransport {
     pub(crate) fn spawn(options: &SshConnectOptions) -> Result<Self> {
-        Self::spawn_command(options.command()?)
+        let shell = options.probe_shell();
+        Self::spawn_command(options.command(shell)?)
     }
 
     pub(crate) fn spawn_command(mut command: Command) -> Result<Self> {
@@ -418,7 +477,7 @@ mod tests {
             "-user@host",
         ] {
             assert!(
-                SshConnectOptions::new(host).command().is_err(),
+                SshConnectOptions::new(host).command(RemoteShell::Posix).is_err(),
                 "accepted {host:?}"
             );
         }
@@ -430,22 +489,22 @@ mod tests {
             "fe80::1%eth0",
         ] {
             assert!(
-                SshConnectOptions::new(host).command().is_ok(),
+                SshConnectOptions::new(host).command(RemoteShell::Posix).is_ok(),
                 "rejected {host}"
             );
         }
         let mut opts = options();
         opts.user = Some("root;evil".into());
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.user = None;
         opts.port = Some(0);
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.port = None;
         opts.connect_timeout = Duration::ZERO;
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
         opts.connect_timeout = Duration::from_secs(2);
         opts.client_name = "\0".repeat(1024);
-        assert!(opts.command().is_err());
+        assert!(opts.command(RemoteShell::Posix).is_err());
     }
 
     #[test]
@@ -454,7 +513,7 @@ mod tests {
         opts.port = Some(2222);
         opts.user = Some("alice".into());
         opts.remote_binary = "/opt/a b/jcode'$(false)".into();
-        let command = opts.command().unwrap();
+        let command = opts.command(RemoteShell::Posix).unwrap();
         let args: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
         assert_eq!(command.get_program(), "ssh");
         assert!(args.contains(&"StrictHostKeyChecking=yes"));

@@ -36,7 +36,7 @@ fn wait_until(mut ready: impl FnMut() -> bool, label: &str) {
 fn connect(options: &SshConnectOptions, config: &Path) -> Result<JcodeClient> {
     // Keep production argument generation intact, but replace the config only
     // for this fixture. This does not mutate PATH/HOME in the test process.
-    let generated = options.command()?;
+    let generated = options.command(RemoteShell::Posix)?;
     let mut command = Command::new("/usr/bin/ssh");
     command.arg("-F").arg(config).args(generated.get_args());
     let transport = SshTransport::spawn_command(command)?;

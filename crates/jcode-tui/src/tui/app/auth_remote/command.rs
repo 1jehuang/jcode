@@ -9,6 +9,27 @@ use tokio::sync::oneshot;
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
 pub(super) const INPUT_LIMIT: usize = 16 * 1024;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemoteShell {
+    Posix,
+    Fish,
+}
+
+fn parse_remote_shell(output: &[u8]) -> RemoteShell {
+    let text = String::from_utf8_lossy(output);
+    let name = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SHELL="))
+        .map(|path| path.rsplit('/').next().unwrap_or_default())
+        .unwrap_or_default();
+    if name == "fish" {
+        RemoteShell::Fish
+    } else {
+        RemoteShell::Posix
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct Target {
@@ -44,18 +65,7 @@ impl Target {
         Ok(target)
     }
 
-    fn command(&self, provider: &str, flow: &str, operation: Operation) -> tokio::process::Command {
-        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
-        let socket = self
-            .socket
-            .as_deref()
-            .map(|v| format!(" --socket {}", quote(v)))
-            .unwrap_or_default();
-        let cwd = self
-            .cwd
-            .as_deref()
-            .map(|v| format!(" --cwd {}", quote(v)))
-            .unwrap_or_default();
+    fn base_command(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new("ssh");
         command.args([
             "-T",
@@ -88,6 +98,52 @@ impl Target {
             "-o",
             "ServerAliveCountMax=2",
         ]);
+        command
+    }
+
+    /// `env` is a single bare command, valid source under every login shell
+    /// (fish, POSIX sh, csh). Its output carries `SHELL=<login shell path>`.
+    async fn probe_shell(&self) -> RemoteShell {
+        let mut command = self.base_command();
+        command.arg("--").arg(&self.host).arg("env");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let output = async {
+            let child = command.spawn().ok()?;
+            tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
+                .await
+                .ok()?
+                .ok()
+        }
+        .await;
+        match output.filter(|o| o.status.success()) {
+            Some(output) => parse_remote_shell(&output.stdout),
+            None => RemoteShell::Posix,
+        }
+    }
+
+    fn command(
+        &self,
+        shell: RemoteShell,
+        provider: &str,
+        flow: &str,
+        operation: Operation,
+    ) -> tokio::process::Command {
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+        let socket = self
+            .socket
+            .as_deref()
+            .map(|v| format!(" --socket {}", quote(v)))
+            .unwrap_or_default();
+        let cwd = self
+            .cwd
+            .as_deref()
+            .map(|v| format!(" --cwd {}", quote(v)))
+            .unwrap_or_default();
+        let mut command = self.base_command();
         let action = if operation == Operation::Status {
             "auth status --json".to_string()
         } else if operation == Operation::Import {
@@ -100,10 +156,19 @@ impl Target {
                 operation.flag(),
             )
         };
-        command.arg("--").arg(&self.host).arg(format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update --no-selfdev{socket}{cwd} {action}",
-            quote(&self.binary),
-        ));
+        let remote = match shell {
+            // fish: `set PATH a b $PATH` assigns a path list, exported
+            // colon-joined. `PATH="...$PATH"` POSIX syntax is a fish error.
+            RemoteShell::Fish => format!(
+                "set PATH \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" $PATH; exec {} --no-update --no-selfdev{socket}{cwd} {action}",
+                quote(&self.binary),
+            ),
+            RemoteShell::Posix => format!(
+                "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update --no-selfdev{socket}{cwd} {action}",
+                quote(&self.binary),
+            ),
+        };
+        command.arg("--").arg(&self.host).arg(remote);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -291,8 +356,9 @@ async fn execute(
     payload: Option<Payload>,
     cancel: &mut oneshot::Receiver<()>,
 ) -> Result<Reply, &'static str> {
+    let shell = target.probe_shell().await;
     let mut child = target
-        .command(provider, flow, operation)
+        .command(shell, provider, flow, operation)
         .spawn()
         .map_err(|_| "Could not start SSH login")?;
     let mut stdin = child.stdin.take().ok_or("SSH login stdin unavailable")?;
@@ -489,7 +555,7 @@ mod tests {
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
         };
-        let cmd = target.command("unused-provider", "unused-flow", Operation::Status);
+        let cmd = target.command(RemoteShell::Posix, "unused-provider", "unused-flow", Operation::Status);
         let args: Vec<_> = cmd
             .as_std()
             .get_args()
@@ -649,7 +715,7 @@ mod tests {
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
         };
-        let cmd = target.command("openai", "random_flow", Operation::Callback);
+        let cmd = target.command(RemoteShell::Posix, "openai", "random_flow", Operation::Callback);
         let args: Vec<_> = cmd
             .as_std()
             .get_args()
@@ -691,7 +757,7 @@ mod tests {
             socket: Some("/run/remote.sock".into()),
         };
         for provider in ["openai", "claude"] {
-            let cmd = target.command(provider, "unused-flow", Operation::Import);
+            let cmd = target.command(RemoteShell::Posix, provider, "unused-flow", Operation::Import);
             let args: Vec<_> = cmd
                 .as_std()
                 .get_args()

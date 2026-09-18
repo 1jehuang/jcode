@@ -23,6 +23,7 @@ const PROTOCOL: u32 = 1;
 const HANDSHAKE_LIMIT: usize = 8192;
 const STDERR_LIMIT: usize = 16 * 1024;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 32;
 
 fn private_directory() -> Result<tempfile::TempDir> {
@@ -82,6 +83,10 @@ impl NativeSsh {
             );
         }
         options.working_dir = remote_working_dir.map(str::to_owned);
+        // Detect the remote login shell once; the remote command syntax is
+        // per-shell (fish `set` vs POSIX `export`). Failures fall back to
+        // POSIX, matching previous behavior.
+        options.shell = options.probe_shell().await;
         // Fail before entering the TUI, with authentication/host-key diagnostics.
         let mut probe = SshConnection::connect(&options).await?;
         let handshake = probe.handshake.clone();
@@ -146,12 +151,33 @@ impl Drop for NativeSsh {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemoteShell {
+    Posix,
+    Fish,
+}
+
+fn parse_remote_shell(output: &[u8]) -> RemoteShell {
+    let text = String::from_utf8_lossy(output);
+    let name = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SHELL="))
+        .map(|path| path.rsplit('/').next().unwrap_or_default())
+        .unwrap_or_default();
+    if name == "fish" {
+        RemoteShell::Fish
+    } else {
+        RemoteShell::Posix
+    }
+}
+
 #[derive(Clone)]
 struct SshOptions {
     host: String,
     remote_binary: String,
     daemon_socket: Option<String>,
     working_dir: Option<String>,
+    shell: RemoteShell,
 }
 
 impl SshOptions {
@@ -188,10 +214,11 @@ impl SshOptions {
             remote_binary: remote_binary.into(),
             daemon_socket: None,
             working_dir: None,
+            shell: RemoteShell::Posix,
         })
     }
 
-    fn command(&self) -> Command {
+    fn base_command(&self) -> Command {
         let mut command = Command::new("ssh");
         command.args([
             "-T",
@@ -224,6 +251,41 @@ impl SshOptions {
             "-o",
             "ConnectTimeout=30",
         ]);
+        command
+    }
+
+    /// `env` is a single bare command, valid source under every login shell
+    /// (fish, POSIX sh, csh). Its output carries `SHELL=<login shell path>`.
+    fn probe_command(&self) -> Command {
+        let mut command = self.base_command();
+        command.arg("--").arg(&self.host).arg("env");
+        command
+    }
+
+    async fn probe_shell(&self) -> RemoteShell {
+        let mut command = self.probe_command();
+        command.as_std_mut().process_group(0);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let output = async {
+            let child = command.spawn().ok()?;
+            tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
+                .await
+                .ok()?
+                .ok()
+        }
+        .await;
+        match output.filter(|o| o.status.success()) {
+            Some(output) => parse_remote_shell(&output.stdout),
+            None => RemoteShell::Posix,
+        }
+    }
+
+    fn command(&self) -> Command {
+        let mut command = self.base_command();
         let binary = format!("'{}'", self.remote_binary.replace('\'', "'\\''"));
         let socket = self
             .daemon_socket
@@ -235,9 +297,16 @@ impl SshOptions {
             .as_ref()
             .map(|path| format!(" --cwd '{}'", path.replace('\'', "'\\''")))
             .unwrap_or_default();
-        let remote = format!(
-            "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {binary} --no-update --no-selfdev{socket}{cwd} server stdio"
-        );
+        let remote = match self.shell {
+            // fish: `set PATH a b $PATH` assigns a path list, exported
+            // colon-joined. `PATH="...$PATH"` POSIX syntax is a fish error.
+            RemoteShell::Fish => format!(
+                "set PATH \"$HOME/.local/bin\" \"$HOME/.cargo/bin\" $PATH; exec {binary} --no-update --no-selfdev{socket}{cwd} server stdio"
+            ),
+            RemoteShell::Posix => format!(
+                "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {binary} --no-update --no-selfdev{socket}{cwd} server stdio"
+            ),
+        };
         command.arg("--").arg(&self.host).arg(remote);
         command
     }
