@@ -238,8 +238,19 @@ pub async fn request_device_authorization(
     api_base: &str,
     requested_tier: Option<JcodeTier>,
 ) -> std::result::Result<DeviceAuthorization, AccountApiError> {
+    request_device_authorization_for_client(client, api_base, requested_tier, "jcode-cli").await
+}
+
+/// Request browser device authorization with a caller-specific display name.
+/// Existing CLI callers retain their name through `request_device_authorization`.
+pub async fn request_device_authorization_for_client(
+    client: &reqwest::Client,
+    api_base: &str,
+    requested_tier: Option<JcodeTier>,
+    client_name: &str,
+) -> std::result::Result<DeviceAuthorization, AccountApiError> {
     let url = endpoint_url(api_base, "auth/device");
-    let mut payload = serde_json::json!({ "client_name": "jcode-cli" });
+    let mut payload = serde_json::json!({ "client_name": client_name });
     if let Some(tier) = requested_tier {
         payload["requested_tier"] = serde_json::Value::String(tier.as_str().to_string());
     }

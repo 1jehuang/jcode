@@ -17,6 +17,7 @@
     clippy::useless_conversion
 )]
 
+pub mod account_login;
 pub mod auth;
 pub mod background;
 pub mod browser;
