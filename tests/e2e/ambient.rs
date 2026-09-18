@@ -36,7 +36,7 @@ fn test_ambient_state_lifecycle() {
 /// Test ambient scheduled queue: push, pop, priority ordering
 #[test]
 fn test_ambient_scheduled_queue() {
-    use jcode::ambient::{Priority, ScheduledItem, ScheduledQueue};
+    use jcode::ambient::{Priority, Recurrence, ScheduledItem, ScheduledQueue};
 
     let tmp = std::env::temp_dir().join("jcode-test-queue.json");
     let _ = std::fs::remove_file(&tmp); // Clean up from previous runs
@@ -58,6 +58,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        recurrence: Recurrence::Once,
     });
 
     queue.push(ScheduledItem {
@@ -73,6 +74,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        recurrence: Recurrence::Once,
     });
 
     queue.push(ScheduledItem {
@@ -88,6 +90,7 @@ fn test_ambient_scheduled_queue() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
+        recurrence: Recurrence::Once,
     });
 
     assert_eq!(queue.len(), 3);
