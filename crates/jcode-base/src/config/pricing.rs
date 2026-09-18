@@ -317,29 +317,63 @@ pub fn validate(
 /// The order is `priority` ascending with ties broken by `id` lexicographically
 /// (spec 4.2.1's "同层确定性"): `HashMap` iteration order must never decide which
 /// of two sheets prices a model.
+///
+/// `id` is **optional**: the single-source case is one line
+/// (`url = "file:///home/me/prices.json"`). An entry without one gets a
+/// deterministic id derived from its location ([`derive_source_id`]), and a
+/// derived id that would collide with another entry's explicit or derived id is
+/// disambiguated deterministically (`prices`, `prices-2`, …) in declaration
+/// order rather than panicking or silently merging two sheets under one cache
+/// key. Explicit ids keep today's meaning: they must be non-empty and unique.
 fn convert_sources(
     sources: &[PricingSourceFile],
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PricingSource>, PricingConfigError> {
+    // Reserve explicit ids first, so a derived id never takes a name an
+    // explicit entry later in the file already claimed.
+    let explicit: Vec<Option<String>> = {
+        let mut reserved: Vec<String> = Vec::new();
+        let mut explicit: Vec<Option<String>> = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            let path = format!("pricing.sources[{index}]");
+            match source.id.as_deref().map(str::trim) {
+                Some(id) if id.is_empty() => {
+                    return Err(PricingConfigError::new(
+                        format!("{path}.id"),
+                        "a pricing source `id` must not be empty; omit it to derive one from \
+                         the location, or write a non-empty name",
+                    ));
+                }
+                Some(id) => {
+                    if reserved.iter().any(|existing| existing == id) {
+                        return Err(PricingConfigError::new(
+                            format!("{path}.id"),
+                            format!("duplicate source id `{id}`; source ids must be unique"),
+                        ));
+                    }
+                    reserved.push(id.to_string());
+                    explicit.push(Some(id.to_string()));
+                }
+                None => explicit.push(None),
+            }
+        }
+        explicit
+    };
+
+    let mut used: Vec<String> = explicit.iter().flatten().cloned().collect();
     let mut converted: Vec<PricingSource> = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         let path = format!("pricing.sources[{index}]");
-        let id = source.id.trim();
-        if id.is_empty() {
-            return Err(PricingConfigError::new(
-                format!("{path}.id"),
-                "a pricing source needs a non-empty `id` (it is the tie-break key \
-                 when two sources share a `priority`)",
-            ));
-        }
-        if converted.iter().any(|existing| existing.id == id) {
-            return Err(PricingConfigError::new(
-                format!("{path}.id"),
-                format!("duplicate source id `{id}`; source ids must be unique"),
-            ));
-        }
-
         let location = parse_source_location(&source.url, &format!("{path}.url"))?;
+
+        let id = match &explicit[index] {
+            Some(id) => id.clone(),
+            None => {
+                let id = unique_derived_id(&location, index, &used);
+                used.push(id.clone());
+                id
+            }
+        };
 
         let mut scope = Vec::with_capacity(source.scope.len());
         for (scope_index, entry) in source.scope.iter().enumerate() {
@@ -393,7 +427,7 @@ fn convert_sources(
         );
 
         converted.push(PricingSource {
-            id: id.to_string(),
+            id,
             location,
             scope,
             models,
@@ -411,6 +445,58 @@ fn convert_sources(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(converted)
+}
+
+/// The id for a `[[pricing.sources]]` entry that did not name one.
+///
+/// The id is a cache key (`~/.jcode/cache/pricing_sources.json`) and appears in
+/// user-facing labels (`rule expired (pricing source \`prices\`)`), so it must
+/// be deterministic and stable across edits, and recognisably derived from what
+/// the entry points at:
+///
+/// * a local file uses its file stem: `/opt/jcode/prices.json` -> `prices`;
+/// * a URL uses the last path segment without its extension:
+///   `.../models_dev.mirror.json` -> `models_dev.mirror`;
+/// * a location that yields nothing usable falls back to `source{n}` (1-based),
+///   which is what makes an otherwise anonymous sheet identifiable.
+fn derive_source_id(location: &SourceLocation, index: usize) -> String {
+    let stem = match location {
+        SourceLocation::LocalFile(path) => path.file_stem(),
+        SourceLocation::Remote(url) => {
+            // Strip the query/fragment first: a token in `?private_token=…` must
+            // not end up in the id (or in anything derived from it).
+            let without_suffix = url.split(['?', '#']).next().unwrap_or(url.as_str());
+            let last_segment = without_suffix.rsplit('/').next().unwrap_or(without_suffix);
+            std::path::Path::new(last_segment).file_stem()
+        }
+    };
+    stem.and_then(|stem| stem.to_str())
+        .map(str::trim)
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("source{}", index + 1))
+}
+
+/// [`derive_source_id`], disambiguated against everything already in use.
+///
+/// Two sheets may obviously point at files with the same name (`prices.json` in
+/// two directories). Each id must be unique, and dropping one silently would
+/// mean a sheet the user configured never prices anything, so the collision is
+/// resolved by appending `-2`, `-3`, … in declaration order. The result depends
+/// only on the file's declaration order, never on map iteration order.
+fn unique_derived_id(location: &SourceLocation, index: usize, used: &[String]) -> String {
+    let base = derive_source_id(location, index);
+    if !used.contains(&base) {
+        return base;
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !used.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Turn a `url` into a location, rejecting schemes jcode will not fetch.

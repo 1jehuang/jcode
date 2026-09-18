@@ -279,13 +279,19 @@ layer does. Nothing is invented to fill the gap, and a call that models.dev can
 price is never left unpriced:
 
 * a `file://` sheet is read from disk; a file that is missing or is not valid
-  JSON is skipped for that lookup, with a warning in the log;
+  JSON is skipped for that lookup, with a warning in the log. A local file is
+  **not** governed by `refresh_secs`: its cached copy records the file's mtime
+  and size, and editing the file makes it stale immediately, so saving your
+  price file changes the price at the next lookup. A missing file is left alone
+  for a short failure backoff rather than re-attempted on every lookup;
 * an `https://` sheet is read from a cache under `~/.jcode/cache/`. It is fetched
   in the background, so a lookup never waits on the network. Until the fetch
   succeeds the source is unused, and the last successful copy is kept rather than
   discarded;
-* a sheet whose `refresh_secs` has elapsed is **not** used while its refresh is
-  outstanding: a price that may be hours stale is not silently billed;
+* a **remote** sheet whose `refresh_secs` has elapsed is **not** used while its
+  refresh is outstanding: a price that may be hours stale is not silently
+  billed (`refresh_secs` is a fetch-staleness bound, so it does not apply to a
+  local file);
 * a sheet whose rule is out of effect at the call's instant (its
   `effective_until` passed, or its `effective_from` has not arrived) is skipped,
   and the next source or models.dev prices the call — and, as above, that price
