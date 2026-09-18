@@ -635,93 +635,93 @@ fn local_path_bills_the_context_tier_from_the_reported_input_count() {
     });
 }
 
-// F8/F20 for `[[pricing.sources]]` sheets: a sheet is the user's own
-// configuration too, so a sheet rule that is out of effect must be labelled
-// where the user reads the price, exactly like a hand-written card. Without
-// this the price silently changes from the user's sheet to models.dev and
-// nothing on screen says why (the sheet only logged at `debug`).
+// F8/F20 for `[pricing.providers.<vendor>].file` vendor files: a file is the
+// user's own configuration too, so a file rule that is out of effect must be
+// labelled where the user reads the price, exactly like a hand-written card.
+// Without this the price silently changes from the user's file to models.dev
+// and nothing on screen says why (the file only logged at `debug`).
 
-/// Write a sheet next to `config.toml` in the isolated home and return the
-/// `[[pricing.sources]]` section that points at it.
-fn write_source_sheet(id: &str, body: &str) -> String {
+/// Write a vendor file next to `config.toml` in the isolated home and return
+/// the `[pricing.providers.<vendor>]` section that points at it.
+fn write_vendor_file(vendor: &str, body: &str) -> String {
     let home = std::env::var_os("JCODE_HOME").expect("test home is set");
-    let path = std::path::PathBuf::from(&home).join(format!("{id}.json"));
-    std::fs::write(&path, body).expect("write price sheet");
+    let path = std::path::PathBuf::from(&home).join(format!("{vendor}.json"));
+    std::fs::write(&path, body).expect("write price file");
     format!(
-        "\n[[pricing.sources]]\nid = \"{id}\"\nfile = \"{}\"\n",
+        "\n[pricing.providers.{vendor}]\nfile = \"{}\"\n",
         path.display()
     )
 }
 
 #[test]
-fn expired_sheet_rule_is_labelled_where_the_user_reads_the_price() {
+fn an_expired_vendor_file_rule_is_labelled_where_the_user_reads_the_price() {
     with_temp_jcode_home(|| {
         // No config at all: the number the fallback layer produces for this
-        // model, which the out-of-effect sheet must fall back to unchanged.
+        // model, which the out-of-effect vendor file must fall back to unchanged.
         let (fallback_cost, unlabelled) = widget_cost_line();
 
-        let section = write_source_sheet(
-            "expired-sheet",
-            r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+        let section = write_vendor_file(
+            "expired",
+            r#"{"models":{"deepseek-v4-pro":{
                 "cost":{"input":9.0,"output":18.0},
                 "effective_until":"2020-01-01T00:00:00Z"
-            }}}}"#,
+            }}}"#,
         );
         write_pricing_config(&section);
-        let (sheet_cost, labelled) = widget_cost_line();
+        let (file_cost, labelled) = widget_cost_line();
 
         assert!(
-            (sheet_cost - fallback_cost).abs() < 1e-4,
-            "an out-of-effect sheet prices like the next layer, not at its own 9/18 rate: \
-             {sheet_cost} vs {fallback_cost}"
+            (file_cost - fallback_cost).abs() < 1e-4,
+            "an out-of-effect vendor file prices like the next layer, not at its own 9/18 rate: \
+             {file_cost} vs {fallback_cost}"
         );
         assert!(
-            !unlabelled.contains("pricing source"),
-            "sanity: nothing is labelled without a sheet: {unlabelled}"
+            !unlabelled.contains("pricing.providers"),
+            "sanity: nothing is labelled without a file: {unlabelled}"
         );
         assert!(
             labelled.contains("expired"),
-            "the widget must say the sheet's rule stopped applying: {labelled}"
+            "the widget must say the file's rule stopped applying: {labelled}"
         );
         assert!(
-            labelled.contains("pricing source `expired-sheet`"),
-            "the marker must name the sheet that stopped applying: {labelled}"
+            labelled.contains("pricing.providers `expired`"),
+            "the marker must name the vendor that stopped applying: {labelled}"
         );
     });
 }
 
 #[test]
-fn an_in_effect_sheet_rule_is_not_labelled() {
+fn an_in_effect_vendor_file_rule_is_not_labelled() {
     with_temp_jcode_home(|| {
-        let section = write_source_sheet(
-            "live-sheet",
-            r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+        let section = write_vendor_file(
+            "live",
+            r#"{"models":{"deepseek-v4-pro":{
                 "cost":{"input":9.0,"output":18.0},
                 "effective_until":"2100-01-01T00:00:00Z"
-            }}}}"#,
+            }}}"#,
         );
         write_pricing_config(&section);
         let (cost, line) = widget_cost_line();
 
         assert!(
             (cost - 27.0).abs() < 1e-3,
-            "the in-effect sheet's own 9+18 rates price the call, got ${cost}: {line}"
+            "the in-effect vendor file's own 9+18 rates price the call, got ${cost}: {line}"
         );
         assert!(
-            !line.contains("expired") && !line.contains("pricing source"),
-            "an in-effect sheet must not carry an out-of-effect marker: {line}"
+            !line.contains("expired") && !line.contains("pricing.providers"),
+            "an in-effect file must not carry an out-of-effect marker: {line}"
         );
     });
 }
 
-// F-A: a `[[pricing.sources]]` sheet's `schedule` is as time-dependent as a
-// hand-written card's, but the TUI memoizes the derived price. The memo key has
-// to carry the tariff the sheet selects, or a memo filled in one window keeps
+// F-A: a `[pricing.providers.<vendor>].file`'s `schedule` is as time-dependent
+// as a hand-written card's, but the TUI memoizes the derived price. The memo key
+// has to carry the tariff the file selects, or a memo filled in one window keeps
 // billing that window's rate after the schedule has moved on.
 
-/// A sheet whose peak tariff doubles the base rate, in the same JSON shape a
-/// hand-written card states its peak hours in.
-const PEAK_SHEET_BODY: &str = r#"{"deepseek":{"models":{"deepseek-v4-pro":{
+/// A vendor file whose peak tariff doubles the base rate, in the same JSON
+/// shape a hand-written card states its peak hours in.
+const PEAK_VENDOR_BODY: &str = r#"{"models":{"deepseek-v4-pro":{
     "cost":{"input":1.0,"output":2.0},
     "tariffs":{"peak":{"multiplier":2.0}},
     "schedule":[{
@@ -730,26 +730,26 @@ const PEAK_SHEET_BODY: &str = r#"{"deepseek":{"models":{"deepseek-v4-pro":{
         "weekdays":["Mon","Tue","Wed","Thu","Fri"],
         "windows":[["01:00","04:00"]]
     }]
-}}}}"#;
+}}}"#;
 
 #[test]
-fn a_sheet_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
+fn a_vendor_file_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
     with_temp_jcode_home(|| {
-        let section = write_source_sheet("peak-sheet", PEAK_SHEET_BODY);
+        let section = write_vendor_file("peak", PEAK_VENDOR_BODY);
         write_pricing_config(&section);
 
         let mut app = remote_deepseek_app();
 
-        // First call: Saturday 02:00Z, off-peak, so the sheet's base $1/$2 rates.
+        // First call: Saturday 02:00Z, off-peak, so the file's base $1/$2 rates.
         // This also fills the derived-price memo with the off-peak price.
         app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_OFF_PEAK));
         assert!(
             (session_cost_usd(&app) - 1.0).abs() < 1e-4,
-            "off-peak the sheet's base input rate is $1.00/Mtok, got ${:.4}",
+            "off-peak the vendor file's base input rate is $1.00/Mtok, got ${:.4}",
             session_cost_usd(&app)
         );
 
-        // A new call: Monday 02:00Z, inside the sheet's peak window. The memo was
+        // A new call: Monday 02:00Z, inside the file's peak window. The memo was
         // filled off-peak; billing must follow the schedule to the peak tariff
         // (2x), not reuse the off-peak price it cached.
         app.begin_api_call_accounting_at(instant(FAR_FUTURE_PEAK));
@@ -757,7 +757,7 @@ fn a_sheet_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
         app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_PEAK));
         assert!(
             (session_cost_usd(&app) - before - 2.0).abs() < 1e-4,
-            "inside the peak window the sheet's input rate doubles to $2.00/Mtok, got ${:.4} \
+            "inside the peak window the vendor file's input rate doubles to $2.00/Mtok, got ${:.4} \
              (a stale memo would bill the off-peak $1.00)",
             session_cost_usd(&app) - before
         );
@@ -769,7 +769,7 @@ fn a_sheet_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
         app.accrue_remote_call_cost(1_000_000, 0, 0, 0, instant(FAR_FUTURE_OFF_PEAK));
         assert!(
             (session_cost_usd(&app) - before - 1.0).abs() < 1e-4,
-            "back off-peak the sheet's base rate applies again, got ${:.4}",
+            "back off-peak the vendor file's base rate applies again, got ${:.4}",
             session_cost_usd(&app) - before
         );
     });

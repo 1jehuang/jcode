@@ -519,9 +519,9 @@ impl App {
     /// dependent (peak/off-peak, validity windows), so they are resolved here,
     /// per call, and never taken from the cross-call memo. Only when no rule
     /// claims the model do the derived layers answer. Those are time-dependent
-    /// too once a `[[pricing.sources]]` sheet states a `schedule` or an expiry,
-    /// so the memo below is keyed on the tariff in force at `at`, not just the
-    /// model: it never hands back a window that has closed.
+    /// too once a `[pricing.providers.<vendor>].file` states a `schedule` or an
+    /// expiry, so the memo below is keyed on the tariff in force at `at`, not
+    /// just the model: it never hands back a window that has closed.
     fn resolve_call_pricing(
         &mut self,
         at: SystemTime,
@@ -564,13 +564,14 @@ impl App {
                     Some(crate::model_pricing::PricingNotice::ConfigCard(reason));
             }
             crate::model_pricing::ConfigCallRates::Absent => {
-                // No hand-written card claims this model. A `[[pricing.sources]]`
-                // sheet is the user's own configuration too, so a sheet rule
-                // that is out of effect is labelled the same way: without it the
-                // price silently changes from the user's sheet to the next
-                // layer, which is exactly the class of bug this feature removes.
+                // No inline card claims this model. A
+                // `[pricing.providers.<vendor>].file` is the user's own
+                // configuration too, so a file rule that is out of effect is
+                // labelled the same way: without it the price silently changes
+                // from the user's file to the next layer, which is exactly the
+                // class of bug this feature removes.
                 self.cost.pricing_notice =
-                    crate::model_pricing::sheet_rule_out_of_effect(&source_key, model, at);
+                    crate::model_pricing::vendor_file_rule_out_of_effect(model, at);
             }
         }
 
@@ -630,9 +631,9 @@ impl App {
     /// Only the derived layers are memoized here: hand-written config cards are
     /// resolved separately, at each call's own instant, so this memo can never
     /// hand back a stale tariff. The derived layers themselves are not all
-    /// time-independent either - a `[[pricing.sources]]` sheet can state a
-    /// `schedule` - so the memo key carries the identity of the derived price at
-    /// `at` (the sheet and its tariff, plus the long-context tier). That is what
+    /// time-independent either - a `[pricing.providers.<vendor>].file` can state
+    /// a `schedule` - so the memo key carries the identity of the derived price
+    /// at `at` (the vendor file and its tariff, plus the long-context tier). That is what
     /// makes an off-peak memo re-resolve once the peak window opens.
     fn refresh_cached_pricing(
         &mut self,
@@ -648,11 +649,11 @@ impl App {
         // The identity of the derived price in force at the call's instant. It
         // has two time-dependent parts and both belong in the key:
         //
-        // * the sheet + tariff a `[[pricing.sources]]` sheet's `schedule`
-        //   selects (F-A: without it a memo filled off-peak kept billing
-        //   off-peak rates after the window closed), and
+        // * the vendor file + tariff a `[pricing.providers.<vendor>].file`'s
+        //   `schedule` selects (F-A: without it a memo filled off-peak kept
+        //   billing off-peak rates after the window closed), and
         // * the long-context tier the call's input count selects (models.dev's
-        //   `context_over_200k`, or a sheet's own tiers), so a long call must not
+        //   `context_over_200k`, or a file's own tiers), so a long call must not
         //   leave its higher rates cached for the next short one.
         //
         // Both are read at `at`, never the wall clock.
@@ -668,8 +669,8 @@ impl App {
             Some(threshold) => format!("{price_key}|ctx{threshold}"),
             None => price_key,
         };
-        let price_key = match identity.sheet.as_deref() {
-            Some(sheet) => format!("{price_key}|src{sheet}"),
+        let price_key = match identity.vendor_file.as_deref() {
+            Some(vendor_file) => format!("{price_key}|vf{vendor_file}"),
             None => price_key,
         };
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {

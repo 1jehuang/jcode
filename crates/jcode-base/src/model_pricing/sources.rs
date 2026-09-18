@@ -2,16 +2,18 @@
 //! that decide which layer owns a `(provider, model)` pair.
 //!
 //! This is the highest-priority price source (spec 4.4): it outranks the
-//! `[[pricing.sources]]` registry ([`super::source_registry`], which plugs in
-//! between this layer and models.dev), the curated static tables, OpenRouter's
-//! own caches, and models.dev. The registry shares this module's card resolver
+//! vendor files ([`super::vendor_files`], which plug in between this layer and
+//! models.dev), the curated static tables, OpenRouter's own caches, and
+//! models.dev. The vendor files share this module's card resolver
 //! ([`resolve_card`]) so the two layers cannot disagree about merging or about
 //! currency.
 //!
-//! Two rules from the spec are enforced here and nowhere else:
+//! Three rules from the spec are enforced here and nowhere else:
 //!
-//! * provider keys follow the `scope` identity rules (spec 4.2.1) so
-//!   `[pricing.providers."deepseek"]` also covers `openai-compatible:deepseek`;
+//! * rules are matched by **model id, not route**: a vendor key is a label for
+//!   a group of rules, so `provider = OpenRouter, model = deepseek-flash` still
+//!   reaches DeepSeek's card (binding rules to a route would silently fall them
+//!   back to models.dev's USD numbers);
 //! * **currency follows the price** (F1): a card in a currency other than the
 //!   next layer's never inherits that layer's numbers.
 
@@ -20,7 +22,7 @@ use crate::config::PricingConfig;
 use crate::config::pricing::{PricingConfigError, ProviderPricing, validate};
 use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::rules;
-use crate::model_pricing::{ModelCost, models_dev_provider_id, normalize_model_id};
+use crate::model_pricing::{ModelCost, normalize_model_id};
 use jcode_provider_core::Currency;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -81,17 +83,6 @@ pub fn pricing_config() -> Arc<PricingConfig> {
             for warning in warnings {
                 crate::logging::warn(&format!("pricing config: {warning}"));
             }
-            // A key that matches no provider identity is a rule that can never
-            // take effect, and it used to say nothing at all: no card, no
-            // warning, no signal, so the user saw models.dev prices and no
-            // reason why (Task 5a deferred). Say it once per loaded config.
-            for key in unmatchable_provider_keys(&parsed) {
-                crate::logging::warn(&format!(
-                    "pricing config: pricing.providers.{key}: no provider identity matches this \
-                     key, so its rules apply only if a provider reports exactly this activity key \
-                     (check for a typo)"
-                ));
-            }
             (parsed, None)
         }
         Err(error) => {
@@ -148,58 +139,21 @@ pub fn pricing_config_error() -> Option<Arc<PricingConfigError>> {
     memo.as_ref().and_then(|(_, _, error)| error.clone())
 }
 
-/// The `[pricing.providers]` keys that cannot match any provider identity jcode
-/// reports, i.e. rules that can never take effect.
-///
-/// This is the mirror of [`provider_key_matches`]'s three forms (spec 4.2.1)
-/// asked about a key on its own, and it exists so a typo is not a silent no-op.
-/// `provider_activity` buckets a provider no other table knows under a slug of
-/// its display name, so this is "no *known* provider" rather than a proof.
-pub fn unmatchable_provider_keys(config: &PricingConfig) -> Vec<String> {
-    config
-        .providers
-        .keys()
-        .filter(|key| !provider_key_is_known(key))
-        .cloned()
-        .collect()
-}
-
-/// Whether `key` can be an identity form a billing path would report.
-fn provider_key_is_known(key: &str) -> bool {
-    let key = key.trim();
-    if key.is_empty() {
-        return false;
-    }
-    // The jcode slugs and api-key routes models.dev knows.
-    if models_dev_provider_id(key).is_some() {
-        return true;
-    }
-    // `openai-compatible:<profile>`, or the profile's id / display name alone.
-    let profile = key.strip_prefix("openai-compatible:").unwrap_or(key);
-    if crate::provider_catalog::openai_compatible_profile_by_id(profile).is_some()
-        || crate::provider_catalog::openai_compatible_profile_id_for_display_name(profile).is_some()
-    {
-        return true;
-    }
-    // The source keys the activity ledger produces for the providers no other
-    // table knows (`provider_activity::source_key_for_provider_label`).
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "jcode" | "copilot" | "cursor" | "antigravity"
-    )
-}
-
 /// The config-authoritative card for `(source_key, model)`, if the user wrote
 /// one that is in effect at `at`.
+///
+/// Rules are matched by **model id, not route** (see
+/// `jcode_config_types::ProviderPricingFile`): a vendor namespace is a label for
+/// a group of rules, not a route binding. Vendors are consulted in `BTreeMap`
+/// (lexicographic) order and the first vendor that states a rule for the model
+/// decides; `source_key` is used only to resolve the models.dev fallback the
+/// card merges with.
 pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> ConfigPrice {
     let config = pricing_config();
     if config.providers.is_empty() {
         return ConfigPrice::Absent;
     }
-    let Some(provider) = find_provider(&config, source_key) else {
-        return ConfigPrice::Absent;
-    };
-    let Some(rule) = find_rule(provider, model) else {
+    let Some((_vendor, provider, rule)) = find_rule(&config, model) else {
         return ConfigPrice::Absent;
     };
 
@@ -239,38 +193,10 @@ fn sane_rate(value: Option<f64>) -> Option<f64> {
     value.filter(|value| value.is_finite() && *value >= 0.0)
 }
 
-/// Which layers a card may borrow the rate fields it leaves unset from.
-///
-/// This is explicit rather than "always ask everything" so the sheet layer can
-/// never re-enter itself: a `[pricing.providers]` card falls back to the sheets
-/// and then models.dev, while a sheet's own card falls back to models.dev only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CardFallback {
-    /// A hand-written `[pricing.providers]` card (the highest layer).
-    ConfigCard,
-    /// A `[[pricing.sources]]` sheet's card.
-    Sheet,
-}
-
-/// Fill rate fields `entry` leaves unset from a sheet's card, per field only.
-///
-/// The sheet's tariff, schedule and long-context tiers are deliberately not
-/// copied: those describe the sheet's own rate card, and the winning card's
-/// tier selection already ran on its own rules.
-fn fill_missing_from_entry(entry: &mut ModelPricingEntry, fallback: &ModelPricingEntry) {
-    entry.cost.input = entry.cost.input.or(fallback.cost.input);
-    entry.cost.output = entry.cost.output.or(fallback.cost.output);
-    entry.cost.cache_read = entry.cost.cache_read.or(fallback.cost.cache_read);
-    entry.cost.cache_write = entry.cost.cache_write.or(fallback.cost.cache_write);
-}
-
 /// Merge what the card leaves out with the layers below it, honoring F1.
 ///
-/// * A card already in USD (the next layers' currency) merges field by field,
-///   so "only `input` written" keeps the next layer's output price. A
-///   `[pricing.providers]` card asks the `[[pricing.sources]]` sheets first and
-///   models.dev second (see [`CardFallback`]); a sheet's card asks models.dev
-///   only, so resolving a sheet never re-enters the sheet layer.
+/// * A card already in USD (the next layer's currency) merges field by field,
+///   so "only `input` written" keeps models.dev's output price.
 /// * A card in any other currency never inherits USD numbers, because a USD
 ///   figure would be relabelled as, say, CNY. If such a card cannot price the
 ///   model on its own, the next layer wins outright.
@@ -288,15 +214,7 @@ pub(super) fn resolve_card(
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
-    fallback: CardFallback,
 ) -> ResolvedCard {
-    // Sheets outrank models.dev, so a hand-written card's unwritten fields are
-    // filled from the sheet layer first (spec 4.4's one-layer-down fallback).
-    // A sheet's own card asks for nothing here: it must not re-enter itself.
-    let sheet_card = match fallback {
-        CardFallback::ConfigCard => crate::model_pricing::sheet_card_raw(provider, model, at),
-        CardFallback::Sheet => None,
-    };
     let models_dev = crate::model_pricing::lookup(provider, model);
     let mut owns_price = true;
     // What the `[pricing]` card states for cache writes *on its own*, asked
@@ -308,13 +226,6 @@ pub(super) fn resolve_card(
 
     if currency.is_usd() {
         // Same currency as the next layer, so missing fields merge per field.
-        // The sheet layer comes first: it outranks models.dev, and a blank the
-        // user's own rule left must take the highest-numbered layer that has it.
-        if let Some((sheet_entry, sheet_currency)) = &sheet_card
-            && sheet_currency.is_usd()
-        {
-            fill_missing_from_entry(&mut entry, sheet_entry);
-        }
         if let Some(fallback) = models_dev {
             merge_same_currency(&mut entry, &fallback);
         }
@@ -401,8 +312,8 @@ pub(super) struct ResolvedCard {
     /// `false` when the card could not price the model and the rates are the
     /// next layer's, so callers can keep labelling sources truthfully. The name
     /// says "the layer this card came from is the one that set the price"; it is
-    /// the same question for a `[pricing.providers]` card and for a
-    /// `[[pricing.sources]]` sheet, which share this resolver.
+    /// the same question for an inline `[pricing.providers]` card and for a
+    /// `[pricing.providers.<vendor>].file` rule, which share this resolver.
     pub(super) owns_price: bool,
     /// The cache-write rate the `[pricing]` card itself states, when it states
     /// one. `None` also covers "the merge filled the field from models.dev":
@@ -420,60 +331,29 @@ fn merge_same_currency(entry: &mut ModelPricingEntry, fallback: &ModelCost) {
     entry.cost.cache_write = entry.cost.cache_write.or(fallback.cache_write_usd_per_mtok);
 }
 
-/// Find the `[pricing.providers]` section that owns `source_key`.
+/// The first `[pricing.providers.<vendor>]` section (in `BTreeMap` order) that
+/// declares a rule for `model`, with the vendor key and section.
 ///
-/// Exact key wins; otherwise any key that resolves to the same models.dev
-/// provider id or compatible-profile id matches (spec 4.2.1).
-fn find_provider<'a>(config: &'a PricingConfig, source_key: &str) -> Option<&'a ProviderPricing> {
-    if let Some(exact) = config.providers.get(source_key) {
-        return Some(exact);
-    }
-    config
-        .providers
-        .iter()
-        .find(|(key, _)| provider_key_matches(key, source_key))
-        .map(|(_, provider)| provider)
-}
-
-/// Whether a `[pricing.providers]` key refers to the same provider as
-/// `source_key`, using the three normalized identity forms of spec 4.2.1.
-pub(super) fn provider_key_matches(config_key: &str, source_key: &str) -> bool {
-    let key = config_key.trim();
-    if key == source_key {
-        return true;
-    }
-    // `openai-compatible:foo` and `foo` are the same compatible profile.
-    let key_profile = key.strip_prefix("openai-compatible:");
-    if key_profile == Some(source_key) {
-        return true;
-    }
-    if source_key.strip_prefix("openai-compatible:") == Some(key) {
-        return true;
-    }
-    // Anything that maps to the same models.dev provider id is the same
-    // provider (covers the jcode slugs, api-key routes, and profiles).
-    match (
-        models_dev_provider_id(key),
-        models_dev_provider_id(source_key),
-    ) {
-        (Some(left), Some(right)) => left == right,
-        _ => false,
-    }
-}
-
-/// Find the model rule the provider section declares for `model`.
+/// Callers may hand over ids carrying jcode-local decorations (`[1m]`, `@pin`);
+/// the catalog strips them, so config lookup does too.
 fn find_rule<'a>(
-    provider: &'a ProviderPricing,
+    config: &'a PricingConfig,
     model: &str,
-) -> Option<&'a crate::config::ModelPricingRule> {
-    if let Some(rule) = provider.models.get(model) {
-        return Some(rule);
-    }
-    // Callers may hand over ids carrying jcode-local decorations (`[1m]`,
-    // `@pin`); the catalog strips them, so config lookup does too.
+) -> Option<(
+    &'a str,
+    &'a ProviderPricing,
+    &'a crate::config::ModelPricingRule,
+)> {
     let normalized = normalize_model_id(model);
-    if normalized != model {
-        return provider.models.get(normalized);
-    }
-    None
+    config.providers.iter().find_map(|(vendor, provider)| {
+        provider
+            .models
+            .get(model)
+            .or_else(|| {
+                (normalized != model)
+                    .then(|| provider.models.get(normalized))
+                    .flatten()
+            })
+            .map(|rule| (vendor.as_str(), provider, rule))
+    })
 }

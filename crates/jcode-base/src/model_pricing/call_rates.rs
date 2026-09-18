@@ -115,15 +115,8 @@ pub fn config_call_rates(
         ConfigPrice::OutOfEffect(reason) => ConfigCallRates::OutOfEffect(reason),
         ConfigPrice::Absent => ConfigCallRates::Absent,
         ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(
-                *entry,
-                currency,
-                provider,
-                model,
-                at,
-                input_tokens,
-                sources::CardFallback::ConfigCard,
-            );
+            let resolved =
+                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
             if !resolved.owns_price {
                 // The card lost to the next layer (a foreign-currency card that
                 // cannot be completed, per F1). That is not this layer's answer:
@@ -156,22 +149,22 @@ pub fn config_call_rates(
 ///   cost was accrued at all and the figure is deliberately left at zero rather
 ///   than replaced by an estimate.
 ///
-/// Both layers a user can write by hand are covered, and the sheet names itself:
-/// a user with several `[[pricing.sources]]` sheets has to be able to tell which
-/// of them stopped applying, so the marker carries the sheet's `id`.
+/// Both of the user's own layers are covered, and the vendor file names itself:
+/// a user with several `[pricing.providers.<vendor>].file` entries has to be
+/// able to tell which of them stopped applying, so the marker carries the
+/// vendor key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PricingNotice {
     /// A hand-written `[pricing.providers]` card. Label: `rule expired` /
     /// `rule not in effect yet`.
     ConfigCard(RuleOutOfEffect),
-    /// A rule inside an extra `[[pricing.sources]]` sheet, named by its `id`.
+    /// A rule inside a `[pricing.providers.<vendor>].file`, named by its vendor.
     ///
-    /// A sheet has no `on_rule_expiry` of its own: out of effect always means
-    /// "the next layer prices the call" (see `source_registry`), which is the
-    /// card's `fallback` behaviour. The label is the same class as the card's,
-    /// with the sheet appended.
-    PriceSheet {
-        source_id: String,
+    /// A vendor file rule is out of effect exactly like a card's `fallback`
+    /// behaviour: the next layer prices the call (see `vendor_files`). The label
+    /// is the same class as the card's, with the vendor appended.
+    VendorFile {
+        vendor: String,
         reason: RuleOutOfEffect,
     },
     /// A hand-written card claims this pair but cannot price the call (its
@@ -188,26 +181,22 @@ impl PricingNotice {
     pub fn label(&self) -> String {
         match self {
             Self::ConfigCard(reason) => reason.label().to_string(),
-            Self::PriceSheet { source_id, reason } => {
-                format!("{} (pricing source `{source_id}`)", reason.label())
+            Self::VendorFile { vendor, reason } => {
+                format!("{} (pricing.providers `{vendor}` file)", reason.label())
             }
             Self::ConfiguredWithoutPrice => "rule cannot price this call".to_string(),
         }
     }
 }
 
-/// The `[[pricing.sources]]` sheet rule that covers this call but is out of
-/// effect at `at`, if the sheet layer is what sends the price below it.
+/// The vendor file rule that covers this call but is out of effect at `at`, if
+/// the file layer is what sends the price below it.
 ///
-/// This is the sheet's half of the F8/F20 marker. The call is still priced by
-/// the next layer (that is the existing fall-through); the notice is what tells
-/// the user their sheet stopped applying instead of a models.dev number taking
-/// over silently.
-pub fn sheet_rule_out_of_effect(
-    provider: &str,
-    model: &str,
-    at: SystemTime,
-) -> Option<PricingNotice> {
-    let (source_id, reason) = super::source_registry::out_of_effect_sheet(provider, model, at)?;
-    Some(PricingNotice::PriceSheet { source_id, reason })
+/// This is the file's half of the F8/F20 marker. The call is still priced by the
+/// next layer (that is the existing fall-through); the notice is what tells the
+/// user their file stopped applying instead of a models.dev number taking over
+/// silently.
+pub fn vendor_file_rule_out_of_effect(model: &str, at: SystemTime) -> Option<PricingNotice> {
+    let (vendor, reason) = super::vendor_file_out_of_effect(model, at)?;
+    Some(PricingNotice::VendorFile { vendor, reason })
 }

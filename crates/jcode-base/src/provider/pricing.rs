@@ -240,25 +240,26 @@ fn config_price_estimate(
     }
 }
 
-/// Build a route estimate from an extra `[[pricing.sources]]` sheet.
+/// Build a route estimate from a `[pricing.providers.<vendor>].file`.
 ///
-/// A sheet sits below the user's own `[pricing.providers]` cards (which
+/// A vendor file sits below the user's own inline `[pricing.providers]` cards
+/// (which
 /// [`metered_pricing_for_source_at`] resolves first) and above every derived
 /// layer: the static tables, the OpenRouter caches, and models.dev. That is
 /// what "strictly between the config cards and models.dev" means in practice -
-/// a source the user configured outranks a catalog jcode ships, because
-/// otherwise pointing at your own mirror would be a no-op for exactly the
-/// providers jcode has curated.
-fn source_price_estimate(
+/// a file the user configured outranks a catalog jcode ships, because otherwise
+/// pointing at your own price file would be a no-op for exactly the providers
+/// jcode has curated.
+fn vendor_file_price_estimate(
     source_key: &str,
     model: &str,
     at: std::time::SystemTime,
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
-    let card = crate::model_pricing::source_card_at_size(source_key, model, at, input_tokens)?;
+    let card = crate::model_pricing::vendor_file_card_at_size(source_key, model, at, input_tokens)?;
     let input = card.entry.cost.input?;
     let output = card.entry.cost.output?;
-    let (currency, source_id) = (card.currency, card.source_id);
+    let (currency, vendor) = (card.currency, card.vendor);
     Some(
         RouteCheapnessEstimate::metered(
             RouteCostSource::ExtraPriceSource,
@@ -266,9 +267,7 @@ fn source_price_estimate(
             rate_to_micros(input),
             rate_to_micros(output),
             card.entry.cost.cache_read.map(rate_to_micros),
-            Some(format!(
-                "[[pricing.sources]] sheet `{source_id}` in {currency}"
-            )),
+            Some(format!("pricing.providers `{vendor}` file in {currency}")),
         )
         .with_currency(currency),
     )
@@ -345,8 +344,9 @@ pub fn metered_pricing_for_source_at(
 ///
 /// This is the "right now" entry point the route catalog uses (see
 /// [`metered_pricing_for_source_with_tier`]); a caller that knows when the call
-/// happened uses [`derived_pricing_for_source_at_size`] so an extra
-/// `[[pricing.sources]]` sheet's peak/off-peak schedule is read at that instant.
+/// happened uses [`derived_pricing_for_source_at_size`] so a
+/// `[pricing.providers.<vendor>].file`'s peak/off-peak schedule is read at that
+/// instant.
 pub fn derived_pricing_for_source(
     source_key: &str,
     model: &str,
@@ -365,22 +365,22 @@ pub fn derived_pricing_for_source(
 /// token count.
 ///
 /// `at` is required because the layers below are not all time-independent any
-/// more: an extra `[[pricing.sources]]` sheet can state a `schedule` (and
+/// more: a `[pricing.providers.<vendor>].file` can state a `schedule` (and
 /// `effective_from`/`effective_until`), so the tariff it selects has to be the
 /// one in force at the *call's* instant, exactly like a hand-written card (F15).
-/// Reading the wall clock here was the bug that let a sheet's off-peak rate keep
+/// Reading the wall clock here was the bug that let a file's off-peak rate keep
 /// billing after the peak window opened (F-A).
 ///
 /// The curated static tables and the OpenRouter caches state one rate card each
 /// and have no long-context tiers, so `input_tokens` does not reach them. The
-/// sheet arm and the models.dev arm both use it: their long-context rates
+/// file arm and the models.dev arm both use it: their long-context rates
 /// (`context_tiers` / `context_over_200k`) are what stop a long call from being
 /// billed at the base rate. `None` (a cheapness comparison) prices the base tier.
 ///
 /// This runs *after* the hand-written `[pricing.providers]` layer (callers
 /// resolve that themselves at the call's own instant) and *before* every layer
-/// below: an extra `[[pricing.sources]]` sheet is the user's configuration too,
-/// so it outranks the catalogs jcode ships.
+/// below: a vendor file is the user's configuration too, so it outranks the
+/// catalogs jcode ships.
 pub fn derived_pricing_for_source_at_size(
     source_key: &str,
     model: &str,
@@ -388,8 +388,8 @@ pub fn derived_pricing_for_source_at_size(
     at: std::time::SystemTime,
     input_tokens: Option<u64>,
 ) -> Option<RouteCheapnessEstimate> {
-    // 1. Extra `[[pricing.sources]]` price sheets.
-    if let Some(estimate) = source_price_estimate(source_key, model, at, input_tokens) {
+    // 1. `[pricing.providers.<vendor>].file` price files.
+    if let Some(estimate) = vendor_file_price_estimate(source_key, model, at, input_tokens) {
         return Some(estimate);
     }
 

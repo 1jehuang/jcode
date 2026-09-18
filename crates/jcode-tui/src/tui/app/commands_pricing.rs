@@ -32,15 +32,15 @@ pub(super) struct PricingReport<'a> {
     pub model: &'a str,
     /// The activity/billing key the pricing layers were actually asked about,
     /// e.g. `openrouter` or `openai-compatible:deepseek`. It can differ from
-    /// `provider`, and it is the key a `[pricing.providers]` rule or a sheet's
-    /// `scope` must match, so the report names it.
+    /// `provider`. Rules are matched by model id, not by this key, but the
+    /// models.dev fallback is resolved for it, so the report names it.
     pub source_key: &'a str,
     pub card: CardState<'a>,
     /// Why the `[pricing]` section was rejected, when it was.
     pub config_error: Option<&'a str>,
     /// The user's own rule that covers this model but is out of its validity
-    /// window at the report instant: a `[pricing.providers]` card or a
-    /// `[[pricing.sources]]` sheet (whose label names the sheet).
+    /// window at the report instant: an inline `[pricing.providers]` card or a
+    /// `[pricing.providers.<vendor>].file` rule (whose label names the vendor).
     pub out_of_effect: Option<&'a crate::model_pricing::PricingNotice>,
     pub fx_base: &'a jcode_provider_core::Currency,
     pub fx_rates: &'a std::collections::BTreeMap<jcode_provider_core::Currency, f64>,
@@ -53,12 +53,13 @@ pub(super) struct PricingReport<'a> {
     /// Listing the thresholds is what keeps that honest: the user learns which
     /// tiers a real call can cross instead of reading the figure as the only one.
     pub context_tier_thresholds: &'a [u64],
-    /// The `[[pricing.sources]]` sheet that prices the model at the report
-    /// instant, as `(sheet_id, currency)`, when no `[pricing.providers]` card
-    /// does. The sheet layer sits between the card and models.dev, so a report
-    /// whose `reference request` figure came from a sheet must name it here
-    /// rather than claim only models.dev/provider caches could be the source.
-    pub sheet: Option<(&'a str, jcode_provider_core::Currency)>,
+    /// The `[pricing.providers.<vendor>].file` that prices the model at the
+    /// report instant, as `(vendor, file, currency)`, when no inline
+    /// `[pricing.providers]` card does. The file layer sits between the card and
+    /// models.dev, so a report whose `reference request` figure came from a file
+    /// must name it here rather than claim only models.dev/provider caches could
+    /// be the source.
+    pub vendor_file: Option<(String, String, jcode_provider_core::Currency)>,
 }
 
 impl PricingReport<'_> {
@@ -105,14 +106,15 @@ impl PricingReport<'_> {
             ),
             CardState::Absent => {
                 out.push_str(&format!(
-                    "\n- rate card: no `[pricing]` rule prices this model under the key `{}`, so the cost comes from a lower layer \
-                     (a `[[pricing.sources]]` sheet, models.dev, a provider cache, or the fallback estimate); a rule must be keyed by \
-                     a provider identity this key matches (see `[pricing.providers.<key>]`)\n",
-                    self.source_key
+                    "\n- rate card: no inline `[pricing.providers]` card prices this model, so the cost comes from a lower layer \
+                     (a `[pricing.providers.<vendor>].file`, models.dev, a provider cache, or the fallback estimate). Rules are \
+                     matched by model id, so `[pricing.providers.<vendor>.models.\"{}\"]` or a vendor file naming it applies \
+                     regardless of the route `{}`\n",
+                    self.model, self.source_key
                 ));
-                if let Some((sheet_id, currency)) = self.sheet.as_ref() {
+                if let Some((vendor, file, currency)) = self.vendor_file.as_ref() {
                     out.push_str(&format!(
-                        "- from: [[pricing.sources]] sheet `{sheet_id}` ({})\n",
+                        "- from: `[pricing.providers.{vendor}]` file `{file}` ({})\n",
                         currency.as_str()
                     ));
                 }
@@ -210,14 +212,15 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         _ => None,
     };
     // F8/F20: which of the user's own rules stopped applying to this model. The
-    // card first (it outranks a sheet), then the sheet layer, so `/pricing`
-    // answers "why is it this price" the same way the cost widget does.
+    // inline card first (it outranks a vendor file), then the file layer, so
+    // `/pricing` answers "why is it this price" the same way the cost widget
+    // does.
     let out_of_effect = match &rates_state {
         crate::model_pricing::ConfigCallRates::OutOfEffect(reason) => {
             Some(crate::model_pricing::PricingNotice::ConfigCard(*reason))
         }
         crate::model_pricing::ConfigCallRates::Absent => {
-            crate::model_pricing::sheet_rule_out_of_effect(&source_key, &model, now)
+            crate::model_pricing::vendor_file_rule_out_of_effect(&model, now)
         }
         _ => None,
     };
@@ -238,13 +241,11 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
     let error = crate::model_pricing::pricing_config_error();
     let reference = crate::model_pricing::effective_cost(&source_key, &model, now);
     let display_currency = crate::config::config().display.currency.clone();
-    // The sheet layer sits between the card and models.dev; name it when it is
-    // the layer that priced the model, so the report cannot deny a source its
-    // own `reference request` figure came from.
-    let sheet = crate::model_pricing::source_sheet_for(&source_key, &model, now);
-    let sheet_label = sheet
-        .as_ref()
-        .map(|(id, currency)| (id.as_str(), currency.clone()));
+    // The vendor file layer sits between the card and models.dev; name it when
+    // it is the layer that priced the model, so the report cannot deny a file
+    // its own `reference request` figure came from.
+    let vendor_file = crate::model_pricing::vendor_file_for(&source_key, &model, now)
+        .map(|(vendor, path, currency)| (vendor, path.display().to_string(), currency));
 
     let report = PricingReport {
         provider: &provider,
@@ -258,7 +259,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
         display_currency: &display_currency,
         reference_cost: reference.as_ref(),
         context_tier_thresholds: &context_tier_thresholds,
-        sheet: sheet_label,
+        vendor_file,
     };
     app.push_display_message(DisplayMessage::system(report.render()));
     true
@@ -300,7 +301,7 @@ mod tests {
             display_currency: "native",
             reference_cost: Some(&Money::new(0.09, Currency::new("CNY"))),
             context_tier_thresholds: &[],
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
@@ -333,7 +334,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &[],
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
@@ -362,12 +363,12 @@ mod tests {
             display_currency: "CNY",
             reference_cost: None,
             context_tier_thresholds: &[],
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
         assert!(
-            text.contains("no `[pricing]` rule prices this model"),
+            text.contains("no inline `[pricing.providers]` card prices this model"),
             "{text}"
         );
         assert!(text.contains("**rejected**"), "{text}");
@@ -397,7 +398,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &thresholds,
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
@@ -406,13 +407,13 @@ mod tests {
         assert!(text.contains("base tier"), "{text}");
     }
 
-    /// F8/F20 for sheets: `/pricing` answers "why is it this price" the same way
-    /// the cost widget does, so an out-of-effect sheet rule must be named here
-    /// too - and the label must name *which* sheet stopped applying.
+    /// F8/F20 for vendor files: `/pricing` answers "why is it this price" the
+    /// same way the cost widget does, so an out-of-effect file rule must be
+    /// named here too - and the label must name *which* vendor stopped applying.
     #[test]
-    fn an_out_of_effect_sheet_rule_is_reported_by_name() {
-        let notice = crate::model_pricing::PricingNotice::PriceSheet {
-            source_id: "deepseek-mirror".to_string(),
+    fn an_out_of_effect_vendor_file_rule_is_reported_by_name() {
+        let notice = crate::model_pricing::PricingNotice::VendorFile {
+            vendor: "deepseek-mirror".to_string(),
             reason: crate::model_pricing::RuleOutOfEffect::Expired,
         };
         let rates = std::collections::BTreeMap::new();
@@ -428,15 +429,15 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &[],
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
         assert!(text.contains("out of effect"), "{text}");
         assert!(text.contains("rule expired"), "{text}");
         assert!(
-            text.contains("pricing source `deepseek-mirror`"),
-            "the report must name the sheet that stopped applying: {text}"
+            text.contains("pricing.providers `deepseek-mirror`"),
+            "the report must name the vendor that stopped applying: {text}"
         );
         assert!(
             text.contains("comes from a lower layer"),
@@ -444,8 +445,8 @@ mod tests {
         );
     }
 
-    /// The card's own marker still reads exactly as before: the sheet label is
-    /// an addition, not a change to the card's wording.
+    /// The card's own marker still reads exactly as before: the vendor-file
+    /// label is an addition, not a change to the card's wording.
     #[test]
     fn a_config_card_marker_keeps_its_wording() {
         let notice = crate::model_pricing::PricingNotice::ConfigCard(
@@ -454,12 +455,12 @@ mod tests {
         assert_eq!(notice.label(), "rule not in effect yet");
     }
 
-    /// When no card prices the model but a `[[pricing.sources]]` sheet does, the
-    /// report must name that sheet: otherwise it lists only "models.dev, a
-    /// provider cache, or the fallback estimate" while the `reference request`
-    /// figure right beside it came from the sheet.
+    /// When no card prices the model but a `[pricing.providers.<vendor>].file`
+    /// does, the report must name that file: otherwise it lists only "models.dev,
+    /// a provider cache, or the fallback estimate" while the `reference request`
+    /// figure right beside it came from the file.
     #[test]
-    fn an_absent_card_names_the_sheet_that_priced_the_model() {
+    fn an_absent_card_names_the_vendor_file_that_priced_the_model() {
         let rates = std::collections::BTreeMap::new();
         let report = PricingReport {
             provider: "DeepSeek",
@@ -473,16 +474,20 @@ mod tests {
             display_currency: "native",
             reference_cost: Some(&Money::new(0.005, Currency::new("CNY"))),
             context_tier_thresholds: &[],
-            sheet: Some(("corp-mirror", Currency::new("CNY"))),
+            vendor_file: Some((
+                "corp-mirror".to_string(),
+                "/tmp/corp-mirror.json".to_string(),
+                Currency::new("CNY"),
+            )),
         };
         let text = report.render();
 
         assert!(
-            text.contains("[[pricing.sources]] sheet `corp-mirror` (CNY)"),
-            "the sheet layer must be named: {text}"
+            text.contains("`[pricing.providers.corp-mirror]` file `/tmp/corp-mirror.json` (CNY)"),
+            "the file layer must be named: {text}"
         );
         assert!(
-            text.contains("a `[[pricing.sources]]` sheet,"),
+            text.contains("a `[pricing.providers.<vendor>].file`,"),
             "and it must appear in the list of lower layers: {text}"
         );
     }
@@ -505,7 +510,7 @@ mod tests {
             display_currency: "native",
             reference_cost: None,
             context_tier_thresholds: &[],
-            sheet: None,
+            vendor_file: None,
         };
         let text = report.render();
 
@@ -515,7 +520,7 @@ mod tests {
         );
         assert!(text.contains("looked up as `openrouter`"), "{text}");
         assert!(
-            text.contains("no `[pricing]` rule prices this model under the key `openrouter`"),
+            text.contains("regardless of the route `openrouter`"),
             "the no-card line must say which key was looked up: {text}"
         );
     }

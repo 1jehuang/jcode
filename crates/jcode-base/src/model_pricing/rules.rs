@@ -813,15 +813,7 @@ windows = [["01:00", "04:00"], ["06:00", "10:00"]]
         input_tokens: Option<u64>,
     ) -> Option<(ModelPricingEntry, Currency)> {
         let (entry, currency) = hit(sources::config_price(provider, model, at))?;
-        let card = sources::resolve_card(
-            entry,
-            currency,
-            provider,
-            model,
-            at,
-            input_tokens,
-            sources::CardFallback::ConfigCard,
-        );
+        let card = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
         Some((card.entry, card.currency))
     }
 

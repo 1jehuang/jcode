@@ -99,54 +99,29 @@ pub struct ModelPricingRuleFile {
     pub on_rule_expiry: Option<OnRuleExpiry>,
 }
 
-/// Rate rules for a single provider.
+/// Rate rules for a single provider ("vendor").
+///
+/// A vendor is the user's own label, not a route identity: its `models` rules
+/// (and the model rules inside `file`) apply by **model id regardless of which
+/// route a call uses**. That is deliberate - a user who runs
+/// `provider = OpenRouter, model = deepseek-flash` still wants DeepSeek's
+/// official CNY prices, and binding rules to a route would silently fall them
+/// back to models.dev's USD numbers.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderPricingFile {
-    /// Default currency for this provider's rules; defaults to USD when absent.
+    /// Optional local JSON file holding this vendor's model rules. A bare name
+    /// (`deepseek.json`) resolves under `~/.jcode/cache/`; anything else
+    /// (absolute, or relative with a separator, with a leading `~` expanded) is
+    /// used as the path it is. The file holds only
+    /// `{"models": {"<model-id>": {cost|tariffs|schedule|...}}}`, with no outer
+    /// vendor key: the vendor is already the config key this file hangs under.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Currency the numbers in this vendor's rules are denominated in; defaults
+    /// to USD when absent.
     pub currency: Option<String>,
     pub models: BTreeMap<String, ModelPricingRuleFile>,
-}
-
-/// One `[[pricing.sources]]` entry: an extra price sheet.
-///
-/// Written as an array of tables (`[[pricing.sources]]`) because a multi-line
-/// inline table is invalid TOML, the same reason `schedule` is. The sheet
-/// itself is a JSON document in models.dev's shape
-/// (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`) that lives in
-/// a **local file**; jcode never fetches a price sheet. The fields here say
-/// *which file* it is and *when* it applies.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PricingSourceFile {
-    /// Stable identity of this source. It is the tie-break key when two sources
-    /// share a `priority`, so an explicit id must be unique.
-    ///
-    /// Optional: when absent, the id is derived from the location at validation
-    /// time (see `jcode-base::config::pricing::convert_sources`) so the
-    /// single-source case is one line. An id-less entry re-saves without an
-    /// `id` key, because the derived form is a runtime detail, not user config.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    /// The local file the sheet is read from. A bare name (`prices.json`) with
-    /// no path separator resolves under `~/.jcode/cache/`; anything else
-    /// (absolute, or relative with a separator, with a leading `~` expanded) is
-    /// used as the path it is.
-    pub file: String,
-    /// Which provider identities this sheet may price; empty = every provider.
-    /// The same identity forms as a `[pricing.providers]` key (spec 4.2.1).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub scope: Vec<String>,
-    /// Model globs this sheet may price; empty = every model under `scope`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
-    /// Sheet schema. Only `models_dev_v1` (the default) exists today.
-    pub format: Option<String>,
-    /// Lower wins among sources; ties break on `id` in lexicographic order.
-    pub priority: Option<i64>,
-    /// Currency the sheet's numbers are denominated in; defaults to USD (the
-    /// models.dev catalog's currency), like an extra source that states nothing.
-    pub currency: Option<String>,
 }
 
 /// `[pricing]`: hand-written rate rules, which outrank every other source.
@@ -158,23 +133,12 @@ pub struct PricingConfigFile {
     /// `1 fx_base = N <code>`. v1 has no automatic fetch; hand-written wins.
     pub fx_rates: BTreeMap<String, f64>,
     pub providers: BTreeMap<String, ProviderPricingFile>,
-    /// Extra price sheets, below `providers` and above models.dev.
-    ///
-    /// Never written back when empty, for the same reason as
-    /// `ModelPricingRuleFile::context_tiers`: `Config::save` serializes the whole
-    /// struct, so a default-valued field must not be baked into the user's file
-    /// (the lesson of commit `9da6f9831`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sources: Vec<PricingSourceFile>,
 }
 
 impl PricingConfigFile {
     /// Whether the user configured any rate rules at all.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty()
-            && self.fx_rates.is_empty()
-            && self.fx_base.is_none()
-            && self.sources.is_empty()
+        self.providers.is_empty() && self.fx_rates.is_empty() && self.fx_base.is_none()
     }
 }
 
@@ -187,74 +151,56 @@ mod tests {
         let parsed: PricingConfigFile = serde_json::from_str("{}").expect("parse");
         assert!(parsed.is_empty());
         assert!(parsed.providers.is_empty());
-        assert!(parsed.sources.is_empty());
     }
 
     #[test]
-    fn source_entries_parse_and_roundtrip() {
+    fn a_vendor_file_and_inline_models_parse_and_roundtrip() {
         let json = r#"{
-            "sources": [
-                {
-                    "id": "corp-mirror",
-                    "file": "/srv/pricing/models_dev.mirror.json",
-                    "scope": ["deepseek", "openai-compatible:my-gateway"],
-                    "models": ["deepseek-v4-*"],
-                    "format": "models_dev_v1",
-                    "priority": 10,
-                    "currency": "CNY"
+            "providers": {
+                "deepseek": {
+                    "file": "deepseek.json",
+                    "currency": "CNY",
+                    "models": {
+                        "deepseek-v4-pro": {"cost": {"input": 2.0, "output": 8.0}}
+                    }
                 },
-                {"id": "local", "file": "file:///opt/jcode/pricing.json"}
-            ]
+                "inline-only": {"currency": "USD"}
+            }
         }"#;
         let parsed: PricingConfigFile = serde_json::from_str(json).expect("parse");
-        assert!(
-            !parsed.is_empty(),
-            "sources alone make the section non-empty"
-        );
-        assert_eq!(parsed.sources.len(), 2);
-        let first = &parsed.sources[0];
-        assert_eq!(first.id.as_deref(), Some("corp-mirror"));
-        assert_eq!(first.file, "/srv/pricing/models_dev.mirror.json");
-        assert_eq!(first.priority, Some(10));
-        assert_eq!(first.currency.as_deref(), Some("CNY"));
-        assert_eq!(first.models, vec!["deepseek-v4-*".to_string()]);
-        // Optional fields default rather than fail: an entry with just a `file`
-        // is the common single-source case.
-        let second = &parsed.sources[1];
-        assert_eq!(second.id.as_deref(), Some("local"));
-        assert_eq!(second.file, "file:///opt/jcode/pricing.json");
-        assert_eq!(second.scope, Vec::<String>::new());
-        assert_eq!(second.format, None);
-        assert_eq!(second.priority, None);
-
-        let again = serde_json::to_string(&parsed).expect("serialize");
-        assert!(again.contains("corp-mirror"));
-        let reparsed: PricingConfigFile = serde_json::from_str(&again).expect("reparse");
-        assert_eq!(reparsed.sources, parsed.sources);
-    }
-
-    #[test]
-    fn a_source_without_an_id_parses_as_none() {
-        // The single-source case: `file` alone. Deriving an id belongs to
-        // validation in jcode-base; the DTO must simply accept the shape.
-        let parsed: PricingConfigFile =
-            serde_json::from_str(r#"{"sources":[{"file":"prices.json"}]}"#).expect("parse");
-        assert_eq!(parsed.sources.len(), 1);
-        assert_eq!(parsed.sources[0].id, None);
         assert!(!parsed.is_empty());
+        let deepseek = parsed.providers.get("deepseek").expect("deepseek");
+        assert_eq!(deepseek.file.as_deref(), Some("deepseek.json"));
+        assert_eq!(deepseek.currency.as_deref(), Some("CNY"));
+        assert_eq!(deepseek.models.len(), 1);
+        // Optional fields default rather than fail: a vendor with only inline
+        // models, or only a file, is legal.
+        let inline = parsed.providers.get("inline-only").expect("inline-only");
+        assert_eq!(inline.file, None);
+        assert!(inline.models.is_empty());
 
-        // ... and an id-less entry re-saves without inventing an `id` key.
         let again = serde_json::to_string(&parsed).expect("serialize");
-        assert!(!again.contains("\"id\""), "{again}");
+        assert!(again.contains("deepseek.json"));
+        let reparsed: PricingConfigFile = serde_json::from_str(&again).expect("reparse");
+        assert_eq!(reparsed.providers, parsed.providers);
     }
 
     /// The lesson of commit `9da6f9831`: a default-valued field must not be
     /// baked into the user's file the next time anything saves.
     #[test]
-    fn empty_sources_do_not_serialize_the_key() {
+    fn a_vendor_without_a_file_does_not_serialize_the_key() {
+        let parsed: PricingConfigFile =
+            serde_json::from_str(r#"{"providers":{"deepseek":{"currency":"CNY"}}}"#)
+                .expect("parse");
+        let again = serde_json::to_string(&parsed).expect("serialize");
+        assert!(!again.contains("\"file\""), "{again}");
+    }
+
+    #[test]
+    fn an_empty_pricing_section_does_not_serialize_a_providers_key() {
         let parsed = PricingConfigFile::default();
         let json = serde_json::to_string(&parsed).expect("serialize");
-        assert!(!json.contains("sources"), "{json}");
+        assert!(!json.contains("providers"), "{json}");
     }
 
     #[test]
