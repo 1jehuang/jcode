@@ -53,9 +53,9 @@ to reach the terminal: the rendered frame buffer.
 ```mermaid
 flowchart TD
     A["Widgets: rgb() literals,<br/>role accessors, named colors"] --> B["Rendered frame buffer"]
-    B --> C["adapt_buffer_for_theme<br/>(light/dark adaptation)"]
-    C --> D["adapt_buffer_for_palette<br/>(user color config)"]
-    D --> E[Terminal]
+    B --> C["Attribute configured roles<br/>from original colors"]
+    C --> D["Adapt unconfigured colors<br/>for theme and surface contrast"]
+    D --> E["Terminal: chosen overrides stay exact"]
 ```
 
 The order matters. The light/dark pass exists because jcode's *built-in* palette
@@ -70,13 +70,14 @@ contrast check includes 256-color quantization. Dark themes are unchanged.
 This avoids simple inversion turning muted `#505050` text into washed-out
 `#afafaf` text. The default-surface muted ink is now `#636363` instead.
 
-A color the user configured is already the color they want, so it
-runs last and is never flipped: otherwise a deliberately dark red for errors on a
-white terminal would come out an unreadable pale pink. Because incoming literals
-have already been flipped by then, role defaults are pre-flipped the same way
-before matching, including any foreground contrast repair on that cell's
-pre-override surface. Explicit color overrides remain exact, even if a user
-deliberately chooses a low-contrast color.
+A color the user configured is already the color they want. The combined
+`adapt_buffer_for_display` pass matches overrides against the original native
+colors, then adapts only colors that were not substituted. Matching must happen
+before contrast repair: otherwise different muted grays can converge to the same
+readable ink, making `tool`, `dim`, and `pending` overrides indistinguishable.
+Explicit overrides remain exact, even if a user deliberately chooses a
+low-contrast color. Unconfigured text uses its final surface, including a
+configured panel background. Partial animation/spinner redraws use the same order.
 
 Three consequences worth knowing:
 

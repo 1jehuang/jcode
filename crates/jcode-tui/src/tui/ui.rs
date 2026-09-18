@@ -2663,12 +2663,11 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         Ok(()) => {}
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
-    // Adapt the finished frame for light backgrounds, then apply the user's
-    // configured colors, which must not be luminance-flipped. Working at the
-    // buffer level covers every widget and overlay without touching individual
-    // color call sites. See `palette::adapt_buffer_for_palette` for the ordering.
-    jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
-    jcode_tui_style::palette::adapt_buffer_for_palette(frame.buffer_mut());
+    // Adapt the finished frame at buffer level so every widget and overlay
+    // follows the same policy. User-configured colors remain exact.
+    // Attribute explicit palette overrides before light-theme contrast repair
+    // can make distinct muted source grays converge to the same rendered ink.
+    jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Cache eviction/clearing can outlive the last visible image. Carry Kitty
     // deletion commands on any completed frame so terminal-side pixel storage
