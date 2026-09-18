@@ -863,7 +863,7 @@ pub mod pricing;
 
 pub use pricing::{
     ContextTier, CostFields, ModelPricingRule, OnRuleExpiry, PricingConfig, PricingConfigError,
-    PricingSource, ProviderPricing, ScheduleRule, SourceLocation, Tariff, TimeWindow,
+    PricingSource, ProviderPricing, ScheduleRule, Tariff, TimeWindow,
 };
 
 #[cfg(test)]

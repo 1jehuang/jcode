@@ -16,7 +16,7 @@ use crate::config::{ContextTier, CostFields, Tariff};
 use jcode_config_types::ModelPricingRuleFile;
 
 pub(super) const API_URL: &str = "https://models.dev/api.json";
-pub(super) const CACHE_FILE: &str = "models_dev_pricing.json";
+pub(crate) const CACHE_FILE: &str = "models_dev_pricing.json";
 pub(super) const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 pub(super) const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 

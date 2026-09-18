@@ -2,47 +2,45 @@
 //! between the user's own `[pricing.providers]` cards and models.dev.
 //!
 //! A source is a JSON document in models.dev's shape
-//! (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`) that lives at
-//! an `https://` URL or in a local file, with its own scope, priority and TTL.
-//! The user's cards stay authoritative (spec 4.4); a source only fills in what
-//! those leave unsaid, and models.dev still prices anything no source covers.
+//! (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`) that lives in
+//! a **local file**, with its own scope and priority. jcode never fetches a
+//! price sheet: a `file` value names a path on disk (a bare name resolves under
+//! `~/.jcode/cache/`). The user's cards stay authoritative (spec 4.4); a source
+//! only fills in what those leave unsaid, and models.dev still prices anything
+//! no source covers.
 //!
 //! Three properties of this module are deliberate and are what its tests pin
 //! down:
 //!
-//! * **Lookups never block on the network.** A remote sheet is read from the
-//!   on-disk cache; a missing or stale copy is refreshed by the background task
-//!   and the source is simply unused until that succeeds. A `file://` sheet is
-//!   re-read inline, because a local read is not network I/O.
-//! * **A local sheet is fresh while its file is unchanged.** A cached copy of a
-//!   local file records the file's mtime and size; an edit makes the copy stale
-//!   immediately, so "my price file" means "saving it changes the price", not
-//!   "wait out `refresh_secs`". `refresh_secs` and its failure backoff are a
-//!   remote concern. The check costs one `stat` per lookup (never a re-read), and
-//!   a file that is missing or unreadable is left alone for the failure backoff
-//!   so a broken source costs one attempt per window, not one per lookup.
-//! * **A source never fabricates a rate.** Unreachable, unparseable, empty, or
-//!   stale all mean "this source has nothing to say", so the next layer prices
-//!   the model. The previous good copy stays on disk: degradation is per
-//!   lookup, not destruction of what was fetched.
+//! * **Lookups never block.** A local sheet is read inline, because a local read
+//!   is not network I/O. There is no fetch path at all.
+//! * **A sheet is fresh while its file is unchanged.** The cached copy records
+//!   the file's mtime and size; an edit makes the copy stale immediately, so "my
+//!   price file" means "saving it changes the price". The check costs one `stat`
+//!   per lookup (never a re-read), and a file that is missing or unreadable is
+//!   left alone for a short failure backoff so a broken source costs one attempt
+//!   per window, not one per lookup.
+//! * **A source never fabricates a rate.** Missing, unreadable, unparseable,
+//!   empty, or out of effect all mean "this source has nothing to say", so the
+//!   next layer prices the model. Degradation is per lookup.
 //! * **The order is a property of the config.** Sources resolve by `priority`
 //!   ascending and then by `id` lexicographically (`config::pricing` sorts once
 //!   at validation time), never by map iteration order.
 
-use crate::config::{PricingSource, SourceLocation};
+use crate::config::PricingSource;
 use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::sources;
 use crate::model_pricing::{catalog, models_dev_provider_id, normalize_model_id};
 use jcode_provider_core::Currency;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-/// Where the fetched sheets live. One file for every source, so a source that
-/// is removed from the config simply stops being read.
-const SOURCES_CACHE_FILE: &str = "pricing_sources.json";
+/// Where the read sheets live. One file for every source, so a source that is
+/// removed from the config simply stops being read.
+pub(crate) const SOURCES_CACHE_FILE: &str = "pricing_sources.json";
 const SOURCES_SCHEMA_VERSION: u32 = 1;
 
 /// A price sheet that decides what money is spent does not get read without a
@@ -57,21 +55,18 @@ pub(super) const MAX_SHEET_BYTES_TEST: usize = MAX_SHEET_BYTES;
 #[cfg(test)]
 static LOCAL_SHEET_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// One fetched sheet, plus what it was fetched from.
+/// One read sheet, plus the file it was read from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct SourceCatalog {
-    /// The location this copy came from. A config edit that points the same
-    /// `id` somewhere else must not keep serving the old sheet until the TTL
-    /// runs out, so a mismatch is treated as "no copy yet".
+    /// The path this copy came from. A config edit that points the same `id`
+    /// somewhere else must not keep serving the old sheet, so a mismatch is
+    /// treated as "no copy yet".
     pub(super) location: String,
-    pub(super) fetched_at_unix_secs: u64,
     /// The local file this copy was read from, identified by mtime and size.
     ///
-    /// `None` for a remote sheet, and for a cache written by a build that
-    /// predates this field; either way the copy is treated as stale once, read
-    /// again, and fingerprinted. A local sheet is fresh exactly while this
-    /// matches the file on disk, which is why an edit takes effect at the next
-    /// lookup instead of after `refresh_secs`.
+    /// A sheet is fresh exactly while this matches the file on disk, which is
+    /// why an edit takes effect at the next lookup. `None` is treated as stale
+    /// once, re-read, and fingerprinted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) fingerprint: Option<FileFingerprint>,
     /// provider id -> model id -> entry, exactly like the models.dev cache.
@@ -127,23 +122,18 @@ impl Default for SourcesCache {
 static SOURCES_CACHE: Mutex<Option<(PathBuf, Arc<SourcesCache>)>> = Mutex::new(None);
 /// Serializes the read-modify-write of the on-disk/in-memory sources cache.
 ///
-/// [`SOURCES_CACHE`]'s own lock only covers the memory assignment, and
-/// [`SOURCES_REFRESHING`] single-flights one source id, so without this two
-/// different sources' background refreshes could interleave and drop a sheet.
-/// It is deliberately a separate lock from [`SOURCES_CACHE`] because
-/// `save_catalog` takes both, in this order, and nothing takes them reversed.
+/// [`SOURCES_CACHE`]'s own lock only covers the memory assignment, so without
+/// this two different sources' reads could interleave and drop a sheet. It is
+/// deliberately a separate lock from [`SOURCES_CACHE`] because `save_catalog`
+/// takes both, in this order, and nothing takes them reversed.
 static SOURCES_WRITE_LOCK: Mutex<()> = Mutex::new(());
-/// Ids whose background refresh is already running, so a burst of lookups
-/// launches one fetch per source (the per-source shape of the single-flight
-/// flag the models.dev refresh uses).
-static SOURCES_REFRESHING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 /// The source layer's answer for one `(provider, model)` pair at `at`.
 ///
 /// `None` means no source covers the pair, or every source that does has
-/// nothing usable to say (unreachable, unparseable, stale, or out of effect).
-/// The caller then asks the next layer, which is the whole point: a source
-/// never turns "I do not know" into a number.
+/// nothing usable to say (missing, unreadable, unparseable, or out of effect).
+/// The caller then asks the next layer, which is the whole point: a source never
+/// turns "I do not know" into a number.
 pub(super) struct SourceHit {
     /// The `id` of the sheet that supplied the rates, for honest labelling.
     pub(super) source_id: String,
@@ -272,18 +262,23 @@ fn covers_model(source: &PricingSource, model: &str) -> bool {
     })
 }
 
+/// The path string a cache entry records for `path`, and the form compared to
+/// decide whether a cached copy still describes the source's file.
+fn location_key(path: &Path) -> String {
+    path.display().to_string()
+}
+
 /// The copy of `source` a lookup may use right now.
 ///
-/// Fresh means "the same sheet this source still points at": for a local file,
-/// the copy was read from that file unchanged (same mtime and size); for a
-/// remote sheet, it was fetched within this source's own TTL. A local file is
-/// re-read inline when its copy is stale (or missing); a remote sheet is only
-/// ever fetched by the background refresher, so this returns `None` in the
-/// meantime and the lookup falls through to the next layer instead of blocking.
+/// Fresh means "the copy was read from the file this source still points at,
+/// unchanged" (same path, mtime and size). A stale (or missing) copy is re-read
+/// inline: a local read is cheap and is not network I/O, so a lookup never has
+/// to wait for a background refresh. A file that cannot be read is skipped for
+/// the failure backoff rather than retried on every lookup.
 fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
     let cache = load_cache();
     if let Some(catalog) = cache.sources.get(&source.id)
-        && catalog.location == source.location.describe_for_log()
+        && catalog.location == location_key(&source.path)
         && is_fresh(source, catalog)
     {
         return Some(cache);
@@ -293,47 +288,28 @@ fn usable_catalog(source: &PricingSource) -> Option<Arc<SourcesCache>> {
         return None;
     }
 
-    match &source.location {
-        SourceLocation::LocalFile(path) => match read_local_sheet_fingerprinted(path) {
-            Ok((fingerprint, providers)) => {
-                clear_failure(&source.id);
-                save_catalog(&source.id, &source.location, Some(fingerprint), providers);
-                Some(load_cache())
-            }
-            Err(error) => {
-                note_failure(&source.id);
-                crate::logging::warn(&format!(
-                    "pricing source `{}` ({}) is unavailable: {error}; \
-                     falling through to the next price source",
-                    source.id,
-                    source.location.describe_for_log()
-                ));
-                None
-            }
-        },
-        SourceLocation::Remote(_) => {
-            schedule_source_refresh(source);
+    match read_local_sheet_fingerprinted(&source.path) {
+        Ok((fingerprint, providers)) => {
+            clear_failure(&source.id);
+            save_catalog(&source.id, &source.path, Some(fingerprint), providers);
+            Some(load_cache())
+        }
+        Err(error) => {
+            note_failure(&source.id);
+            crate::logging::warn(&format!(
+                "pricing source `{}` ({}) is unavailable: {error}; \
+                 falling through to the next price source",
+                source.id,
+                source.path.display()
+            ));
             None
         }
     }
 }
 
-/// Whether a cached copy still describes what the source points at.
-///
-/// A local copy is fresh while the file it recorded is unchanged; a remote copy
-/// is fresh while its TTL has not elapsed. The two are deliberately different:
-/// `refresh_secs` bounds how stale a *fetch* may be, and a local file is not
-/// fetched.
+/// Whether a cached copy still describes the file the source points at.
 fn is_fresh(source: &PricingSource, catalog: &SourceCatalog) -> bool {
-    match &source.location {
-        SourceLocation::LocalFile(path) => {
-            local_fingerprint(path).is_some_and(|current| catalog.fingerprint == Some(current))
-        }
-        SourceLocation::Remote(_) => {
-            catalog::now_unix_secs().saturating_sub(catalog.fetched_at_unix_secs)
-                < source.refresh_secs
-        }
-    }
+    local_fingerprint(&source.path).is_some_and(|current| catalog.fingerprint == Some(current))
 }
 
 /// The fingerprint of the file at `path`, or `None` when it cannot be stat'ed
@@ -352,9 +328,9 @@ fn local_fingerprint(path: &std::path::Path) -> Option<FileFingerprint> {
 /// long enough that a broken source costs one attempt per minute instead of one
 /// per price.
 ///
-/// Only *failures* are recorded: a source that succeeds is governed by its own
-/// TTL, so a config edit that repoints it (or a file that changes) is read at
-/// the next lookup rather than after the backoff.
+/// Only *failures* are recorded: a source that succeeds is governed by its
+/// file's fingerprint, so an edit is read at the next lookup rather than after
+/// the backoff.
 const FAILURE_BACKOFF_SECS: u64 = 60;
 
 /// When each source last failed, for [`FAILURE_BACKOFF_SECS`]. Process local:
@@ -416,11 +392,10 @@ pub(super) fn read_local_sheet(
 /// Read one sheet from a local path, enforcing the size ceiling, and also
 /// return the fingerprint of the bytes it read.
 ///
-/// The `stat` runs before the `open` on purpose: a `file://` path can name a
-/// FIFO, and opening one with no writer blocks a price lookup forever. A
-/// non-regular file is refused outright, and the size is checked from metadata
-/// and again while reading (`take`) so an oversized file is never fully
-/// buffered.
+/// The `stat` runs before the `open` on purpose: a path can name a FIFO, and
+/// opening one with no writer blocks a price lookup forever. A non-regular file
+/// is refused outright, and the size is checked from metadata and again while
+/// reading (`take`) so an oversized file is never fully buffered.
 ///
 /// The fingerprint comes from the same `stat` that gates the open, so a copy is
 /// recorded as "this exact version of the file" without a second syscall. It is
@@ -550,27 +525,27 @@ fn load_cache() -> Arc<SourcesCache> {
 
 /// Store a freshly read sheet, replacing whatever was there.
 ///
-/// Only ever called with a successfully parsed sheet, so a failed refresh
-/// leaves the last good copy (and its timestamp) exactly as it was.
+/// Only ever called with a successfully parsed sheet, so a failed read leaves
+/// the last good copy exactly as it was.
 ///
 /// The whole read-modify-write runs under [`SOURCES_WRITE_LOCK`], and the
 /// in-memory `Arc` is the base when it is already for this path. Without that,
-/// two different sources' background refreshes could interleave
-/// (`read{}`, `read{}`, `mem={A}`, `mem={B}`, `write{A}`, `write{B}`) and drop
-/// one sheet from disk *and* memory; the next lookup would re-fetch it, and in
-/// the meantime a call could be priced from the wrong layer.
+/// two different sources' reads could interleave (`read{}`, `read{}`, `mem={A}`,
+/// `mem={B}`, `write{A}`, `write{B}`) and drop one sheet from disk *and* memory;
+/// the next lookup would re-read it, and in the meantime a call could be priced
+/// from the wrong layer.
 ///
 /// This is in-process only: a second process sharing the cache file can still
 /// race this one and win, and the loser's sheet is simply re-read on its next
 /// stale lookup, so the state converges rather than corrupts.
 pub(super) fn save_catalog(
     id: &str,
-    location: &SourceLocation,
+    path: &Path,
     fingerprint: Option<FileFingerprint>,
     providers: HashMap<String, HashMap<String, ModelPricingEntry>>,
 ) {
-    let path = cache_path();
-    let location = location.describe_for_log();
+    let cache_file = cache_path();
+    let location = location_key(path);
     // Serialize the entire read-modify-write, not just the memory assignment.
     let _guard = SOURCES_WRITE_LOCK
         .lock()
@@ -579,10 +554,10 @@ pub(super) fn save_catalog(
         Ok(memory) => match memory.as_ref() {
             // The in-memory copy is the freshest in-process state for this path
             // (every writer holds the same lock), so base the update on it.
-            Some((cached_path, cache)) if cached_path == &path => (**cache).clone(),
-            _ => crate::storage::read_json(&path).unwrap_or_default(),
+            Some((cached_path, cache)) if cached_path == &cache_file => (**cache).clone(),
+            _ => crate::storage::read_json(&cache_file).unwrap_or_default(),
         },
-        Err(_) => crate::storage::read_json(&path).unwrap_or_default(),
+        Err(_) => crate::storage::read_json(&cache_file).unwrap_or_default(),
     };
     cache.schema_version = SOURCES_SCHEMA_VERSION;
     let changed = cache
@@ -594,16 +569,15 @@ pub(super) fn save_catalog(
         id.to_string(),
         SourceCatalog {
             location,
-            fetched_at_unix_secs: catalog::now_unix_secs(),
             fingerprint,
             providers,
         },
     );
     let cache = Arc::new(cache);
     if let Ok(mut memory) = SOURCES_CACHE.lock() {
-        *memory = Some((path.clone(), Arc::clone(&cache)));
+        *memory = Some((cache_file.clone(), Arc::clone(&cache)));
     }
-    if let Err(error) = crate::storage::write_json(&path, cache.as_ref()) {
+    if let Err(error) = crate::storage::write_json(&cache_file, cache.as_ref()) {
         crate::logging::warn(&format!(
             "could not persist pricing sources cache: {error:#}"
         ));
@@ -618,144 +592,8 @@ pub(super) fn save_catalog(
     }
 }
 
-/// Spawn one background fetch for `source` if none is running.
-///
-/// Never called from a test build (see [`background_refresh_allowed`]): tests
-/// exercise the cache and the fallback paths directly, and must not reach the
-/// network.
-fn schedule_source_refresh(source: &PricingSource) {
-    if !super::background_refresh_allowed() {
-        return;
-    }
-    let SourceLocation::Remote(url) = source.location.clone() else {
-        return;
-    };
-    {
-        let Ok(mut in_flight) = SOURCES_REFRESHING.lock() else {
-            return;
-        };
-        let in_flight = in_flight.get_or_insert_with(HashSet::new);
-        if !in_flight.insert(source.id.clone()) {
-            return;
-        }
-    }
-
-    let id = source.id.clone();
-    let location = source.location.clone();
-    let log_location = source.location.describe_for_log();
-    let work = move || async move {
-        let result = fetch_remote(&url).await;
-        match result {
-            Ok(providers) => {
-                clear_failure(&id);
-                save_catalog(&id, &location, None, providers);
-            }
-            Err(error) => {
-                note_failure(&id);
-                crate::logging::warn(&format!(
-                    "pricing source `{id}` ({log_location}) could not be refreshed: {error:#}; \
-                     keeping the last successful copy"
-                ));
-            }
-        }
-        if let Ok(mut in_flight) = SOURCES_REFRESHING.lock()
-            && let Some(set) = in_flight.as_mut()
-        {
-            set.remove(&id);
-        }
-    };
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(work());
-    } else {
-        std::thread::spawn(move || {
-            if let Ok(runtime) = tokio::runtime::Runtime::new() {
-                runtime.block_on(work());
-            }
-        });
-    }
-}
-
-/// How many redirects a price-sheet fetch will follow. Small on purpose: a
-/// sheet URL is configured, not discovered, so a long redirect chain is either
-/// a mistake or an attempt to move the fetch somewhere the config layer did not
-/// approve.
-const MAX_SHEET_REDIRECTS: usize = 3;
-
-/// The client price sheets are fetched with: same transport as the shared
-/// provider client, but with a bounded redirect policy so the FINAL url can be
-/// checked to still be `https`.
-fn sheet_http_client() -> reqwest::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .user_agent(crate::provider::JCODE_USER_AGENT)
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::limited(MAX_SHEET_REDIRECTS))
-                .build()
-                .unwrap_or_else(|_| {
-                    reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::limited(MAX_SHEET_REDIRECTS))
-                        .build()
-                        .unwrap_or_default()
-                })
-        })
-        .clone()
-}
-
-pub(super) async fn fetch_remote(
-    url: &str,
-) -> anyhow::Result<HashMap<String, HashMap<String, ModelPricingEntry>>> {
-    let client = sheet_http_client();
-    let response = client
-        .get(url)
-        .header("Accept", "application/json")
-        .timeout(catalog::HTTP_TIMEOUT)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        anyhow::bail!("HTTP {}", response.status());
-    }
-    // The config layer rejects `http://`, but reqwest follows redirects, so a
-    // 302 could smuggle the sheet back onto cleartext transport. A price sheet
-    // decides what money is spent, so the FINAL url must still be https.
-    if response.url().scheme() != "https" {
-        anyhow::bail!(
-            "refusing a price sheet redirected to `{}`: only https is allowed",
-            response.url()
-        );
-    }
-    let body = read_body_limited(response).await?;
-    parse_sheet(&body)
-}
-
-/// Read a response body with [`MAX_SHEET_BYTES`] enforced while streaming, so an
-/// oversized body is rejected without being fully buffered.
-pub(super) async fn read_body_limited(mut response: reqwest::Response) -> anyhow::Result<String> {
-    if let Some(length) = response.content_length()
-        && length > MAX_SHEET_BYTES as u64
-    {
-        anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
-    }
-    let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if body.len() + chunk.len() > MAX_SHEET_BYTES {
-            anyhow::bail!("sheet is larger than {MAX_SHEET_BYTES} bytes");
-        }
-        body.extend_from_slice(&chunk);
-    }
-    String::from_utf8(body).map_err(|error| anyhow::anyhow!("sheet is not valid UTF-8: {error}"))
-}
-
 #[cfg(test)]
-pub(crate) fn save_test_source(
-    id: &str,
-    location: &str,
-    fetched_at_unix_secs: u64,
-    entries: &[(&str, &str, ModelPricingEntry)],
-) {
+pub(crate) fn save_test_source(id: &str, path: &Path, entries: &[(&str, &str, ModelPricingEntry)]) {
     let mut providers: HashMap<String, HashMap<String, ModelPricingEntry>> = HashMap::new();
     for (provider, model, entry) in entries {
         providers
@@ -763,30 +601,28 @@ pub(crate) fn save_test_source(
             .or_default()
             .insert((*model).to_string(), entry.clone());
     }
-    // A primed local source has to look like one this process just read, or the
-    // mtime check would treat it as stale and re-read the (usually absent) file.
-    // The fingerprint comes from the file the caller points at, so priming a
-    // local source means writing that file.
-    let fingerprint = location
-        .strip_prefix("file://")
-        .and_then(|path| std::fs::metadata(path).ok())
+    // A primed source has to look like one this process just read, or the mtime
+    // check would treat it as stale and re-read the (usually absent) file. The
+    // fingerprint comes from the file the caller points at, so priming a source
+    // means writing that file.
+    let fingerprint = std::fs::metadata(path)
+        .ok()
         .map(|metadata| FileFingerprint::of(&metadata));
-    let path = cache_path();
-    let mut cache: SourcesCache = crate::storage::read_json(&path).unwrap_or_default();
+    let cache_file = cache_path();
+    let mut cache: SourcesCache = crate::storage::read_json(&cache_file).unwrap_or_default();
     cache.sources.insert(
         id.to_string(),
         SourceCatalog {
-            location: location.to_string(),
-            fetched_at_unix_secs,
+            location: location_key(path),
             fingerprint,
             providers,
         },
     );
     let cache = Arc::new(cache);
     if let Ok(mut memory) = SOURCES_CACHE.lock() {
-        *memory = Some((path.clone(), Arc::clone(&cache)));
+        *memory = Some((cache_file.clone(), Arc::clone(&cache)));
     }
-    if let Err(error) = crate::storage::write_json(&path, cache.as_ref()) {
+    if let Err(error) = crate::storage::write_json(&cache_file, cache.as_ref()) {
         panic!("could not persist test sources cache: {error:#}");
     }
 }
@@ -821,16 +657,6 @@ pub(crate) fn forget_failures_for_tests() {
     if let Ok(mut failures) = SOURCE_FAILURES.lock() {
         *failures = None;
     }
-}
-
-/// What the cache holds for `id`, for tests that assert a failed refresh did
-/// not destroy the last good copy.
-#[cfg(test)]
-pub(crate) fn cached_fetched_at_for_tests(id: &str) -> Option<u64> {
-    load_cache()
-        .sources
-        .get(id)
-        .map(|catalog| catalog.fetched_at_unix_secs)
 }
 
 /// How many local sheet files have been opened since the counter was reset, so

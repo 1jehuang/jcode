@@ -22,7 +22,7 @@ fn pricing_command_names_the_sheet_that_priced_the_model() {
                 r#"
 [[pricing.sources]]
 id = "corp-mirror"
-url = "file://{}"
+file = "{}"
 "#,
                 sheet_path.display()
             ),

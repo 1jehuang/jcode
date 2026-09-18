@@ -5,12 +5,12 @@ model is one idea:
 
 > **`config.toml` holds a pointer, not prices.** You say which price source to
 > read, covering which providers and models, and who wins; the rates themselves
-> live in a file (or a URL) in models.dev's JSON shape.
+> live in a local file in models.dev's JSON shape.
 
 So the answer to "why is it this price?" has **two layers**:
 
-1. **Your sources.** A `[[pricing.sources]]` entry points at a sheet: a local
-   file or an `https://` URL. Sources resolve by `priority` (lower wins, ties by
+1. **Your sources.** A `[[pricing.sources]]` entry points at a local price
+   file. Sources resolve by `priority` (lower wins, ties by
    `id`), and a sheet only covers the providers/models its `scope` and `models`
    allow. A `[pricing.providers]` card written inline in `config.toml` still
    outranks every source; it is the escape hatch for the two things a sheet
@@ -29,10 +29,14 @@ One line in `~/.jcode/config.toml`:
 
 ```toml
 [[pricing.sources]]
-url = "file:///home/me/prices.json"
+file = "prices.json"
 ```
 
-and your price file, in models.dev's shape:
+A bare name like `prices.json` resolves under `~/.jcode/cache/`, so that is
+where this file lives. Any other value is a path (`~` expanded), which is what
+you want for a file you keep elsewhere, e.g.
+`file = "~/pricing/prices.json"` or `file = "/srv/pricing/prices.json"`. The
+price file itself is in models.dev's shape:
 
 ```json
 {
@@ -84,30 +88,29 @@ billed and compared by. They are used in two places, and nowhere else:
 
 ### `[[pricing.sources]]`
 
-A source is a price list you point jcode at: your own mirror of models.dev, a
-vendor's published rate sheet, a file you keep in a git repo. Sources sit
+A source is a local price file you point jcode at: your own snapshot of
+models.dev, a vendor's published rate sheet, a file you keep in a git repo.
+jcode **never fetches** a price sheet. Sources sit
 **below an inline `[pricing.providers]` card and above every catalog jcode
 derives itself**, so pointing at your own sheet is never a no-op.
 
 ```toml
 [[pricing.sources]]
-id = "corp-mirror"                                     # optional; derived from the URL when absent
-url = "https://gitlab.internal/pricing/models_dev.mirror.json"  # or file:///opt/jcode/prices.json
+id = "corp-mirror"                                     # optional; derived from the file name when absent
+file = "corp-prices.json"                              # bare name -> ~/.jcode/cache/, or a path
 scope = ["deepseek", "openai-compatible:my-gateway"]   # omit = every provider
 models = ["deepseek-v4-*"]                             # omit = every model under scope
-refresh_secs = 86400                                   # remote TTL, default 24h
 priority = 10                                          # lower wins; default 0
 currency = "USD"                                       # currency of the sheet's numbers; default USD
 ```
 
 | Key | Meaning |
 | --- | --- |
-| `id` | Name of this source. Optional: omit it and jcode derives a stable one from the location (the file stem for a local path, the last path segment without its extension for a URL, e.g. `prices` from `…/prices.json`, `models_dev.mirror` from `…/models_dev.mirror.json`). It is the tie-break key when two sources share a `priority`, so it must be unique; an id you write wins over a derived one, and two sources that would derive the same id get `-2`, `-3`, … in declaration order. |
-| `url` | `https://…` or a local file: `file:///path/to/prices.json`, or a bare path. No other scheme is accepted, and `http://` is refused: a price sheet decides what money is spent. |
+| `id` | Name of this source. Optional: omit it and jcode derives a stable one from the file name (the file stem, so `prices` from `…/prices.json`). It is the tie-break key when two sources share a `priority`, so it must be unique; an id you write wins over a derived one, and two sources that would derive the same id get `-2`, `-3`, … in declaration order. |
+| `file` | The local price file to read. A bare name (no path separator) resolves under `~/.jcode/cache/`; any other value is a path (absolute, or relative with a separator, `~` expanded). A bare name may not be one of jcode's own cache files. |
 | `scope` | Which provider identities this sheet may price. Omit it, or leave it empty, to cover every provider. |
 | `models` | Model globs (`*` any run, `?` one character, case-insensitive). Omit for every model under `scope`. |
 | `format` | Sheet schema. Only `models_dev_v1` exists, and it is the default. |
-| `refresh_secs` | How long a fetched copy of a **remote** sheet may be reused before it is refreshed in the background. Default `86400` (24h), the same as models.dev. A local file ignores this and is re-read whenever it changes. |
 | `priority` | Lower wins between sources. Default `0`; ties are broken by `id` in lexicographic order, so the merge never depends on map order. |
 | `currency` | Currency every number in the sheet is denominated in. Defaults to `USD`, the same implicit currency models.dev uses. |
 
@@ -146,25 +149,17 @@ shows `(rule expired (pricing source \`corp-mirror\`))`, and `/pricing` prints a
 switch from your sheet to models.dev's number. The next layer still prices the
 call at its own rate — the marker is what changes.
 
-**Failure degrades, it never fabricates.** A sheet that is unreachable,
-unparseable, stale, or out of effect simply does not price the call, and the next
+**Failure degrades, it never fabricates.** A sheet that is missing, unreadable,
+unparseable, or out of effect simply does not price the call, and the next
 layer does. Nothing is invented to fill the gap, and a call that models.dev can
 price is never left unpriced:
 
-* a `file://` sheet is read from disk; a file that is missing or is not valid
-  JSON is skipped for that lookup, with a warning in the log. A local file is
-  **not** governed by `refresh_secs`: its cached copy records the file's mtime
-  and size, and editing the file makes it stale immediately, so saving your price
-  file changes the price at the next lookup. A missing file is left alone for a
-  short failure backoff rather than re-attempted on every lookup;
-* an `https://` sheet is read from a cache under `~/.jcode/cache/`. It is fetched
-  in the background, so a lookup never waits on the network. Until the fetch
-  succeeds the source is unused, and the last successful copy is kept rather than
-  discarded;
-* a **remote** sheet whose `refresh_secs` has elapsed is **not** used while its
-  refresh is outstanding: a price that may be hours stale is not silently billed
-  (`refresh_secs` is a fetch-staleness bound, so it does not apply to a local
-  file);
+* a source is read from its local file; a file that is missing or is not valid
+  JSON is skipped for that lookup, with a warning in the log. The cached copy
+  records the file's mtime and size, and editing the file makes it stale
+  immediately, so saving your price file changes the price at the next lookup. A
+  missing file is left alone for a short failure backoff rather than re-attempted
+  on every lookup;
 * a sheet whose rule is out of effect at the call's instant (its
   `effective_until` passed, or its `effective_from` has not arrived) is skipped,
   and the next source or models.dev prices the call — and, as above, that price
@@ -178,7 +173,7 @@ instead.
 
 An invalid `[[pricing.sources]]` entry is reported like any other invalid
 `[pricing]` field: the section is rejected as a whole, `/pricing` and the cost
-display say `invalid [pricing]: pricing.sources[0].url`, and a line naming the
+display say `invalid [pricing]: pricing.sources[0].file`, and a line naming the
 problem goes to the log.
 
 **A sheet entry is all-or-nothing, unlike an inline card.** An inline
@@ -188,15 +183,6 @@ the next layer of the same currency. A sheet entry may not: it must state both
 entirely (the source simply does not price that model, and the next layer does).
 That restricts how much of a sheet a broken field can affect, at the cost of
 having to write both directions.
-
-**The sheet URL is recorded, redacted.** jcode persists what it fetched from in
-`~/.jcode/cache/pricing_sources.json`, and writes the URL as `scheme://host/path`
-with the query string and any userinfo removed, so a token in the query is never
-logged or saved. The schema has no header field yet, so a mirror that needs
-authentication has to put the credential in the URL — which means the credential
-still lives in your `config.toml` in the clear. Prefer a private network or an
-unauthenticated path today, and move the secret into a header field once one
-exists.
 
 Two things a source does **not** do: it cannot change the cache-write premium
 billing applies for Anthropic models (that stays an inline card's privilege), and
@@ -410,7 +396,7 @@ These are worth reading once, because each one breaks more than it looks like:
   one thing a save can still drop is a setting you deliberately reset (for
   example a cleared `/colors` or a cleared default model), because "empty" and
   "not written by this build" look identical in the file. An `id` you did not
-  write is not invented on save: the source stays a `url` line.
+  write is not invented on save: the source stays a `file` line.
 * **Entries inside an array of tables are rewritten wholesale.** A
   `[[providers.<name>.models]]` or `[[...schedule]]` entry is a value, not a
   sub-table jcode patches key by key, so comments *inside* such an entry are

@@ -1809,8 +1809,9 @@ fn documented_pricing_example_prices_as_documented() {
 /// copied, so keep it executable the same way the card example is: the config
 /// points at the sheet, and the sheet is the JSON block beside it.
 ///
-/// This is the quick-start block, so it also pins the one-line id-less form:
-/// the document must keep showing `url = …` with no `id`.
+/// This is the quick-start block, so it also pins the one-line id-less bare-name
+/// form: the document must keep showing `file = "prices.json"` with no `id`, and
+/// the sheet lives where a bare name resolves (under `~/.jcode/cache/`).
 #[test]
 fn documented_sources_example_prices_as_documented() {
     let doc = std::fs::read_to_string(concat!(
@@ -1834,17 +1835,22 @@ fn documented_sources_example_prices_as_documented() {
         !example.contains("id ="),
         "the quick-start source must stay the one-line id-less form:\n{example}"
     );
+    assert!(
+        example.contains("file = \"prices.json\""),
+        "the quick-start source must name a bare file:\n{example}"
+    );
 
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
     crate::env::set_var("JCODE_HOME", dir.path());
-    // The document names the path the sheet is expected to live at; the test
-    // writes the documented JSON there.
-    let sheet_path = dir.path().join("documented-pricing.json");
+    // A bare name resolves under `~/.jcode/cache/`, so that is where the
+    // documented sheet is written.
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let sheet_path = cache_dir.join("prices.json");
     std::fs::write(&sheet_path, sheet).expect("write documented sheet");
-    let config = with_documented_sheet_path(example, &sheet_path);
-    std::fs::write(dir.path().join("config.toml"), config).expect("write documented config");
+    std::fs::write(dir.path().join("config.toml"), example).expect("write documented config");
     crate::config::invalidate_config_cache();
 
     Config::load_strict().expect("the documented example must parse");
@@ -1875,19 +1881,4 @@ fn documented_sources_example_prices_as_documented() {
         (peak.amount - 0.36).abs() < 1e-9,
         "the documented peak multiplier doubles it, got {peak:?}"
     );
-}
-
-/// Point the documented `url = "file://…"` at the file the test actually wrote,
-/// so the document can keep naming a plausible path.
-fn with_documented_sheet_path(example: &str, path: &std::path::Path) -> String {
-    let marker = "url = \"file://";
-    let start = example
-        .find(marker)
-        .expect("the documented source names a file:// url")
-        + marker.len();
-    let end = start
-        + example[start..]
-            .find('"')
-            .expect("the documented url has a closing quote");
-    format!("{}{}{}", &example[..start], path.display(), &example[end..])
 }

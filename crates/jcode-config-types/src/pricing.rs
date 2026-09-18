@@ -113,8 +113,9 @@ pub struct ProviderPricingFile {
 /// Written as an array of tables (`[[pricing.sources]]`) because a multi-line
 /// inline table is invalid TOML, the same reason `schedule` is. The sheet
 /// itself is a JSON document in models.dev's shape
-/// (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`); the fields
-/// here say *where* it comes from and *when* it applies.
+/// (`{provider: {models: {id: {cost, tariffs, schedule, ...}}}}`) that lives in
+/// a **local file**; jcode never fetches a price sheet. The fields here say
+/// *which file* it is and *when* it applies.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PricingSourceFile {
@@ -127,8 +128,12 @@ pub struct PricingSourceFile {
     /// `id` key, because the derived form is a runtime detail, not user config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// `https://…` or `file:///…` (a bare path counts as a local file).
-    pub url: String,
+    /// The local file the sheet is read from. A bare name (`prices.json`)
+    /// resolves under `~/.jcode/cache/`; a path (absolute, or relative with a
+    /// separator, `~` expanded) is used as-is; `file://` is accepted as a
+    /// synonym for a path. `http(s)://` and every other scheme are rejected:
+    /// fetch the sheet yourself and point at the file.
+    pub file: String,
     /// Which provider identities this sheet may price; empty = every provider.
     /// The same identity forms as a `[pricing.providers]` key (spec 4.2.1).
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -138,8 +143,6 @@ pub struct PricingSourceFile {
     pub models: Vec<String>,
     /// Sheet schema. Only `models_dev_v1` (the default) exists today.
     pub format: Option<String>,
-    /// How long a fetched copy may be reused before the source is refreshed.
-    pub refresh_secs: Option<u64>,
     /// Lower wins among sources; ties break on `id` in lexicographic order.
     pub priority: Option<i64>,
     /// Currency the sheet's numbers are denominated in; defaults to USD (the
@@ -194,15 +197,14 @@ mod tests {
             "sources": [
                 {
                     "id": "corp-mirror",
-                    "url": "https://gitlab.internal/pricing/models_dev.mirror.json",
+                    "file": "/srv/pricing/models_dev.mirror.json",
                     "scope": ["deepseek", "openai-compatible:my-gateway"],
                     "models": ["deepseek-v4-*"],
                     "format": "models_dev_v1",
-                    "refresh_secs": 3600,
                     "priority": 10,
                     "currency": "CNY"
                 },
-                {"id": "local", "url": "file:///opt/jcode/pricing.json"}
+                {"id": "local", "file": "file:///opt/jcode/pricing.json"}
             ]
         }"#;
         let parsed: PricingConfigFile = serde_json::from_str(json).expect("parse");
@@ -213,14 +215,15 @@ mod tests {
         assert_eq!(parsed.sources.len(), 2);
         let first = &parsed.sources[0];
         assert_eq!(first.id.as_deref(), Some("corp-mirror"));
+        assert_eq!(first.file, "/srv/pricing/models_dev.mirror.json");
         assert_eq!(first.priority, Some(10));
-        assert_eq!(first.refresh_secs, Some(3600));
         assert_eq!(first.currency.as_deref(), Some("CNY"));
         assert_eq!(first.models, vec!["deepseek-v4-*".to_string()]);
-        // Optional fields default rather than fail: an entry with just a `url`
+        // Optional fields default rather than fail: an entry with just a `file`
         // is the common single-source case.
         let second = &parsed.sources[1];
         assert_eq!(second.id.as_deref(), Some("local"));
+        assert_eq!(second.file, "file:///opt/jcode/pricing.json");
         assert_eq!(second.scope, Vec::<String>::new());
         assert_eq!(second.format, None);
         assert_eq!(second.priority, None);
@@ -233,11 +236,10 @@ mod tests {
 
     #[test]
     fn a_source_without_an_id_parses_as_none() {
-        // The single-source case: `url` alone. Deriving an id belongs to
+        // The single-source case: `file` alone. Deriving an id belongs to
         // validation in jcode-base; the DTO must simply accept the shape.
         let parsed: PricingConfigFile =
-            serde_json::from_str(r#"{"sources":[{"url":"file:///home/me/prices.json"}]}"#)
-                .expect("parse");
+            serde_json::from_str(r#"{"sources":[{"file":"prices.json"}]}"#).expect("parse");
         assert_eq!(parsed.sources.len(), 1);
         assert_eq!(parsed.sources[0].id, None);
         assert!(!parsed.is_empty());
