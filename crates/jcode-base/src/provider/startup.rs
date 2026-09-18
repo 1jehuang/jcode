@@ -532,6 +532,12 @@ impl MultiProvider {
             return;
         }
 
+        let Some(_request_lease) = crate::auth::provider_pool::try_acquire_account_request_lease(
+            Self::provider_key(provider),
+        ) else {
+            return;
+        };
+
         let Some(probe) = account_usage_probe(provider) else {
             return;
         };

@@ -47,7 +47,7 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// `JCODE_CURSOR_CLI_VERSION` if Cursor moves the floor.
 const CLI_CLIENT_VERSION_DEFAULT: &str = "cli-2026.07.08-0c04a8a";
 
-fn cli_client_version() -> String {
+pub(crate) fn cli_client_version() -> String {
     std::env::var("JCODE_CURSOR_CLI_VERSION")
         .ok()
         .map(|raw| raw.trim().to_string())
@@ -159,7 +159,7 @@ fn agent_host_from_cursor_cli_config() -> Option<String> {
 /// 1. `JCODE_CURSOR_AGENT_HOST` / `CURSOR_AGENT_HOST` (explicit override)
 /// 2. `~/.cursor/cli-config.json` regional endpoint cached by `cursor-agent`
 /// 3. the `global` host, as a last-resort fallback
-fn agent_host() -> String {
+pub(crate) fn agent_host() -> String {
     for var in ["JCODE_CURSOR_AGENT_HOST", "CURSOR_AGENT_HOST"] {
         if let Ok(raw) = std::env::var(var) {
             // Normalize overrides too. These get copied straight out of

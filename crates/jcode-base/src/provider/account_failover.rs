@@ -1,4 +1,5 @@
 use super::ActiveProvider;
+use std::cmp::Ordering;
 
 pub(super) fn multi_account_provider_kind(
     provider: ActiveProvider,
@@ -6,6 +7,7 @@ pub(super) fn multi_account_provider_kind(
     match provider {
         ActiveProvider::Claude => Some(crate::usage::MultiAccountProviderKind::Anthropic),
         ActiveProvider::OpenAI => Some(crate::usage::MultiAccountProviderKind::OpenAI),
+        ActiveProvider::Cursor => Some(crate::usage::MultiAccountProviderKind::Cursor),
         _ => None,
     }
 }
@@ -27,6 +29,14 @@ pub(super) fn active_account_label_for_provider(provider: ActiveProvider) -> Opt
     match provider {
         ActiveProvider::Claude => crate::auth::claude::active_account_label(),
         ActiveProvider::OpenAI => crate::auth::codex::active_account_label(),
+        ActiveProvider::Antigravity => crate::auth::provider_pool::active_account("antigravity")
+            .ok()
+            .flatten()
+            .map(|account| account.label),
+        ActiveProvider::Cursor => crate::auth::provider_pool::active_account("cursor")
+            .ok()
+            .flatten()
+            .map(|account| account.label),
         _ => None,
     }
 }
@@ -35,11 +45,20 @@ pub(super) fn set_account_override_for_provider(provider: ActiveProvider, label:
     match provider {
         ActiveProvider::Claude => crate::auth::claude::set_active_account_override(label),
         ActiveProvider::OpenAI => crate::auth::codex::set_active_account_override(label),
+        ActiveProvider::Antigravity => {
+            crate::auth::provider_pool::set_runtime_active_override("antigravity", label)
+        }
+        ActiveProvider::Cursor => {
+            crate::auth::provider_pool::set_runtime_active_override("cursor", label)
+        }
         _ => {}
     }
 }
 
-pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
+pub(super) fn same_provider_account_candidates(
+    provider: ActiveProvider,
+    model: Option<&str>,
+) -> Vec<String> {
     let current_label = active_account_label_for_provider(provider);
     let mut labels = Vec::new();
 
@@ -90,10 +109,43 @@ pub(super) fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<
                 push_unique(account.label);
             }
         }
+        ActiveProvider::Antigravity => {
+            for label in managed_pool_candidates("antigravity", model) {
+                push_unique(label);
+            }
+        }
+        ActiveProvider::Cursor => {
+            for label in managed_pool_candidates("cursor", model) {
+                push_unique(label);
+            }
+        }
         _ => {}
     }
 
     labels
+}
+
+fn managed_pool_candidates(provider: &str, model: Option<&str>) -> Vec<String> {
+    let score_for = |label: &str| match model.map(str::trim) {
+        Some(model) if !model.is_empty() => {
+            crate::auth::provider_pool::account_quota_score_for_model(provider, label, model)
+        }
+        _ => crate::auth::provider_pool::account_quota_score(provider, label),
+    };
+    let mut accounts = crate::auth::provider_pool::list_accounts(provider)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|account| {
+            !crate::auth::provider_pool::account_on_cooldown(provider, &account.label)
+        })
+        .collect::<Vec<_>>();
+    accounts.sort_by(|a, b| match (score_for(&a.label), score_for(&b.label)) {
+        (Some(a), Some(b)) => b.cmp(&a),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
+    accounts.into_iter().map(|account| account.label).collect()
 }
 
 pub(super) fn account_switch_guidance(provider: ActiveProvider) -> Option<String> {

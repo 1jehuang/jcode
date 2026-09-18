@@ -32,6 +32,7 @@ const LOAD_ENDPOINTS: &[&str] = &[
     "https://autopush-cloudcode-pa.sandbox.googleapis.com",
 ];
 const GOOGLE_OAUTH_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+const STANDALONE_NATIVE_CREDENTIAL_KEY: &str = "antigravity/standalone";
 
 fn antigravity_client_id() -> String {
     std::env::var(CLIENT_ID_ENV)
@@ -124,14 +125,38 @@ pub fn tokens_path() -> Result<std::path::PathBuf> {
 }
 
 pub fn load_tokens() -> Result<AntigravityTokens> {
+    if let Some(account) = crate::auth::provider_pool::active_account("antigravity")? {
+        return Ok(AntigravityTokens {
+            access_token: account.access_token,
+            refresh_token: account.refresh_token,
+            expires_at: account.expires_at,
+            email: account.email,
+            project_id: account.project_id,
+        });
+    }
+
+    if let Ok(serialized) = crate::storage::get_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY)
+        && let Ok(tokens) = serde_json::from_str(&serialized)
+    {
+        return Ok(tokens);
+    }
+
     let path = tokens_path()?;
     if path.exists() {
         crate::storage::harden_secret_file_permissions(&path);
-        return crate::storage::read_json(&path).map_err(|_| {
+        let tokens: AntigravityTokens = crate::storage::read_json(&path).map_err(|_| {
             anyhow::anyhow!(
                 "No Antigravity tokens found. Run `jcode login --provider antigravity`."
             )
-        });
+        })?;
+        if let Ok(serialized) = serde_json::to_string(&tokens)
+            && crate::storage::set_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY, &serialized)
+                .is_ok()
+        {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension("bak"));
+        }
+        return Ok(tokens);
     }
 
     if let Some(tokens) = crate::auth::external::load_antigravity_oauth_tokens() {
@@ -147,7 +172,36 @@ pub fn load_tokens() -> Result<AntigravityTokens> {
     anyhow::bail!("No Antigravity tokens found. Run `jcode login --provider antigravity`.");
 }
 
+fn tokens_from_managed_account(label: &str) -> Result<AntigravityTokens> {
+    let account = crate::auth::provider_pool::account("antigravity", label)?
+        .with_context(|| format!("No Antigravity account with label '{label}'"))?;
+    Ok(AntigravityTokens {
+        access_token: account.access_token,
+        refresh_token: account.refresh_token,
+        expires_at: account.expires_at,
+        email: account.email,
+        project_id: account.project_id,
+    })
+}
+
+/// Load one managed Antigravity account without consulting or changing the
+/// process-global active-account override. Provider-local failover uses this
+/// path so an alternate account cannot redirect another request.
+pub fn load_tokens_for_account(label: &str) -> Result<AntigravityTokens> {
+    tokens_from_managed_account(label)
+}
+
 pub fn save_tokens(tokens: &AntigravityTokens) -> Result<()> {
+    if let Ok(serialized) = serde_json::to_string(tokens)
+        && crate::storage::set_native_credential(STANDALONE_NATIVE_CREDENTIAL_KEY, &serialized)
+            .is_ok()
+    {
+        let path = tokens_path()?;
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("bak"));
+        return Ok(());
+    }
+
     let path = tokens_path()?;
     crate::storage::write_json_secret(&path, tokens)
 }
@@ -160,6 +214,15 @@ pub async fn load_or_refresh_tokens() -> Result<AntigravityTokens> {
     let tokens = load_tokens()?;
     if tokens.is_expired() {
         refresh_tokens(&tokens).await
+    } else {
+        Ok(tokens)
+    }
+}
+
+pub async fn load_or_refresh_tokens_for_account(label: &str) -> Result<AntigravityTokens> {
+    let tokens = load_tokens_for_account(label)?;
+    if tokens.is_expired() {
+        refresh_tokens_for_account(label, &tokens).await
     } else {
         Ok(tokens)
     }
@@ -178,6 +241,23 @@ pub async fn refresh_tokens(tokens: &AntigravityTokens) -> Result<AntigravityTok
                 let source = stored.unwrap_or(observed);
                 refresh_tokens_uncoordinated(&source).await
             }
+        },
+    )
+    .await
+}
+
+pub async fn refresh_tokens_for_account(
+    label: &str,
+    tokens: &AntigravityTokens,
+) -> Result<AntigravityTokens> {
+    let key = format!("antigravity:{label}");
+    let observed = tokens.clone();
+    crate::auth::refresh_coordinator::single_flight(
+        key,
+        || load_tokens_for_account(label).ok(),
+        |stored: &AntigravityTokens| !stored.is_expired(),
+        move |stored: Option<AntigravityTokens>| async move {
+            refresh_tokens_uncoordinated(&stored.unwrap_or(observed)).await
         },
     )
     .await
@@ -209,7 +289,17 @@ async fn refresh_tokens_uncoordinated(tokens: &AntigravityTokens) -> Result<Anti
             refreshed.project_id = fetch_project_id(&refreshed.access_token).await.ok();
         }
 
-        save_tokens(&refreshed)?;
+        if !crate::auth::provider_pool::update_tokens_for_refresh(
+            "antigravity",
+            &tokens.refresh_token,
+            refreshed.access_token.clone(),
+            refreshed.refresh_token.clone(),
+            refreshed.expires_at,
+            refreshed.email.clone(),
+            refreshed.project_id.clone(),
+        )? {
+            save_tokens(&refreshed)?;
+        }
         Ok(refreshed)
     }
     .await;
@@ -636,5 +726,31 @@ mod tests {
             extract_project_id(Some(serde_json::json!({ "id": "   " }))),
             None
         );
+    }
+
+    #[test]
+    fn standalone_tokens_prefer_native_storage_without_plaintext_copy() {
+        let _lock = lock_test_env();
+        let temp = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+
+        let tokens = AntigravityTokens {
+            access_token: "antigravity-access".to_string(),
+            refresh_token: "antigravity-refresh".to_string(),
+            expires_at: i64::MAX,
+            email: Some("test@example.com".to_string()),
+            project_id: Some("test-project".to_string()),
+        };
+        save_tokens(&tokens).unwrap();
+
+        let path = tokens_path().unwrap();
+        assert!(!path.exists());
+        assert_eq!(load_tokens().unwrap().access_token, "antigravity-access");
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
     }
 }

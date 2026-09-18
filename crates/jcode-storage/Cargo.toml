@@ -8,6 +8,7 @@ publish = false
 anyhow = "1"
 dirs = "5"
 jcode-core = { path = "../jcode-core" }
+keyring = "4.2.0"
 libc = "0.2"
 rand = "0.9.3"
 serde = { version = "1", features = ["derive"] }

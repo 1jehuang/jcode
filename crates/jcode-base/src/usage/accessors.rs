@@ -236,7 +236,63 @@ pub fn account_usage_probe_sync(provider: MultiAccountProviderKind) -> Option<Ac
     match provider {
         MultiAccountProviderKind::Anthropic => anthropic_account_usage_probe_sync(),
         MultiAccountProviderKind::OpenAI => openai_account_usage_probe_sync(),
+        MultiAccountProviderKind::Cursor => cursor_account_usage_probe_sync(),
     }
+}
+
+fn cursor_account_usage_probe_sync() -> Option<AccountUsageProbe> {
+    let accounts = auth::provider_pool::list_accounts("cursor").ok()?;
+    if accounts.is_empty() {
+        return None;
+    }
+    let current_label = auth::provider_pool::active_account("cursor")
+        .ok()
+        .flatten()
+        .map(|account| account.label)
+        .or_else(|| accounts.first().map(|account| account.label.clone()))?;
+    let snapshots = accounts
+        .into_iter()
+        .map(|account| {
+            let windows = auth::provider_pool::account_quota_snapshots("cursor", &account.label);
+            let monthly = windows.iter().find(|(model, _)| model == "monthly");
+            let auto = windows.iter().find(|(model, _)| model == "auto");
+            let api = windows.iter().find(|(model, _)| model == "api");
+            let ratio = |entry: Option<&(String, auth::provider_pool::AccountQuotaSnapshot)>| {
+                entry
+                    .and_then(|(_, snapshot)| snapshot.remaining_fraction_milli)
+                    .map(|remaining| (1000_u16.saturating_sub(remaining) as f32) / 1000.0)
+            };
+            let monthly_ratio = ratio(monthly);
+            let auto_ratio = ratio(auto);
+            let api_ratio = ratio(api);
+            let exhausted = [monthly_ratio, auto_ratio, api_ratio]
+                .into_iter()
+                .flatten()
+                .any(|value| value >= 0.99);
+            let reset = monthly
+                .and_then(|(_, snapshot)| snapshot.reset_time.clone())
+                .or_else(|| auto.and_then(|(_, snapshot)| snapshot.reset_time.clone()))
+                .or_else(|| api.and_then(|(_, snapshot)| snapshot.reset_time.clone()));
+            let error = (monthly_ratio.is_none() && auto_ratio.is_none() && api_ratio.is_none())
+                .then(|| "Cursor quota unknown (no recent usable snapshot)".to_string());
+            AccountUsageSnapshot {
+                label: account.label,
+                email: account.email,
+                exhausted,
+                primary_label: Some("Monthly".to_string()),
+                five_hour_ratio: monthly_ratio,
+                secondary_label: Some("Auto/API".to_string()),
+                seven_day_ratio: auto_ratio.or(api_ratio),
+                resets_at: reset,
+                error,
+            }
+        })
+        .collect();
+    Some(AccountUsageProbe {
+        provider: MultiAccountProviderKind::Cursor,
+        current_label,
+        accounts: snapshots,
+    })
 }
 
 fn anthropic_account_usage_probe_sync() -> Option<AccountUsageProbe> {

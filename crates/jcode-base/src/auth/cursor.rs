@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CURSOR_API_BASE: &str = "https://api2.cursor.sh";
+const CURSOR_API_KEY_NATIVE_KEY: &str = "cursor/api-key";
 // Cursor's server rejects stale client versions for chat ("Update Required").
 // This must track a real, currently-served Cursor IDE release (e.g. 3.8.x),
 // not the Composer model number. Override at runtime with
@@ -269,6 +270,13 @@ pub fn load_api_key() -> Result<String> {
         }
     }
 
+    if let Ok(key) = crate::storage::get_native_credential(CURSOR_API_KEY_NATIVE_KEY) {
+        let trimmed = jcode_provider_env::sanitize_secret_value(&key);
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
     let file_path = config_file_path()?;
     if file_path.exists() {
         crate::storage::harden_secret_file_permissions(&file_path);
@@ -291,12 +299,25 @@ pub fn load_api_key() -> Result<String> {
     )
 }
 
-/// Save a Cursor API key to `~/.config/jcode/cursor.env`.
+/// Save a Cursor API key to the native secret store.
+///
+/// Existing `cursor.env` files remain a compatibility fallback when the native
+/// store is unavailable. Successful native saves remove the legacy value so a
+/// second plaintext copy is not retained.
 pub fn save_api_key(key: &str) -> Result<()> {
-    let file_path = config_file_path()?;
-    crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(key))?;
+    let key = jcode_provider_env::sanitize_secret_value(key);
+    if key.is_empty() {
+        anyhow::bail!("Cursor API key cannot be empty");
+    }
 
-    crate::env::set_var("CURSOR_API_KEY", key);
+    let file_path = config_file_path()?;
+    if crate::storage::set_native_credential(CURSOR_API_KEY_NATIVE_KEY, &key).is_ok() {
+        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
+    } else {
+        crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", Some(&key))?;
+    }
+
+    crate::env::set_var("CURSOR_API_KEY", &key);
     Ok(())
 }
 
@@ -304,6 +325,7 @@ pub fn save_api_key(key: &str) -> Result<()> {
 /// current process environment.
 pub fn clear_api_key() -> Result<()> {
     let file_path = config_file_path()?;
+    let _ = crate::storage::delete_native_credential(CURSOR_API_KEY_NATIVE_KEY);
     crate::storage::upsert_env_file_value(&file_path, "CURSOR_API_KEY", None)?;
 
     crate::env::remove_var("CURSOR_API_KEY");
@@ -408,8 +430,45 @@ pub fn load_access_token_from_env_or_file() -> Result<CursorDirectTokens> {
     )
 }
 
+fn load_managed_tokens() -> Result<CursorDirectTokens> {
+    let account = crate::auth::provider_pool::active_account("cursor")?
+        .context("no managed Cursor account is active")?;
+    Ok(CursorDirectTokens {
+        access_token: account.access_token,
+        refresh_token: Some(account.refresh_token),
+        source: "cursor_managed",
+    })
+}
+
 /// Resolve the best available direct-auth credentials for Cursor's native API.
 pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens> {
+    if let Ok(tokens) = load_managed_tokens() {
+        if !token_is_expiring_soon(&tokens.access_token) {
+            return Ok(tokens);
+        }
+        if let Some(refresh_token) = tokens.refresh_token.as_deref()
+            && let Ok(refreshed) = refresh_direct_access_token(client, refresh_token).await
+        {
+            let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+                "cursor",
+                refresh_token,
+                refreshed.access_token.clone(),
+                refreshed
+                    .refresh_token
+                    .clone()
+                    .unwrap_or_else(|| refresh_token.to_string()),
+                token_expiry_epoch_secs(&refreshed.access_token)
+                    .and_then(|value| i64::try_from(value).ok())
+                    .unwrap_or_default(),
+                None,
+                None,
+            );
+            return Ok(CursorDirectTokens {
+                source: "cursor_managed",
+                ..refreshed
+            });
+        }
+    }
     if let Ok(tokens) = load_access_token_from_env_or_file() {
         if !token_is_expiring_soon(&tokens.access_token) {
             return Ok(tokens);
@@ -461,6 +520,99 @@ pub async fn resolve_direct_tokens(client: &Client) -> Result<CursorDirectTokens
     })
 }
 
+/// Resolve one managed account without consulting or changing the active
+/// account override. Usage polling calls this for every account in the pool so
+/// a background refresh cannot accidentally move request traffic to a
+/// different login.
+pub async fn resolve_direct_tokens_for_account(
+    client: &Client,
+    account: &crate::auth::provider_pool::ManagedProviderAccount,
+) -> Result<CursorDirectTokens> {
+    let tokens = CursorDirectTokens {
+        access_token: account.access_token.clone(),
+        refresh_token: Some(account.refresh_token.clone()),
+        source: "cursor_managed",
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let account_expiring = account.expires_at > 0
+        && account.expires_at <= i64::try_from(now.saturating_add(60)).unwrap_or(i64::MAX);
+    if !account_expiring && !token_is_expiring_soon(&tokens.access_token) {
+        return Ok(tokens);
+    }
+    let refresh_token = account.refresh_token.trim();
+    if refresh_token.is_empty() {
+        return Ok(tokens);
+    }
+    let mut refreshed = refresh_direct_access_token(client, refresh_token).await?;
+    refreshed.source = "cursor_managed";
+    let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+        "cursor",
+        refresh_token,
+        refreshed.access_token.clone(),
+        refreshed
+            .refresh_token
+            .clone()
+            .unwrap_or_else(|| refresh_token.to_string()),
+        token_expiry_epoch_secs(&refreshed.access_token)
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(account.expires_at),
+        None,
+        None,
+    );
+    Ok(refreshed)
+}
+
+/// Return stable identity claims from a JWT without returning or logging the
+/// token itself. Opaque tokens intentionally return `None`.
+pub fn token_identities(access_token: &str) -> Vec<String> {
+    let Some(payload) = access_token.split('.').nth(1) else {
+        return Vec::new();
+    };
+    let Ok(decoded) = URL_SAFE_NO_PAD.decode(payload) else {
+        return Vec::new();
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+        return Vec::new();
+    };
+    [
+        "sub",
+        "user_id",
+        "userId",
+        "uid",
+        "email",
+        "preferred_username",
+    ]
+    .into_iter()
+    .filter_map(|key| claims.get(key).and_then(|value| value.as_str()))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+/// A web-origin usage endpoint may only receive a token when its identity is
+/// provably the managed account being inspected. This deliberately requires an
+/// exact match against the imported account id or email.
+pub fn token_is_bound_to_account(
+    access_token: &str,
+    account: &crate::auth::provider_pool::ManagedProviderAccount,
+) -> bool {
+    let expected = std::iter::once(account.id.trim())
+        .chain(account.email.as_deref().into_iter().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    !expected.is_empty()
+        && token_identities(access_token).into_iter().any(|identity| {
+            expected
+                .iter()
+                .any(|value| value == &identity.to_ascii_lowercase())
+        })
+}
+
 /// Force-refresh a resolved Cursor token set, preserving the original source label.
 pub async fn refresh_resolved_tokens(
     client: &Client,
@@ -474,6 +626,21 @@ pub async fn refresh_resolved_tokens(
     refreshed.source = tokens.source;
     if tokens.source == "cursor_auth_file" {
         let _ = save_auth_file_tokens(&refreshed);
+    } else if tokens.source == "cursor_managed" {
+        let _ = crate::auth::provider_pool::update_tokens_for_refresh(
+            "cursor",
+            refresh_token,
+            refreshed.access_token.clone(),
+            refreshed
+                .refresh_token
+                .clone()
+                .unwrap_or_else(|| refresh_token.to_string()),
+            token_expiry_epoch_secs(&refreshed.access_token)
+                .and_then(|value| i64::try_from(value).ok())
+                .unwrap_or_default(),
+            None,
+            None,
+        );
     }
     Ok(refreshed)
 }

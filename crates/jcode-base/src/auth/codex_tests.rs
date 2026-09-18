@@ -201,7 +201,7 @@ fn multi_account_active_switch_works() {
     let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
     set_active_account_override(None);
 
-    upsert_account(OpenAiAccount {
+    let personal_label = upsert_account(OpenAiAccount {
         label: "personal".to_string(),
         access_token: "at_personal".to_string(),
         refresh_token: "rt_personal".to_string(),
@@ -211,7 +211,7 @@ fn multi_account_active_switch_works() {
         email: Some("personal@example.com".to_string()),
     })
     .unwrap();
-    upsert_account(OpenAiAccount {
+    let work_label = upsert_account(OpenAiAccount {
         label: "work".to_string(),
         access_token: "at_work".to_string(),
         refresh_token: "rt_work".to_string(),
@@ -222,9 +222,12 @@ fn multi_account_active_switch_works() {
     })
     .unwrap();
 
-    assert_eq!(active_account_label().as_deref(), Some("openai-1"));
-    set_active_account("openai-2").unwrap();
-    assert_eq!(active_account_label().as_deref(), Some("openai-2"));
+    assert_eq!(
+        active_account_label().as_deref(),
+        Some(personal_label.as_str())
+    );
+    set_active_account(&work_label).unwrap();
+    assert_eq!(active_account_label().as_deref(), Some(work_label.as_str()));
 
     let creds = load_credentials().unwrap();
     assert_eq!(creds.access_token, "at_work");

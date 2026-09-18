@@ -1,3 +1,4 @@
+use super::cursor::fetch_cursor_usage_for_account;
 use super::*;
 
 pub(super) fn usage_percent_from_used_limit(used: f64, limit: f64) -> f32 {
@@ -387,6 +388,10 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
     }
 
     let client = crate::provider::shared_http_client();
+    // Refresh alternate managed accounts as well as the active account. Their
+    // secret-free snapshots let the request path prefer accounts with recent
+    // remaining quota without changing the account used for this report.
+    crate::provider::antigravity::refresh_managed_account_quotas(&client).await;
     let snapshot = match crate::provider::antigravity::fetch_catalog_snapshot(&client).await {
         Ok(snapshot) if !snapshot.models.is_empty() => {
             crate::provider::antigravity::persist_catalog(&snapshot);
@@ -407,6 +412,24 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
             });
         }
     };
+
+    if let Some(account) = crate::auth::provider_pool::active_account("antigravity")
+        .ok()
+        .flatten()
+    {
+        let quotas = snapshot
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.id.clone(),
+                    model.remaining_fraction_milli,
+                    model.reset_time.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::auth::provider_pool::record_account_quotas("antigravity", &account.label, &quotas);
+    }
 
     let mut limits = Vec::new();
     let mut extra_info = Vec::new();
@@ -502,52 +525,85 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
 /// free keys the `/v0/me` error body still tells us the key is live and which
 /// plan tier it is on, so we surface that.
 pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
-    let api_key = auth::cursor::load_api_key().ok()?;
-
-    let client = crate::provider::shared_http_client();
-    let response = client
-        .get("https://api.cursor.com/v0/me")
-        .basic_auth(&api_key, Option::<&str>::None)
-        .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await;
-
     let mut extra_info = Vec::new();
-    match response {
-        Ok(response) => {
-            let status = response.status();
-            let body: serde_json::Value = response.json().await.unwrap_or_default();
-            if status.is_success() {
-                extra_info.push(("Key status".to_string(), "valid".to_string()));
-                if let Some(email) = body.get("email").and_then(|v| v.as_str()) {
-                    extra_info.push(("Account".to_string(), mask_email(email)));
-                }
-            } else if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
-                if error.contains("free users") {
-                    // Key is live; the admin API is just gated to paid plans.
+    let api_key = auth::cursor::load_api_key().ok();
+    let managed_accounts = auth::provider_pool::list_accounts("cursor").unwrap_or_default();
+    let semantics = CursorUsageSemantics::from_api_key_available(api_key.is_some());
+
+    extra_info.push((
+        "Usage semantics".to_string(),
+        semantics.as_str().to_string(),
+    ));
+
+    if let Some(api_key) = api_key {
+        let client = crate::provider::shared_http_client();
+        let response = client
+            .get("https://api.cursor.com/v0/me")
+            .basic_auth(&api_key, Option::<&str>::None)
+            .header("Accept", "application/json")
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+
+        match response {
+            Ok(response) => {
+                let status = response.status();
+                let body: serde_json::Value = response.json().await.unwrap_or_default();
+                if status.is_success() {
                     extra_info.push(("Key status".to_string(), "valid".to_string()));
-                    extra_info.push(("Plan".to_string(), "free".to_string()));
                     extra_info.push((
                         "Usage API".to_string(),
-                        "requires Cursor Pro (admin API)".to_string(),
+                        "official Cursor team/admin API".to_string(),
                     ));
+                    if let Some(email) = body.get("email").and_then(|v| v.as_str()) {
+                        extra_info.push(("Account".to_string(), mask_email(email)));
+                    }
+                } else if let Some(error) = body.get("error").and_then(|v| v.as_str()) {
+                    if error.contains("free users") {
+                        // Key is live; the admin API is just gated to paid plans.
+                        extra_info.push(("Key status".to_string(), "valid".to_string()));
+                        extra_info.push(("Plan".to_string(), "free".to_string()));
+                        extra_info.push((
+                            "Usage API".to_string(),
+                            "official Cursor team/admin API requires Cursor Pro".to_string(),
+                        ));
+                    } else {
+                        extra_info.push((
+                            "Key status".to_string(),
+                            format!("{} ({})", error, status.as_u16()),
+                        ));
+                    }
                 } else {
                     extra_info.push((
                         "Key status".to_string(),
-                        format!("{} ({})", error, status.as_u16()),
+                        format!("check failed ({})", status.as_u16()),
                     ));
                 }
-            } else {
-                extra_info.push((
-                    "Key status".to_string(),
-                    format!("check failed ({})", status.as_u16()),
-                ));
+            }
+            Err(e) => {
+                extra_info.push(("Key status".to_string(), format!("check failed ({})", e)));
             }
         }
-        Err(e) => {
-            extra_info.push(("Key status".to_string(), format!("check failed ({})", e)));
+    } else {
+        let has_native_auth = auth::cursor::has_cursor_native_auth();
+        if has_native_auth {
+            extra_info.push(("Auth".to_string(), "native Cursor account".to_string()));
         }
+        if !managed_accounts.is_empty() {
+            let active = auth::provider_pool::active_account("cursor")
+                .ok()
+                .flatten()
+                .map(|account| account.label)
+                .unwrap_or_else(|| managed_accounts[0].label.clone());
+            extra_info.push((
+                "Account pool".to_string(),
+                format!("{} accounts (active: {})", managed_accounts.len(), active),
+            ));
+        }
+        extra_info.push((
+            "Usage API".to_string(),
+            "personal Cursor quota is not exposed by a supported public API".to_string(),
+        ));
     }
 
     Some(ProviderUsage {
@@ -558,6 +614,12 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         error: None,
         last_used_unix_secs: None,
     })
+}
+
+pub(super) async fn fetch_cursor_usage_report_for_account(
+    account: auth::provider_pool::ManagedProviderAccount,
+) -> ProviderUsage {
+    fetch_cursor_usage_for_account(account).await
 }
 
 pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {

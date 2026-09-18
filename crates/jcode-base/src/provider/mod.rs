@@ -34,8 +34,7 @@ use crate::auth;
 use crate::message::{Message, ToolDefinition};
 use account_failover::{
     account_usage_probe, active_account_label_for_provider, maybe_annotate_limit_summary,
-    same_provider_account_candidates, same_provider_account_failover_enabled,
-    set_account_override_for_provider,
+    same_provider_account_failover_enabled, set_account_override_for_provider,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -604,7 +603,17 @@ impl MultiProvider {
 
     #[cfg(test)]
     fn same_provider_account_candidates(provider: ActiveProvider) -> Vec<String> {
-        account_failover::same_provider_account_candidates(provider)
+        account_failover::same_provider_account_candidates(provider, None)
+    }
+
+    /// Return the best currently available same-provider account according to
+    /// the provider's cached usage probe. Runtime crates use this only when a
+    /// request is about to hit a known exhausted account, so normal requests
+    /// preserve the user's selected account and session affinity.
+    pub fn preferred_openai_account_label() -> Option<String> {
+        account_failover::same_provider_account_candidates(ActiveProvider::OpenAI, None)
+            .into_iter()
+            .next()
     }
 
     async fn complete_with_failover(
@@ -632,6 +641,12 @@ impl MultiProvider {
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
 
         let active = self.active_provider();
+        // Capture the account scope before any account-dependent precheck or
+        // provider call. The legacy override remains process-local for provider
+        // compatibility, but it cannot change underneath this request.
+        let active_account_lease =
+            crate::auth::provider_pool::acquire_account_request_lease(Self::provider_key(active))
+                .await;
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
         let mut failover_reason: Option<String> = None;
@@ -699,22 +714,37 @@ impl MultiProvider {
                 continue;
             }
 
+            let account_lease = if candidate == active {
+                active_account_lease.clone()
+            } else {
+                crate::auth::provider_pool::acquire_account_request_lease(key).await
+            };
             let attempt = match mode {
                 CompletionMode::Unified { system } => {
-                    self.complete_on_provider(candidate, messages, tools, system, resume_session_id)
-                        .await
+                    self.complete_on_provider_with_guard(
+                        candidate,
+                        messages,
+                        tools,
+                        system,
+                        resume_session_id,
+                        account_lease,
+                        None,
+                    )
+                    .await
                 }
                 CompletionMode::Split {
                     system_static,
                     system_dynamic,
                 } => {
-                    self.complete_split_on_provider(
+                    self.complete_split_on_provider_with_guard(
                         candidate,
                         messages,
                         tools,
                         system_static,
                         system_dynamic,
                         resume_session_id,
+                        account_lease,
+                        None,
                     )
                     .await
                 }
@@ -764,7 +794,13 @@ impl MultiProvider {
                         if candidate == active
                             && let Some(stream) = self
                                 .try_same_provider_account_failover(
-                                    candidate, messages, tools, mode, &summary, &mut notes,
+                                    candidate,
+                                    messages,
+                                    tools,
+                                    mode,
+                                    &summary,
+                                    &mut notes,
+                                    active_account_lease.clone(),
                                 )
                                 .await?
                         {

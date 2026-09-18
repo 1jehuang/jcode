@@ -36,6 +36,10 @@ impl App {
         let provider_scope = provider_filter.map(|value| value.to_string());
         let claude_accounts = crate::auth::claude::list_accounts().unwrap_or_default();
         let openai_accounts = crate::auth::codex::list_accounts().unwrap_or_default();
+        let antigravity_accounts =
+            crate::auth::provider_pool::list_accounts("antigravity").unwrap_or_default();
+        let cursor_accounts =
+            crate::auth::provider_pool::list_accounts("cursor").unwrap_or_default();
         let add_replace_scope_supports_multi_account = match provider_scope.as_deref() {
             None => true,
             Some("claude" | "anthropic" | "openai") => true,
@@ -52,9 +56,11 @@ impl App {
                 "choose provider, add a new account, or replace an existing saved one".to_string()
             } else {
                 format!(
-                    "choose provider; {} Claude and {} OpenAI account(s) available",
+                    "choose provider; {} Claude, {} OpenAI, {} Antigravity, and {} Cursor account(s) available",
                     claude_accounts.len(),
-                    openai_accounts.len()
+                    openai_accounts.len(),
+                    antigravity_accounts.len(),
+                    cursor_accounts.len()
                 )
             };
             items.push(AccountPickerItem::action(
@@ -88,8 +94,23 @@ impl App {
 
         for provider in providers {
             let assessment = status.assessment_for_provider(provider);
-            let auth_state = assessment.state;
-            let method_detail = assessment.method_detail.as_str();
+            let managed_pool_account_count = match provider.id {
+                "antigravity" => antigravity_accounts.len(),
+                "cursor" => cursor_accounts.len(),
+                _ => 0,
+            };
+            let auth_state = if managed_pool_account_count > 0
+                && matches!(assessment.state, crate::auth::AuthState::NotConfigured)
+            {
+                crate::auth::AuthState::Available
+            } else {
+                assessment.state
+            };
+            let method_detail = if managed_pool_account_count > 0 {
+                "managed account pool"
+            } else {
+                assessment.method_detail.as_str()
+            };
             let validation_detail = validation
                 .get(provider.id)
                 .map(crate::auth::validation::format_record_label)
@@ -103,6 +124,8 @@ impl App {
             match provider.id {
                 "claude" => summary.named_account_count += claude_accounts.len(),
                 "openai" => summary.named_account_count += openai_accounts.len(),
+                "antigravity" => summary.named_account_count += antigravity_accounts.len(),
+                "cursor" => summary.named_account_count += cursor_accounts.len(),
                 _ if !matches!(auth_state, crate::auth::AuthState::NotConfigured) => {
                     summary.named_account_count += 1;
                 }
@@ -207,6 +230,9 @@ impl App {
                             }
                         )),
                     ));
+                }
+                "antigravity" | "cursor" => {
+                    self.append_managed_pool_account_picker_items(&mut items, provider)
                 }
                 "openai-compatible" => {
                     let compat = crate::provider_catalog::resolve_openai_compatible_profile(

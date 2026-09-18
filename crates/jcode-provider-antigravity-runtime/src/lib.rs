@@ -39,6 +39,8 @@ pub struct AntigravityProvider {
     /// Backend-advertised default agent model id (from `fetchAvailableModels`).
     /// Used to resolve the `"default"` alias to a real model for inference.
     backend_default_model: Arc<RwLock<Option<String>>>,
+    /// Account label bound to this request-local provider clone, if any.
+    request_account: Option<String>,
 }
 
 impl Clone for AntigravityProvider {
@@ -48,11 +50,111 @@ impl Clone for AntigravityProvider {
             model: self.model.clone(),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            request_account: self.request_account.clone(),
         }
     }
 }
 
 impl AntigravityProvider {
+    /// Retry quota/auth failures on another managed account before the stream
+    /// reports an error. MultiProvider cannot observe errors emitted after an
+    /// EventStream has been returned, so this boundary must own provider-level
+    /// account rotation.
+    #[expect(clippy::too_many_arguments)]
+    async fn generate_content_with_pool_failover(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let original = jcode_base::auth::provider_pool::active_account("antigravity")
+            .ok()
+            .flatten()
+            .map(|account| account.label);
+        let first = self
+            .generate_content(
+                model,
+                messages,
+                tools,
+                system,
+                resume_session_id,
+                force_function_call,
+                signature_policy,
+            )
+            .await;
+        let Err(first_error) = first else {
+            return first;
+        };
+        if !jcode_provider_core::classify_failover_error_message(&first_error.to_string())
+            .should_failover()
+        {
+            return Err(first_error);
+        }
+        let Some(original) = original else {
+            return Err(first_error);
+        };
+        let cooldown = jcode_base::auth::provider_pool::cooldown_for_error(
+            &first_error,
+            std::time::Duration::from_secs(300),
+        );
+        let alternatives = jcode_base::auth::provider_pool::list_accounts("antigravity")
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|account| account.label != original)
+            .filter(|account| {
+                !jcode_base::auth::provider_pool::account_on_cooldown("antigravity", &account.label)
+            })
+            .collect::<Vec<_>>();
+        for account in alternatives {
+            jcode_base::auth::provider_pool::mark_account_cooldown(
+                "antigravity",
+                &original,
+                cooldown,
+            );
+            match self
+                .generate_content_for_account(
+                    model,
+                    messages,
+                    tools,
+                    system,
+                    resume_session_id,
+                    force_function_call,
+                    signature_policy,
+                    Some(&account.label),
+                )
+                .await
+            {
+                Ok(response) => {
+                    jcode_base::auth::provider_pool::clear_account_cooldown(
+                        "antigravity",
+                        &account.label,
+                    );
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if !jcode_provider_core::classify_failover_error_message(&error.to_string())
+                        .should_failover()
+                    {
+                        return Err(error);
+                    }
+                    jcode_base::auth::provider_pool::mark_account_cooldown(
+                        "antigravity",
+                        &account.label,
+                        jcode_base::auth::provider_pool::cooldown_for_error(
+                            &error,
+                            std::time::Duration::from_secs(300),
+                        ),
+                    );
+                }
+            }
+        }
+        Err(first_error)
+    }
+
     fn load_persisted_catalog() -> Option<PersistedCatalog> {
         jcode_base::provider::antigravity::load_persisted_catalog()
     }
@@ -89,6 +191,7 @@ impl AntigravityProvider {
             model: Arc::new(RwLock::new(model)),
             fetched_catalog: Arc::new(RwLock::new(Vec::new())),
             backend_default_model: Arc::new(RwLock::new(None)),
+            request_account: None,
         };
         provider.seed_cached_catalog();
         provider
@@ -299,7 +402,38 @@ impl AntigravityProvider {
         force_function_call: bool,
         signature_policy: jcode_provider_gemini::SignaturePolicy,
     ) -> Result<CodeAssistGenerateResponse> {
-        let mut tokens = antigravity_auth::load_or_refresh_tokens().await?;
+        self.generate_content_for_account(
+            model,
+            messages,
+            tools,
+            system,
+            resume_session_id,
+            force_function_call,
+            signature_policy,
+            self.request_account.as_deref(),
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the Code Assist call threads explicit per-request settings and an optional account context"
+    )]
+    async fn generate_content_for_account(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_function_call: bool,
+        signature_policy: jcode_provider_gemini::SignaturePolicy,
+        account_label: Option<&str>,
+    ) -> Result<CodeAssistGenerateResponse> {
+        let mut tokens = match account_label {
+            Some(label) => antigravity_auth::load_or_refresh_tokens_for_account(label).await?,
+            None => antigravity_auth::load_or_refresh_tokens().await?,
+        };
         let project = match tokens
             .project_id
             .as_deref()
@@ -309,7 +443,19 @@ impl AntigravityProvider {
             None => {
                 let project_id = antigravity_auth::fetch_project_id(&tokens.access_token).await?;
                 tokens.project_id = Some(project_id.clone());
-                let _ = antigravity_auth::save_tokens(&tokens);
+                if account_label.is_some() {
+                    let _ = jcode_base::auth::provider_pool::update_tokens_for_refresh(
+                        "antigravity",
+                        &tokens.refresh_token,
+                        tokens.access_token.clone(),
+                        tokens.refresh_token.clone(),
+                        tokens.expires_at,
+                        tokens.email.clone(),
+                        Some(project_id.clone()),
+                    );
+                } else {
+                    let _ = antigravity_auth::save_tokens(&tokens);
+                }
                 project_id
             }
         };
@@ -420,12 +566,16 @@ impl AntigravityProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
             let body = jcode_base::util::http_error_body(response, "HTTP error").await;
-            anyhow::bail!(
-                "Antigravity generateContent failed (HTTP {}): {}",
-                status,
-                body.trim()
-            );
+            return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                format!(
+                    "Antigravity generateContent failed (HTTP {}): {}",
+                    status,
+                    body.trim()
+                ),
+                retry_after,
+            ));
         }
 
         response
@@ -490,7 +640,7 @@ impl Provider for AntigravityProvider {
             // and the model re-signs its new calls.
             let mut signature_policy = jcode_provider_gemini::SignaturePolicy::ReplayCarriedForward;
             let response = match provider
-                .generate_content(
+                .generate_content_with_pool_failover(
                     &model,
                     &messages,
                     &tools,
@@ -766,6 +916,25 @@ impl Provider for AntigravityProvider {
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
 
+    async fn complete_for_account(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        account_label: &str,
+    ) -> Result<EventStream> {
+        let mut provider = self.clone();
+        provider.request_account = Some(account_label.to_string());
+        provider
+            .complete(messages, tools, system, resume_session_id)
+            .await
+    }
+
+    fn supports_request_scoped_accounts(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "antigravity"
     }
@@ -906,6 +1075,7 @@ impl Provider for AntigravityProvider {
             model: Arc::new(RwLock::new(self.model())),
             fetched_catalog: self.fetched_catalog.clone(),
             backend_default_model: self.backend_default_model.clone(),
+            request_account: self.request_account.clone(),
         })
     }
 }

@@ -23,6 +23,10 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "sonnet-4.6-thinking",
     "opus-4.6",
     "gemini-3.1-pro",
+    // OpenCodeX exposes these Cursor-hosted models through AgentService even
+    // when the public models endpoint is unavailable.
+    "grok-4.6",
+    "kimi-k3",
 ];
 
 pub fn is_known_model(model: &str) -> bool {

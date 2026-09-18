@@ -10,6 +10,41 @@ pub struct ProviderUsage {
     pub last_used_unix_secs: Option<u64>,
 }
 
+/// The usage surface that Cursor credentials can safely expose to jcode.
+///
+/// Cursor's documented usage API is an organization/team administration
+/// surface. Personal IDE/API credentials do not have a supported quota
+/// endpoint, so callers must not interpret an empty `limits` list as zero
+/// usage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorUsageSemantics {
+    /// An official Cursor team/admin API can be used for this credential.
+    OfficialTeamApi,
+    /// Personal quota is not exposed by a supported public Cursor API.
+    PersonalQuotaUnsupported,
+}
+
+impl CursorUsageSemantics {
+    pub const fn from_api_key_available(api_key_available: bool) -> Self {
+        if api_key_available {
+            Self::OfficialTeamApi
+        } else {
+            Self::PersonalQuotaUnsupported
+        }
+    }
+
+    pub const fn is_quota_supported(self) -> bool {
+        matches!(self, Self::OfficialTeamApi)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OfficialTeamApi => "official_team_api",
+            Self::PersonalQuotaUnsupported => "personal_quota_unsupported",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UsageLimit {
     pub name: String,
