@@ -177,10 +177,10 @@ pub(super) fn parse_api_response(body: &str) -> anyhow::Result<PricingCache> {
 ///
 /// The extension fields are parsed through the *config* vocabulary
 /// (`tariffs`, `schedule`, `context_tiers`, `default_tariff`, `effective_*`,
-/// `on_rule_expiry`): a custom `[[pricing.sources]]` sheet is allowed to state
-/// the same things a hand-written rule can (spec 4.3), and sharing
+/// `on_rule_expiry`): a models.dev entry is allowed to state the same things a
+/// hand-written rule can (spec 4.3), and sharing
 /// `config::pricing::convert_rule` is what keeps the two from drifting. A
-/// malformed extension is an error for the whole document, so a bad sheet is
+/// malformed extension is an error for the whole document, so a bad catalog is
 /// skipped with a warning instead of being half-applied.
 fn parse_model_entry(
     model: &serde_json::Value,

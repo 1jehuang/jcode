@@ -1805,15 +1805,15 @@ fn documented_pricing_example_prices_as_documented() {
     );
 }
 
-/// The `[[pricing.sources]]` example in `docs/MODEL_PRICING.md` is meant to be
-/// copied, so keep it executable the same way the card example is: the config
-/// points at the sheet, and the sheet is the JSON block beside it.
+/// The vendor-file example in `docs/MODEL_PRICING.md` is meant to be copied,
+/// so keep it executable the same way the card example is: the config points at
+/// the file under the vendor key, and the file is the JSON block beside it.
 ///
-/// This is the quick-start block, so it also pins the one-line id-less bare-name
-/// form: the document must keep showing `file = "prices.json"` with no `id`, and
-/// the sheet lives where a bare name resolves (under `~/.jcode/cache/`).
+/// This is the quick-start block, so it also pins the bare-name form: the
+/// document must keep showing `file = "prices.json"`, and the file lives where a
+/// bare name resolves (under `~/.jcode/cache/`).
 #[test]
-fn documented_sources_example_prices_as_documented() {
+fn documented_vendor_file_example_prices_as_documented() {
     let doc = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/MODEL_PRICING.md"
@@ -1823,21 +1823,29 @@ fn documented_sources_example_prices_as_documented() {
         .split("```toml")
         .skip(1)
         .filter_map(|rest| rest.split("```").next())
-        .find(|block| block.contains("[[pricing.sources]]"))
-        .expect("the documented [[pricing.sources]] block");
-    let sheet = doc
+        .find(|block| block.contains("file = \"prices.json\""))
+        .expect("the documented vendor-file TOML block");
+    let vendor_file = doc
         .split("```json")
         .skip(1)
         .filter_map(|rest| rest.split("```").next())
         .find(|block| block.contains("deepseek-v4-pro"))
-        .expect("the documented sheet block");
+        .expect("the documented vendor-file JSON block");
     assert!(
-        !example.contains("id ="),
-        "the quick-start source must stay the one-line id-less form:\n{example}"
+        example.contains("[pricing.providers.deepseek]"),
+        "the quick-start file must hang under a vendor key:\n{example}"
     );
     assert!(
         example.contains("file = \"prices.json\""),
-        "the quick-start source must name a bare file:\n{example}"
+        "the quick-start file must name a bare file:\n{example}"
+    );
+    assert!(
+        vendor_file.contains("\"models\""),
+        "the vendor file must have a top-level `models` map:\n{vendor_file}"
+    );
+    assert!(
+        !vendor_file.contains("\"deepseek\": {"),
+        "the vendor file must not repeat the vendor as an outer key:\n{vendor_file}"
     );
 
     let _guard = crate::storage::lock_test_env();
@@ -1845,11 +1853,10 @@ fn documented_sources_example_prices_as_documented() {
     let dir = tempfile::TempDir::new().expect("tempdir");
     crate::env::set_var("JCODE_HOME", dir.path());
     // A bare name resolves under `~/.jcode/cache/`, so that is where the
-    // documented sheet is written.
+    // documented file is written.
     let cache_dir = dir.path().join("cache");
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
-    let sheet_path = cache_dir.join("prices.json");
-    std::fs::write(&sheet_path, sheet).expect("write documented sheet");
+    std::fs::write(cache_dir.join("prices.json"), vendor_file).expect("write vendor file");
     std::fs::write(dir.path().join("config.toml"), example).expect("write documented config");
     crate::config::invalidate_config_cache();
 
@@ -1861,21 +1868,22 @@ fn documented_sources_example_prices_as_documented() {
     // 01:00-04:00 UTC weekday peak window).
     let off_peak =
         crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_324_000))
-            .expect("the sheet prices an off-peak call");
+            .expect("the vendor file prices an off-peak call");
     let peak =
         crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_496_800))
-            .expect("the sheet prices a peak call");
+            .expect("the vendor file prices a peak call");
 
     restore_env_var("JCODE_HOME", prev_home);
 
-    // 25k input at $4.5/Mtok plus 5k output at $13.5/Mtok.
-    assert!(
-        off_peak.currency.is_usd(),
-        "a sheet that states no currency is USD, like models.dev"
+    // 25k input at CNY 4.5/Mtok plus 5k output at CNY 13.5/Mtok.
+    assert_eq!(
+        off_peak.currency.as_str(),
+        "CNY",
+        "the documented vendor states CNY"
     );
     assert!(
         (off_peak.amount - 0.18).abs() < 1e-9,
-        "off-peak should be $0.18 per reference request, got {off_peak:?}"
+        "off-peak should be CNY 0.18 per reference request, got {off_peak:?}"
     );
     assert!(
         (peak.amount - 0.36).abs() < 1e-9,

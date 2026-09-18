@@ -8,8 +8,8 @@
 
 use chrono::{DateTime, NaiveTime, Utc, Weekday};
 use jcode_config_types::{
-    ContextTierFile, CostFile, ModelPricingRuleFile, PricingConfigFile, PricingSourceFile,
-    ScheduleRuleFile, TariffFile,
+    ContextTierFile, CostFile, ModelPricingRuleFile, PricingConfigFile, ScheduleRuleFile,
+    TariffFile,
 };
 use jcode_provider_core::Currency;
 use serde::{Deserialize, Serialize};
@@ -18,10 +18,6 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use jcode_config_types::OnRuleExpiry;
-
-/// The only `[[pricing.sources]].format` v1 understands: models.dev's own
-/// `{provider: {models: {id: {cost, ...}}}}` shape.
-pub const SOURCE_FORMAT_MODELS_DEV_V1: &str = "models_dev_v1";
 
 /// A validation failure, carrying the config path that caused it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,30 +117,13 @@ pub struct ModelPricingRule {
 /// A validated per-provider rate rule set.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderPricing {
+    /// The resolved local file this vendor's model rules are read from, if any.
+    /// A bare name has already been resolved under `~/.jcode/cache/`; `~` has
+    /// been expanded. jcode never fetches a price file, so this is always a
+    /// path on disk.
+    pub file: Option<PathBuf>,
     pub currency: Option<Currency>,
     pub models: BTreeMap<String, ModelPricingRule>,
-}
-
-/// A validated `[[pricing.sources]]` entry.
-///
-/// The validation that matters to the merge is done once, here: the list is
-/// kept in **resolution order** (priority ascending, ties broken by `id`), so
-/// lookups do not have to re-sort and the tie-break rule is visible in one
-/// place. `currency` is the currency every number the sheet states is
-/// denominated in.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PricingSource {
-    pub id: String,
-    /// The resolved local file the sheet is read from. A bare name has already
-    /// been resolved under `~/.jcode/cache/`; `~` has been expanded. jcode never
-    /// fetches a price sheet, so this is always a path on disk.
-    pub path: PathBuf,
-    /// Provider identities this sheet may price; empty means every provider.
-    pub scope: Vec<String>,
-    /// Model globs this sheet may price; empty means every model.
-    pub models: Vec<String>,
-    pub priority: i64,
-    pub currency: Currency,
 }
 
 /// The validated runtime view of `[pricing]`.
@@ -152,9 +131,9 @@ pub struct PricingSource {
 pub struct PricingConfig {
     pub fx_base: Currency,
     pub fx_rates: BTreeMap<Currency, f64>,
+    /// Vendor namespaces, keyed by the user's own label. Rules inside apply by
+    /// model id regardless of route (see `model_pricing::sources`).
     pub providers: BTreeMap<String, ProviderPricing>,
-    /// Extra price sheets in resolution order (priority ascending, then `id`).
-    pub sources: Vec<PricingSource>,
 }
 
 impl Default for PricingConfig {
@@ -163,7 +142,6 @@ impl Default for PricingConfig {
             fx_base: Currency::usd(),
             fx_rates: BTreeMap::new(),
             providers: BTreeMap::new(),
-            sources: Vec::new(),
         }
     }
 }
@@ -172,7 +150,7 @@ impl PricingConfig {
     /// Whether the user configured anything at all. When empty, the pricing
     /// path must behave exactly as it did before this feature existed.
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.fx_rates.is_empty() && self.sources.is_empty()
+        self.providers.is_empty() && self.fx_rates.is_empty()
     }
 }
 
@@ -224,197 +202,35 @@ pub fn validate(
             .currency
             .as_deref()
             .map(|code| parse_currency(code, &format!("{base}.currency"), &mut warnings));
+        let file_path = match provider.file.as_deref() {
+            Some(raw) => Some(parse_vendor_file(raw, &format!("{base}.file"))?),
+            None => None,
+        };
         let mut models = BTreeMap::new();
         for (model, rule) in &provider.models {
             let path = format!("{base}.models.{model}");
             models.insert(model.clone(), convert_rule(rule, &path)?);
         }
-        providers.insert(name.clone(), ProviderPricing { currency, models });
+        providers.insert(
+            name.clone(),
+            ProviderPricing {
+                file: file_path,
+                currency,
+                models,
+            },
+        );
     }
 
     let config = PricingConfig {
         fx_base,
         fx_rates,
         providers,
-        sources: convert_sources(&file.sources, &mut warnings)?,
     };
     Ok((config, warnings))
 }
 
-/// Validate `[[pricing.sources]]` and put the entries in resolution order.
-///
-/// A malformed entry is a hard error carrying its config path, so the display
-/// can name the line to fix (`invalid [pricing]: pricing.sources[0].file`); it
-/// must not be a log-only warning, because a source that silently does not load
-/// looks exactly like a source that has nothing to say.
-///
-/// The order is `priority` ascending with ties broken by `id` lexicographically
-/// (spec 4.2.1's "同层确定性"): `HashMap` iteration order must never decide which
-/// of two sheets prices a model.
-///
-/// `id` is **optional**: the single-source case is one line
-/// (`file = "deepseek.json"`). An entry without one gets a
-/// deterministic id derived from its location ([`derive_source_id`]), and a
-/// derived id that would collide with another entry's explicit or derived id is
-/// disambiguated deterministically (`prices`, `prices-2`, …) in declaration
-/// order rather than panicking or silently merging two sheets under one cache
-/// key. Explicit ids keep today's meaning: they must be non-empty and unique.
-fn convert_sources(
-    sources: &[PricingSourceFile],
-    warnings: &mut Vec<String>,
-) -> Result<Vec<PricingSource>, PricingConfigError> {
-    // Reserve explicit ids first, so a derived id never takes a name an
-    // explicit entry later in the file already claimed.
-    let explicit: Vec<Option<String>> = {
-        let mut reserved: Vec<String> = Vec::new();
-        let mut explicit: Vec<Option<String>> = Vec::with_capacity(sources.len());
-        for (index, source) in sources.iter().enumerate() {
-            let path = format!("pricing.sources[{index}]");
-            match source.id.as_deref().map(str::trim) {
-                Some("") => {
-                    return Err(PricingConfigError::new(
-                        format!("{path}.id"),
-                        "a pricing source `id` must not be empty; omit it to derive one from \
-                         the location, or write a non-empty name",
-                    ));
-                }
-                Some(id) => {
-                    if reserved.iter().any(|existing| existing == id) {
-                        return Err(PricingConfigError::new(
-                            format!("{path}.id"),
-                            format!("duplicate source id `{id}`; source ids must be unique"),
-                        ));
-                    }
-                    reserved.push(id.to_string());
-                    explicit.push(Some(id.to_string()));
-                }
-                None => explicit.push(None),
-            }
-        }
-        explicit
-    };
-
-    let mut used: Vec<String> = explicit.iter().flatten().cloned().collect();
-    let mut converted: Vec<PricingSource> = Vec::with_capacity(sources.len());
-    for (index, source) in sources.iter().enumerate() {
-        let path = format!("pricing.sources[{index}]");
-        let resolved = parse_source_location(&source.file, &format!("{path}.file"))?;
-
-        let id = match &explicit[index] {
-            Some(id) => id.clone(),
-            None => {
-                let id = unique_derived_id(&resolved, index, &used);
-                used.push(id.clone());
-                id
-            }
-        };
-
-        let mut scope = Vec::with_capacity(source.scope.len());
-        for (scope_index, entry) in source.scope.iter().enumerate() {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                return Err(PricingConfigError::new(
-                    format!("{path}.scope[{scope_index}]"),
-                    "a scope entry must name a provider or profile; omit `scope` to \
-                     cover every provider",
-                ));
-            }
-            scope.push(entry.to_string());
-        }
-
-        let mut models = Vec::with_capacity(source.models.len());
-        for (model_index, pattern) in source.models.iter().enumerate() {
-            let pattern = pattern.trim();
-            if pattern.is_empty() {
-                return Err(PricingConfigError::new(
-                    format!("{path}.models[{model_index}]"),
-                    "a model glob must not be empty; omit `models` to cover every model",
-                ));
-            }
-            models.push(pattern.to_string());
-        }
-
-        match source.format.as_deref().map(str::trim) {
-            None | Some("") | Some(SOURCE_FORMAT_MODELS_DEV_V1) => {}
-            Some(other) => {
-                return Err(PricingConfigError::new(
-                    format!("{path}.format"),
-                    format!(
-                        "unknown source format `{other}`; only `{SOURCE_FORMAT_MODELS_DEV_V1}` is \
-                         supported"
-                    ),
-                ));
-            }
-        }
-
-        let currency = parse_currency(
-            source.currency.as_deref().unwrap_or("USD"),
-            &format!("{path}.currency"),
-            warnings,
-        );
-
-        converted.push(PricingSource {
-            id,
-            path: resolved,
-            scope,
-            models,
-            priority: source.priority.unwrap_or(0),
-            currency,
-        });
-    }
-
-    // Stable and total: priority first, then the id, so the merge order is a
-    // property of the config rather than of the writer's file layout.
-    converted.sort_by(|left, right| {
-        left.priority
-            .cmp(&right.priority)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(converted)
-}
-
-/// The id for a `[[pricing.sources]]` entry that did not name one.
-///
-/// The id is a cache key (`~/.jcode/cache/pricing_sources.json`) and appears in
-/// user-facing labels (`rule expired (pricing source \`prices\`)`), so it must
-/// be deterministic and stable across edits, and recognisably derived from the
-/// file the entry points at: its file stem, so `/opt/jcode/prices.json` and a
-/// bare `prices.json` both yield `prices`. A path that yields nothing usable
-/// falls back to `source{n}` (1-based), which is what makes an otherwise
-/// anonymous sheet identifiable.
-fn derive_source_id(path: &std::path::Path, index: usize) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::trim)
-        .filter(|stem| !stem.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("source{}", index + 1))
-}
-
-/// [`derive_source_id`], disambiguated against everything already in use.
-///
-/// Two sheets may obviously point at files with the same name (`prices.json` in
-/// two directories). Each id must be unique, and dropping one silently would
-/// mean a sheet the user configured never prices anything, so the collision is
-/// resolved by appending `-2`, `-3`, … in declaration order. The result depends
-/// only on the file's declaration order, never on map iteration order.
-fn unique_derived_id(path: &std::path::Path, index: usize, used: &[String]) -> String {
-    let base = derive_source_id(path, index);
-    if !used.contains(&base) {
-        return base;
-    }
-    let mut suffix = 2;
-    loop {
-        let candidate = format!("{base}-{suffix}");
-        if !used.contains(&candidate) {
-            return candidate;
-        }
-        suffix += 1;
-    }
-}
-
-/// `~/.jcode/cache/`, where a bare source name resolves and where the models.dev
-/// catalog and the sources cache live.
+/// `~/.jcode/cache/`, where a bare vendor file name resolves and where the
+/// models.dev catalog lives.
 fn cache_dir() -> PathBuf {
     crate::storage::jcode_dir()
         .unwrap_or_else(|_| PathBuf::from(".").join(".jcode"))
@@ -422,13 +238,14 @@ fn cache_dir() -> PathBuf {
 }
 
 /// The fixed names jcode writes for its own files in `~/.jcode/cache/`. A bare
-/// source name that matches one of these is refused: the user's sheet must never
-/// shadow jcode's cache. jcode also writes names it derives from a provider
-/// namespace or a session source; [`is_jcode_cache_file_name`] covers those too.
+/// vendor file name that matches one of these is refused: the user's file must
+/// never shadow jcode's cache. jcode also writes names it derives from a
+/// provider namespace or a session source; [`is_jcode_cache_file_name`] covers
+/// those too.
 fn jcode_cache_file_names() -> [&'static str; 4] {
     [
         crate::model_pricing::catalog_cache_file_name(),
-        crate::model_pricing::sources_cache_file_name(),
+        crate::model_pricing::vendor_files_cache_file_name(),
         "session-picker-list-v2.json",
         "osc11-silent-terminals",
     ]
@@ -488,20 +305,21 @@ fn is_bare_name(raw: &str) -> bool {
     !raw.is_empty() && !raw.contains('/') && !raw.contains('\\') && !raw.starts_with('~')
 }
 
-/// Turn a `file` value into the local path a source is read from.
+/// Turn a vendor `file` value into the local path it is read from.
 ///
-/// A price sheet is always a local file: jcode never fetches it. The value is
+/// A vendor price file is always local: jcode never fetches it. The value is
 /// either a **bare name** (`deepseek.json`), which resolves under
 /// `~/.jcode/cache/` and is refused if it would shadow one of jcode's own files
 /// there, or a **path** (absolute, or relative with a separator, `~` expanded),
 /// which is used exactly as written. Anything that is not a readable file there
 /// simply contributes no rules.
-fn parse_source_location(raw: &str, path: &str) -> Result<PathBuf, PricingConfigError> {
+fn parse_vendor_file(raw: &str, path: &str) -> Result<PathBuf, PricingConfigError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(PricingConfigError::new(
             path,
-            "a pricing source needs a `file` naming a local price sheet",
+            "a pricing provider `file` must not be empty; omit it to write rules inline, or name \
+             a local price file",
         ));
     }
     if is_bare_name(raw) {
@@ -531,9 +349,9 @@ fn parse_currency(code: &str, path: &str, warnings: &mut Vec<String>) -> Currenc
     currency
 }
 
-/// Shared with the `model_pricing` catalog parser: a custom `[[pricing.sources]]`
-/// sheet states its extension fields in this vocabulary too, so a sheet and a
-/// hand-written card validate identically.
+/// Shared with the `model_pricing` catalog and vendor-file parsers: both state
+/// their extension fields in this vocabulary, so a catalog entry, a vendor-file
+/// rule, and a hand-written card validate identically.
 pub(crate) fn convert_rule(
     rule: &ModelPricingRuleFile,
     path: &str,
@@ -591,9 +409,9 @@ pub(crate) fn convert_rule(
 /// Reject a rate that is not a finite, non-negative number.
 ///
 /// A rate can be written four ways (a `cost` table, a named tariff, a
-/// `context_tiers` entry, or the same shape inside a `[[pricing.sources]]`
-/// sheet), and every one of them funnels through here so the whole pricing
-/// surface shares one rule. `NaN` is rejected along with the infinities and
+/// `context_tiers` entry, or a rule inside a `[pricing.providers.<vendor>].file`
+/// or the models.dev catalog), and every one of them funnels through here so the
+/// whole pricing surface shares one rule. `NaN` is rejected along with the infinities and
 /// negatives because `CostState::accrue` has no finite guard: a single `NaN`
 /// would poison a session total permanently and a negative rate would truncate
 /// to zero and read as "free".
@@ -1214,6 +1032,7 @@ mod tests {
         config.pricing.providers.insert(
             "deepseek".to_string(),
             jcode_config_types::ProviderPricingFile {
+                file: None,
                 currency: Some("CNY".to_string()),
                 models: BTreeMap::from([(
                     "m".to_string(),

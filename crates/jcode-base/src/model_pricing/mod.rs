@@ -28,32 +28,33 @@ mod entry;
 mod fx;
 mod generation;
 mod rules;
-mod source_registry;
 mod sources;
+mod vendor_files;
 
 /// The per-model rate fields an entry carries, re-exported here so the billing
 /// call sites can read a card without reaching into `config`.
 pub use crate::config::CostFields;
 pub use call_rates::{
-    CallRateCard, ConfigCallRates, PricingNotice, config_call_rates, sheet_rule_out_of_effect,
+    CallRateCard, ConfigCallRates, PricingNotice, config_call_rates, vendor_file_rule_out_of_effect,
 };
 pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};
 pub use fx::{FxTable, convert};
 pub use generation::pricing_generation;
+pub use sources::{pricing_config, pricing_config_error};
 #[cfg(test)]
-pub(crate) use source_registry::save_test_source;
-pub use sources::{pricing_config, pricing_config_error, unmatchable_provider_keys};
+pub(crate) use vendor_files::save_test_vendor;
 
 /// The file name of jcode's own models.dev cache, so the config layer can refuse
-/// a bare `[[pricing.sources]].file` name that would shadow it.
+/// a bare `[pricing.providers.<vendor>].file` name that would shadow it.
 pub(crate) fn catalog_cache_file_name() -> &'static str {
     catalog::CACHE_FILE
 }
 
-/// The file name of jcode's own sources cache, for the same collision guard.
-pub(crate) fn sources_cache_file_name() -> &'static str {
-    source_registry::SOURCES_CACHE_FILE
+/// The file name of jcode's own vendor files cache, for the same collision
+/// guard.
+pub(crate) fn vendor_files_cache_file_name() -> &'static str {
+    vendor_files::VENDOR_FILES_CACHE_FILE
 }
 
 use catalog::PricingCache;
@@ -69,8 +70,8 @@ mod call_rates_tests;
 #[path = "comparable_cost_tests.rs"]
 mod comparable_cost_tests;
 #[cfg(test)]
-#[path = "source_registry_tests.rs"]
-mod source_registry_tests;
+#[path = "vendor_file_tests.rs"]
+mod vendor_file_tests;
 
 use jcode_provider_core::{
     CHEAPNESS_REFERENCE_INPUT_TOKENS, CHEAPNESS_REFERENCE_OUTPUT_TOKENS, Currency, Money,
@@ -132,44 +133,6 @@ fn normalize_model_id(model: &str) -> &str {
         .map_or(model, |(bare, _)| bare.trim())
 }
 
-/// Case-insensitive glob matching with `*` (any run, including none) and `?`
-/// (exactly one character).
-///
-/// A hand-written `models = ["deepseek-v4-*"]` has to mean what a user expects
-/// without pulling a regex engine into the pricing path; anything that is not a
-/// wildcard is compared literally. Matching is ASCII case-insensitive because
-/// model ids are, and a pattern that differs only in case should not silently
-/// miss.
-pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.trim().to_ascii_lowercase().chars().collect();
-    let text: Vec<char> = text.trim().to_ascii_lowercase().chars().collect();
-    // Greedy backtracking: `star` remembers the last `*` and `resume` the text
-    // position it may re-expand from.
-    let (mut p, mut t) = (0, 0);
-    let mut star: Option<usize> = None;
-    let mut resume = 0;
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == '*' {
-            star = Some(p);
-            resume = t;
-            p += 1;
-        } else if let Some(star_index) = star {
-            p = star_index + 1;
-            resume += 1;
-            t = resume;
-        } else {
-            return false;
-        }
-    }
-    while p < pattern.len() && pattern[p] == '*' {
-        p += 1;
-    }
-    p == pattern.len()
-}
-
 /// Look up live pricing for `model` under a jcode provider key. Returns `None`
 /// when the catalog has no entry; never blocks on the network. Schedules a
 /// background refresh when the disk cache is missing or stale.
@@ -214,9 +177,8 @@ fn ensure_cache_fresh() -> Option<Arc<PricingCache>> {
 /// The effective rate card for `(provider, model)` at `at`, together with the
 /// currency of the layer that produced it.
 ///
-/// Priority (spec 4.4): hand-written `[pricing.providers]` rules first, then
-/// models.dev. Optional `[[pricing.sources]]` extra sources land between the
-/// two later.
+/// Priority (spec 4.4): hand-written inline `[pricing.providers]` rules first,
+/// then `[pricing.providers.<vendor>].file` rules, then models.dev.
 ///
 /// A card that is out of effect at `at` (`effective_from` / `effective_until`)
 /// is dropped and the next layer prices the model instead; peak/off-peak
@@ -250,15 +212,8 @@ pub fn effective_entry_at_size(
     match sources::config_price(provider, model, at) {
         sources::ConfigPrice::NoPrice => None,
         sources::ConfigPrice::Hit { entry, currency } => {
-            let resolved = sources::resolve_card(
-                *entry,
-                currency,
-                provider,
-                model,
-                at,
-                input_tokens,
-                sources::CardFallback::ConfigCard,
-            );
+            let resolved =
+                sources::resolve_card(*entry, currency, provider, model, at, input_tokens);
             Some((resolved.entry, resolved.currency))
         }
         // A rule that is out of effect is not this layer's answer either: the
@@ -266,9 +221,9 @@ pub fn effective_entry_at_size(
         // written for this instant (the expiry itself is reported by
         // `config_call_rates`, which is the side that has to label it).
         sources::ConfigPrice::OutOfEffect(_) | sources::ConfigPrice::Absent => {
-            // Extra `[[pricing.sources]]` sheets sit strictly between the
-            // hand-written cards and models.dev (spec 4.4).
-            match source_card_at_size(provider, model, at, input_tokens) {
+            // A `[pricing.providers.<vendor>].file` rule sits strictly between
+            // the hand-written cards and models.dev (spec 4.4).
+            match vendor_file_card_at_size(provider, model, at, input_tokens) {
                 Some(card) => Some((card.entry, card.currency)),
                 None => models_dev_card_at_size(provider, model, at, input_tokens),
             }
@@ -276,72 +231,85 @@ pub fn effective_entry_at_size(
     }
 }
 
-/// The extra-source layer's card for `(provider, model)` at `at`, with the
-/// sheet's identity, or `None` when no source can price the model.
+/// The vendor-file layer's card for `(provider, model)` at `at`, with the
+/// vendor and file that supplied it, or `None` when no vendor file prices the
+/// model.
 ///
-/// The merge and the currency rules are the config card's, not a second
-/// implementation: a sheet is a price card like any other, so
-/// [`sources::resolve_card`] fills what it leaves out from models.dev when the
-/// currencies agree and refuses to relabel a foreign-currency sheet's numbers
-/// when they do not (F1). `None` in that second case is what sends the call on
-/// to models.dev instead of pricing it from half a card.
-pub(crate) fn source_card_at_size(
+/// A vendor file rule is a price card like any other: the merge and the currency
+/// rules are the config card's, not a second implementation. [`sources::resolve_card`]
+/// fills what the file leaves out from models.dev when the currencies agree and
+/// refuses to relabel a foreign-currency file's numbers when they do not (F1).
+/// `None` in that second case is what sends the call on to models.dev instead of
+/// pricing it from half a card.
+///
+/// Vendor files are matched by **model id, not route**, so a
+/// `provider = OpenRouter, model = deepseek-flash` call reaches DeepSeek's file.
+/// Vendors are consulted in `BTreeMap` (lexicographic) order; the first file
+/// that states a rule for the model decides. (A reserved future `route = [...]`
+/// field would narrow this; it is not implemented.)
+pub(crate) fn vendor_file_card_at_size(
     provider: &str,
     model: &str,
     at: SystemTime,
     input_tokens: Option<u64>,
-) -> Option<SourceCard> {
-    let hit = source_registry::source_card(provider, model, at)?;
-    let source_registry::SourceHit {
-        source_id,
-        entry,
-        currency,
-    } = hit;
-    // Asked before the merge below, and before the card is consumed: the
-    // schedule that picks the tariff is the sheet's own, and the selection (and
-    // the tier) is what the billing memo has to key on.
-    let selected = rules::resolve_tier(&entry, at, input_tokens);
-    let context_tier = selected.as_ref().and_then(|tier| tier.context_tier);
-    let tariff = selected.and_then(|tier| tier.tariff);
-    let resolved = sources::resolve_card(
-        entry,
-        currency,
-        provider,
-        model,
-        at,
-        input_tokens,
-        sources::CardFallback::Sheet,
-    );
-    resolved.owns_price.then_some(SourceCard {
-        entry: resolved.entry,
-        currency: resolved.currency,
-        source_id,
-        tariff,
-        context_tier,
-    })
+) -> Option<VendorFileCard> {
+    let config = sources::pricing_config();
+    for (vendor, pricing) in &config.providers {
+        let Some(path) = pricing.file.as_deref() else {
+            continue;
+        };
+        let Some(entry) = vendor_files::vendor_rule(vendor, path, model) else {
+            continue;
+        };
+        // The first file that states a rule for this model decides: either it
+        // prices the call, or its validity window is why it did not. The same
+        // first-file rule is what `vendor_file_out_of_effect` mirrors.
+        if entry.out_of_effect_reason(at).is_some() {
+            return None;
+        }
+        // Asked before the merge below, and before the card is consumed: the
+        // schedule that picks the tariff is the file's own, and the selection
+        // (and the tier) is what the billing memo has to key on.
+        let selected = rules::resolve_tier(&entry, at, input_tokens);
+        let context_tier = selected.as_ref().and_then(|tier| tier.context_tier);
+        let tariff = selected.and_then(|tier| tier.tariff);
+        let currency = pricing.currency.clone().unwrap_or_else(Currency::usd);
+        let resolved = sources::resolve_card(entry, currency, provider, model, at, input_tokens);
+        return resolved.owns_price.then_some(VendorFileCard {
+            entry: resolved.entry,
+            currency: resolved.currency,
+            vendor: vendor.clone(),
+            path: path.to_path_buf(),
+            tariff,
+            context_tier,
+        });
+    }
+    None
 }
 
-/// The extra-source layer's card, with what a caller needs to label it.
-pub(crate) struct SourceCard {
+/// The vendor-file layer's card, with what a caller needs to label it.
+pub(crate) struct VendorFileCard {
     pub(crate) entry: ModelPricingEntry,
     pub(crate) currency: Currency,
-    /// The `id` of the sheet that supplied the rates.
-    pub(crate) source_id: String,
-    /// The name of the tariff the sheet's schedule selected at the call's
-    /// instant, or `None` when the sheet's own base `cost` applies.
+    /// The `[pricing.providers.<vendor>]` key the file hangs under.
+    pub(crate) vendor: String,
+    /// The resolved local file the rules were read from.
+    pub(crate) path: std::path::PathBuf,
+    /// The name of the tariff the file's schedule selected at the call's
+    /// instant, or `None` when the file's own base `cost` applies.
     ///
-    /// A sheet's schedule is time-dependent, and a derived price is memoized,
-    /// so the tariff in force is part of what identifies the price the memo
-    /// holds: without it a memo filled off-peak would keep billing off-peak
-    /// rates after the window closed (the schedule bug Task 10 introduced).
+    /// A file's schedule is time-dependent, and a derived price is memoized, so
+    /// the tariff in force is part of what identifies the price the memo holds:
+    /// without it a memo filled off-peak would keep billing off-peak rates after
+    /// the window closed (the schedule bug Task 10 introduced).
     pub(crate) tariff: Option<String>,
-    /// The sheet's long-context tier in force for the call's input token count,
+    /// The file's long-context tier in force for the call's input token count,
     /// if it declares one.
     ///
-    /// A derived price is memoized per `(model, tariff, generation)`, so
-    /// without this a call billed at a sheet's higher long-context rates would
-    /// leave those rates cached for the next short call (the same trap the
-    /// models.dev `context_over_200k` tier has).
+    /// A derived price is memoized per `(model, tariff, generation)`, so without
+    /// this a call billed at a file's higher long-context rates would leave
+    /// those rates cached for the next short call (the same trap the models.dev
+    /// `context_over_200k` tier has).
     pub(crate) context_tier: Option<u64>,
 }
 
@@ -374,29 +342,29 @@ pub(crate) fn models_dev_card_at_size(
 /// is exactly the state of the derived chain that can change what a memoized
 /// price *means*:
 ///
-/// * `sheet` names the `[[pricing.sources]]` sheet and the tariff its schedule
-///   selected at the call's instant, or `None` when no sheet prices the call and
-///   the catalogs jcode ships answer. A memo keyed on this identity re-resolves
-///   when the sheet's window changes, so a call in the peak window never reuses
-///   the price a call in the off-peak window cached.
+/// * `vendor_file` names the `[pricing.providers.<vendor>].file` and the tariff
+///   its schedule selected at the call's instant, or `None` when no file prices
+///   the call and the catalogs jcode ships answer. A memo keyed on this identity
+///   re-resolves when the file's window changes, so a call in the peak window
+///   never reuses the price a call in the off-peak window cached.
 /// * `context_tier` is the long-context tier in force (`min_input_tokens`), or
 ///   `None` for the base tier. Without it a long call's higher rates would stay
 ///   cached for the next short one.
 ///
 /// Both are read with the *call's* instant, never the wall clock, which is what
-/// makes peak/off-peak sheets behave like the hand-written rules they mirror.
+/// makes peak/off-peak files behave like the hand-written rules they mirror.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedPriceIdentity {
-    /// `"{source_id}#{tariff}"` for the sheet in force, else `None`.
-    pub sheet: Option<String>,
+    /// `"{vendor}#{tariff}"` for the file in force, else `None`.
+    pub vendor_file: Option<String>,
     /// The long-context tier in force, else `None`.
     pub context_tier: Option<u64>,
 }
 
 /// The derived-layer price identity for `(provider, model)` at `at`.
 ///
-/// The extra-source layer outranks models.dev, so a sheet's own tariff and tier
-/// are asked for first; only when no sheet prices the call does models.dev's
+/// The vendor-file layer outranks models.dev, so a file's own tariff and tier
+/// are asked for first; only when no file prices the call does models.dev's
 /// `context_over_200k` tier answer.
 pub fn derived_price_identity(
     provider: &str,
@@ -404,18 +372,18 @@ pub fn derived_price_identity(
     at: SystemTime,
     input_tokens: Option<u64>,
 ) -> DerivedPriceIdentity {
-    if let Some(card) = source_card_at_size(provider, model, at, input_tokens) {
+    if let Some(card) = vendor_file_card_at_size(provider, model, at, input_tokens) {
         return DerivedPriceIdentity {
-            sheet: Some(format!(
+            vendor_file: Some(format!(
                 "{}#{}",
-                card.source_id,
+                card.vendor,
                 card.tariff.as_deref().unwrap_or("base")
             )),
             context_tier: card.context_tier,
         };
     }
     DerivedPriceIdentity {
-        sheet: None,
+        vendor_file: None,
         context_tier: models_dev_context_tier_in_force(provider, model, at, input_tokens),
     }
 }
@@ -430,31 +398,53 @@ pub fn models_dev_context_tier_in_force(
     rules::resolve_tier(&entry, at, input_tokens)?.context_tier
 }
 
-/// The `[[pricing.sources]]` sheet's *own* stated card for `(provider, model)`
-/// at `at`, before any fields are filled from models.dev.
+/// The vendor file that states a rule for `(provider, model)` but is out of
+/// effect at `at`, as `(vendor, reason)`, if the file layer is what sends the
+/// price below it.
 ///
-/// A hand-written `[pricing.providers]` card uses this to fill the rate fields
-/// it leaves unset (spec 4.4's field-level fallback, one layer down): a sheet
-/// outranks models.dev, so a blank in the user's own rule must first take the
-/// sheet's number, and only then models.dev's. The raw entry (not the resolved
-/// one) is returned so the card does not inherit a sheet tariff it never named.
-pub(super) fn sheet_card_raw(
+/// This is the vendor file's half of the F8/F20 marker. The call is still priced
+/// by the next layer (that is the existing fall-through); the notice is what
+/// tells the user their file stopped applying instead of a models.dev number
+/// taking over silently.
+///
+/// Only the *first* file that states an entry for the model can be that reason,
+/// mirroring [`vendor_file_card_at_size`]'s iteration order: an earlier file
+/// that states nothing for this model would not have priced the call even while
+/// in effect, and an earlier file that *is* in effect wins outright, so neither
+/// is reported.
+pub(super) fn vendor_file_out_of_effect(
+    model: &str,
+    at: SystemTime,
+) -> Option<(String, RuleOutOfEffect)> {
+    let config = sources::pricing_config();
+    for (vendor, pricing) in &config.providers {
+        let Some(path) = pricing.file.as_deref() else {
+            continue;
+        };
+        let Some(entry) = vendor_files::vendor_rule(vendor, path, model) else {
+            continue;
+        };
+        return entry
+            .out_of_effect_reason(at)
+            .map(|reason| (vendor.clone(), reason));
+    }
+    None
+}
+
+/// The vendor file that prices `(provider, model)` at `at`, as
+/// `(vendor, file, currency)`, or `None` when no file can price it.
+///
+/// This exists so `/pricing` can name the file layer in exactly the case its own
+/// "no `[pricing.providers]` rule prices this model" text is about: without it
+/// the report listed only "models.dev, a provider cache, or the fallback
+/// estimate" while the `reference request` figure beside it came from a file.
+pub fn vendor_file_for(
     provider: &str,
     model: &str,
     at: SystemTime,
-) -> Option<(ModelPricingEntry, Currency)> {
-    source_registry::source_card(provider, model, at).map(|hit| (hit.entry, hit.currency))
-}
-
-/// The `[[pricing.sources]]` sheet that prices `(provider, model)` at `at`, as
-/// `(sheet_id, currency)`, or `None` when no sheet can price it.
-///
-/// This exists so `/pricing` can name the sheet layer in exactly the case its
-/// own "no `[pricing.providers]` rule prices this model" text is about: without
-/// it the report listed only "models.dev, a provider cache, or the fallback
-/// estimate" while the `reference request` figure beside it came from a sheet.
-pub fn source_sheet_for(provider: &str, model: &str, at: SystemTime) -> Option<(String, Currency)> {
-    source_card_at_size(provider, model, at, None).map(|card| (card.source_id, card.currency))
+) -> Option<(String, std::path::PathBuf, Currency)> {
+    vendor_file_card_at_size(provider, model, at, None)
+        .map(|card| (card.vendor, card.path, card.currency))
 }
 
 /// What one canonical request costs on this route at `at`, in the currency the
@@ -562,7 +552,7 @@ pub fn comparable_reference_cost_micros(estimate: &RouteCheapnessEstimate) -> Op
 /// out entirely. JCODE_FORCE_PRICING_REFRESH=1 re-enables the fetch for manual
 /// e2e checks (e.g. `cargo run --example pricing_e2e_check`, which builds with
 /// the `test-support` feature unified in). Only the models.dev catalog fetches;
-/// user `[[pricing.sources]]` are always local files.
+/// user vendor files are always local files.
 pub(crate) fn background_refresh_allowed() -> bool {
     if std::env::var_os("JCODE_FORCE_PRICING_REFRESH").is_some() {
         return true;
@@ -1158,7 +1148,7 @@ output = 13.5
         }
     }
 
-    /// A `[[pricing.sources]]` sheet states its rates in the same vocabulary a
+    /// A models.dev entry states its rates in the same vocabulary a
     /// hand-written card does, so it must be held to the same finite,
     /// non-negative rule and fail with the field path that caused it.
     #[test]

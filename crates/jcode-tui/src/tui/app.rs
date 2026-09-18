@@ -856,8 +856,8 @@ struct CostState {
     ///
     /// Two cases reach here. A rule that was out of its validity window and
     /// whose `on_rule_expiry = "fallback"` sent the call to the next layer
-    /// (F8/F20) - a hand-written card, or a `[[pricing.sources]]` sheet rule
-    /// labelled with the sheet's `id` - makes the amount a fallback price. A
+    /// (F8/F20) - an inline card, or a `[pricing.providers.<vendor>].file` rule
+    /// labelled with the vendor name - makes the amount a fallback price. A
     /// card that claims the pair but cannot price the call (spec 4.4) accrues
     /// nothing, so the label is what stops a zero from reading as "free".
     ///

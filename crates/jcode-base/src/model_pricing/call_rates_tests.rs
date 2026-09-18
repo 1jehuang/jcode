@@ -7,10 +7,7 @@
 
 use super::call_rates::{ConfigCallRates, config_call_rates};
 use super::{ModelCost, RuleOutOfEffect, clear_memory_cache_for_tests, save_test_cache};
-use crate::config::PricingConfig;
-use crate::config::pricing::ProviderPricing;
 use jcode_provider_core::Currency;
-use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 /// DeepSeek's peak windows: peak is UTC 01:00-04:00 on weekdays, 10x off-peak.
@@ -360,36 +357,6 @@ output = 13.5
             "the rejected section is parsed once per loaded config, not once per read"
         );
     });
-}
-
-#[test]
-fn a_provider_key_that_can_never_match_is_named() {
-    // Task 5a deferred / I-2: a typo'd `[pricing.providers]` key produced no
-    // card, no warning and no signal anywhere, so the user saw models.dev prices
-    // and no reason why. The keys that cannot match any identity form are named
-    // once, when the validated view is built.
-    let config = PricingConfig {
-        providers: BTreeMap::from([
-            ("anthropic".to_string(), ProviderPricing::default()),
-            ("claude:api-key".to_string(), ProviderPricing::default()),
-            ("deepsek".to_string(), ProviderPricing::default()),
-            ("deepseek".to_string(), ProviderPricing::default()),
-            ("jcode".to_string(), ProviderPricing::default()),
-            (
-                "openai-compatible:deepseek".to_string(),
-                ProviderPricing::default(),
-            ),
-            (
-                "openai-compatible:nope".to_string(),
-                ProviderPricing::default(),
-            ),
-        ]),
-        ..PricingConfig::default()
-    };
-    assert_eq!(
-        crate::model_pricing::unmatchable_provider_keys(&config),
-        vec!["deepsek".to_string(), "openai-compatible:nope".to_string()],
-    );
 }
 
 /// Provenance: a cost view has to be able to name the tariff that is in force,

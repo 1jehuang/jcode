@@ -297,24 +297,17 @@ prompt_entry_animation = true
 #
 # `fx_base`/`fx_rates` only matter for a card written in another currency.
 #
-# The first source example is the one-line form: no `id` is needed, jcode
-# derives one from the file name. The second names an `id`, scopes the sheet to
-# some provider identities and model globs, and sets `priority` (lower wins
-# between sources).
+# A `[pricing.providers.<vendor>]` entry either writes model cards inline (see
+# the card example below) or points at a local JSON price file with `file`. The
+# vendor key is your own label, not a route: rules are matched by model id, so
+# they price that model no matter which route a call uses. A bare `file` name
+# (`deepseek.json`) resolves under `~/.jcode/cache/`; anything else is a path.
+# The file holds only `{"models": {"<model-id>": {cost|tariffs|schedule|...}}}`,
+# with no outer vendor key.
 #
 # The card example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC,
 # Mon-Fri.
 [pricing]
-# [[pricing.sources]]
-# file = "prices.json"
-#
-# [[pricing.sources]]
-# id = "corp-mirror"
-# file = "/srv/pricing/models_dev.mirror.json"
-# scope = ["deepseek", "openai-compatible:my-gateway"]
-# models = ["deepseek-v4-*"]
-# priority = 10
-#
 # fx_base = "USD"
 #
 # [pricing.fx_rates]
@@ -323,6 +316,7 @@ prompt_entry_animation = true
 # JPY = 150.0
 #
 # [pricing.providers."deepseek"]
+# file = "deepseek.json"
 # currency = "CNY"
 #
 # [pricing.providers."deepseek".models."deepseek-v4-pro"]
@@ -908,23 +902,15 @@ mod tests {
                 .any(|model| !model.context_tiers.is_empty()),
             "the example should demonstrate a long-context tier, got {deepseek:?}"
         );
-        assert!(
-            parsed
-                .pricing
-                .sources
-                .iter()
-                .any(|source| source.id.as_deref() == Some("corp-mirror")),
-            "the example should demonstrate an extra price sheet, got {:?}",
-            parsed.pricing.sources
+        assert_eq!(
+            deepseek.file.as_deref(),
+            Some("deepseek.json"),
+            "the example should demonstrate a vendor price file, got {deepseek:?}"
         );
-        assert!(
-            parsed
-                .pricing
-                .sources
-                .iter()
-                .any(|source| source.id.is_none() && source.file == "prices.json"),
-            "the example should lead with the one-line id-less source form, got {:?}",
-            parsed.pricing.sources
+        assert_eq!(
+            deepseek.currency.as_deref(),
+            Some("CNY"),
+            "the example should state the file's currency, got {deepseek:?}"
         );
 
         // Field placement matters: `effective_until`/`on_rule_expiry` must land

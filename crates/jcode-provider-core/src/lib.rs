@@ -1250,7 +1250,7 @@ pub enum RouteCostSource {
     ModelsDevCatalog,
     /// Hand-written `[pricing.providers]` rules from the user's config.
     ConfigPriceSheet,
-    /// An extra `[[pricing.sources]]` price sheet from the user's config.
+    /// A `[pricing.providers.<vendor>].file` price file from the user's config.
     ///
     /// Distinct from [`Self::ConfigPriceSheet`] so a price the user's own card
     /// did not write is never reported as if their card had: the sheet is
