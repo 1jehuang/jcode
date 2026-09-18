@@ -115,7 +115,7 @@ impl AmbientManager {
             additional_context: request.additional_context,
         };
 
-        self.queue.push(item);
+        self.queue.push(item)?;
         Ok(id)
     }
 

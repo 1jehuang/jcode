@@ -143,12 +143,14 @@ impl ScheduledQueue {
             .unwrap_or(0)
     }
 
-    pub fn push(&mut self, item: ScheduledItem) {
+    /// Queue an item, persisting it. Errors when the queue cannot retain
+    /// the item, so callers never report success for lost work.
+    pub fn push(&mut self, item: ScheduledItem) -> Result<()> {
         // Retry on cross-process conflicts: reload disk truth, re-apply.
         for _ in 0..3 {
             self.items.push(item.clone());
             match self.try_save() {
-                Ok(true) => return,
+                Ok(true) => return Ok(()),
                 Ok(false) => self.reload(),
                 Err(error) => {
                     crate::logging::warn(&format!(
@@ -158,7 +160,7 @@ impl ScheduledQueue {
                 }
             }
         }
-        crate::logging::warn("schedule queue push lost after save retries");
+        anyhow::bail!("schedule queue push failed: item could not be persisted")
     }
 
     /// Remove a scheduled item by ID, persisting the queue when found.

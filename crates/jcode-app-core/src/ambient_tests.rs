@@ -62,7 +62,7 @@ fn test_scheduled_queue_push_and_pop() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     queue.push(ScheduledItem {
         id: "s2".into(),
@@ -78,7 +78,7 @@ fn test_scheduled_queue_push_and_pop() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     assert_eq!(queue.len(), 2);
 
@@ -113,7 +113,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
     queue.push(ScheduledItem {
         id: "cancel".into(),
         scheduled_for: future,
@@ -128,7 +128,7 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     let removed = queue.remove_by_id("cancel").unwrap().unwrap();
     assert_eq!(removed.id, "cancel");
@@ -162,7 +162,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     queue.push(ScheduledItem {
         id: "high_late".into(),
@@ -178,7 +178,7 @@ fn test_pop_ready_sorts_by_priority_then_time() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     let ready = queue.pop_ready();
     assert_eq!(ready.len(), 2);
@@ -211,7 +211,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     queue.push(ScheduledItem {
         id: "spawn_due".into(),
@@ -229,7 +229,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     queue.push(ScheduledItem {
         id: "ambient_due".into(),
@@ -245,7 +245,7 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     let ready_direct = queue.take_ready_direct_items();
     assert_eq!(ready_direct.len(), 2);
@@ -485,7 +485,7 @@ fn test_scheduled_queue_items_accessor() {
         git_branch: None,
         additional_context: None,
         repeat: None,
-    });
+    }).expect("queue persists in tests");
 
     let items = queue.items();
     assert_eq!(items.len(), 1);
@@ -528,7 +528,8 @@ fn test_stale_snapshot_cancel_cannot_resurrect_series() {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("queue.json");
     let mut a = ScheduledQueue::load(path.clone());
-    a.push(recurring_item("first", Some(3)));
+    a.push(recurring_item("first", Some(3)))
+        .expect("queue persists in tests");
     let mut b = ScheduledQueue::load(path.clone());
     let popped = a.pop_ready();
     assert_eq!(popped.len(), 1);
@@ -552,12 +553,25 @@ fn test_failed_dequeue_save_delivers_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("queue.json");
     let mut queue = ScheduledQueue::load(path);
-    queue.push(recurring_item("first", Some(3)));
+    queue.push(recurring_item("first", Some(3))).expect("queue persists in tests");
     let _lock = ReadOnlyDir::lock(tmp.path());
     let ready = queue.pop_ready();
     assert!(ready.is_empty(), "nothing delivered without a durable dequeue");
     assert_eq!(queue.len(), 1, "the popped item stays queued via reload");
     assert_eq!(queue.items()[0].id, "first");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_push_reports_unpersistable_work() {
+    // Scheduling must not return success for work that is in neither
+    // memory nor durable storage.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path);
+    let _lock = ReadOnlyDir::lock(tmp.path());
+    let result = queue.push(recurring_item("lost", Some(2)));
+    assert!(result.is_err(), "unpersistable push must error, not vanish");
 }
 
 #[test]
@@ -571,7 +585,7 @@ fn test_legacy_bare_array_loads_as_v0() {
     let mut queue = ScheduledQueue::load(path.clone());
     assert_eq!(queue.len(), 1);
     assert_eq!(queue.items()[0].id, "old");
-    queue.push(recurring_item("new", None));
+    queue.push(recurring_item("new", None)).expect("queue persists in tests");
     let disk = ScheduledQueue::load(path);
     assert_eq!(disk.len(), 2);
 }
@@ -604,7 +618,7 @@ fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
 fn test_recurring_pop_requeues_next_occurrence() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    queue.push(recurring_item("first", Some(3)));
+    queue.push(recurring_item("first", Some(3))).expect("queue persists in tests");
 
     let ready = queue.pop_ready();
     assert_eq!(ready.len(), 1);
@@ -629,7 +643,7 @@ fn test_recurring_pop_requeues_next_occurrence() {
 fn test_recurrence_exhausts_at_last_iteration() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    queue.push(recurring_item("last", Some(1)));
+    queue.push(recurring_item("last", Some(1))).expect("queue persists in tests");
 
     let ready = queue.pop_ready();
     assert_eq!(ready.len(), 1);
@@ -643,7 +657,7 @@ fn test_recurrence_exhausts_at_last_iteration() {
 fn test_recurrence_without_limit_repeats_forever() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    queue.push(recurring_item("forever", None));
+    queue.push(recurring_item("forever", None)).expect("queue persists in tests");
 
     for _ in 0..3 {
         let ready = queue.pop_ready();
@@ -661,7 +675,7 @@ fn test_recurrence_without_limit_repeats_forever() {
 fn test_recurring_direct_items_requeue_on_take_ready_direct() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    queue.push(recurring_item("direct", Some(2)));
+    queue.push(recurring_item("direct", Some(2))).expect("queue persists in tests");
 
     let ready = queue.take_ready_direct_items();
     assert_eq!(ready.len(), 1);
@@ -673,13 +687,13 @@ fn test_recurring_direct_items_requeue_on_take_ready_direct() {
 fn test_cancel_recurrence_removes_whole_series() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
-    queue.push(recurring_item("a", Some(5)));
-    queue.push(recurring_item("b", None));
+    queue.push(recurring_item("a", Some(5))).expect("queue persists in tests");
+    queue.push(recurring_item("b", None)).expect("queue persists in tests");
     // One-shot bystander from another series must survive.
     let mut solo = recurring_item("solo", Some(2));
     solo.id = "solo".into();
     solo.repeat.as_mut().unwrap().recurrence_id = "recur_other".into();
-    queue.push(solo);
+    queue.push(solo).expect("queue persists in tests");
 
     let removed = queue.remove_by_recurrence("recur_test").unwrap();
     assert_eq!(removed, 2);
