@@ -362,19 +362,31 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
     }
     let palette = palette();
     // A frame holds few distinct colors; memoize the substitution per color.
-    let mut cache: std::collections::HashMap<Color, Color> = std::collections::HashMap::new();
-    let mut adapt = |color: Color| -> Color {
+    let mut cache = std::collections::HashMap::new();
+    let mut adapt = |color: Color, surface: Option<Color>| -> Color {
         if color == Color::Reset {
             return color;
         }
         *cache
-            .entry(color)
-            .or_insert_with(|| adapt_color(&palette, color))
+            .entry((color, surface))
+            .or_insert_with(|| adapt_color_on_surface(&palette, color, surface))
     };
     for cell in buf.content.iter_mut() {
-        cell.fg = adapt(cell.fg);
-        cell.bg = adapt(cell.bg);
-        cell.underline_color = adapt(cell.underline_color);
+        // Match using the pre-override surface: a user-chosen background must
+        // not change how we recognize the foreground's built-in default.
+        let reversed = cell.modifier.contains(ratatui::style::Modifier::REVERSED);
+        let surface = if reversed {
+            if cell.fg == Color::Reset {
+                Color::Rgb(32, 32, 32)
+            } else {
+                cell.fg
+            }
+        } else {
+            cell.bg
+        };
+        cell.fg = adapt(cell.fg, (!reversed).then_some(surface));
+        cell.bg = adapt(cell.bg, reversed.then_some(surface));
+        cell.underline_color = adapt(cell.underline_color, Some(surface));
     }
 }
 
@@ -383,9 +395,15 @@ pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
 /// Literals arriving at substitution have already been through the light-theme
 /// flip, so they must be matched against equally flipped defaults. On dark
 /// themes this is the identity.
-fn match_target(role: Role) -> (u8, u8, u8) {
+fn match_target(role: Role, surface: Option<Color>) -> (u8, u8, u8) {
     let (r, g, b) = role.default_rgb();
-    match crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b)) {
+    let mut color = crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b));
+    if crate::theme_mode::is_light_theme() {
+        if let Some(surface) = surface {
+            color = crate::theme_mode::readable_light_foreground(color, surface);
+        }
+    }
+    match color {
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(index) => crate::color::indexed_to_rgb(index),
         _ => (r, g, b),
@@ -394,14 +412,19 @@ fn match_target(role: Role) -> (u8, u8, u8) {
 
 /// Substitute one rendered color using `palette`.
 pub fn adapt_color(palette: &Palette, color: Color) -> Color {
+    adapt_color_on_surface(palette, color, None)
+}
+
+fn adapt_color_on_surface(palette: &Palette, color: Color, surface: Option<Color>) -> Color {
     match color {
         Color::Rgb(r, g, b) => {
-            let (r, g, b) = remap_literal_with(palette, (r, g, b));
+            let (r, g, b) = remap_literal_on_surface(palette, (r, g, b), surface);
             crate::color::rgb(r, g, b)
         }
         Color::Indexed(index) => {
             // 256-color terminals: map through the same logic in RGB space.
-            let (r, g, b) = remap_literal_with(palette, crate::color::indexed_to_rgb(index));
+            let (r, g, b) =
+                remap_literal_on_surface(palette, crate::color::indexed_to_rgb(index), surface);
             crate::color::rgb(r, g, b)
         }
         named => remap_named_with(palette, named),
@@ -487,13 +510,21 @@ pub fn role_for_rendered(color: Color) -> Option<Role> {
 
 /// Palette-explicit variant of [`remap_literal`], for tests and tooling.
 pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    remap_literal_on_surface(palette, rgb, None)
+}
+
+fn remap_literal_on_surface(
+    palette: &Palette,
+    rgb: (u8, u8, u8),
+    surface: Option<Color>,
+) -> (u8, u8, u8) {
     let source = crate::harmony::Oklab::from_rgb(rgb);
     let mut best: Option<(f32, Role)> = None;
     for role in ALL_ROLES.iter().copied() {
         if !palette.is_overridden(role) {
             continue;
         }
-        let default = crate::harmony::Oklab::from_rgb(match_target(role));
+        let default = crate::harmony::Oklab::from_rgb(match_target(role, surface));
         let distance = source.distance(default);
         if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
             best = Some((distance, role));
@@ -508,7 +539,7 @@ pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) 
     // lightness/chroma offset from the role default. The configured color is
     // used exactly as given: the user picked it for their own terminal, so it
     // must not be luminance-flipped.
-    let default = crate::harmony::Oklab::from_rgb(match_target(role));
+    let default = crate::harmony::Oklab::from_rgb(match_target(role, surface));
     let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
     crate::harmony::Oklab {
         l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
@@ -768,6 +799,28 @@ mod light_theme_interaction {
             rendered, chosen,
             "the user's configured color must reach the terminal unmodified"
         );
+
+        // The same guarantee holds for muted text, whose new contrast repair
+        // depends on whether it is on the default surface or a tinted panel.
+        for background in [Color::Reset, Color::Rgb(35, 40, 50)] {
+            let mut palette = Palette::default();
+            let chosen = (75, 85, 95);
+            palette.set(Role::Dim, chosen);
+            palette.set(Role::UserBg, (232, 235, 238));
+            set_palette(palette);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+            buf.content[0].fg = role_color(Role::Dim);
+            buf.content[0].bg = background;
+            adapt_buffer(&mut buf, ThemeMode::Light);
+            adapt_buffer_for_palette(&mut buf);
+            assert_eq!(
+                buf.content[0].fg,
+                crate::color::rgb(chosen.0, chosen.1, chosen.2)
+            );
+            if background != Color::Reset {
+                assert_eq!(buf.content[0].bg, crate::color::rgb(232, 235, 238));
+            }
+        }
     }
 }
 

@@ -6,9 +6,9 @@
 //! point every style ultimately flows through: the rendered frame buffer.
 //!
 //! When the theme mode is [`ThemeMode::Light`], [`adapt_buffer_for_theme`]
-//! rewrites each cell's colors with a hue-preserving luminance flip: light
-//! text designed for dark backgrounds becomes dark text of the same hue, and
-//! dark panel backgrounds become light ones. `Color::Reset` is left alone so
+//! rewrites each cell's colors with a hue-preserving luminance flip, then
+//! darkens washed-out text to meet a 4.5:1 contrast floor against its surface.
+//! Dark panel backgrounds remain light tints. `Color::Reset` is left alone so
 //! the terminal's own (light) default background shows through, exactly like
 //! it does on dark themes today.
 //!
@@ -17,7 +17,7 @@
 //! defaults to dark, which keeps every existing code path byte-identical.
 
 use ratatui::buffer::Buffer;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Whether the terminal background is dark or light.
@@ -69,8 +69,15 @@ pub fn adapt_color_for_theme(color: Color) -> Color {
 }
 
 fn adapt_color_for_light(color: Color) -> Color {
-    let (r, g, b) = match color {
-        Color::Reset => return color,
+    let Some((r, g, b)) = color_rgb(color) else {
+        return color;
+    };
+    flip_luminance(r, g, b)
+}
+
+fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    Some(match color {
+        Color::Reset => return None,
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(n) => crate::color::indexed_to_rgb(n),
         named => {
@@ -91,12 +98,81 @@ fn adapt_color_for_light(color: Color) -> Color {
                 Color::LightMagenta => 13,
                 Color::LightCyan => 14,
                 Color::White => 15,
-                _ => return color,
+                _ => return None,
             };
             crate::color::indexed_to_rgb(idx)
         }
+    })
+}
+
+// Use a conservative light surface for terminal-default backgrounds. This
+// covers off-white themes and recessed/inactive panes, not just pure white.
+const LIGHT_SURFACE: (u8, u8, u8) = (224, 224, 224);
+const MIN_TEXT_CONTRAST: f32 = 4.5;
+
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    let linear = |channel: u8| {
+        let value = channel as f32 / 255.;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
     };
-    flip_luminance(r, g, b)
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
+    let a = relative_luminance(a);
+    let b = relative_luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Repair an already light-adapted foreground. Backgrounds must not take this
+/// path: the same gray can be unreadable text but a perfectly good panel tint.
+/// Check the quantized output too, so 256-color terminals keep the guarantee.
+pub(crate) fn readable_light_foreground(color: Color, background: Color) -> Color {
+    let Some(rgb) = color_rgb(color) else {
+        return color;
+    };
+    let surface = color_rgb(background).unwrap_or(LIGHT_SURFACE);
+    if contrast(rgb, surface) >= MIN_TEXT_CONTRAST {
+        return color;
+    }
+    let (h, s, l) = rgb_to_hsl(rgb.0, rgb.1, rgb.2);
+    let endpoint = if relative_luminance(surface) > 0.179 {
+        0.
+    } else {
+        1.
+    };
+    let mut failing = l;
+    let mut passing = endpoint;
+    let mut result = crate::color::rgb(
+        (endpoint * 255.) as u8,
+        (endpoint * 255.) as u8,
+        (endpoint * 255.) as u8,
+    );
+    for _ in 0..12 {
+        let candidate = (failing + passing) / 2.;
+        let (r, g, b) = hsl_to_rgb(h, s, candidate);
+        let quantized = crate::color::rgb(r, g, b);
+        if contrast(color_rgb(quantized).unwrap(), surface) >= MIN_TEXT_CONTRAST {
+            passing = candidate;
+            result = quantized;
+        } else {
+            failing = candidate;
+        }
+    }
+    result
+}
+
+/// Foreground counterpart to the generic color flip, for partial repaint paths.
+pub fn adapt_foreground_for_theme(color: Color, background: Color) -> Color {
+    if is_light_theme() {
+        readable_light_foreground(adapt_color_for_light(color), background)
+    } else {
+        color
+    }
 }
 
 /// Hue/saturation-preserving lightness inversion, quantized through the
@@ -157,9 +233,9 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 
 /// Adapt a fully rendered frame buffer for the current theme mode.
 ///
-/// No-op in dark mode. In light mode, rewrites each cell's foreground,
-/// background, and underline colors via [`adapt_color_for_theme`]. This is
-/// called once per frame after the UI has been drawn, so every widget
+/// No-op in dark mode. In light mode, flips each cell's colors and repairs
+/// visible foreground/underline contrast without changing its adapted surface.
+/// This is called once per frame after the UI has been drawn, so every widget
 /// (transcript, markdown, pickers, overlays) is covered without needing
 /// per-call-site changes.
 pub fn adapt_buffer_for_theme(buf: &mut Buffer) {
@@ -180,10 +256,29 @@ pub fn adapt_buffer(buf: &mut Buffer, mode: ThemeMode) {
         }
         *cache.entry(c).or_insert_with(|| adapt_color_for_light(c))
     };
+    let mut foreground_cache = std::collections::HashMap::new();
+    let mut readable = |color, background| {
+        *foreground_cache
+            .entry((color, background))
+            .or_insert_with(|| readable_light_foreground(color, background))
+    };
     for cell in buf.content.iter_mut() {
         cell.fg = adapt(cell.fg);
         cell.bg = adapt(cell.bg);
         cell.underline_color = adapt(cell.underline_color);
+        if cell.modifier.contains(Modifier::REVERSED) {
+            // With reverse video, the logical background is the visible ink.
+            let surface = if cell.fg == Color::Reset {
+                Color::Rgb(32, 32, 32)
+            } else {
+                cell.fg
+            };
+            cell.bg = readable(cell.bg, surface);
+            cell.underline_color = readable(cell.underline_color, surface);
+        } else {
+            cell.fg = readable(cell.fg, cell.bg);
+            cell.underline_color = readable(cell.underline_color, cell.bg);
+        }
     }
 }
 
@@ -310,6 +405,90 @@ mod tests {
             assert!(luminance(fg) < 0.3, "near-white text should become dark");
             assert!(luminance(bg) > 0.7, "dark panel bg should become light");
         });
+    }
+
+    #[test]
+    fn muted_text_is_readable_on_off_white_without_darkening_the_surface() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        for cell in &mut buf.content {
+            cell.fg = Color::Rgb(80, 80, 80);
+            cell.underline_color = Color::Rgb(80, 80, 80);
+        }
+        buf.content[1].bg = Color::Rgb(35, 40, 50);
+        adapt_buffer(&mut buf, ThemeMode::Light);
+        assert_eq!(buf.content[0].bg, Color::Reset);
+        assert_eq!(
+            buf.content[1].bg,
+            adapt_color_for_light(Color::Rgb(35, 40, 50))
+        );
+        for cell in &buf.content {
+            let surface = color_rgb(cell.bg).unwrap_or(LIGHT_SURFACE);
+            assert!(contrast(as_rgb(cell.fg), surface) >= MIN_TEXT_CONTRAST);
+            assert!(contrast(as_rgb(cell.underline_color), surface) >= MIN_TEXT_CONTRAST);
+            assert!(
+                as_rgb(cell.fg).0 < 110,
+                "muted labels must not become pale gray"
+            );
+        }
+        assert!(
+            contrast((175, 175, 175), LIGHT_SURFACE) < 2.0,
+            "pin the original failure"
+        );
+    }
+
+    #[test]
+    fn every_tui_literal_has_readable_light_text_on_default_and_tinted_panels() {
+        let literals: &[(u8, u8, u8)] = &include!("palette_literals.rs");
+        for background in [
+            Color::Reset,
+            Color::Black,
+            Color::Rgb(35, 40, 50),
+            Color::Rgb(50, 50, 70),
+            Color::Rgb(220, 220, 220),
+        ] {
+            let mut buf = Buffer::empty(Rect::new(0, 0, literals.len() as u16, 1));
+            for (cell, &(r, g, b)) in buf.content.iter_mut().zip(literals) {
+                cell.fg = Color::Rgb(r, g, b);
+                cell.bg = background;
+            }
+            let mut dark = buf.clone();
+            adapt_buffer(&mut dark, ThemeMode::Dark);
+            assert_eq!(dark, buf, "dark palette must stay byte-identical");
+            adapt_buffer(&mut buf, ThemeMode::Light);
+            for (cell, original) in buf.content.iter().zip(literals) {
+                let surface = color_rgb(cell.bg).unwrap_or(LIGHT_SURFACE);
+                assert!(
+                    contrast(as_rgb(cell.fg), surface) >= MIN_TEXT_CONTRAST,
+                    "{original:?} on {background:?} became {:?} on {:?}",
+                    cell.fg,
+                    cell.bg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn named_indexed_and_reverse_video_text_keep_contrast() {
+        for color in [
+            Color::DarkGray,
+            Color::Yellow,
+            Color::Green,
+            Color::Indexed(244),
+            Color::Indexed(250),
+        ] {
+            for reversed in [false, true] {
+                let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+                let cell = &mut buf.content[0];
+                cell.fg = color;
+                cell.bg = Color::Black;
+                if reversed {
+                    cell.modifier.insert(Modifier::REVERSED);
+                }
+                adapt_buffer(&mut buf, ThemeMode::Light);
+                let cell = &buf.content[0];
+                assert!(contrast(as_rgb(cell.fg), as_rgb(cell.bg)) >= MIN_TEXT_CONTRAST);
+            }
+        }
     }
 
     #[test]
