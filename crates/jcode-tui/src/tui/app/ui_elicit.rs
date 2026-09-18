@@ -16,11 +16,11 @@ impl App {
     ///
     /// Converts tool-core types to TUI types, sets up a bridge oneshot channel,
     /// and activates the modal overlay.
-    pub(super) fn handle_elicit_msg(&mut self, msg: jcode_tool_core::ElicitMessage) {
+    pub(super) fn handle_elicit_msg(&mut self, msg: Box<jcode_tool_core::ElicitMessage>) {
         let jcode_tool_core::ElicitMessage {
             request: tc_req,
             response_tx: tc_tx,
-        } = msg;
+        } = *msg;
 
         // Convert field spec from JSON to typed enum
         let field = parse_field_spec(&tc_req.field);

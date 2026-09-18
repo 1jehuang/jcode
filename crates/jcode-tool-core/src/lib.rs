@@ -116,23 +116,23 @@ pub mod elicit_channel {
     use std::sync::OnceLock;
     use tokio::sync::mpsc;
 
-    static ELICIT_TX: OnceLock<mpsc::UnboundedSender<ElicitMessage>> = OnceLock::new();
+    static ELICIT_TX: OnceLock<mpsc::UnboundedSender<Box<ElicitMessage>>> = OnceLock::new();
 
     /// Initialize the global elicitation channel. Returns the receiver that the
     /// TUI must poll. Safe to call once per process; subsequent calls return a
     /// dead receiver (the first call's sender is used for all tool sends).
-    pub fn init() -> mpsc::UnboundedReceiver<ElicitMessage> {
+    pub fn init() -> mpsc::UnboundedReceiver<Box<ElicitMessage>> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = ELICIT_TX.set(tx);
         rx
     }
 
     /// Try to send without blocking (returns Err if channel closed or not initialized).
-    pub fn try_send(msg: ElicitMessage) -> Result<(), tokio::sync::mpsc::error::SendError<ElicitMessage>> {
+    pub fn try_send(msg: ElicitMessage) -> Result<(), tokio::sync::mpsc::error::SendError<Box<ElicitMessage>>> {
         let Some(tx) = ELICIT_TX.get() else {
-            return Err(tokio::sync::mpsc::error::SendError(msg));
+            return Err(tokio::sync::mpsc::error::SendError(Box::new(msg)));
         };
-        tx.send(msg)
+        tx.send(Box::new(msg))
     }
 }
 
