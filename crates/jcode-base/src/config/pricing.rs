@@ -337,7 +337,7 @@ fn convert_sources(
         for (index, source) in sources.iter().enumerate() {
             let path = format!("pricing.sources[{index}]");
             match source.id.as_deref().map(str::trim) {
-                Some(id) if id.is_empty() => {
+                Some("") => {
                     return Err(PricingConfigError::new(
                         format!("{path}.id"),
                         "a pricing source `id` must not be empty; omit it to derive one from \
