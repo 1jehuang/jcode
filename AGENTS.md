@@ -2,6 +2,10 @@
 
 ## Development Workflow
 
+- **Use the user's Git identity** - Create commits with the configured
+  `user.name` and `user.email`. Do not override them with `Jcode`, `Jcode agent`,
+  or a fabricated agent email. Preserve existing contributor attribution when
+  integrating work. If no identity is configured, ask rather than inventing one.
 - **Welcome pull requests from everyone** - Review contributions on their merits,
   regardless of whether the author is a maintainer, an existing contributor, a
   first-time contributor, or an agent. Good PRs can be merged directly after review
