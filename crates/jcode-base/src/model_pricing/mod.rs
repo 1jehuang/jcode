@@ -45,6 +45,17 @@ pub use generation::pricing_generation;
 pub(crate) use source_registry::save_test_source;
 pub use sources::{pricing_config, pricing_config_error, unmatchable_provider_keys};
 
+/// The file name of jcode's own models.dev cache, so the config layer can refuse
+/// a bare `[[pricing.sources]].file` name that would shadow it.
+pub(crate) fn catalog_cache_file_name() -> &'static str {
+    catalog::CACHE_FILE
+}
+
+/// The file name of jcode's own sources cache, for the same collision guard.
+pub(crate) fn sources_cache_file_name() -> &'static str {
+    source_registry::SOURCES_CACHE_FILE
+}
+
 use catalog::PricingCache;
 #[cfg(test)]
 use catalog::parse_api_response;
@@ -550,8 +561,8 @@ pub fn comparable_reference_cost_micros(estimate: &RouteCheapnessEstimate) -> Op
 /// downstream crates' test targets via feature unification), and users can opt
 /// out entirely. JCODE_FORCE_PRICING_REFRESH=1 re-enables the fetch for manual
 /// e2e checks (e.g. `cargo run --example pricing_e2e_check`, which builds with
-/// the `test-support` feature unified in). Shared by the models.dev catalog and
-/// the `[[pricing.sources]]` registry so the two cannot drift apart.
+/// the `test-support` feature unified in). Only the models.dev catalog fetches;
+/// user `[[pricing.sources]]` are always local files.
 pub(crate) fn background_refresh_allowed() -> bool {
     if std::env::var_os("JCODE_FORCE_PRICING_REFRESH").is_some() {
         return true;

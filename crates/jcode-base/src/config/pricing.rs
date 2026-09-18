@@ -19,10 +19,6 @@ use std::path::PathBuf;
 
 pub use jcode_config_types::OnRuleExpiry;
 
-/// Default TTL for a `[[pricing.sources]]` sheet: the same 24h the models.dev
-/// catalog uses.
-pub const DEFAULT_SOURCE_REFRESH_SECS: u64 = 24 * 60 * 60;
-
 /// The only `[[pricing.sources]].format` v1 understands: models.dev's own
 /// `{provider: {models: {id: {cost, ...}}}}` shape.
 pub const SOURCE_FORMAT_MODELS_DEV_V1: &str = "models_dev_v1";
@@ -129,70 +125,6 @@ pub struct ProviderPricing {
     pub models: BTreeMap<String, ModelPricingRule>,
 }
 
-/// Where a `[[pricing.sources]]` sheet is read from.
-///
-/// Only two kinds exist, and they differ in how a refresh is allowed to happen:
-/// a local file is cheap to read and is therefore re-read inline when its cache
-/// is stale, while a remote sheet is only ever fetched by the background
-/// refresher so a lookup can never block on the network (spec 4.4's fetch
-/// constraint: `https://` and `file://` only).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceLocation {
-    /// `file:///opt/jcode/pricing.json`, or a bare filesystem path.
-    LocalFile(PathBuf),
-    /// `https://…`. `http://` is rejected: a price sheet decides what money is
-    /// spent, so it does not travel in the clear.
-    Remote(String),
-}
-
-impl SourceLocation {
-    /// The location as the user wrote it, for messages.
-    pub fn describe(&self) -> String {
-        match self {
-            Self::LocalFile(path) => format!("file://{}", path.display()),
-            Self::Remote(url) => url.clone(),
-        }
-    }
-
-    /// The location safe to log and to persist: `scheme://host/path` with any
-    /// query and userinfo stripped.
-    ///
-    /// A sheet URL is how a user points jcode at a private mirror, and the
-    /// schema has no header field yet, so credentials go in the query string
-    /// (`?private_token=glpat-…`). `crate::message::redact_secrets` does not
-    /// recognise those, and both the warning lines and the persisted
-    /// `pricing_sources.json` used to carry the URL verbatim, so this is the one
-    /// form the registry is allowed to write down. It is *not* what is fetched:
-    /// the request still uses [`Self::describe`].
-    pub fn describe_for_log(&self) -> String {
-        match self {
-            Self::LocalFile(path) => format!("file://{}", path.display()),
-            Self::Remote(url) => redact_url(url),
-        }
-    }
-}
-
-/// Strip a URL down to `scheme://host/path`, dropping the query, the fragment,
-/// and any userinfo. A URL without a `scheme://` is returned with its query and
-/// fragment dropped, so nothing unrecognised leaks.
-fn redact_url(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((scheme, rest)) => (Some(scheme), rest),
-        None => (None, url),
-    };
-    let without_suffix = rest.split_once(['?', '#']).map_or(rest, |(head, _)| head);
-    let authority_end = without_suffix.find('/').unwrap_or(without_suffix.len());
-    let (authority, path) = without_suffix.split_at(authority_end);
-    // Drop any `user:password@` prefix in the authority.
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    match scheme {
-        Some(scheme) => format!("{scheme}://{authority}{path}"),
-        None => format!("{authority}{path}"),
-    }
-}
-
 /// A validated `[[pricing.sources]]` entry.
 ///
 /// The validation that matters to the merge is done once, here: the list is
@@ -203,12 +135,14 @@ fn redact_url(url: &str) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricingSource {
     pub id: String,
-    pub location: SourceLocation,
+    /// The resolved local file the sheet is read from. A bare name has already
+    /// been resolved under `~/.jcode/cache/`; `~` has been expanded. jcode never
+    /// fetches a price sheet, so this is always a path on disk.
+    pub path: PathBuf,
     /// Provider identities this sheet may price; empty means every provider.
     pub scope: Vec<String>,
     /// Model globs this sheet may price; empty means every model.
     pub models: Vec<String>,
-    pub refresh_secs: u64,
     pub priority: i64,
     pub currency: Currency,
 }
@@ -310,7 +244,7 @@ pub fn validate(
 /// Validate `[[pricing.sources]]` and put the entries in resolution order.
 ///
 /// A malformed entry is a hard error carrying its config path, so the display
-/// can name the line to fix (`invalid [pricing]: pricing.sources[0].url`); it
+/// can name the line to fix (`invalid [pricing]: pricing.sources[0].file`); it
 /// must not be a log-only warning, because a source that silently does not load
 /// looks exactly like a source that has nothing to say.
 ///
@@ -319,7 +253,7 @@ pub fn validate(
 /// of two sheets prices a model.
 ///
 /// `id` is **optional**: the single-source case is one line
-/// (`url = "file:///home/me/prices.json"`). An entry without one gets a
+/// (`file = "deepseek.json"`). An entry without one gets a
 /// deterministic id derived from its location ([`derive_source_id`]), and a
 /// derived id that would collide with another entry's explicit or derived id is
 /// disambiguated deterministically (`prices`, `prices-2`, …) in declaration
@@ -364,12 +298,12 @@ fn convert_sources(
     let mut converted: Vec<PricingSource> = Vec::with_capacity(sources.len());
     for (index, source) in sources.iter().enumerate() {
         let path = format!("pricing.sources[{index}]");
-        let location = parse_source_location(&source.url, &format!("{path}.url"))?;
+        let resolved = parse_source_location(&source.file, &format!("{path}.file"))?;
 
         let id = match &explicit[index] {
             Some(id) => id.clone(),
             None => {
-                let id = unique_derived_id(&location, index, &used);
+                let id = unique_derived_id(&resolved, index, &used);
                 used.push(id.clone());
                 id
             }
@@ -413,13 +347,6 @@ fn convert_sources(
             }
         }
 
-        if source.refresh_secs == Some(0) {
-            return Err(PricingConfigError::new(
-                format!("{path}.refresh_secs"),
-                "a source TTL must be at least one second",
-            ));
-        }
-
         let currency = parse_currency(
             source.currency.as_deref().unwrap_or("USD"),
             &format!("{path}.currency"),
@@ -428,10 +355,9 @@ fn convert_sources(
 
         converted.push(PricingSource {
             id,
-            location,
+            path: resolved,
             scope,
             models,
-            refresh_secs: source.refresh_secs.unwrap_or(DEFAULT_SOURCE_REFRESH_SECS),
             priority: source.priority.unwrap_or(0),
             currency,
         });
@@ -451,26 +377,14 @@ fn convert_sources(
 ///
 /// The id is a cache key (`~/.jcode/cache/pricing_sources.json`) and appears in
 /// user-facing labels (`rule expired (pricing source \`prices\`)`), so it must
-/// be deterministic and stable across edits, and recognisably derived from what
-/// the entry points at:
-///
-/// * a local file uses its file stem: `/opt/jcode/prices.json` -> `prices`;
-/// * a URL uses the last path segment without its extension:
-///   `.../models_dev.mirror.json` -> `models_dev.mirror`;
-/// * a location that yields nothing usable falls back to `source{n}` (1-based),
-///   which is what makes an otherwise anonymous sheet identifiable.
-fn derive_source_id(location: &SourceLocation, index: usize) -> String {
-    let stem = match location {
-        SourceLocation::LocalFile(path) => path.file_stem(),
-        SourceLocation::Remote(url) => {
-            // Strip the query/fragment first: a token in `?private_token=…` must
-            // not end up in the id (or in anything derived from it).
-            let without_suffix = url.split(['?', '#']).next().unwrap_or(url.as_str());
-            let last_segment = without_suffix.rsplit('/').next().unwrap_or(without_suffix);
-            std::path::Path::new(last_segment).file_stem()
-        }
-    };
-    stem.and_then(|stem| stem.to_str())
+/// be deterministic and stable across edits, and recognisably derived from the
+/// file the entry points at: its file stem, so `/opt/jcode/prices.json` and a
+/// bare `prices.json` both yield `prices`. A path that yields nothing usable
+/// falls back to `source{n}` (1-based), which is what makes an otherwise
+/// anonymous sheet identifiable.
+fn derive_source_id(path: &std::path::Path, index: usize) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
         .map(str::trim)
         .filter(|stem| !stem.is_empty())
         .map(str::to_string)
@@ -484,8 +398,8 @@ fn derive_source_id(location: &SourceLocation, index: usize) -> String {
 /// mean a sheet the user configured never prices anything, so the collision is
 /// resolved by appending `-2`, `-3`, … in declaration order. The result depends
 /// only on the file's declaration order, never on map iteration order.
-fn unique_derived_id(location: &SourceLocation, index: usize, used: &[String]) -> String {
-    let base = derive_source_id(location, index);
+fn unique_derived_id(path: &std::path::Path, index: usize, used: &[String]) -> String {
+    let base = derive_source_id(path, index);
     if !used.contains(&base) {
         return base;
     }
@@ -499,39 +413,77 @@ fn unique_derived_id(location: &SourceLocation, index: usize, used: &[String]) -
     }
 }
 
-/// Turn a `url` into a location, rejecting schemes jcode will not fetch.
-fn parse_source_location(raw: &str, path: &str) -> Result<SourceLocation, PricingConfigError> {
+/// `~/.jcode/cache/`, where a bare source name resolves and where the models.dev
+/// catalog and the sources cache live.
+fn cache_dir() -> PathBuf {
+    crate::storage::jcode_dir()
+        .unwrap_or_else(|_| PathBuf::from(".").join(".jcode"))
+        .join("cache")
+}
+
+/// The names of jcode's own files in `~/.jcode/cache/`. A bare source name that
+/// matches one of these is refused: the user's sheet must never shadow jcode's
+/// cache.
+fn jcode_cache_file_names() -> [&'static str; 2] {
+    [
+        crate::model_pricing::catalog_cache_file_name(),
+        crate::model_pricing::sources_cache_file_name(),
+    ]
+}
+
+/// Expand a leading `~` (alone or `~/…`) to the user's home directory. `~user`
+/// is not expanded: it is left as a literal path, like every other shell would
+/// need a passwd lookup for.
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if text == "~" {
+        return dirs::home_dir().unwrap_or(path);
+    }
+    if let Some(rest) = text.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    path
+}
+
+/// Whether `raw` is a bare file name: no path separator and not `~`-anchored.
+/// A bare name resolves under `~/.jcode/cache/`; everything else is a path.
+fn is_bare_name(raw: &str) -> bool {
+    !raw.is_empty() && !raw.contains('/') && !raw.contains('\\') && !raw.starts_with('~')
+}
+
+/// Turn a `file` value into the local path a source is read from.
+///
+/// A price sheet is always a local file: jcode never fetches it. The value is
+/// either a **bare name** (`deepseek.json`), which resolves under
+/// `~/.jcode/cache/` and is refused if it would shadow one of jcode's own files
+/// there, or a **path** (absolute, or relative with a separator, `~` expanded),
+/// which is used exactly as written. Anything that is not a readable file there
+/// simply contributes no rules.
+fn parse_source_location(raw: &str, path: &str) -> Result<PathBuf, PricingConfigError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err(PricingConfigError::new(
             path,
-            "a pricing source needs a `url` (an `https://` URL or a local file)",
+            "a pricing source needs a `file` naming a local price sheet",
         ));
     }
-    if let Some(rest) = raw.strip_prefix("file://") {
-        if rest.trim().is_empty() {
+    if is_bare_name(raw) {
+        if jcode_cache_file_names().contains(&raw) {
             return Err(PricingConfigError::new(
                 path,
-                "`file://` needs a path after it",
+                format!(
+                    "`{raw}` is jcode's own file in {}; choose another name",
+                    cache_dir().display()
+                ),
             ));
         }
-        return Ok(SourceLocation::LocalFile(PathBuf::from(rest)));
+        return Ok(cache_dir().join(raw));
     }
-    if let Some((scheme, _)) = raw.split_once("://") {
-        if scheme.eq_ignore_ascii_case("https") {
-            return Ok(SourceLocation::Remote(raw.to_string()));
-        }
-        return Err(PricingConfigError::new(
-            path,
-            format!(
-                "unsupported scheme `{scheme}://`; a price source must be `https://` or a local \
-                 file (`file:///path/to/pricing.json`)"
-            ),
-        ));
-    }
-    // No scheme at all: a local path, which is what the user means when they
-    // point at a file on disk.
-    Ok(SourceLocation::LocalFile(PathBuf::from(raw)))
+    Ok(expand_tilde(PathBuf::from(raw)))
 }
 
 /// Normalize a currency code, warning (not failing) on unknown codes.

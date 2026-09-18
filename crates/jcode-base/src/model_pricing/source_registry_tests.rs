@@ -1,20 +1,17 @@
 //! `[[pricing.sources]]` registry tests.
 //!
-//! Everything here runs in an isolated `JCODE_HOME`, uses `file://` sheets or a
-//! primed cache for the network case, and never lets a background fetch start
-//! (`background_refresh_allowed` is false in test builds), so the merge order,
-//! the TTL and the failure paths are all exercised deterministically.
+//! Everything here runs in an isolated `JCODE_HOME` and uses local sheet files
+//! or a primed cache, so the merge order, the mtime freshness and the failure
+//! paths are all exercised deterministically.
 
 use super::ModelCost;
 use super::entry::ModelPricingEntry;
 use super::source_registry::{
-    MAX_SHEET_BYTES_TEST as MAX_SHEET_BYTES, cached_fetched_at_for_tests,
-    cached_fingerprint_for_tests, cached_source_ids_for_tests, clear_sources_cache_for_tests,
-    fetch_remote, forget_failures_for_tests, in_backoff_for_tests, local_sheet_reads_for_tests,
-    read_body_limited, read_local_sheet, reset_local_sheet_reads_for_tests, save_catalog,
-    source_card,
+    MAX_SHEET_BYTES_TEST as MAX_SHEET_BYTES, cached_fingerprint_for_tests,
+    cached_source_ids_for_tests, clear_sources_cache_for_tests, forget_failures_for_tests,
+    in_backoff_for_tests, local_sheet_reads_for_tests, read_local_sheet,
+    reset_local_sheet_reads_for_tests, save_catalog, source_card,
 };
-use crate::config::SourceLocation;
 use crate::model_pricing::{clear_memory_cache_for_tests, save_test_cache, save_test_source};
 use jcode_provider_core::Currency;
 use std::ffi::OsString;
@@ -64,11 +61,11 @@ impl Env {
         crate::config::invalidate_config_cache();
     }
 
-    /// Write a sheet next to the config and return its `file://` URL.
-    fn sheet_url(&self, name: &str, body: &str) -> String {
+    /// Write a sheet next to the config and return its path.
+    fn sheet_path(&self, name: &str, body: &str) -> String {
         let path = self.dir.path().join(name);
         std::fs::write(&path, body).expect("write sheet");
-        format!("file://{}", path.display())
+        path.display().to_string()
     }
 
     fn save_models_dev(&self) {
@@ -120,7 +117,7 @@ fn priced_by(source_key: &str, model: &str) -> Option<String> {
 fn a_sheet_prices_between_the_config_card_and_models_dev() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -128,7 +125,7 @@ fn a_sheet_prices_between_the_config_card_and_models_dev() {
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -142,7 +139,7 @@ url = "{url}"
     );
 
     // Config card added: the card is authoritative and it wins.
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -150,7 +147,7 @@ url = "{url}"
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 
 [pricing.providers.deepseek.models.deepseek-v4-pro.cost]
 input = 1.0
@@ -180,7 +177,7 @@ output = 2.0
 fn scope_form_one_matches_the_exact_source_key() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "openrouter.json",
         &sheet_body("openrouter", "some-model", 3.0, 4.0),
     );
@@ -188,7 +185,7 @@ fn scope_form_one_matches_the_exact_source_key() {
         r#"
 [[pricing.sources]]
 id = "openrouter-only"
-url = "{url}"
+file = "{url}"
 scope = ["openrouter"]
 "#
     ));
@@ -208,7 +205,7 @@ scope = ["openrouter"]
 fn scope_form_two_matches_the_models_dev_provider_id_on_both_sides() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "deepseek.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -216,7 +213,7 @@ fn scope_form_two_matches_the_models_dev_provider_id_on_both_sides() {
         r#"
 [[pricing.sources]]
 id = "ds"
-url = "{url}"
+file = "{url}"
 scope = ["deepseek"]
 "#
     ));
@@ -240,7 +237,7 @@ scope = ["deepseek"]
 fn scope_form_three_matches_the_compatible_profile_id() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "gateway.json",
         &sheet_body("my-gateway", "gw-model", 5.0, 6.0),
     );
@@ -248,7 +245,7 @@ fn scope_form_three_matches_the_compatible_profile_id() {
         r#"
 [[pricing.sources]]
 id = "gateway"
-url = "{url}"
+file = "{url}"
 scope = ["openai-compatible:my-gateway"]
 "#
     ));
@@ -272,7 +269,7 @@ fn a_models_glob_scopes_a_sheet() {
     let env = Env::new();
     env.save_models_dev();
     // Two models in one sheet: only the globbed one is covered.
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "glob.json",
         r#"{"deepseek":{"models":{
             "deepseek-v4-pro":{"cost":{"input":9.0,"output":18.0}},
@@ -283,7 +280,7 @@ fn a_models_glob_scopes_a_sheet() {
         r#"
 [[pricing.sources]]
 id = "v4-only"
-url = "{url}"
+file = "{url}"
 scope = ["deepseek"]
 models = ["deepseek-v4-*"]
 "#
@@ -306,11 +303,11 @@ fn priority_decides_between_sheets_and_the_id_breaks_ties() {
     env.save_models_dev();
     // The ids are deliberately in the opposite order to the priorities, so an
     // id-only ordering cannot pass this test by accident.
-    let losing = env.sheet_url(
+    let losing = env.sheet_path(
         "losing.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
-    let winning = env.sheet_url(
+    let winning = env.sheet_path(
         "winning.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 3.0, 6.0),
     );
@@ -320,12 +317,12 @@ fn priority_decides_between_sheets_and_the_id_breaks_ties() {
         r#"
 [[pricing.sources]]
 id = "alpha"
-url = "{losing}"
+file = "{losing}"
 priority = 10
 
 [[pricing.sources]]
 id = "zulu"
-url = "{winning}"
+file = "{winning}"
 priority = 5
 "#
     ));
@@ -342,11 +339,11 @@ priority = 5
         r#"
 [[pricing.sources]]
 id = "zulu"
-url = "{losing}"
+file = "{losing}"
 
 [[pricing.sources]]
 id = "alpha"
-url = "{winning}"
+file = "{winning}"
 "#
     ));
     let winner = source_card("deepseek", "deepseek-v4-pro", SystemTime::now()).expect("hit");
@@ -364,7 +361,7 @@ fn a_lower_priority_sheet_fills_fields_the_winner_leaves_unset() {
     // The winner's entry is primed rather than parsed: the JSON parser
     // (correctly) refuses a model with no output rate, and this test is about
     // what the merge does with an entry that has one.
-    let complete = env.sheet_url(
+    let complete = env.sheet_path(
         "complete.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -372,24 +369,23 @@ fn a_lower_priority_sheet_fills_fields_the_winner_leaves_unset() {
     // rate), so its file has to exist for the primed copy to be fresh.
     let winner_path = env.dir.path().join("winner.json");
     std::fs::write(&winner_path, "{}").expect("write the winner's file");
-    let winner_url = format!("file://{}", winner_path.display());
+    let winner_url = winner_path.display().to_string();
     env.write_config(&format!(
         r#"
 [[pricing.sources]]
 id = "winner"
-url = "{winner_url}"
+file = "{winner_url}"
 priority = 0
 
 [[pricing.sources]]
 id = "filler"
-url = "{complete}"
+file = "{complete}"
 priority = 10
 "#
     ));
     save_test_source(
         "winner",
-        &winner_url,
-        super::catalog::now_unix_secs(),
+        &winner_path,
         &[(
             "deepseek",
             "deepseek-v4-pro",
@@ -418,77 +414,6 @@ priority = 10
 }
 
 #[test]
-fn a_fresh_sheet_is_used_and_a_stale_one_is_not() {
-    let env = Env::new();
-    env.save_models_dev();
-    let url = "https://pricing.example.invalid/mirror.json";
-    env.write_config(&format!(
-        r#"
-[[pricing.sources]]
-id = "mirror"
-url = "{url}"
-refresh_secs = 3600
-"#
-    ));
-
-    let now = super::catalog::now_unix_secs();
-    save_test_source(
-        "mirror",
-        url,
-        now,
-        &[("deepseek", "deepseek-v4-pro", cost(9.0, 18.0))],
-    );
-    let fresh =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
-            .expect("priced");
-    assert!(
-        (fresh.amount - reference_amount(9.0, 18.0)).abs() < 1e-12,
-        "a copy within its TTL is used, got {fresh:?}"
-    );
-
-    // Same copy, fetched long before the 3600s TTL: not used, and the call is
-    // still priced by models.dev (never left unpriced).
-    save_test_source(
-        "mirror",
-        url,
-        0,
-        &[("deepseek", "deepseek-v4-pro", cost(9.0, 18.0))],
-    );
-    let stale =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
-            .expect("still priced");
-    assert!(
-        (stale.amount - MODELS_DEV_REFERENCE).abs() < 1e-12,
-        "a stale copy must not be used, got {stale:?}"
-    );
-    assert_eq!(
-        cached_fetched_at_for_tests("mirror"),
-        Some(0),
-        "the last good copy stays on disk for the refresh to replace"
-    );
-}
-
-#[test]
-fn an_unreachable_remote_sheet_falls_through_to_models_dev() {
-    let env = Env::new();
-    env.save_models_dev();
-    env.write_config(
-        r#"
-[[pricing.sources]]
-id = "gone"
-url = "https://pricing.example.invalid/gone.json"
-"#,
-    );
-
-    assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
-    let priced =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
-            .expect("models.dev still prices the call");
-    assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
-    assert!(priced.currency.is_usd());
-}
-
-#[test]
 fn a_missing_local_sheet_falls_through_to_models_dev() {
     let env = Env::new();
     env.save_models_dev();
@@ -497,7 +422,7 @@ fn a_missing_local_sheet_falls_through_to_models_dev() {
         r#"
 [[pricing.sources]]
 id = "missing"
-url = "file://{}"
+file = "{}"
 "#,
         missing.display()
     ));
@@ -508,16 +433,38 @@ url = "file://{}"
     assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
 }
 
+/// A `file://` value is not a synonym for anything: it is simply a path-like
+/// string that does not exist on disk, so the source contributes no rules and
+/// the call falls through to the next layer.
+#[test]
+fn a_file_url_value_is_just_a_path_that_does_not_exist() {
+    let env = Env::new();
+    env.save_models_dev();
+    env.write_config(
+        r#"
+[[pricing.sources]]
+id = "scheme"
+file = "file:///nowhere/prices.json"
+"#,
+    );
+
+    assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
+    let priced =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("models.dev still prices the call");
+    assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
+}
+
 #[test]
 fn a_malformed_sheet_falls_through_to_models_dev() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url("broken.json", "{ this is not json ");
+    let url = env.sheet_path("broken.json", "{ this is not json ");
     env.write_config(&format!(
         r#"
 [[pricing.sources]]
 id = "broken"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -532,7 +479,7 @@ url = "{url}"
 fn a_sheet_whose_rule_is_out_of_effect_is_skipped() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "expired.json",
         r#"{"deepseek":{"models":{"deepseek-v4-pro":{
             "cost":{"input":9.0,"output":18.0},
@@ -543,7 +490,7 @@ fn a_sheet_whose_rule_is_out_of_effect_is_skipped() {
         r#"
 [[pricing.sources]]
 id = "expired"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -576,7 +523,7 @@ url = "{url}"
 fn an_in_effect_sheet_rule_is_not_reported_out_of_effect() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "live.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -584,7 +531,7 @@ fn an_in_effect_sheet_rule_is_not_reported_out_of_effect() {
         r#"
 [[pricing.sources]]
 id = "live"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -607,7 +554,7 @@ url = "{url}"
 fn a_foreign_currency_sheet_prices_in_its_own_currency_never_in_another() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "cny.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 12.0, 24.0),
     );
@@ -615,7 +562,7 @@ fn a_foreign_currency_sheet_prices_in_its_own_currency_never_in_another() {
         r#"
 [[pricing.sources]]
 id = "cny"
-url = "{url}"
+file = "{url}"
 currency = "CNY"
 "#
     ));
@@ -659,19 +606,18 @@ fn an_incomplete_foreign_currency_sheet_does_not_relabel_models_dev() {
     // to look like a copy this process just read.
     let path = env.dir.path().join("incomplete.json");
     std::fs::write(&path, "{}").expect("write the primed sheet's file");
-    let location = format!("file://{}", path.display());
+    let location = path.display().to_string();
     env.write_config(&format!(
         r#"
 [[pricing.sources]]
 id = "incomplete"
-url = "{location}"
+file = "{location}"
 currency = "CNY"
 "#
     ));
     save_test_source(
         "incomplete",
-        &location,
-        super::catalog::now_unix_secs(),
+        &path,
         &[(
             "deepseek",
             "deepseek-v4-pro",
@@ -699,7 +645,7 @@ currency = "CNY"
 fn the_derived_billing_layer_labels_and_uses_the_sheet() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -707,7 +653,7 @@ fn the_derived_billing_layer_labels_and_uses_the_sheet() {
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -755,7 +701,7 @@ url = "{url}"
 fn the_config_card_still_outranks_a_sheet_in_the_route_catalog() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
@@ -763,7 +709,7 @@ fn the_config_card_still_outranks_a_sheet_in_the_route_catalog() {
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 
 [pricing.providers.deepseek.models.deepseek-v4-pro.cost]
 input = 1.0
@@ -805,7 +751,7 @@ fn glob_matching_is_case_insensitive_and_supports_star_and_question_mark() {
 fn a_currency_stated_by_a_sheet_is_normalized_like_any_other_code() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "cny.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 12.0, 24.0),
     );
@@ -813,7 +759,7 @@ fn a_currency_stated_by_a_sheet_is_normalized_like_any_other_code() {
         r#"
 [[pricing.sources]]
 id = "cny"
-url = "{url}"
+file = "{url}"
 currency = "cny"
 "#
     ));
@@ -834,12 +780,12 @@ fn an_invalid_source_is_reported_to_the_display_and_ignored() {
         r#"
 [[pricing.sources]]
 id = "bad"
-url = "http://insecure.example/pricing.json"
+file = ""
 "#,
     );
 
     let error = crate::model_pricing::pricing_config_error().expect("reported");
-    assert_eq!(error.field_path, "pricing.sources[0].url");
+    assert_eq!(error.field_path, "pricing.sources[0].file");
 
     // And the section is ignored whole, exactly like any other invalid
     // `[pricing]`: models.dev still prices the call.
@@ -855,7 +801,7 @@ url = "http://insecure.example/pricing.json"
 fn a_sheet_can_state_peak_hours_like_a_hand_written_card() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "peak.json",
         r#"{"deepseek":{"models":{"deepseek-v4-pro":{
             "cost":{"input":1.0,"output":2.0},
@@ -872,7 +818,7 @@ fn a_sheet_can_state_peak_hours_like_a_hand_written_card() {
         r#"
 [[pricing.sources]]
 id = "peak"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -902,7 +848,7 @@ url = "{url}"
 fn the_derived_billing_layer_reads_a_sheet_schedule_at_the_call_instant() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "peak.json",
         r#"{"deepseek":{"models":{"deepseek-v4-pro":{
             "cost":{"input":1.0,"output":2.0},
@@ -919,7 +865,7 @@ fn the_derived_billing_layer_reads_a_sheet_schedule_at_the_call_instant() {
         r#"
 [[pricing.sources]]
 id = "peak"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -962,7 +908,7 @@ url = "{url}"
 fn a_sheets_long_context_tier_is_reported_and_billed() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "tiers.json",
         r#"{"deepseek":{"models":{"deepseek-v4-pro":{
             "cost":{"input":1.0,"output":2.0},
@@ -973,7 +919,7 @@ fn a_sheets_long_context_tier_is_reported_and_billed() {
         r#"
 [[pricing.sources]]
 id = "tiers"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -1045,7 +991,7 @@ fn a_failing_source_is_not_retried_on_every_lookup() {
         r#"
 [[pricing.sources]]
 id = "missing"
-url = "file://{}"
+file = "{}"
 "#,
         missing.display()
     ));
@@ -1093,7 +1039,7 @@ url = "file://{}"
 fn two_matching_sheet_provider_keys_always_pick_the_same_section() {
     for iteration in 0..16 {
         let env = Env::new();
-        let url = env.sheet_url(
+        let url = env.sheet_path(
             "mirror.json",
             r#"{"claude":{"models":{"claude-fable-5":{"cost":{"input":9.0,"output":9.0}}}},
                 "anthropic-api":{"models":{"claude-fable-5":{"cost":{"input":1.0,"output":2.0}}}}}"#,
@@ -1102,7 +1048,7 @@ fn two_matching_sheet_provider_keys_always_pick_the_same_section() {
             r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 "#
         ));
         let hit = source_card("claude:api-key", "claude-fable-5", SystemTime::now())
@@ -1122,7 +1068,7 @@ url = "{url}"
 fn a_partial_usd_config_card_is_filled_from_a_sheet_before_models_dev() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 3.0, 7.0),
     );
@@ -1130,7 +1076,7 @@ fn a_partial_usd_config_card_is_filled_from_a_sheet_before_models_dev() {
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 
 [pricing.providers.deepseek.models."deepseek-v4-pro".cost]
 input = 1.5
@@ -1157,7 +1103,7 @@ input = 1.5
 fn a_sheet_card_fills_from_models_dev_and_not_another_sheet() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "mirror.json",
         r#"{"deepseek":{"models":{"deepseek-v4-pro":{"cost":{"input":3.0,"output":7.0}}}}}"#,
     );
@@ -1165,7 +1111,7 @@ fn a_sheet_card_fills_from_models_dev_and_not_another_sheet() {
         r#"
 [[pricing.sources]]
 id = "mirror"
-url = "{url}"
+file = "{url}"
 "#
     ));
 
@@ -1201,7 +1147,7 @@ fn cache_file(env: &Env) -> std::path::PathBuf {
 #[test]
 fn a_save_bases_on_memory_and_never_drops_the_other_source() {
     let env = Env::new();
-    let location = SourceLocation::LocalFile(env.dir.path().join("sheet.json"));
+    let location = env.dir.path().join("sheet.json");
     save_catalog("a", &location, None, providers_for("m-a"));
     // The disk file disappears under us; the process still holds `a`.
     std::fs::remove_file(cache_file(&env)).expect("remove cache file");
@@ -1221,7 +1167,7 @@ fn a_save_bases_on_memory_and_never_drops_the_other_source() {
 #[test]
 fn concurrent_saves_of_different_sources_all_survive() {
     let env = Env::new();
-    let location = SourceLocation::LocalFile(env.dir.path().join("sheet.json"));
+    let location = env.dir.path().join("sheet.json");
     let handles: Vec<_> = (0..12)
         .map(|index| {
             let id = format!("s{index}");
@@ -1277,141 +1223,18 @@ fn a_non_regular_sheet_path_is_refused_without_being_opened() {
     );
 }
 
-/// The remote shape: a body whose `Content-Length` is past the ceiling is
-/// refused from the header, so the body is never read into memory. A tiny local
-/// HTTP fixture stands in for the network.
-#[test]
-fn an_oversized_remote_body_is_refused_without_being_buffered() {
-    use std::io::{Read as _, Write as _};
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let handle = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
-        let mut request = [0u8; 1024];
-        let _ = stream.read(&mut request);
-        let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            MAX_SHEET_BYTES + 10
-        );
-        let _ = stream.write_all(header.as_bytes());
-        let _ = stream.write_all(b"{}");
-        let _ = stream.flush();
-    });
-
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let result = runtime.block_on(async {
-        let response = reqwest::Client::new()
-            .get(format!("http://{addr}/sheet.json"))
-            .send()
-            .await
-            .expect("response");
-        read_body_limited(response).await
-    });
-    let error = result.expect_err("the content-length precheck must refuse it");
-    assert!(
-        error.to_string().contains("larger than"),
-        "expected the size error, got: {error}"
-    );
-    let _ = handle.join();
-}
-
-/// A redirect must not smuggle the sheet back onto cleartext transport: the
-/// config layer rejects `http://`, so the FINAL url must still be `https`. The
-/// fixture serves both the 302 and the cleartext target, so reqwest completes
-/// the redirect and the scheme check is what refuses it.
-#[test]
-fn a_redirected_sheet_url_must_still_be_https() {
-    use std::io::{Read as _, Write as _};
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let handle = std::thread::spawn(move || {
-        for step in 0..2 {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut request = [0u8; 1024];
-            let _ = stream.read(&mut request);
-            let response = if step == 0 {
-                format!(
-                    "HTTP/1.1 302 Found\r\nLocation: http://{addr}/cleartext.json\r\nContent-Length: 0\r\n\r\n"
-                )
-            } else {
-                let body = r#"{"deepseek":{"models":{"m":{"cost":{"input":1.0,"output":2.0}}}}}"#;
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-                    body.len()
-                )
-            };
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        }
-    });
-
-    let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let result = runtime.block_on(fetch_remote(&format!("http://{addr}/sheet.json")));
-    let error = result.expect_err("a cleartext redirect must be refused");
-    assert!(
-        error.to_string().contains("only https"),
-        "expected the https refusal, got: {error}"
-    );
-    let _ = handle.join();
-}
-
-/// A sheet URL is persisted and logged in a redacted form: no query (where a
-/// GitLab token lives, since the schema has no header field) and no userinfo.
-#[test]
-fn a_sheet_url_with_a_token_is_redacted_in_the_cache_file() {
-    let env = Env::new();
-    let location = SourceLocation::Remote(
-        "https://gitlab.internal/api/v4/projects/1/repository/files/p.json/raw\
-         ?ref=main&private_token=glpat-SUPERSECRET"
-            .to_string(),
-    );
-
-    let redacted = location.describe_for_log();
-    assert_eq!(
-        redacted,
-        "https://gitlab.internal/api/v4/projects/1/repository/files/p.json/raw"
-    );
-    assert!(!redacted.contains("glpat"), "no token in {redacted}");
-    assert!(
-        !redacted.contains("private_token"),
-        "no query in {redacted}"
-    );
-    assert_eq!(
-        SourceLocation::Remote("https://user:pass@host/x.json?a=1".to_string()).describe_for_log(),
-        "https://host/x.json",
-        "userinfo is dropped too"
-    );
-
-    save_catalog("mirror", &location, None, providers_for("m"));
-    let raw = std::fs::read_to_string(cache_file(&env)).expect("cache file");
-    assert!(
-        !raw.contains("glpat"),
-        "the token must not be persisted: {raw}"
-    );
-    assert!(
-        !raw.contains("private_token"),
-        "nor the query string: {raw}"
-    );
-    assert!(
-        raw.contains("gitlab.internal"),
-        "the host still names it: {raw}"
-    );
-}
-
-/// The single-source case: `[[pricing.sources]]` with a `url` and nothing else.
+/// The single-source case: `[[pricing.sources]]` with a `file` and nothing else.
 /// The derived id (`prices`, from `prices.json`) is the cache key and the label
 /// `/pricing` and the cost line print, so it must be the same on every load.
 #[test]
 fn an_id_less_local_source_prices_the_call_under_a_stable_derived_id() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "prices.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
-    let config = format!("[[pricing.sources]]\nurl = \"{url}\"\n");
+    let config = format!("[[pricing.sources]]\nfile = \"{url}\"\n");
     env.write_config(&config);
 
     let priced =
@@ -1440,11 +1263,38 @@ fn an_id_less_local_source_prices_the_call_under_a_stable_derived_id() {
     );
 }
 
-/// A local price file is the user's own file, so editing it has to take effect
-/// at the next lookup. `refresh_secs` is a *remote* concept: a local read is not
-/// network I/O, so the TTL must not hold an edit back for a day.
+/// A bare `file` name resolves under `~/.jcode/cache/`, so the one-line form
+/// names the price file the user dropped in the cache dir rather than spelling
+/// out a path.
 #[test]
-fn an_edited_local_sheet_is_picked_up_without_waiting_the_ttl() {
+fn a_bare_name_source_is_read_from_the_jcode_cache_dir() {
+    let env = Env::new();
+    env.save_models_dev();
+    std::fs::create_dir_all(env.dir.path().join("cache")).expect("create cache dir");
+    std::fs::write(
+        env.dir.path().join("cache").join("deepseek.json"),
+        sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
+    )
+    .expect("write the bare-name sheet");
+    env.write_config("[[pricing.sources]]\nfile = \"deepseek.json\"\n");
+
+    let priced =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("the bare-name sheet prices the model");
+    assert!(
+        (priced.amount - reference_amount(9.0, 18.0)).abs() < 1e-12,
+        "a bare name must resolve under the cache dir, got {priced:?}"
+    );
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro").as_deref(),
+        Some("deepseek")
+    );
+}
+
+/// A local price file is the user's own file, so editing it has to take effect
+/// at the next lookup.
+#[test]
+fn an_edited_local_sheet_is_picked_up_at_the_next_lookup() {
     let env = Env::new();
     env.save_models_dev();
     let path = env.dir.path().join("prices.json");
@@ -1453,8 +1303,7 @@ fn an_edited_local_sheet_is_picked_up_without_waiting_the_ttl() {
     env.write_config(&format!(
         r#"
 [[pricing.sources]]
-url = "file://{}"
-refresh_secs = 86400
+file = "{}"
 "#,
         path.display()
     ));
@@ -1478,7 +1327,7 @@ refresh_secs = 86400
             .expect("the sheet still prices the model");
     assert!(
         (after.amount - reference_amount(3.0, 6.0)).abs() < 1e-12,
-        "an edited local sheet must be re-read without waiting refresh_secs, got {after:?}"
+        "an edited local sheet must be re-read at the next lookup, got {after:?}"
     );
 }
 
@@ -1502,13 +1351,11 @@ fn set_modified(path: &std::path::Path, secs: u64) {
 fn an_unchanged_local_sheet_is_not_reread_on_every_lookup() {
     let env = Env::new();
     env.save_models_dev();
-    let url = env.sheet_url(
+    let url = env.sheet_path(
         "prices.json",
         &sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0),
     );
-    env.write_config(&format!(
-        "[[pricing.sources]]\nurl = \"{url}\"\nrefresh_secs = 3600\n"
-    ));
+    env.write_config(&format!("[[pricing.sources]]\nfile = \"{url}\"\n"));
 
     reset_local_sheet_reads_for_tests();
     assert_eq!(
@@ -1545,7 +1392,7 @@ fn a_missing_local_sheet_costs_one_attempt_per_backoff_not_one_per_lookup() {
     env.save_models_dev();
     let missing = env.dir.path().join("not-there.json");
     env.write_config(&format!(
-        "[[pricing.sources]]\nurl = \"file://{}\"\n",
+        "[[pricing.sources]]\nfile = \"{}\"\n",
         missing.display()
     ));
 

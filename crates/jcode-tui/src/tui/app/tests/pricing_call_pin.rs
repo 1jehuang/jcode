@@ -648,7 +648,7 @@ fn write_source_sheet(id: &str, body: &str) -> String {
     let path = std::path::PathBuf::from(&home).join(format!("{id}.json"));
     std::fs::write(&path, body).expect("write price sheet");
     format!(
-        "\n[[pricing.sources]]\nid = \"{id}\"\nurl = \"file://{}\"\n",
+        "\n[[pricing.sources]]\nid = \"{id}\"\nfile = \"{}\"\n",
         path.display()
     )
 }

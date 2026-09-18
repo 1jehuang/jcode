@@ -4,10 +4,9 @@
 //! code-size budget; everything here goes through the public `validate` entry
 //! point the config loader uses.
 
-use crate::config::pricing::{DEFAULT_SOURCE_REFRESH_SECS, validate};
-use crate::config::{PricingSource, SourceLocation};
+use crate::config::PricingSource;
+use crate::config::pricing::validate;
 use jcode_config_types::PricingConfigFile;
-use jcode_provider_core::Currency;
 
 fn parse_toml(section: &str) -> PricingConfigFile {
     toml::from_str(section).expect("toml parses into the DTO")
@@ -17,23 +16,64 @@ fn sources_of(section: &str) -> Vec<PricingSource> {
     validate(&parse_toml(section)).expect("validates").0.sources
 }
 
+/// An isolated `JCODE_HOME` (and, optionally, `HOME`), with the test-env lock
+/// held for its lifetime. Only the resolution tests that read the environment
+/// need this; the rest name a path.
+struct Home {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous_jcode_home: Option<std::ffi::OsString>,
+    previous_home: Option<std::ffi::OsString>,
+    dir: tempfile::TempDir,
+}
+
+impl Home {
+    fn new() -> Self {
+        let lock = crate::storage::lock_test_env();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let previous_jcode_home = std::env::var_os("JCODE_HOME");
+        let previous_home = std::env::var_os("HOME");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        crate::env::set_var("HOME", dir.path());
+        Self {
+            _lock: lock,
+            previous_jcode_home,
+            previous_home,
+            dir,
+        }
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        restore("JCODE_HOME", self.previous_jcode_home.take());
+        restore("HOME", self.previous_home.take());
+    }
+}
+
+fn restore(key: &str, value: Option<std::ffi::OsString>) {
+    match value {
+        Some(value) => crate::env::set_var(key, value),
+        None => crate::env::remove_var(key),
+    }
+}
+
 #[test]
 fn sources_resolve_by_priority_then_id_whatever_the_file_order_is() {
     let sources = sources_of(
         r#"
         [[sources]]
         id = "zeta"
-        url = "https://example.test/zeta.json"
+        file = "/prices/zeta.json"
         priority = 5
 
         [[sources]]
         id = "alpha"
-        url = "https://example.test/alpha.json"
+        file = "/prices/alpha.json"
         priority = 5
 
         [[sources]]
         id = "first"
-        url = "https://example.test/first.json"
+        file = "/prices/first.json"
         priority = -3
         "#,
     );
@@ -48,67 +88,63 @@ fn sources_resolve_by_priority_then_id_whatever_the_file_order_is() {
 
 #[test]
 fn a_source_needs_a_location_but_an_id_is_optional() {
-    // The single-source case: `url` alone. Deriving the id is what the next
+    // The single-source case: `file` alone. Deriving the id is what the next
     // tests pin down.
-    let sources = sources_of("[[sources]]\nurl = \"file:///home/me/prices.json\"\n");
+    let sources = sources_of("[[sources]]\nfile = \"/home/me/prices.json\"\n");
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].id, "prices");
 
-    let err = validate(&parse_toml("[[sources]]\nid = \"a\"\n")).expect_err("a url-less source");
-    assert_eq!(err.field_path, "pricing.sources[0].url");
+    let err = validate(&parse_toml("[[sources]]\nid = \"a\"\n")).expect_err("a file-less source");
+    assert_eq!(err.field_path, "pricing.sources[0].file");
     let err =
-        validate(&parse_toml("[[sources]]\nid = \"a\"\nurl = \"\"\n")).expect_err("an empty url");
-    assert_eq!(err.field_path, "pricing.sources[0].url");
+        validate(&parse_toml("[[sources]]\nid = \"a\"\nfile = \"\"\n")).expect_err("an empty file");
+    assert_eq!(err.field_path, "pricing.sources[0].file");
 
     // An explicit id is still allowed to be written, and an explicitly empty
     // one is a mistake rather than a request to derive: deriving silently there
     // would hide a half-deleted line.
-    let sources = sources_of("[[sources]]\nid = \"corp\"\nurl = \"file:///home/me/prices.json\"\n");
+    let sources = sources_of("[[sources]]\nid = \"corp\"\nfile = \"/home/me/prices.json\"\n");
     assert_eq!(sources[0].id, "corp");
     let err = validate(&parse_toml(
-        "[[sources]]\nid = \"\"\nurl = \"https://x.test/a.json\"\n",
+        "[[sources]]\nid = \"\"\nfile = \"/home/me/prices.json\"\n",
     ))
     .expect_err("an explicitly empty id is rejected");
     assert_eq!(err.field_path, "pricing.sources[0].id");
 }
 
 /// A derived id is the cache key and the label users see, so it must be a
-/// property of the location, not of the file's declaration order or of anything
-/// ambient. Loading the same config twice must produce the same id, and two
-/// different id-less entries must each get their own.
+/// property of the file, not of the declaration order or of anything ambient.
+/// Loading the same config twice must produce the same id, and two different
+/// id-less entries must each get their own.
 #[test]
 fn an_id_is_derived_from_the_location_and_is_stable_across_loads() {
-    // The URL keeps its last path segment, without the extension or the query.
-    let section = "[[sources]]\nurl = \"https://pricing.test/models_dev.mirror.json?token=x\"\n";
+    let section = "[[sources]]\nfile = \"/opt/jcode/models_dev.mirror.json\"\n";
     assert_eq!(sources_of(section)[0].id, "models_dev.mirror");
     assert_eq!(sources_of(section)[0].id, "models_dev.mirror");
 
-    // A local file uses its file stem, scheme or not.
+    // A relative path uses its file stem too.
     assert_eq!(
-        sources_of("[[sources]]\nurl = \"file:///opt/jcode/prices.json\"\n")[0].id,
+        sources_of("[[sources]]\nfile = \"prices.json\"\n")[0].id,
         "prices"
     );
     assert_eq!(
-        sources_of("[[sources]]\nurl = \"/opt/jcode/prices.json\"\n")[0].id,
+        sources_of("[[sources]]\nfile = \"sub/dir/prices.json\"\n")[0].id,
         "prices"
     );
 
     // A location that names no file at all still gets a recognisable,
     // deterministic id rather than an empty cache key.
-    assert_eq!(
-        sources_of("[[sources]]\nurl = \"https://pricing.test/\"\n")[0].id,
-        "source1"
-    );
+    assert_eq!(sources_of("[[sources]]\nfile = \"/\"\n")[0].id, "source1");
 
     // Two id-less entries keep two distinct ids: the second is suffixed in
     // declaration order, so neither sheet is silently merged under one key.
     let sources = sources_of(
         r#"
         [[sources]]
-        url = "file:///one/prices.json"
+        file = "/one/prices.json"
 
         [[sources]]
-        url = "file:///two/prices.json"
+        file = "/two/prices.json"
         "#,
     );
     let ids: Vec<&str> = sources.iter().map(|source| source.id.as_str()).collect();
@@ -122,11 +158,11 @@ fn a_derived_id_never_collides_with_an_explicit_id() {
     let sources = sources_of(
         r#"
         [[sources]]
-        url = "file:///one/prices.json"
+        file = "/one/prices.json"
 
         [[sources]]
         id = "prices"
-        url = "https://other.test/prices.json"
+        file = "/other/prices.json"
         "#,
     );
     // Ordered by priority (both 0), then id: `prices` before `prices-2`.
@@ -137,8 +173,8 @@ fn a_derived_id_never_collides_with_an_explicit_id() {
         .find(|source| source.id == "prices-2")
         .expect("the derived one is disambiguated");
     assert_eq!(
-        derived.location,
-        SourceLocation::LocalFile(std::path::PathBuf::from("/one/prices.json")),
+        derived.path,
+        std::path::PathBuf::from("/one/prices.json"),
         "the replaced name lands on the derived entry"
     );
 }
@@ -149,11 +185,11 @@ fn duplicate_explicit_source_ids_are_rejected() {
         r#"
         [[sources]]
         id = "mirror"
-        url = "https://x.test/a.json"
+        file = "/a.json"
 
         [[sources]]
         id = "mirror"
-        url = "https://x.test/b.json"
+        file = "/b.json"
         "#,
     ))
     .expect_err("explicit ids must be unique");
@@ -161,80 +197,98 @@ fn duplicate_explicit_source_ids_are_rejected() {
     assert!(err.message.contains("duplicate"), "{err}");
 }
 
+/// A bare name is the single-source convenience: `file = "deepseek.json"`
+/// resolves under `~/.jcode/cache/` so the user does not have to spell out the
+/// cache path.
 #[test]
-fn a_source_must_be_https_or_a_local_file() {
-    for url in ["http://x.test/a.json", "ftp://x.test/a.json"] {
+fn a_bare_name_resolves_under_the_jcode_cache_dir() {
+    let home = Home::new();
+    let sources = sources_of("[[sources]]\nfile = \"deepseek.json\"\n");
+    assert_eq!(
+        sources[0].path,
+        home.dir.path().join("cache").join("deepseek.json")
+    );
+    assert_eq!(sources[0].id, "deepseek");
+}
+
+/// Anything that is not a bare name is a path, used as written. `~` is the one
+/// expansion: `~/…` becomes the home directory. A `file://` value is just such
+/// a path-like string, with no special meaning: it is not resolved under the
+/// cache dir and simply names a file that does not exist.
+#[test]
+fn a_non_bare_value_is_a_path_used_as_written() {
+    let home = Home::new();
+    // Absolute path: verbatim.
+    assert_eq!(
+        sources_of("[[sources]]\nfile = \"/opt/jcode/prices.json\"\n")[0].path,
+        std::path::PathBuf::from("/opt/jcode/prices.json")
+    );
+    // Relative with a separator: verbatim (relative to the process cwd).
+    assert_eq!(
+        sources_of("[[sources]]\nfile = \"pricing/prices.json\"\n")[0].path,
+        std::path::PathBuf::from("pricing/prices.json")
+    );
+    // `~` expands to the home directory.
+    assert_eq!(
+        sources_of("[[sources]]\nfile = \"~/prices.json\"\n")[0].path,
+        home.dir.path().join("prices.json")
+    );
+    // A `file://` string is a path, not a synonym for a bare name: it is not
+    // resolved under the cache dir.
+    let path = sources_of("[[sources]]\nfile = \"file:///opt/jcode/prices.json\"\n")[0]
+        .path
+        .clone();
+    assert_eq!(
+        path,
+        std::path::PathBuf::from("file:///opt/jcode/prices.json")
+    );
+    assert!(
+        !path.starts_with(home.dir.path()),
+        "a file:// value must not be cache-resolved: {path:?}"
+    );
+}
+
+/// A bare name must never shadow jcode's own files in `~/.jcode/cache/`. The
+/// error is factual and short: it names the clash.
+#[test]
+fn a_bare_name_may_not_shadow_a_jcode_cache_file() {
+    let _home = Home::new();
+    for name in ["models_dev_pricing.json", "pricing_sources.json"] {
         let err = validate(&parse_toml(&format!(
-            "[[sources]]\nid = \"a\"\nurl = \"{url}\"\n"
+            "[[sources]]\nid = \"a\"\nfile = \"{name}\"\n"
         )))
-        .expect_err("only https and local files are accepted");
-        assert_eq!(err.field_path, "pricing.sources[0].url");
-        assert!(
-            err.message.contains("https://"),
-            "the message says what is allowed: {err}"
-        );
+        .expect_err("a bare name that shadows jcode's cache is refused");
+        assert_eq!(err.field_path, "pricing.sources[0].file");
+        assert!(err.message.contains(name), "the clash must be named: {err}");
     }
-
-    let sources = sources_of("[[sources]]\nid = \"a\"\nurl = \"file:///opt/jcode/p.json\"\n");
-    assert_eq!(
-        sources[0].location,
-        SourceLocation::LocalFile(std::path::PathBuf::from("/opt/jcode/p.json"))
-    );
-
-    // A bare path is the same thing spelled without a scheme.
-    let sources = sources_of("[[sources]]\nid = \"a\"\nurl = \"/opt/jcode/p.json\"\n");
-    assert_eq!(
-        sources[0].location,
-        SourceLocation::LocalFile(std::path::PathBuf::from("/opt/jcode/p.json"))
-    );
-
-    let sources = sources_of("[[sources]]\nid = \"a\"\nurl = \"https://x.test/p.json\"\n");
-    assert_eq!(
-        sources[0].location,
-        SourceLocation::Remote("https://x.test/p.json".to_string())
-    );
 }
 
 #[test]
 fn the_format_defaults_to_models_dev_v1_and_anything_else_is_rejected() {
-    let sources = sources_of("[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\n");
-    assert_eq!(sources[0].refresh_secs, DEFAULT_SOURCE_REFRESH_SECS);
+    let sources = sources_of("[[sources]]\nid = \"a\"\nfile = \"/a.json\"\n");
+    assert_eq!(sources[0].path, std::path::PathBuf::from("/a.json"));
 
-    let sources = sources_of(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nformat = \"models_dev_v1\"\n",
-    );
+    let sources =
+        sources_of("[[sources]]\nid = \"a\"\nfile = \"/a.json\"\nformat = \"models_dev_v1\"\n");
     assert_eq!(sources[0].id, "a");
 
     let err = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nformat = \"csv\"\n",
+        "[[sources]]\nid = \"a\"\nfile = \"/a.json\"\nformat = \"csv\"\n",
     ))
     .expect_err("an unknown format is rejected, not ignored");
     assert_eq!(err.field_path, "pricing.sources[0].format");
 }
 
 #[test]
-fn a_ttl_must_be_at_least_one_second() {
-    let err = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nrefresh_secs = 0\n",
-    ))
-    .expect_err("a zero TTL is rejected");
-    assert_eq!(err.field_path, "pricing.sources[0].refresh_secs");
-
-    let sources =
-        sources_of("[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nrefresh_secs = 60\n");
-    assert_eq!(sources[0].refresh_secs, 60);
-}
-
-#[test]
 fn an_empty_scope_or_model_entry_is_rejected() {
     let err = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nscope = [\"deepseek\", \" \"]\n",
+        "[[sources]]\nid = \"a\"\nfile = \"/a.json\"\nscope = [\"deepseek\", \" \"]\n",
     ))
     .expect_err("a blank scope entry is rejected");
     assert_eq!(err.field_path, "pricing.sources[0].scope[1]");
 
     let err = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\nmodels = [\"\"]\n",
+        "[[sources]]\nid = \"a\"\nfile = \"/a.json\"\nmodels = [\"\"]\n",
     ))
     .expect_err("a blank glob is rejected");
     assert_eq!(err.field_path, "pricing.sources[0].models[0]");
@@ -242,16 +296,17 @@ fn an_empty_scope_or_model_entry_is_rejected() {
 
 #[test]
 fn a_source_currency_is_normalized_and_defaults_to_usd() {
-    let sources = sources_of("[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\n");
+    let sources = sources_of("[[sources]]\nid = \"a\"\nfile = \"/a.json\"\n");
     assert!(sources[0].currency.is_usd());
 
-    let sources = sources_of(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\ncurrency = \"cny\"\n",
+    let sources = sources_of("[[sources]]\nid = \"a\"\nfile = \"/a.json\"\ncurrency = \"cny\"\n");
+    assert_eq!(
+        sources[0].currency,
+        jcode_provider_core::Currency::new("CNY")
     );
-    assert_eq!(sources[0].currency, Currency::new("CNY"));
 
     let (_, warnings) = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\ncurrency = \"zzz\"\n",
+        "[[sources]]\nid = \"a\"\nfile = \"/a.json\"\ncurrency = \"zzz\"\n",
     ))
     .expect("an unknown code is accepted");
     assert!(
@@ -264,10 +319,8 @@ fn a_source_currency_is_normalized_and_defaults_to_usd() {
 
 #[test]
 fn a_sources_only_section_is_not_empty() {
-    let (config, _) = validate(&parse_toml(
-        "[[sources]]\nid = \"a\"\nurl = \"https://x.test/a.json\"\n",
-    ))
-    .expect("validates");
+    let (config, _) =
+        validate(&parse_toml("[[sources]]\nid = \"a\"\nfile = \"/a.json\"\n")).expect("validates");
     assert!(
         !config.is_empty(),
         "a configured source means the section is configured"
@@ -311,7 +364,7 @@ fn a_configured_source_is_written_back() {
         .sources
         .push(jcode_config_types::PricingSourceFile {
             id: Some("mirror".to_string()),
-            url: "https://x.test/a.json".to_string(),
+            file: "/prices/a.json".to_string(),
             ..Default::default()
         });
     let toml = toml::to_string_pretty(&config).expect("serialize");
@@ -320,4 +373,5 @@ fn a_configured_source_is_written_back() {
         "a configured source must survive a save:\n{toml}"
     );
     assert!(toml.contains("id = \"mirror\""), "{toml}");
+    assert!(toml.contains("file = \"/prices/a.json\""), "{toml}");
 }
