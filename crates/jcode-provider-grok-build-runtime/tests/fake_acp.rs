@@ -11,6 +11,7 @@ fn fake_process(log: &Path) -> GrokBuildProcess {
         "JCODE_FAKE_GROK_ACP_LOG".to_string(),
         log.display().to_string(),
     );
+    env.insert("JCODE_GROK_ACP_DISABLE_MCP".to_string(), "1".to_string());
     GrokBuildProcess {
         command: env!("CARGO_BIN_EXE_jcode-fake-grok-acp").into(),
         args: Vec::new(),
@@ -89,9 +90,18 @@ async fn fake_subprocess_covers_handshake_models_new_prompt_and_auth_isolation()
     assert!(requests.contains("\"methodId\":\"cached_token\""));
     assert!(!requests.contains("\"methodId\":\"xai.api_key\""));
     assert!(requests.contains("\"method\":\"session/new\""));
-    assert!(requests.contains("\"mcpServers\":[]"));
     assert!(requests.contains("\"method\":\"session/set_model\""));
-    assert!(requests.contains("outer-system"));
+    assert!(requests.contains("\"rules\":\"outer-system\""));
+    assert!(requests.contains("\"yoloMode\":true"));
+    let prompt_line = requests
+        .lines()
+        .find(|line| line.contains("\"method\":\"session/prompt\""))
+        .expect("session/prompt was logged");
+    assert!(prompt_line.contains("AUTH_TEST_OK"), "{prompt_line}");
+    assert!(
+        !prompt_line.contains("outer-system"),
+        "Jcode system prompt must not be wrapped into session/prompt: {prompt_line}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

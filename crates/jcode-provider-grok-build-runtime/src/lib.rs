@@ -14,8 +14,8 @@ use jcode_message_types::{
 };
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -47,7 +47,11 @@ impl GrokBuildProcess {
             .unwrap_or_else(|| PathBuf::from("grok"));
         Self {
             command,
-            args: vec!["agent".to_string(), "stdio".to_string()],
+            args: vec![
+                "agent".to_string(),
+                "--always-approve".to_string(),
+                "stdio".to_string(),
+            ],
             env: BTreeMap::new(),
         }
     }
@@ -130,7 +134,8 @@ impl Provider for GrokBuildProvider {
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let prompt = build_prompt(messages, system, resume_session_id.is_some())?;
+        let prompt = build_prompt(messages, resume_session_id.is_some())?;
+        let system = system.to_string();
         let process = self.process.clone();
         // Before catalog prefetch or an explicit `--model`/picker choice, let
         // Grok CLI keep its advertised current model instead of forcing our
@@ -150,6 +155,7 @@ impl Provider for GrokBuildProvider {
                     process,
                     selected_model,
                     resume_session_id,
+                    system,
                     prompt,
                     tx.clone(),
                     cancel_rx,
@@ -490,6 +496,7 @@ fn run_turn_thread(
     process: GrokBuildProcess,
     selected_model: Option<String>,
     resume_session_id: Option<String>,
+    system: String,
     prompt: String,
     tx: mpsc::Sender<Result<StreamEvent>>,
     cancel_rx: oneshot::Receiver<()>,
@@ -519,9 +526,10 @@ fn run_turn_thread(
                     Err(error) if resume_session_is_missing(&error) => {
                         let response = timeout_request(
                             "session/new",
-                            connection.new_session(
-                                acp::NewSessionRequest::new(process_cwd).mcp_servers(Vec::new()),
-                            ),
+                            connection.new_session(grok_new_session_request(
+                                process_cwd,
+                                &system,
+                            )),
                         )
                         .await?;
                         (response.session_id, response.models)
@@ -531,9 +539,7 @@ fn run_turn_thread(
             } else {
                 let response = timeout_request(
                     "session/new",
-                    connection.new_session(
-                        acp::NewSessionRequest::new(process_cwd).mcp_servers(Vec::new()),
-                    ),
+                    connection.new_session(grok_new_session_request(process_cwd, &system)),
                 )
                 .await?;
                 (response.session_id, response.models)
@@ -1467,17 +1473,123 @@ fn text_from_acp_content(content: acp::ContentBlock) -> Option<String> {
     }
 }
 
-fn build_prompt(messages: &[Message], system: &str, resumed: bool) -> Result<String> {
+fn grok_new_session_request(cwd: PathBuf, system: &str) -> acp::NewSessionRequest {
+    acp::NewSessionRequest::new(cwd)
+        .mcp_servers(load_forwarded_mcp_servers())
+        .meta(grok_session_meta(system))
+}
+
+fn grok_session_meta(system: &str) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    // Append Jcode's coordinator prompt (skills, MCP catalog, TUI conventions)
+    // onto Grok's own agent system prompt. Do not use systemPromptOverride —
+    // that would strip Grok's harness.
+    if !system.trim().is_empty() {
+        meta.insert(
+            "rules".to_string(),
+            Value::String(system.trim().to_string()),
+        );
+    }
+    meta.insert("yoloMode".to_string(), Value::Bool(true));
+    meta
+}
+
+fn load_forwarded_mcp_servers() -> Vec<acp::McpServer> {
+    if std::env::var_os("JCODE_GROK_ACP_DISABLE_MCP").is_some() {
+        return Vec::new();
+    }
+    let mut servers = Vec::new();
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.push(PathBuf::from(home).join(".jcode").join("mcp.json"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        paths.push(cwd.join(".jcode").join("mcp.json"));
+        paths.push(cwd.join(".mcp.json"));
+    }
+    for path in paths {
+        for server in mcp_servers_from_file(&path) {
+            let Some(name) = mcp_server_name(&server) else {
+                continue;
+            };
+            if seen.insert(name) {
+                servers.push(server);
+            }
+        }
+    }
+    servers
+}
+
+fn mcp_server_name(server: &acp::McpServer) -> Option<String> {
+    match server {
+        acp::McpServer::Stdio(stdio) => Some(stdio.name.clone()),
+        acp::McpServer::Http(http) => Some(http.name.clone()),
+        acp::McpServer::Sse(sse) => Some(sse.name.clone()),
+        _ => None,
+    }
+}
+
+fn mcp_servers_from_file(path: &Path) -> Vec<acp::McpServer> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(servers) = value
+        .get("servers")
+        .or_else(|| value.get("mcpServers"))
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .filter_map(|(name, config)| {
+            if config.get("disabled").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            if config.get("enabled").and_then(Value::as_bool) == Some(false) {
+                return None;
+            }
+            let command = config.get("command").and_then(Value::as_str)?.trim();
+            if command.is_empty() {
+                return None;
+            }
+            let args = config
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|args| {
+                    args.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let env = config
+                .get("env")
+                .and_then(Value::as_object)
+                .map(|env| {
+                    env.iter()
+                        .filter_map(|(key, value)| {
+                            Some(acp::EnvVariable::new(key, value.as_str()?.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(acp::McpServer::Stdio(
+                acp::McpServerStdio::new(name, command).args(args).env(env),
+            ))
+        })
+        .collect()
+}
+
+fn build_prompt(messages: &[Message], resumed: bool) -> Result<String> {
     let latest_user = latest_user_text(messages)
         .ok_or_else(|| anyhow!("No user prompt found for Grok Build request"))?;
 
     let mut sections = Vec::new();
-    // On resume the Grok ACP session already has the system prompt. Sending
-    // Jcode's identity dump again wraps it as a new <user_query> and can
-    // restart the previous task in a harness loop.
-    if !resumed && !system.trim().is_empty() {
-        sections.push(format!("<system>\n{}\n</system>", system.trim()));
-    }
     if !resumed {
         let history = messages
             .iter()
@@ -1601,7 +1713,7 @@ mod tests {
             Message::assistant_text("old answer"),
             Message::user("new"),
         ];
-        let prompt = build_prompt(&messages, "outer", true).unwrap();
+        let prompt = build_prompt(&messages, true).unwrap();
         assert!(!prompt.contains("outer"), "{prompt}");
         assert!(!prompt.contains("<system>"), "{prompt}");
         assert_eq!(prompt, "new");
@@ -1623,7 +1735,47 @@ mod tests {
                 tool_duration_ms: None,
             },
         ];
-        let prompt = build_prompt(&messages, "outer", true).unwrap();
+        let prompt = build_prompt(&messages, true).unwrap();
         assert_eq!(prompt, "print degrees");
+    }
+
+    #[test]
+    fn first_prompt_does_not_wrap_jcode_system_as_user_query() {
+        let prompt = build_prompt(&[Message::user("hello")], false).unwrap();
+        assert_eq!(prompt, "hello");
+        assert!(!prompt.contains("<system>"));
+        let meta = grok_session_meta("Jcode coordinator\nUse skills when relevant.");
+        assert_eq!(
+            meta.get("rules").and_then(Value::as_str),
+            Some("Jcode coordinator\nUse skills when relevant.")
+        );
+        assert_eq!(meta.get("yoloMode").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn mcp_json_stdio_servers_forward_to_acp() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mcp.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "servers": {
+                "session-graph": {
+                  "command": "python3",
+                  "args": ["/tmp/mcp_server.py"]
+                },
+                "off": { "command": "x", "disabled": true }
+              }
+            }"#,
+        )
+        .unwrap();
+        let servers = mcp_servers_from_file(&path);
+        assert_eq!(servers.len(), 1);
+        let acp::McpServer::Stdio(stdio) = &servers[0] else {
+            panic!("expected stdio");
+        };
+        assert_eq!(stdio.name, "session-graph");
+        assert_eq!(stdio.command, PathBuf::from("python3"));
+        assert_eq!(stdio.args, ["/tmp/mcp_server.py"]);
     }
 }
