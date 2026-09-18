@@ -1799,6 +1799,53 @@ impl OpenRouterProvider {
         })
     }
 
+    /// Grok Build subscription over the CLI chat proxy.
+    ///
+    /// Auth is the Grok CLI OIDC token (`~/.grok/auth.json`), not `XAI_API_KEY`.
+    /// Jcode owns tools (same loop as Opus); Grok is the model.
+    pub fn new_grok_build_subscription(token: String) -> Result<Self> {
+        let api_base = normalize_api_base("https://cli-chat-proxy.grok.com/v1").ok_or_else(|| {
+            anyhow::anyhow!("invalid Grok Build CLI chat proxy base URL")
+        })?;
+        Ok(Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new("grok-4.6".to_string())),
+            reasoning_effort: Arc::new(RwLock::new(Some("xhigh".to_string()))),
+            api_base,
+            auth: ProviderAuth::AuthorizationBearer {
+                token,
+                label: "Grok Build subscription".to_string(),
+            },
+            supports_provider_features: false,
+            supports_model_catalog: true,
+            profile_id: Some("grok-build".to_string()),
+            reasoning_effort_support: Some(true),
+            disable_reasoning_heuristics: false,
+            static_reasoning_config: HashMap::new(),
+            max_tokens: None,
+            extra_body: None,
+            static_models: vec![
+                "grok-4.6".to_string(),
+                "grok-4.5".to_string(),
+                "grok-code-fast-1".to_string(),
+            ],
+            static_context_limits: HashMap::from([
+                ("grok-4.6".to_string(), 500_000),
+                ("grok-4.5".to_string(), 500_000),
+                ("grok-code-fast-1".to_string(), 256_000),
+            ]),
+            static_image_input_support: HashMap::new(),
+            send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        })
+    }
+
     fn should_background_refresh_model_catalog(&self, cache_age_secs: u64) -> bool {
         if cache_age_secs < MODEL_CATALOG_SOFT_REFRESH_SECS {
             return false;

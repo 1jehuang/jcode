@@ -232,6 +232,30 @@ pub fn cli_available() -> bool {
 /// Whether the managed backend has a credential that it can attempt to use.
 /// Backend presence alone is not authentication and must not make `/login` or
 /// `jcode auth status` claim that Grok Build is ready.
+/// Bearer token from Grok CLI / Jcode Grok Build OIDC login (`~/.grok/auth.json`).
+/// This is the subscription session token, not `XAI_API_KEY`.
+pub fn bearer_token() -> Option<String> {
+    if let Ok(key) = std::env::var("GROK_DEPLOYMENT_KEY") {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let bytes = std::fs::read(PathBuf::from(home).join(".grok").join("auth.json")).ok()?;
+    let serde_json::Value::Object(scopes) = serde_json::from_slice(&bytes).ok()? else {
+        return None;
+    };
+    scopes.values().find_map(|credential| {
+        credential
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
 pub fn has_cached_login() -> bool {
     if std::env::var("GROK_DEPLOYMENT_KEY")
         .ok()

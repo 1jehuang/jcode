@@ -60,6 +60,9 @@ impl GrokBuildProcess {
 #[derive(Clone)]
 pub struct GrokBuildProvider {
     process: GrokBuildProcess,
+    /// When Grok CLI OIDC login is present, talk to the CLI chat proxy as a
+    /// model (Jcode owns tools). Fake ACP tests leave this unset.
+    http: Option<Arc<jcode_provider_openrouter_runtime::OpenRouterProvider>>,
     model: Arc<RwLock<String>>,
     models: Arc<RwLock<Vec<String>>>,
     model_selected: Arc<AtomicBool>,
@@ -71,8 +74,21 @@ impl GrokBuildProvider {
     }
 
     pub fn with_process(process: GrokBuildProcess) -> Self {
+        let fake_acp = process.env.contains_key("JCODE_FAKE_GROK_ACP_LOG");
+        let http = if fake_acp {
+            None
+        } else {
+            jcode_base::auth::grok_build::bearer_token().and_then(|token| {
+                jcode_provider_openrouter_runtime::OpenRouterProvider::new_grok_build_subscription(
+                    token,
+                )
+                .ok()
+                .map(Arc::new)
+            })
+        };
         Self {
             process,
+            http,
             model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
             models: Arc::new(RwLock::new(Vec::new())),
             model_selected: Arc::new(AtomicBool::new(false)),
@@ -130,10 +146,16 @@ impl Provider for GrokBuildProvider {
     async fn complete(
         &self,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
+        if let Some(http) = &self.http {
+            http.set_model(&self.model())?;
+            return http
+                .complete(messages, tools, system, resume_session_id)
+                .await;
+        }
         let prompt = build_prompt(messages, resume_session_id.is_some())?;
         let system = system.to_string();
         let process = self.process.clone();
@@ -208,6 +230,9 @@ impl Provider for GrokBuildProvider {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.to_string();
         self.model_selected.store(true, Ordering::Release);
+        if let Some(http) = &self.http {
+            http.set_model(model)?;
+        }
         Ok(())
     }
 
@@ -228,9 +253,17 @@ impl Provider for GrokBuildProvider {
             .map(|model| ModelRoute {
                 model,
                 provider: "Grok Build".to_string(),
-                api_method: "grok-build-acp".to_string(),
+                api_method: if self.http.is_some() {
+                    "grok-build".to_string()
+                } else {
+                    "grok-build-acp".to_string()
+                },
                 available: true,
-                detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
+                detail: if self.http.is_some() {
+                    "Grok Build subscription via Jcode tools".to_string()
+                } else {
+                    "Grok Build subscription via Jcode-managed ACP".to_string()
+                },
                 usage: None,
                 cheapness: None,
             })
@@ -238,6 +271,17 @@ impl Provider for GrokBuildProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
+        if self.http.is_some() {
+            self.update_models(DiscoveredModels {
+                current: Some("grok-4.6".to_string()),
+                available: vec![
+                    "grok-4.6".to_string(),
+                    "grok-4.5".to_string(),
+                    "grok-code-fast-1".to_string(),
+                ],
+            });
+            return Ok(());
+        }
         let process = self.process.clone();
         let discovered = run_on_acp_thread_with_process(process, move |connection| {
             Box::pin(async move {
@@ -256,27 +300,27 @@ impl Provider for GrokBuildProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
-        true
+        self.http.is_none()
     }
 
     fn transport(&self) -> Option<String> {
-        Some("ACP stdio".to_string())
+        if self.http.is_some() {
+            Some("Grok CLI subscription HTTP".to_string())
+        } else {
+            Some("ACP stdio".to_string())
+        }
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        let fork = Self::with_process(self.process.clone());
-        *fork
-            .model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model();
-        *fork
-            .models
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.available_models_display();
-        fork.model_selected.store(
-            self.model_selected.load(Ordering::Acquire),
-            Ordering::Release,
-        );
+        let fork = Self {
+            process: self.process.clone(),
+            http: self.http.clone(),
+            model: Arc::new(RwLock::new(self.model())),
+            models: Arc::new(RwLock::new(self.available_models_display())),
+            model_selected: Arc::new(AtomicBool::new(
+                self.model_selected.load(Ordering::Acquire),
+            )),
+        };
         Arc::new(fork)
     }
 }
