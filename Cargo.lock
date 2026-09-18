@@ -3123,6 +3123,7 @@ dependencies = [
  "jcode-build-support",
  "jcode-command-risk",
  "jcode-core",
+ "jcode-harness-api",
  "jcode-import-core",
  "jcode-message-types",
  "jcode-notify-email",
