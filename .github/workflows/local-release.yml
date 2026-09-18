@@ -1,0 +1,257 @@
+# Fork release pipeline for kmou424/<tag> patch branches.
+#
+# On every push to a kmou424/* branch:
+#   1. Resolve the release tag from the branch name (text after the last
+#      '/', e.g. kmou424/v0.84.0 -> v0.84.0).
+#   2. Compute `changes-hash`: a content hash of the diff between the docs
+#      commit (the branch's first commit, found by its fixed subject
+#      "docs(fork): kmou424 patch series") and HEAD, excluding docs/.
+#      Docs-only updates therefore never trigger a rebuild.
+#   3. If the existing release for that tag already carries a
+#      release-info.json with the same changes-hash, the build is skipped.
+#      A missing file means the tag was never built and always builds.
+#   4. Otherwise the jcode binary is built for every OS/arch target,
+#      sha256 checksums are computed, and the binaries plus a fresh
+#      release-info.json are uploaded to the GitHub release named <tag>,
+#      clobbering previous assets.
+#
+# Binaries are built with `cargo build --profile selfdev` (not --release):
+# this fork's personal channel is the selfdev channel, so release artifacts
+# should land where `jcode self-dev --build` / server-reload tooling expects
+# them. The release body is regenerated on every run — the plan job renders
+# release-notes.md (build-profile note + the [NN] patch list from
+# `git log <tag>..HEAD`), uploads it as an artifact for the publish job, and
+# when the build is skipped still rewrites the body in place so docs-only
+# pushes keep the patch list current.
+#
+# release-info.json shape:
+#   {
+#     "tag": "v0.84.0",
+#     "branch": "kmou424/v0.84.0",
+#     "commit": "<full sha>",
+#     "changes-hash": "<sha256>",
+#     "built_at": "<iso8601>",
+#     "binaries": [
+#       {"os": "linux", "arch": "x86_64", "file": "jcode-linux-x86_64",
+#        "sha256": "...",
+#        "url": "https://github.com/<owner>/<repo>/releases/download/v0.84.0/jcode-linux-x86_64"}
+#     ]
+#   }
+#
+# Maintainers: this file lives in the branch's first (docs) commit. All
+# workflow changes are amended into that commit and the branch rebased.
+
+name: local-release
+
+on:
+  push:
+    branches:
+      - "kmou424/*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  plan:
+    name: Compute tag + changes-hash, decide skip
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      changes_hash: ${{ steps.meta.outputs.changes_hash }}
+      skip: ${{ steps.meta.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch tags (docs-commit detection needs the base tag)
+        run: git fetch --tags --force origin || true
+
+      - id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME##*/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Docs commit = the first commit on the branch; it always carries
+          # the fixed subject "docs(fork): kmou424 patch series". Fallback:
+          # first commit after the base tag; else HEAD (forces a build since
+          # the hash won't match anything previously stored).
+          DOCS_SHA=$(git log --format=%H --fixed-strings \
+            --grep='docs(fork): kmou424 patch series' | tail -1 || true)
+          if [ -z "$DOCS_SHA" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            DOCS_SHA=$(git rev-list "$TAG..HEAD" | tail -1)
+          fi
+
+          if [ -n "$DOCS_SHA" ]; then
+            CHANGES_HASH=$(git diff "$DOCS_SHA..HEAD" -- . ':!docs/' | git hash-object --stdin)
+          elif git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            CHANGES_HASH=$(git diff "$TAG..HEAD" -- . ':!docs/' | git hash-object --stdin)
+          else
+            CHANGES_HASH=$(git rev-parse HEAD)
+          fi
+          echo "changes_hash=$CHANGES_HASH" >> "$GITHUB_OUTPUT"
+
+          PREV=""
+          rm -rf /tmp/relinfo && mkdir -p /tmp/relinfo
+          gh release download "$TAG" -p release-info.json -D /tmp/relinfo --clobber 2>/dev/null || true
+          if [ -f /tmp/relinfo/release-info.json ]; then
+            PREV=$(jq -r '.["changes-hash"] // empty' /tmp/relinfo/release-info.json)
+          fi
+
+          if [ -n "$PREV" ] && [ "$PREV" = "$CHANGES_HASH" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "changes-hash unchanged ($CHANGES_HASH); skipping build."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "changes-hash changed or no prior release-info.json (prev='${PREV:-none}'); building."
+          fi
+
+      - name: Render release-notes.md
+        id: notes
+        run: |
+          set -e
+          TAG="${GITHUB_REF_NAME##*/}"
+          {
+            echo "Personal fork build of jcode **${TAG}** for branch \`${GITHUB_REF_NAME}\`."
+            echo
+            echo "> Built with \`cargo build --profile selfdev -p jcode --bin jcode\`"
+            echo "> (opt-level 0 + incremental) — this fork's personal channel"
+            echo "> is the selfdev channel, so artifacts land where"
+            echo "> \`jcode self-dev --build\` / server-reload tooling expects."
+            echo
+            echo '## Patch series'
+            echo
+          } > release-notes.md
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+            git log --reverse --format='- %s' "$TAG..HEAD" | grep '^- \[' >> release-notes.md || true
+          fi
+          cat release-notes.md
+
+      - name: Refresh release body when the build is skipped
+        if: steps.meta.outputs.skip == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: gh release edit "$TAG" --notes-file release-notes.md || true
+
+      - name: Upload release notes for the publish job
+        if: steps.meta.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+
+  build:
+    name: ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.skip != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04,     target: x86_64-unknown-linux-gnu,  name: linux-x86_64,   bin: jcode       }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, name: linux-arm64,    bin: jcode       }
+          - { os: macos-15,         target: aarch64-apple-darwin,      name: macos-arm64,    bin: jcode       }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    name: windows-x86_64, bin: jcode.exe   }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Swatinem/rust-cache: caches ~/.cargo registry/git deps + target/.
+      # Keyed per matrix entry so OS/arch caches don't clobber each other.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Build jcode
+        run: cargo build --profile selfdev -p jcode --bin jcode --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/selfdev/${{ matrix.bin }}" "dist/jcode-${{ matrix.name }}${{ matrix.bin == 'jcode.exe' && '.exe' || '' }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Assemble release-info.json + upload release
+    needs: [plan, build]
+    if: needs.plan.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # No checkout in this job: GH_REPO gives the gh CLI its repository.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Generate release-info.json
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          CHANGES_HASH: ${{ needs.plan.outputs.changes_hash }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          {
+            printf '{\n'
+            printf '  "tag": "%s",\n' "$TAG"
+            printf '  "branch": "%s",\n' "$BRANCH"
+            printf '  "commit": "%s",\n' "$COMMIT"
+            printf '  "changes-hash": "%s",\n' "$CHANGES_HASH"
+            printf '  "built_at": "%s",\n' "$NOW"
+            printf '  "binaries": [\n'
+            first=1
+            for f in dist/jcode-*; do
+              base=$(basename "$f")
+              stem=${base#jcode-}; stem=${stem%.exe}
+              os_part=${stem%%-*}
+              arch_part=${stem#*-}
+              sha=$(sha256sum "$f" | awk '{print $1}')
+              url="https://github.com/${REPO}/releases/download/${TAG}/${base}"
+              [ $first -eq 0 ] && printf ',\n'
+              first=0
+              printf '    {"os": "%s", "arch": "%s", "file": "%s", "sha256": "%s", "url": "%s"}' \
+                "$os_part" "$arch_part" "$base" "$sha" "$url"
+            done
+            printf '\n  ]\n}\n'
+          } > dist/release-info.json
+          cat dist/release-info.json
+
+      - name: Create or update release
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -e
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file notes/release-notes.md >/dev/null
+          else
+            gh release create "$TAG" --title "$TAG" --target "${{ github.sha }}" \
+              --notes-file notes/release-notes.md >/dev/null
+          fi
+          gh release upload "$TAG" dist/* --clobber
