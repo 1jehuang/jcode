@@ -37,6 +37,11 @@ use std::sync::{Arc, Mutex};
 
 /// Where the cached vendor files live. One file for every vendor, so a vendor
 /// whose `file` is removed from the config simply stops being read.
+///
+/// The name is historical (it held `[[pricing.sources]]` sheets before this
+/// layer became per-vendor). It is kept so the config layer's bare-name guard
+/// list stays stable and an old cache is simply read as empty and rewritten in
+/// the new `vendors` shape.
 pub(crate) const VENDOR_FILES_CACHE_FILE: &str = "pricing_sources.json";
 const VENDOR_FILES_SCHEMA_VERSION: u32 = 1;
 
