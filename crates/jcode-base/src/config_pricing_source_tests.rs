@@ -248,18 +248,64 @@ fn a_non_bare_value_is_a_path_used_as_written() {
     );
 }
 
-/// A bare name must never shadow jcode's own files in `~/.jcode/cache/`. The
-/// error is factual and short: it names the clash.
+/// Every fixed name jcode writes in `~/.jcode/cache/` must be refused as a bare
+/// name. The error is factual and short: it names the clash.
 #[test]
 fn a_bare_name_may_not_shadow_a_jcode_cache_file() {
     let _home = Home::new();
-    for name in ["models_dev_pricing.json", "pricing_sources.json"] {
+    for name in crate::config::pricing::guarded_cache_names_for_tests() {
         let err = validate(&parse_toml(&format!(
             "[[sources]]\nid = \"a\"\nfile = \"{name}\"\n"
         )))
         .expect_err("a bare name that shadows jcode's cache is refused");
         assert_eq!(err.field_path, "pricing.sources[0].file");
         assert!(err.message.contains(name), "the clash must be named: {err}");
+    }
+}
+
+/// The guarded names also include families jcode builds from a runtime namespace
+/// (`<namespace>_models.json`, `<ns>_endpoints_<model>.json`,
+/// `session_search_<source>_index_v2.bin`), so representative members must be
+/// refused too.
+#[test]
+fn a_namespaced_jcode_cache_name_is_refused_as_a_bare_source() {
+    let _home = Home::new();
+    for name in [
+        "openrouter_models.json",
+        "deepseek_models.json",
+        "openai-compatible_models.json",
+        "openrouter_endpoints_gpt-4o.json",
+        "session_search_claude_index_v2.bin",
+    ] {
+        let err = validate(&parse_toml(&format!(
+            "[[sources]]\nid = \"a\"\nfile = \"{name}\"\n"
+        )))
+        .expect_err("a bare name that shadows jcode's cache is refused");
+        assert_eq!(err.field_path, "pricing.sources[0].file");
+        assert!(err.message.contains(name), "the clash must be named: {err}");
+    }
+}
+
+/// The guard applies to bare names only: the same name written as a non-bare
+/// path is the user's own file and must be accepted exactly as written.
+#[test]
+fn a_guarded_cache_name_as_a_non_bare_path_is_accepted() {
+    let _home = Home::new();
+    let guarded = crate::config::pricing::guarded_cache_names_for_tests();
+    let names = guarded.iter().copied().chain([
+        "openrouter_models.json",
+        "deepseek_models.json",
+        "openrouter_endpoints_gpt-4o.json",
+        "session_search_claude_index_v2.bin",
+    ]);
+    for name in names {
+        let raw = format!("./{name}");
+        let sources = sources_of(&format!("[[sources]]\nid = \"a\"\nfile = \"{raw}\"\n"));
+        assert_eq!(
+            sources[0].path,
+            std::path::PathBuf::from(&raw),
+            "a non-bare path is used as written, never cache-resolved"
+        );
     }
 }
 

@@ -421,14 +421,47 @@ fn cache_dir() -> PathBuf {
         .join("cache")
 }
 
-/// The names of jcode's own files in `~/.jcode/cache/`. A bare source name that
-/// matches one of these is refused: the user's sheet must never shadow jcode's
-/// cache.
-fn jcode_cache_file_names() -> [&'static str; 2] {
+/// The fixed names jcode writes for its own files in `~/.jcode/cache/`. A bare
+/// source name that matches one of these is refused: the user's sheet must never
+/// shadow jcode's cache. jcode also writes names it derives from a provider
+/// namespace or a session source; [`is_jcode_cache_file_name`] covers those too.
+fn jcode_cache_file_names() -> [&'static str; 4] {
     [
         crate::model_pricing::catalog_cache_file_name(),
         crate::model_pricing::sources_cache_file_name(),
+        "session-picker-list-v2.json",
+        "osc11-silent-terminals",
     ]
+}
+
+/// Whether `name` is one of jcode's own files in `~/.jcode/cache/`, by fixed
+/// name or by one of the namespaced families below.
+fn is_jcode_cache_file_name(name: &str) -> bool {
+    jcode_cache_file_names().contains(&name) || is_jcode_cache_generated_name(name)
+}
+
+/// The cache names jcode builds with a component that varies at runtime, so they
+/// cannot be listed literally: `<namespace>_models.json` (the OpenRouter catalog
+/// and every named profile), `<namespace>_endpoints_<model>.json` (its endpoint
+/// cache), and `session_search_<source>_index_v2.bin` (the session-search
+/// indexes). Matching by shape refuses a bare sheet name that would collide with
+/// any of them.
+fn is_jcode_cache_generated_name(name: &str) -> bool {
+    let models = "_models.json";
+    let endpoints = "_endpoints_";
+    let search = "session_search_";
+    let index = "_index_v2.bin";
+    (name.len() > models.len() && name.ends_with(models))
+        || (name.contains(endpoints) && name.ends_with(".json"))
+        || (name.len() > search.len() + index.len()
+            && name.starts_with(search)
+            && name.ends_with(index))
+}
+
+/// The exact guarded names, for the tests that must prove each is refused.
+#[cfg(test)]
+pub(crate) fn guarded_cache_names_for_tests() -> [&'static str; 4] {
+    jcode_cache_file_names()
 }
 
 /// Expand a leading `~` (alone or `~/…`) to the user's home directory. `~user`
@@ -472,7 +505,7 @@ fn parse_source_location(raw: &str, path: &str) -> Result<PathBuf, PricingConfig
         ));
     }
     if is_bare_name(raw) {
-        if jcode_cache_file_names().contains(&raw) {
+        if is_jcode_cache_file_name(raw) {
             return Err(PricingConfigError::new(
                 path,
                 format!(

@@ -128,11 +128,10 @@ pub struct PricingSourceFile {
     /// `id` key, because the derived form is a runtime detail, not user config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// The local file the sheet is read from. A bare name (`prices.json`)
-    /// resolves under `~/.jcode/cache/`; a path (absolute, or relative with a
-    /// separator, `~` expanded) is used as-is; `file://` is accepted as a
-    /// synonym for a path. `http(s)://` and every other scheme are rejected:
-    /// fetch the sheet yourself and point at the file.
+    /// The local file the sheet is read from. A bare name (`prices.json`) with
+    /// no path separator resolves under `~/.jcode/cache/`; anything else
+    /// (absolute, or relative with a separator, with a leading `~` expanded) is
+    /// used as the path it is.
     pub file: String,
     /// Which provider identities this sheet may price; empty = every provider.
     /// The same identity forms as a `[pricing.providers]` key (spec 4.2.1).

@@ -433,6 +433,48 @@ file = "{}"
     assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
 }
 
+/// A sheet that exists but cannot be opened is a read failure like a missing
+/// one: it contributes no rules and the call falls through to models.dev. The
+/// permission is restored so the temp dir can always be cleaned up; the test is
+/// skipped when the process is privileged (root can open mode 000), where the
+/// mode cannot express the scenario.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_local_sheet_falls_through_to_models_dev() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new();
+    env.save_models_dev();
+    let path = env.dir.path().join("unreadable.json");
+    std::fs::write(&path, sheet_body("deepseek", "deepseek-v4-pro", 9.0, 18.0))
+        .expect("write the sheet");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod the sheet 000");
+
+    if std::fs::File::open(&path).is_ok() {
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        eprintln!("skipping: running privileged, mode 000 does not deny the open");
+        return;
+    }
+
+    env.write_config(&format!(
+        r#"
+[[pricing.sources]]
+id = "unreadable"
+file = "{}"
+"#,
+        path.display()
+    ));
+
+    assert_eq!(priced_by("deepseek", "deepseek-v4-pro"), None);
+    let priced =
+        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", SystemTime::now())
+            .expect("models.dev still prices the call");
+    assert!((priced.amount - MODELS_DEV_REFERENCE).abs() < 1e-12);
+
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+}
+
 /// A `file://` value is not a synonym for anything: it is simply a path-like
 /// string that does not exist on disk, so the source contributes no rules and
 /// the call falls through to the next layer.
