@@ -152,9 +152,11 @@ impl Provider for GrokBuildProvider {
     ) -> Result<EventStream> {
         if let Some(http) = &self.http {
             http.set_model(&self.model())?;
-            return http
-                .complete(messages, tools, system, resume_session_id)
-                .await;
+            let messages = sanitize_grok_turn_messages(messages);
+            let stream = http
+                .complete(&messages, tools, system, resume_session_id)
+                .await?;
+            return Ok(wrap_repeat_guard(stream));
         }
         let prompt = build_prompt(messages, resume_session_id.is_some())?;
         let system = system.to_string();
@@ -187,11 +189,11 @@ impl Provider for GrokBuildProvider {
             })
             .context("Failed to start Grok Build ACP runtime thread")?;
 
-        Ok(Box::pin(GrokEventStream {
+        Ok(wrap_repeat_guard(Box::pin(GrokEventStream {
             inner: ReceiverStream::new(rx),
             cancel: Some(cancel_tx),
             thread: Some(thread),
-        }))
+        })))
     }
 
     fn name(&self) -> &str {
@@ -347,6 +349,68 @@ impl Drop for GrokEventStream {
         // Joining can block while the child handles cancellation. Detach here;
         // dropping the child in the ACP thread has kill_on_drop enabled.
         self.thread.take();
+    }
+}
+
+/// Stop a Grok turn that is stuck emitting the same sentence (panda 609-vs-297 loop).
+const REPEAT_NEEDLE_CHARS: usize = 72;
+const REPEAT_LIMIT: usize = 6;
+
+struct RepeatGuardStream {
+    inner: EventStream,
+    buf: String,
+    stopped: bool,
+}
+
+fn wrap_repeat_guard(inner: EventStream) -> EventStream {
+    Box::pin(RepeatGuardStream {
+        inner,
+        buf: String::new(),
+        stopped: false,
+    })
+}
+
+fn repeated_assistant_phrase(buf: &str) -> bool {
+    if buf.len() < REPEAT_NEEDLE_CHARS * REPEAT_LIMIT {
+        return false;
+    }
+    let needle = &buf[buf.len() - REPEAT_NEEDLE_CHARS..];
+    if needle.chars().all(char::is_whitespace) {
+        return false;
+    }
+    let mut count = 0usize;
+    let mut rest = buf;
+    while let Some(pos) = rest.find(needle) {
+        count += 1;
+        if count >= REPEAT_LIMIT {
+            return true;
+        }
+        rest = &rest[pos + needle.len()..];
+    }
+    false
+}
+
+impl Stream for RepeatGuardStream {
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        if self.stopped {
+            return Poll::Ready(None);
+        }
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(StreamEvent::TextDelta(text)))) => {
+                self.buf.push_str(&text);
+                if repeated_assistant_phrase(&self.buf) {
+                    self.stopped = true;
+                    Poll::Ready(Some(Ok(StreamEvent::TextDelta(
+                        "\n\n[jcode stopped a repeated Grok output loop]".to_string(),
+                    ))))
+                } else {
+                    Poll::Ready(Some(Ok(StreamEvent::TextDelta(text))))
+                }
+            }
+            other => other,
+        }
     }
 }
 
@@ -1660,22 +1724,59 @@ fn build_prompt(messages: &[Message], resumed: bool) -> Result<String> {
 
 fn latest_user_text(messages: &[Message]) -> Option<String> {
     messages.iter().rev().find_map(|message| {
+        if is_synthetic_user_turn(message) {
+            return None;
+        }
         if message.role != Role::User {
             return None;
         }
-        let text = message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                JcodeContentBlock::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .filter(|text| !text.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        let text = text.trim();
-        (!text.is_empty()).then(|| text.to_string())
+        let text = user_plain_text(message);
+        (!text.is_empty()).then_some(text)
     })
+}
+
+fn user_plain_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            JcodeContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string()
+}
+
+fn is_synthetic_user_turn(message: &Message) -> bool {
+    if message.role != Role::User {
+        return false;
+    }
+    if message
+        .content
+        .iter()
+        .any(|block| matches!(block, JcodeContentBlock::ToolResult { .. }))
+    {
+        return false;
+    }
+    let text = user_plain_text(message);
+    text.is_empty() || jcode_base::todo::is_auto_poke_message(&text)
+}
+
+/// Drop empty / `[auto] Re-read…` user turns so they are not the latest instruction.
+fn sanitize_grok_turn_messages(messages: &[Message]) -> Vec<Message> {
+    let filtered: Vec<Message> = messages
+        .iter()
+        .filter(|message| !is_synthetic_user_turn(message))
+        .cloned()
+        .collect();
+    if latest_user_text(&filtered).is_some() {
+        filtered
+    } else {
+        messages.to_vec()
+    }
 }
 
 fn message_text(message: &Message) -> String {
@@ -1781,6 +1882,54 @@ mod tests {
         ];
         let prompt = build_prompt(&messages, true).unwrap();
         assert_eq!(prompt, "print degrees");
+    }
+
+    #[test]
+    fn prompt_skips_auto_poke_and_empty_user_messages() {
+        let messages = vec![
+            Message::user("booking Huyen cardigan 609 vs 297"),
+            Message::user(jcode_base::todo::TODO_LONG_SESSION_REVIEW_MESSAGE),
+            Message::user(""),
+        ];
+        assert_eq!(
+            latest_user_text(&messages).as_deref(),
+            Some("booking Huyen cardigan 609 vs 297")
+        );
+        let prompt = build_prompt(&messages, true).unwrap();
+        assert_eq!(prompt, "booking Huyen cardigan 609 vs 297");
+        let sanitized = sanitize_grok_turn_messages(&messages);
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(
+            user_plain_text(&sanitized[0]),
+            "booking Huyen cardigan 609 vs 297"
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_tool_result_user_turns() {
+        let messages = vec![
+            Message::user("print degrees"),
+            Message {
+                role: Role::User,
+                content: vec![JcodeContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "Updating plan".to_string(),
+                    is_error: None,
+                }],
+                timestamp: None,
+                tool_duration_ms: None,
+            },
+        ];
+        let sanitized = sanitize_grok_turn_messages(&messages);
+        assert_eq!(sanitized.len(), 2);
+    }
+
+    #[test]
+    fn repeated_assistant_phrase_trips_on_looped_dump_sentence() {
+        let sentence = "I'll dump the 312 excluded rows, then rebuild the Excel so 609 vs 297 is explicit.";
+        let looping = sentence.repeat(8);
+        assert!(repeated_assistant_phrase(&looping));
+        assert!(!repeated_assistant_phrase("I'll dump the 312 excluded rows once."));
     }
 
     #[test]
