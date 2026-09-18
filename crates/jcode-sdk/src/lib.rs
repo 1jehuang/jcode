@@ -41,6 +41,7 @@ mod errors;
 mod launch;
 mod ssh;
 mod structured;
+pub mod worktrees;
 
 #[cfg(test)]
 #[path = "sdk_tests/parity.rs"]

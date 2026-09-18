@@ -6,6 +6,7 @@ publish = false
 description = "Rust SDK for the jcode harness API: connect, drive sessions, stream events"
 
 [dependencies]
+anyhow = "1"
 jcode-harness-api = { path = "../jcode-harness-api" }
 jcode-provider-metadata = { path = "../jcode-provider-metadata" }
 jcode-transport = { path = "../jcode-transport" }

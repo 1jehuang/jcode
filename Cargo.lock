@@ -3871,6 +3871,7 @@ dependencies = [
 name = "jcode-sdk"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "jcode-harness-api",
  "jcode-provider-metadata",
  "jcode-transport",
