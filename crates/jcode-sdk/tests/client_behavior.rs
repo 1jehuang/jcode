@@ -33,6 +33,7 @@ impl Transport for PairTransport {
 
 fn session(id: &str) -> SessionInfo {
     SessionInfo {
+        edit_stats: None,
         parent_session_id: None,
         agent_label: None,
         swarm_status: None,
