@@ -293,6 +293,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             display_name: None,
@@ -303,6 +304,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             display_name: None,
@@ -313,6 +315,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: false,
             detail: "OPENROUTER_API_KEY not set".to_string(),
             cheapness: None,
+            usage: None,
         },
     ];
 
@@ -334,6 +337,7 @@ fn test_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         available: true,
         detail: String::new(),
         cheapness: None,
+        usage: None,
     }
 }
 
@@ -1331,6 +1335,7 @@ fn collect_cli_model_names_falls_back_when_no_routes_are_available() {
         available: false,
         detail: "no credentials".to_string(),
         cheapness: None,
+        usage: None,
     }];
 
     let models = collect_cli_model_names(&routes, vec!["gpt-5.4".to_string()]);
