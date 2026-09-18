@@ -45,6 +45,7 @@ fn snapshot_maps_to_annotated_get_content() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("snapshot", &input).unwrap();
@@ -87,6 +88,7 @@ fn eval_maps_script_and_page_world() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("eval", &input).unwrap();
@@ -127,6 +129,7 @@ fn interactables_maps_to_bridge_action() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("interactables", &input).unwrap();
@@ -260,5 +263,29 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
         jcode_base::env::set_var("JCODE_BROWSER_AUTOLAUNCH", prev_autolaunch);
     } else {
         jcode_base::env::remove_var("JCODE_BROWSER_AUTOLAUNCH");
+    }
+}
+
+#[test]
+fn ordinary_click_preserves_existing_bridge_dispatch() {
+    let input = BrowserInput {
+        action: "click".into(),
+        selector: Some("#next".into()),
+        ..Default::default()
+    };
+    let (_, params, _) = bridge_request("click", &input).unwrap();
+    assert!(params.get("dispatchEvents").is_none());
+}
+
+#[test]
+fn handoff_schema_prefers_fast_agent_and_bounds_inputs() {
+    let tool = BrowserTool::new();
+    assert!(tool.description().contains("Prefer action='handoff'"));
+    let schema = tool.parameters_schema();
+    assert_eq!(schema["properties"]["max_steps"]["default"], 12);
+    assert_eq!(schema["properties"]["max_steps"]["maximum"], 30);
+    assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
+    for key in ["goal", "candidates", "text_values"] {
+        assert!(schema["properties"].get(key).is_some());
     }
 }
