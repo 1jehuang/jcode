@@ -106,6 +106,19 @@ fn picker_entry_pretty_name(entry: &crate::tui::PickerEntry) -> String {
         },
         None => (entry.name.as_str(), String::new()),
     };
+    // A `[[providers.<profile>.models]]` `display_name` is authoritative for
+    // custom endpoints, ahead of the curated-family prettifier. Remote
+    // sessions consult the label table learned from the server's catalog
+    // wire fields first (the client cannot see remote provider config); the
+    // env-based lookup misses when the TUI client did not inherit the agent's
+    // `JCODE_NAMED_PROVIDER_PROFILE`; fall back to a unique match across all
+    // named profiles so `swe-2` still renders "SWE 2".
+    if let Some(label) = crate::provider_catalog::remote_model_display_name(base)
+        .or_else(|| crate::provider_catalog::active_named_provider_model_display_name(base))
+        .or_else(|| crate::provider_catalog::unique_named_provider_model_display_name(base))
+    {
+        return format!("{label}{suffix}");
+    }
     match crate::tui::app::helpers::model_names::pretty_known_model_family(base) {
         Some(pretty) => format!("{pretty}{suffix}"),
         None => entry.name.clone(),

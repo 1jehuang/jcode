@@ -157,6 +157,29 @@ pub fn enrich_routes(routes: &mut [ModelRoute]) {
         }
     }
     for route in routes {
+        // Configured `[[providers.<profile>.models]]` metadata rides along on
+        // the route so remote clients can render the same labels and context
+        // budgets without seeing the server's provider config. Named-provider
+        // routes encode their profile in `api_method` ("openai-compatible:<p>").
+        if let Some(profile) = route
+            .api_method
+            .strip_prefix("openai-compatible:")
+            .map(str::trim)
+            .filter(|profile| !profile.is_empty())
+        {
+            if route.display_name.is_none() {
+                route.display_name = crate::provider_catalog::named_provider_model_display_name(
+                    profile,
+                    &route.model,
+                );
+            }
+            if route.context_window.is_none() {
+                route.context_window = crate::provider_catalog::named_provider_model_context_window(
+                    profile,
+                    &route.model,
+                );
+            }
+        }
         let mut entry = usage
             .get(&key(&route.model, &route.provider, &route.api_method))
             .cloned()
@@ -235,6 +258,8 @@ mod tests {
 
     fn route(method: &str) -> ModelRoute {
         ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "test-model".into(),
             provider: "OpenAI".into(),
             api_method: method.into(),

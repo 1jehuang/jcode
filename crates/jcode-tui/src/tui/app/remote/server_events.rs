@@ -1508,6 +1508,9 @@ pub(in crate::tui::app) fn handle_server_event(
             session_id,
             provider_name,
             provider_model,
+            model_display_name,
+            model_context_window,
+            available_efforts,
             subagent_model,
             autoreview_enabled,
             autojudge_enabled,
@@ -1689,12 +1692,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.swarm_plan_swarm_id = None;
                 remote.reset_call_output_tokens_seen();
             }
-            let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+            let mut model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
                 available_models,
                 available_model_routes,
             );
+            model_catalog_snapshot.model_display_name = model_display_name;
+            model_catalog_snapshot.model_context_window = model_context_window;
+            model_catalog_snapshot.available_efforts = available_efforts;
             let catalog_outcome = app.replace_remote_model_catalog_snapshot(model_catalog_snapshot);
             app.clear_remote_startup_phase();
             app.session.subagent_model = subagent_model;
@@ -2258,6 +2264,9 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::ModelChanged {
             model,
             provider_name,
+            model_display_name,
+            model_context_window,
+            available_efforts,
             error,
             ..
         } => {
@@ -2281,8 +2290,15 @@ pub(in crate::tui::app) fn handle_server_event(
                 ));
                 app.set_status_notice("Model switch failed");
             } else {
+                app.remote_model_context_window = model_context_window;
+                app.remote_available_efforts = available_efforts;
                 app.update_context_limit_for_model(&model);
                 app.remote_provider_model = Some(model.clone());
+                crate::provider_catalog::set_remote_model_display_name(
+                    &model,
+                    model_display_name.clone(),
+                );
+                app.remote_model_display_name = model_display_name;
                 app.clear_remote_startup_phase();
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
@@ -2311,15 +2327,21 @@ pub(in crate::tui::app) fn handle_server_event(
         ServerEvent::AvailableModelsUpdated {
             provider_name,
             provider_model,
+            model_display_name,
+            model_context_window,
+            available_efforts,
             available_models,
             available_model_routes,
         } => {
-            let model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
+            let mut model_catalog_snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
                 provider_name,
                 provider_model,
                 available_models,
                 available_model_routes,
             );
+            model_catalog_snapshot.model_display_name = model_display_name;
+            model_catalog_snapshot.model_context_window = model_context_window;
+            model_catalog_snapshot.available_efforts = available_efforts;
             let mut explicit_refresh_summary_shown = false;
             if let Some((before_models, before_routes)) =
                 app.pending_remote_model_refresh_snapshot.take()

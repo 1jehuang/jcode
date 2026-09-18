@@ -191,10 +191,11 @@ fn test_remote_error_with_retryable_pending_schedules_retry() {
         .expect("retry should surface a connection status message");
     assert_eq!(retry_notice.role, "system");
     assert!(retry_notice.content.contains("Connection lost - retrying"));
-    assert!(retry_notice.content.contains(&format!(
-        "attempt 1/{}",
-        App::AUTO_RETRY_MAX_ATTEMPTS
-    )));
+    assert!(
+        retry_notice
+            .content
+            .contains(&format!("attempt 1/{}", App::AUTO_RETRY_MAX_ATTEMPTS))
+    );
     assert!(retry_notice.content.contains("Remote request failed"));
 }
 
@@ -483,6 +484,8 @@ fn test_remote_connectivity_error_without_auto_retry_still_waits_for_network() {
 
 fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
         model: model.to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -495,6 +498,8 @@ fn openai_oauth_route(model: &str) -> crate::provider::ModelRoute {
 
 fn claude_oauth_route(model: &str) -> crate::provider::ModelRoute {
     crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
         model: model.to_string(),
         provider: "Anthropic".to_string(),
         api_method: "claude-oauth".to_string(),
@@ -624,6 +629,9 @@ fn test_remote_fallback_offer_accept_stages_switch_and_resends() {
     app.remote_model_switch_in_flight = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: Some("Anthropic".to_string()),
@@ -668,6 +676,9 @@ fn test_remote_fallback_resend_dropped_when_switch_fails() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 0,
             model: "claude-sonnet-4".to_string(),
             provider_name: None,
@@ -786,6 +797,8 @@ fn test_guardrail_reroute_prefers_native_anthropic_route() {
     app.remote_model_options = vec![
         openai_oauth_route("gpt-5.5"),
         crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "claude-opus-4-8".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -1267,10 +1280,7 @@ fn test_tui_grok_build_login_starts_managed_oauth_flow() {
 
     app.start_login_provider(crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER);
 
-    assert!(matches!(
-        app.pending_login,
-        Some(PendingLogin::GrokBuild)
-    ));
+    assert!(matches!(app.pending_login, Some(PendingLogin::GrokBuild)));
     let rendered = app
         .display_messages()
         .iter()
@@ -1971,7 +1981,9 @@ fn test_debug_command_side_panel_latency_bench_reports_immediate_redraw() {
     // against 16.0ms purely from machine load, while passing in isolation. The
     // behavioral assertions above are the real subject, so gate only the timing
     // (refs #592).
-    let p95 = value["summary"]["latency_ms"]["p95"].as_f64().unwrap_or(0.0);
+    let p95 = value["summary"]["latency_ms"]["p95"]
+        .as_f64()
+        .unwrap_or(0.0);
     assert_perf_budget(p95 < 16.0, || {
         format!("side-panel p95 should stay within a 60fps frame budget: {result}")
     });
@@ -2258,7 +2270,10 @@ fn test_externally_started_turn_adopts_processing_state_and_settles_on_done() {
         app.status
     );
 
-    app.handle_server_event(crate::protocol::ServerEvent::MessageEnd { stop_reason: None }, &mut remote);
+    app.handle_server_event(
+        crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+        &mut remote,
+    );
     app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
 
     // Streaming text is revealed at a paced rate, so a `Done` that arrives with

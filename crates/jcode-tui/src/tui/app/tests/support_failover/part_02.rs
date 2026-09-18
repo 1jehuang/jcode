@@ -168,6 +168,8 @@ impl Provider for AuthRefreshingMockProvider {
         if *self.logged_in.lock().unwrap() {
             vec![
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -177,6 +179,8 @@ impl Provider for AuthRefreshingMockProvider {
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -188,6 +192,8 @@ impl Provider for AuthRefreshingMockProvider {
             ]
         } else {
             vec![crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -295,6 +301,8 @@ impl Provider for AntigravityMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-sonnet-4-6".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -304,6 +312,8 @@ impl Provider for AntigravityMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-oss-120b-medium".to_string(),
                 provider: "Antigravity".to_string(),
                 api_method: "cli".to_string(),
@@ -369,6 +379,8 @@ impl Provider for LoginSmokeModelProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -378,6 +390,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-5.4".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-api-key".to_string(),
@@ -387,6 +401,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "openai/gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openrouter".to_string(),
@@ -396,6 +412,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "glm-51-nvfp4".to_string(),
                 provider: "Comtegra GPU Cloud".to_string(),
                 api_method: "openai-compatible:comtegra".to_string(),
@@ -405,6 +423,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -414,6 +434,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -423,6 +445,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "DeepSeek".to_string(),
                 api_method: "openrouter".to_string(),
@@ -432,6 +456,8 @@ impl Provider for LoginSmokeModelProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "moonshotai/kimi-k2.5".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -487,6 +513,8 @@ impl Provider for FailingModelSwitchProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "claude-opus-4.6".to_string(),
             provider: "Copilot".to_string(),
             api_method: "copilot".to_string(),
@@ -619,6 +647,8 @@ impl Provider for DualMethodMockProvider {
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-api".to_string(),
@@ -628,6 +658,8 @@ impl Provider for DualMethodMockProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-sonnet-4".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -753,6 +785,8 @@ fn test_fallback_uses_remote_openai_credential_over_stale_route() {
         app.remote_model_options = ["openai-api", "openai-oauth"]
             .into_iter()
             .map(|method| crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-6-astra".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: method.to_string(),

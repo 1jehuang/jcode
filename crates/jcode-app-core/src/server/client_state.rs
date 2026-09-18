@@ -82,9 +82,20 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
             if IMPORT_SOURCE_CODES.contains(&other) {
                 other.to_string()
             } else {
-                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
-                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
+                // Named `[providers.<key>]` profiles may carry a display_name;
+                // prefer it over the raw profile key.
+                crate::config::config()
+                    .providers
+                    .get(other)
+                    .and_then(|profile| profile.display_name.as_deref())
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
+                        crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                            .map(|profile| profile.display_name.to_string())
+                    })
                     .unwrap_or_else(|| other.to_string())
             }
         }
@@ -226,6 +237,9 @@ pub(super) async fn handle_get_model_catalog(
     let (
         provider_name,
         provider_model,
+        model_display_name,
+        model_context_window,
+        available_efforts,
         available_models,
         available_model_routes,
         resolved_credential,
@@ -237,6 +251,9 @@ pub(super) async fn handle_get_model_catalog(
             Ok(agent_guard) => (
                 Some(agent_guard.provider_name()),
                 Some(agent_guard.provider_model()),
+                agent_guard.provider_model_display_name(),
+                agent_guard.provider_context_window_wire(),
+                agent_guard.provider_available_efforts_wire(),
                 agent_guard.available_models_display(),
                 agent_guard.model_routes(),
                 agent_guard.active_resolved_credential(),
@@ -253,6 +270,15 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                let model = persisted_model.or_else(|| Some(provider.model()));
+                let model_display_name = model.as_deref().and_then(|model| {
+                    crate::provider_catalog::named_provider_model_display_name_for_provider_key(
+                        persisted
+                            .as_ref()
+                            .and_then(|session| session.provider_key.as_deref()),
+                        model,
+                    )
+                });
                 let mut model_routes = provider.model_routes();
                 crate::model_usage::enrich_routes(&mut model_routes);
                 (
@@ -262,7 +288,16 @@ pub(super) async fn handle_get_model_catalog(
                     // correct, so `provider.name()` here reached the header and
                     // the spend ledger as `OpenRouter`.
                     Some(provider.display_name()),
-                    persisted_model.or_else(|| Some(provider.model())),
+                    model,
+                    model_display_name,
+                    u64::try_from(provider.context_window()).ok(),
+                    Some(
+                        provider
+                            .available_efforts()
+                            .iter()
+                            .map(|effort| effort.to_string())
+                            .collect(),
+                    ),
                     provider.available_models_display(),
                     model_routes,
                     provider.active_resolved_credential(),
@@ -283,6 +318,9 @@ pub(super) async fn handle_get_model_catalog(
         images: Vec::new(),
         provider_name,
         provider_model,
+        model_display_name,
+        model_context_window,
+        available_efforts,
         available_models,
         available_model_routes,
         mcp_servers: Vec::new(),
@@ -544,6 +582,12 @@ async fn send_history_from_persisted_session(
     // serialized wire bytes simultaneously.
     let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
+    let model_display_name = provider_model.as_deref().and_then(|model| {
+        crate::provider_catalog::named_provider_model_display_name_for_provider_key(
+            session.provider_key.as_deref(),
+            model,
+        )
+    });
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
     let autojudge_enabled = session.autojudge_enabled;
@@ -578,6 +622,15 @@ async fn send_history_from_persisted_session(
         images,
         provider_name,
         provider_model,
+        model_display_name,
+        model_context_window: u64::try_from(provider.context_window()).ok(),
+        available_efforts: Some(
+            provider
+                .available_efforts()
+                .iter()
+                .map(|effort| effort.to_string())
+                .collect(),
+        ),
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
@@ -639,6 +692,9 @@ pub(super) async fn send_history(
         is_canary,
         provider_name,
         provider_model,
+        model_display_name,
+        model_context_window,
+        available_efforts,
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,
@@ -714,6 +770,9 @@ pub(super) async fn send_history(
             agent_guard.is_canary(),
             agent_guard.provider_name(),
             agent_guard.provider_model(),
+            agent_guard.provider_model_display_name(),
+            agent_guard.provider_context_window_wire(),
+            agent_guard.provider_available_efforts_wire(),
             agent_guard.subagent_model(),
             agent_guard.autoreview_enabled(),
             agent_guard.autojudge_enabled(),
@@ -797,6 +856,9 @@ pub(super) async fn send_history(
         images,
         provider_name: Some(provider_name),
         provider_model: Some(provider_model),
+        model_display_name,
+        model_context_window,
+        available_efforts,
         subagent_model,
         autoreview_enabled,
         autojudge_enabled,

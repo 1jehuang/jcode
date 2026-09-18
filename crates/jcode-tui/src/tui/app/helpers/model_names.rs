@@ -32,6 +32,21 @@ pub(crate) fn pretty_model_display_name(model: &str) -> String {
         return "your default model".to_string();
     }
 
+    // A `[[providers.<profile>.models]]` entry with an explicit
+    // `display_name` wins over every heuristic. This is how custom
+    // OpenAI-compatible endpoints name their models (e.g. `swe-2` -> "SWE 2").
+    // Remote sessions consult the server-learned label table first: the client
+    // cannot see remote `[providers.*]` config and does not inherit the agent's
+    // `JCODE_NAMED_PROVIDER_PROFILE`, so both config-backed lookups miss and the
+    // raw id would be prettified ("swe-2" -> "Swe 2") on surfaces like the
+    // floating info widget. Ordering matches the `/model` picker.
+    if let Some(label) = crate::provider_catalog::remote_model_display_name(model)
+        .or_else(|| crate::provider_catalog::active_named_provider_model_display_name(model))
+        .or_else(|| crate::provider_catalog::unique_named_provider_model_display_name(model))
+    {
+        return label;
+    }
+
     // Preserve bracketed route suffixes (`[1m]`, `[web]`) and re-attach them as
     // a parenthetical, since they are jcode-side route markers rather than part
     // of the upstream family/version name.
@@ -567,6 +582,21 @@ mod tests {
             pretty_model_display_name("some-new-model"),
             "Some New Model"
         );
+    }
+
+    #[test]
+    fn pretty_model_display_name_prefers_remote_wire_label() {
+        // Remote sessions cannot resolve `[providers.*]` config, so the label
+        // learned from the server's wire metadata must win before heuristic
+        // prettification turns e.g. `swe-2` into `Swe 2`.
+        let model = "remote-widget-swe-clone-9001";
+        crate::provider_catalog::set_remote_model_display_name(
+            model,
+            Some("SWE Remote".to_string()),
+        );
+        let resolved = pretty_model_display_name(model);
+        crate::provider_catalog::set_remote_model_display_name(model, None);
+        assert_eq!(resolved, "SWE Remote");
     }
 
     #[test]

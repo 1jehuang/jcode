@@ -2021,6 +2021,8 @@ fn run_wiring_checks_for_contract(
     let catalog_routes: Vec<ModelRoute> = catalog_models
         .iter()
         .map(|model| ModelRoute {
+            display_name: None,
+            context_window: None,
             model: model.clone(),
             provider: contract.route_provider.clone(),
             api_method: api_method.clone(),

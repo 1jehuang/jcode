@@ -5,6 +5,7 @@ pub use jcode_provider_env::{
 };
 pub use jcode_provider_metadata::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::{OnceLock, RwLock};
 
 pub const OPENAI_COMPAT_LOCAL_ENABLED_ENV: &str = "JCODE_OPENAI_COMPAT_LOCAL_ENABLED";
 pub const MINIMAX_CHINA_API_BASE: &str = "https://api.minimaxi.com/v1";
@@ -256,6 +257,16 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
     if let Ok(profile_name) = std::env::var("JCODE_NAMED_PROVIDER_PROFILE") {
         let trimmed = profile_name.trim();
         if !trimmed.is_empty() {
+            // Named `[providers.<name>]` profiles may carry a display_name.
+            if let Some(label) = crate::config::config()
+                .providers
+                .get(trimmed)
+                .and_then(|profile| profile.display_name.as_deref())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+            {
+                return Some(label.to_string());
+            }
             return Some(trimmed.to_string());
         }
     }
@@ -268,6 +279,17 @@ pub fn active_openai_compatible_display_name() -> Option<String> {
             .find(|profile| profile.id == trimmed)
         {
             return Some(profile.display_name.to_string());
+        }
+        // Cache namespace can also point at a named `[providers.<name>]`
+        // profile before the named-profile env is set; honor its display_name.
+        if let Some(label) = crate::config::config()
+            .providers
+            .get(trimmed)
+            .and_then(|profile| profile.display_name.as_deref())
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            return Some(label.to_string());
         }
     }
 
@@ -1251,6 +1273,234 @@ pub fn configured_api_key_source(
     }
 
     Some((env_key, file_name))
+}
+
+/// Look up the user-configured `display_name` for a model declared under
+/// `[[providers.<profile>.models]]`. Returns `None` when the profile or model
+/// is unknown, or when the entry has no explicit display name. The UI uses
+/// this before falling back to heuristic prettification of the raw model id.
+pub fn named_provider_model_display_name(profile_name: &str, model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if profile_name.trim().is_empty() || model_id.is_empty() {
+        return None;
+    }
+    crate::config::config()
+        .providers
+        .get(profile_name.trim())
+        .and_then(|profile| {
+            profile.models.iter().find_map(|model| {
+                if model.id.trim().eq_ignore_ascii_case(model_id) {
+                    model
+                        .display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|label| !label.is_empty())
+                        .map(ToString::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Look up the display name for a model on the *active* named provider
+/// profile (`JCODE_NAMED_PROVIDER_PROFILE`), if any. Convenience wrapper for
+/// UI code that only knows the model id.
+pub fn active_named_provider_model_display_name(model_id: &str) -> Option<String> {
+    let profile = std::env::var("JCODE_NAMED_PROVIDER_PROFILE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE").ok())
+        .filter(|v| !v.trim().is_empty())?;
+    named_provider_model_display_name(&profile, model_id)
+}
+
+/// Like [`active_named_provider_model_display_name`] but resolves the active
+/// profile from the provider label the caller already displays instead of
+/// relying on env vars. The TUI client process often does not inherit
+/// `JCODE_NAMED_PROVIDER_PROFILE`/`JCODE_OPENROUTER_CACHE_NAMESPACE` (they are
+/// set inside the agent/server process), so header/picker code must resolve
+/// the named profile by matching `provider_label` against each
+/// `[providers.<key>]`'s key or `display_name`.
+pub fn named_provider_model_display_name_for_provider_label(
+    provider_label: &str,
+    model_id: &str,
+) -> Option<String> {
+    if let Some(label) = active_named_provider_model_display_name(model_id) {
+        return Some(label);
+    }
+    let label = provider_label.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let providers = &crate::config::config().providers;
+    // Match by profile key first, then by configured display_name.
+    let profile_key = providers
+        .keys()
+        .find(|key| key.trim().eq_ignore_ascii_case(label))
+        .cloned()
+        .or_else(|| {
+            providers.iter().find_map(|(key, profile)| {
+                profile
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| name.eq_ignore_ascii_case(label))
+                    .map(|_| key.clone())
+            })
+        })?;
+    named_provider_model_display_name(&profile_key, model_id)
+}
+
+/// Like [`named_provider_model_display_name_for_provider_label`] but resolves
+/// the profile from a persisted runtime *provider key* instead of a display
+/// label. Server-side call sites use this: `provider_key` is the session's
+/// `openai-compatible:<profile>` source key (or bare session vocabulary like
+/// `deepseek`), which survives reconnects, whereas the process-global
+/// `JCODE_NAMED_PROVIDER_PROFILE` env var can point at a different profile on
+/// a shared server. Falls back to the env-based lookup either way.
+pub fn named_provider_model_display_name_for_provider_key(
+    provider_key: Option<&str>,
+    model_id: &str,
+) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    if let Some(key) = provider_key.map(str::trim).filter(|key| !key.is_empty()) {
+        // Try the key as-is (bare profile name), then a `kind:<profile>`
+        // runtime-key suffix ("openai-compatible:deepseek" -> "deepseek").
+        let suffix = key
+            .split_once(':')
+            .map(|(_, profile)| profile.trim())
+            .filter(|profile| !profile.is_empty());
+        for candidate in [Some(key), suffix].into_iter().flatten() {
+            if let Some(label) = named_provider_model_display_name(candidate, model_id) {
+                return Some(label);
+            }
+        }
+    }
+    active_named_provider_model_display_name(model_id)
+}
+
+/// Model `display_name` lookup that does not need the active profile: returns
+/// the configured label only when exactly one `[providers.*]` profile declares
+/// this model id. Used by UI surfaces (model picker, header) that run in the
+/// TUI client process without the agent's `JCODE_NAMED_PROVIDER_PROFILE` env,
+/// where the env-based lookup cannot resolve the profile.
+pub fn unique_named_provider_model_display_name(model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    let mut found: Option<String> = None;
+    for profile in crate::config::config().providers.values() {
+        for model in &profile.models {
+            if !model.id.trim().eq_ignore_ascii_case(model_id) {
+                continue;
+            }
+            let label = model
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty());
+            if let Some(label) = label {
+                if found.is_some() {
+                    // Ambiguous: two profiles name this model id differently.
+                    return None;
+                }
+                found = Some(label.to_string());
+            }
+        }
+    }
+    found
+}
+
+/// Look up the configured `context_window` for a model on a named provider
+/// profile (`[providers.<profile>]` `[[models]]` entry), if declared.
+pub fn named_provider_model_context_window(profile_name: &str, model_id: &str) -> Option<u64> {
+    let model_id = model_id.trim();
+    if profile_name.trim().is_empty() || model_id.is_empty() {
+        return None;
+    }
+    crate::config::config()
+        .providers
+        .get(profile_name.trim())
+        .and_then(|profile| {
+            profile.models.iter().find_map(|model| {
+                if model.id.trim().eq_ignore_ascii_case(model_id) {
+                    model
+                        .context_window
+                        .and_then(|limit| u64::try_from(limit).ok())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Display labels learned from a remote server's model catalog. Remote TUI
+/// clients cannot see the server's `[providers.*]` config; when a catalog
+/// snapshot arrives, the routes' `display_name` values are registered here so
+/// label lookups (model picker rows, subagent pickers, headers) resolve the
+/// same server-configured labels. Rebuilt wholesale on each accepted catalog
+/// snapshot so switching servers cannot leave stale labels behind.
+fn remote_model_display_names() -> &'static RwLock<HashMap<String, String>> {
+    static MAP: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+    MAP.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Track the server-resolved `display_name` for a single model. Catalog
+/// snapshots carry route labels, but the History/ModelChanged metadata also
+/// carries the *current* model's resolved label even when the provider sends
+/// no routes at all (`model_catalog = false`) — seed that pair here so picker
+/// rows and overlays resolve it too. `None` removes the entry (the server
+/// stopped sending a label for this model).
+pub fn set_remote_model_display_name(model_id: &str, label: Option<String>) {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return;
+    }
+    let mut map = remote_model_display_names()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match label.map(|label| label.trim().to_string()).filter(|label| !label.is_empty()) {
+        Some(label) => {
+            map.insert(model_id.to_string(), label);
+        }
+        None => {
+            map.remove(model_id);
+        }
+    }
+}
+
+/// Replace the remote display-name table with the labels carried on the latest
+/// accepted catalog snapshot (`ModelRoute::display_name`).
+pub fn replace_remote_model_display_names<I>(names: I)
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut map = remote_model_display_names()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    map.clear();
+    map.extend(names);
+}
+
+/// Server-configured `display_name` for `model_id` learned over the wire, if
+/// the remote catalog carried one. Returns `None` in local sessions (the table
+/// is only populated from remote catalog snapshots).
+pub fn remote_model_display_name(model_id: &str) -> Option<String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    remote_model_display_names()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(model_id)
+        .cloned()
 }
 
 fn env_override(name: &str) -> Option<String> {

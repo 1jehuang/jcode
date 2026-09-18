@@ -686,6 +686,15 @@ pub struct ModelRoute {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    /// Configured `display_name` for this model on its `[providers.<profile>]`
+    /// entry, when any. Carried over the wire so remote clients render the
+    /// same label the server would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Configured/resolved context window for this model, when the sending
+    /// side knows it. Remote clients prefer it over their local defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cheapness: Option<RouteCheapnessEstimate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1156,6 +1165,22 @@ pub struct ModelCatalogSnapshot {
     pub provider_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_model: Option<String>,
+    /// Configured `display_name` for `provider_model`, when the provider
+    /// profile declares one. Carried over the wire so remote clients render
+    /// the same label without access to the server's provider config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_display_name: Option<String>,
+    /// Resolved context window for `provider_model` on the server (configured
+    /// `context_window`, catalog metadata, or static default). Remote clients
+    /// cannot resolve the server's per-model config themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_window: Option<u64>,
+    /// Selectable reasoning-effort ladder for the current model on the server.
+    /// `Some(vec)` is authoritative — including an empty list (the provider
+    /// has no effort support); `None` means the sender does not know (older
+    /// server) and clients should fall back to local inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_efforts: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_models: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1172,6 +1197,9 @@ impl ModelCatalogSnapshot {
         Self {
             provider_name,
             provider_model,
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             available_models,
             model_routes,
         }
@@ -1610,6 +1638,8 @@ mod tests {
 
         fn model_routes(&self) -> Vec<ModelRoute> {
             vec![ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "snapshot-model".to_string(),
                 provider: "Snapshot".to_string(),
                 api_method: "snapshot-api".to_string(),
@@ -1656,6 +1686,8 @@ mod tests {
     #[test]
     fn route_selection_preserves_runtime_identity_from_model_route() {
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "openrouter/owl-alpha".to_string(),
             provider: "OpenRouter".to_string(),
             api_method: "openrouter".to_string(),
@@ -1669,6 +1701,8 @@ mod tests {
         assert_eq!(selection.api_method, "openrouter");
 
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "nvidia/example".to_string(),
             provider: "NVIDIA NIM".to_string(),
             api_method: "openai-compatible:nvidia-nim".to_string(),
@@ -1689,6 +1723,8 @@ mod tests {
     #[test]
     fn grok_build_route_selection_is_a_first_class_runtime() {
         let selection = RouteSelection::from_model_route(&ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "grok-4.6".to_string(),
             provider: "Grok Build".to_string(),
             api_method: "grok-build-acp".to_string(),
@@ -1702,6 +1738,8 @@ mod tests {
         assert_eq!(selection.routed_model_spec(), "grok-build:grok-4.6");
 
         let prefixed = RouteSelection::from_model_route(&ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "grok-build:grok-4.6".to_string(),
             provider: "Grok Build".to_string(),
             api_method: "grok-build-acp".to_string(),
@@ -1738,5 +1776,84 @@ mod tests {
         assert_eq!(json, serde_json::json!({"kind": "grok-build"}));
         let decoded: RuntimeKey = serde_json::from_value(json).expect("GrokBuild must deserialize");
         assert_eq!(decoded, RuntimeKey::GrokBuild);
+    }
+
+    #[test]
+    fn model_route_metadata_survives_wire_roundtrip() {
+        // Server-configured `[[providers.<profile>.models]]` metadata rides the
+        // catalog snapshot to remote clients; a serde hiccup here silently
+        // reintroduces the raw-id labels and wrong context budgets this field
+        // exists to fix.
+        let route = ModelRoute {
+            display_name: Some("SWE 2".to_string()),
+            context_window: Some(262_000),
+            model: "swe-2".to_string(),
+            provider: "viola".to_string(),
+            api_method: "openai-compatible:viola".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        };
+        let json = serde_json::to_value(&route).expect("route must serialize");
+        assert_eq!(json["display_name"], "SWE 2");
+        assert_eq!(json["context_window"], 262_000);
+        let decoded: ModelRoute = serde_json::from_value(json).expect("route must deserialize");
+        assert_eq!(decoded.display_name.as_deref(), Some("SWE 2"));
+        assert_eq!(decoded.context_window, Some(262_000));
+
+        // Absent fields stay absent on the wire (older peers ignore them).
+        let bare = ModelRoute {
+            display_name: None,
+            context_window: None,
+            model: "m".to_string(),
+            provider: "p".to_string(),
+            api_method: "a".to_string(),
+            available: true,
+            detail: String::new(),
+            cheapness: None,
+            usage: None,
+        };
+        let json = serde_json::to_value(&bare).expect("bare route must serialize");
+        assert!(json.get("display_name").is_none());
+        assert!(json.get("context_window").is_none());
+    }
+
+    #[test]
+    fn catalog_snapshot_metadata_survives_wire_roundtrip() {
+        let mut snapshot = ModelCatalogSnapshot::new(
+            Some("viola".to_string()),
+            Some("swe-2".to_string()),
+            vec!["swe-2".to_string()],
+            Vec::new(),
+        );
+        snapshot.model_display_name = Some("SWE 2".to_string());
+        snapshot.model_context_window = Some(262_000);
+        snapshot.available_efforts = Some(vec!["low".to_string(), "max".to_string()]);
+        let json = serde_json::to_value(&snapshot).expect("snapshot must serialize");
+        let decoded: ModelCatalogSnapshot =
+            serde_json::from_value(json).expect("snapshot must deserialize");
+        assert_eq!(decoded.model_display_name.as_deref(), Some("SWE 2"));
+        assert_eq!(decoded.model_context_window, Some(262_000));
+        assert_eq!(
+            decoded.available_efforts.as_deref(),
+            Some(["low".to_string(), "max".to_string()].as_slice())
+        );
+
+        // Old servers never send the fields; they must decode as None.
+        let legacy = ModelCatalogSnapshot::new(
+            Some("p".to_string()),
+            Some("m".to_string()),
+            Vec::new(),
+            Vec::new(),
+        );
+        let json = serde_json::to_value(&legacy).expect("legacy must serialize");
+        assert!(json.get("model_display_name").is_none());
+        assert!(json.get("model_context_window").is_none());
+        assert!(json.get("available_efforts").is_none());
+        let decoded: ModelCatalogSnapshot =
+            serde_json::from_value(json).expect("legacy must deserialize");
+        assert!(decoded.model_context_window.is_none());
+        assert!(decoded.available_efforts.is_none());
     }
 }

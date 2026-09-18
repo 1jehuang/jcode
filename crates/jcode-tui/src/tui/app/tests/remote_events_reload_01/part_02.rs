@@ -351,6 +351,9 @@ fn test_remote_rewind_completion_shows_undo_hint_after_history_refresh() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "session_rewind_remote".to_string(),
             messages: vec![crate::protocol::HistoryMessage {

@@ -401,3 +401,300 @@ mod tests {
         ));
     }
 }
+
+// ============================================================================
+// OpenAI Responses wire API (`api = "openai-responses"` on a named profile)
+// ============================================================================
+
+impl OpenRouterProvider {
+    /// POST `{api_base}/responses` with the OpenAI Responses payload shape
+    /// (`input` items + `instructions`), then stream SSE events through the
+    /// shared `OpenAIResponsesStream` parser. Selected when a named
+    /// `[providers.<name>]` profile sets `api = "openai-responses"`.
+    pub(crate) async fn complete_responses(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        model: &str,
+    ) -> Result<EventStream> {
+        let reasoning_effort = self.reasoning_effort();
+        // Gate image blocks the same way the chat path does: endpoints that
+        // did not declare image input get a textual placeholder instead of a
+        // base64 payload they would reject with a schema error.
+        let input = if self.supports_image_input() {
+            jcode_base::provider::openai_request::build_responses_input(messages)
+        } else {
+            let filtered: Vec<Message> = messages
+                .iter()
+                .map(|msg| {
+                    let mut msg = msg.clone();
+                    msg.content = msg
+                        .content
+                        .into_iter()
+                        .map(|block| match block {
+                            ContentBlock::Image { media_type, .. } => ContentBlock::Text {
+                                text: format!(
+                                    "[Image omitted: this provider/model does not support image input; media_type={}]",
+                                    media_type
+                                ),
+                                cache_control: None,
+                            },
+                            other => other,
+                        })
+                        .collect();
+                    msg
+                })
+                .collect();
+            jcode_base::provider::openai_request::build_responses_input(&filtered)
+        };
+        let api_tools = jcode_base::provider::openai_request::build_tools(tools);
+
+        let mut request = serde_json::json!({
+            "model": model,
+            "instructions": system,
+            "input": input,
+            "stream": true,
+            "store": false,
+        });
+        if !api_tools.is_empty() {
+            request["tools"] = serde_json::json!(api_tools);
+            request["tool_choice"] = serde_json::json!("auto");
+        }
+        if let Some(max_tokens) = self.max_tokens {
+            request["max_output_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(effort) = reasoning_effort.as_deref()
+            && effort != "none"
+        {
+            let effort = if jcode_base::prompt::is_swarm_effort(effort) {
+                "max"
+            } else {
+                effort
+            };
+            request["reasoning"] =
+                serde_json::json!({ "effort": effort, "summary": "auto" });
+        }
+
+        // Merge user-configured extra request-body fields last, matching the
+        // chat/completions path so gateways can force non-standard parameters.
+        if let Some(extra) = self.extra_body.as_ref()
+            && let Some(request_obj) = request.as_object_mut()
+        {
+            for (key, value) in extra {
+                request_obj.insert(key.clone(), value.clone());
+            }
+        }
+
+        jcode_base::logging::info(&format!(
+            "OpenAI-compatible transport: HTTPS (Responses SSE, model: {})",
+            model
+        ));
+
+        let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+        let client = self.client.clone();
+        let api_base = self.api_base.clone();
+        let auth = self.auth.clone();
+        let model_for_stream = model.to_string();
+
+        tokio::spawn(async move {
+            if tx
+                .send(Ok(StreamEvent::ConnectionType {
+                    connection: "https/sse".to_string(),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            run_responses_stream_with_retries(client, api_base, auth, request, tx, model_for_stream)
+                .await;
+        });
+
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+}
+
+/// Retry loop for the Responses wire path, mirroring
+/// `run_stream_with_retries` so transient transport faults replay the same
+/// request with rollback semantics.
+async fn run_responses_stream_with_retries(
+    client: Client,
+    api_base: String,
+    auth: ProviderAuth,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    model: String,
+) {
+    let mut last_error = None;
+    let mut next_retry_delay = None;
+    let config = jcode_base::config::config();
+    let max_retries = config.provider.max_retries.max(1);
+    let retry_backoff_cap =
+        std::time::Duration::from_secs(config.provider.retry_backoff_cap_secs.max(1));
+
+    for attempt in 0..max_retries {
+        if attempt > 0 {
+            let delay = jcode_provider_core::retry_after::retry_delay(
+                attempt,
+                RETRY_BASE_DELAY_MS,
+                next_retry_delay.take(),
+            )
+            .min(retry_backoff_cap);
+            tokio::time::sleep(delay).await;
+        }
+
+        let (attempt_tx, attempt_guard) =
+            jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
+
+        let attempt_client = if attempt == 0 {
+            client.clone()
+        } else {
+            jcode_provider_core::fresh_transport_client()
+        };
+
+        match stream_responses_response(
+            attempt_client,
+            api_base.clone(),
+            auth.clone(),
+            request.clone(),
+            attempt_tx,
+            model.clone(),
+        )
+        .await
+        {
+            Ok(()) => {
+                let _ = attempt_guard.finish().await;
+                return;
+            }
+            Err(e) => {
+                let saw_output = attempt_guard.finish().await;
+                let error_str = format!("{e:#}").to_lowercase();
+                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                    if saw_output {
+                        let _ = tx
+                            .send(Ok(StreamEvent::RetryRollback {
+                                attempt: attempt + 2,
+                                max: max_retries,
+                            }))
+                            .await;
+                    }
+                    next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    last_error = Some(e);
+                    continue;
+                }
+                let _ = tx.send(Err(e)).await;
+                return;
+            }
+        }
+    }
+
+    if let Some(e) = last_error {
+        let _ = tx
+            .send(Err(anyhow::anyhow!(
+                "Failed after {} retries: {}",
+                max_retries,
+                e
+            )))
+            .await;
+    }
+}
+
+async fn stream_responses_response(
+    client: Client,
+    api_base: String,
+    auth: ProviderAuth,
+    request: Value,
+    tx: mpsc::Sender<Result<StreamEvent>>,
+    model: String,
+) -> Result<()> {
+    use jcode_message_types::ConnectionPhase;
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::SendingRequest,
+        }))
+        .await;
+    let connect_start = std::time::Instant::now();
+    // Scale the idle budget by the request's reasoning effort: Responses
+    // endpoints can stream silently for a long while on high/xhigh efforts
+    // (same rationale as `effective_https_idle_timeout` in openai-runtime).
+    let request_effort = request
+        .get("reasoning")
+        .and_then(|reasoning| reasoning.get("effort"))
+        .and_then(|effort| effort.as_str());
+    let stream_idle_timeout =
+        jcode_base::provider::stream_idle_timeout_for_effort(request_effort);
+
+    let url = format!("{}/responses", api_base);
+    let req = auth
+        .apply(
+            client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept-Encoding", "identity"),
+        )
+        .await?;
+
+    let response = jcode_provider_core::transport::send_with_initial_response_timeout(
+        req.json(&request),
+        stream_idle_timeout,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to send OpenAI Responses request\n  endpoint: {}\n  model: {}\n  auth: {}",
+            url,
+            model,
+            auth.label()
+        )
+    })?;
+
+    jcode_base::logging::info(&format!(
+        "HTTP connection established in {}ms (status={})",
+        connect_start.elapsed().as_millis(),
+        response.status()
+    ));
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        let body = jcode_base::util::http_error_body(response, "HTTP error").await;
+        return Err(jcode_provider_core::retry_after::error_with_retry_after(
+            format!(
+                "OpenAI Responses request failed\n  endpoint: {}\n  model: {}\n  auth: {}\n  status: {}\n  response: {}",
+                url,
+                model,
+                auth.label(),
+                status,
+                body
+            ),
+            retry_after,
+        ));
+    }
+
+    let _ = tx
+        .send(Ok(StreamEvent::ConnectionPhase {
+            phase: ConnectionPhase::WaitingForResponse,
+        }))
+        .await;
+
+    let mut stream =
+        jcode_provider_openai::stream::OpenAIResponsesStream::new(response.bytes_stream());
+
+    loop {
+        let event = match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
+            Ok(Some(Ok(event))) => event,
+            Ok(Some(Err(e))) => anyhow::bail!("Stream error: {}", e),
+            Ok(None) => break,
+            Err(_) => anyhow::bail!(
+                "Stream idle timeout after {}s waiting for the next Responses event",
+                stream_idle_timeout.as_secs()
+            ),
+        };
+        if tx.send(Ok(event)).await.is_err() {
+            break;
+        }
+    }
+
+    Ok(())
+}

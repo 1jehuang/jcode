@@ -1153,6 +1153,21 @@ pub struct App {
     remote_client_instance_id: String,
     remote_provider_name: Option<String>,
     remote_provider_model: Option<String>,
+    /// Server-resolved `display_name` label for `remote_provider_model`, when
+    /// the server's `[providers.<profile>]` entry declares one. Sent over the
+    /// wire (History / ModelChanged / AvailableModelsUpdated) because the
+    /// client cannot see the remote provider config.
+    remote_model_display_name: Option<String>,
+    /// Server-resolved context window for `remote_provider_model`. The client
+    /// cannot resolve the server's per-model config, so the wire
+    /// `model_context_window` field carries it; when absent (older server) the
+    /// client falls back to its local resolution.
+    remote_model_context_window: Option<u64>,
+    /// Server-declared selectable effort ladder for the current model.
+    /// `Some(vec)` is authoritative — including an empty list (provider has no
+    /// effort support); `None` means the server predates the wire field and we
+    /// fall back to local inference.
+    remote_available_efforts: Option<Vec<String>>,
     /// Monotonic counter bumped each time the server pushes a fresh remote model
     /// catalog snapshot (`AvailableModelsUpdated`). The onboarding readiness
     /// validation uses this to wait for the post-login catalog refresh to land

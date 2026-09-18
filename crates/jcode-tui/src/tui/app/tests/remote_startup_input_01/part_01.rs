@@ -687,6 +687,8 @@ fn configure_test_remote_models_with_cursor(app: &mut App) {
         .iter()
         .cloned()
         .map(|model| crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model,
             provider: "Cursor".to_string(),
             api_method: "cursor".to_string(),
@@ -751,6 +753,9 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
     app.is_remote = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             provider_name: Some("Copilot".to_string()),
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec![
@@ -759,6 +764,8 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
             ],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -768,6 +775,8 @@ fn test_available_models_updated_event_surfaces_authed_provider_in_remote_model_
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "grok-code-fast-1".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),
@@ -818,10 +827,15 @@ fn test_duplicate_available_models_updated_event_is_a_no_op() {
 
         app.is_remote = true;
         let event = || crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             provider_name: Some("Copilot".to_string()),
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Copilot".to_string(),
                 api_method: "copilot".to_string(),
@@ -863,6 +877,8 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
     app.remote_provider_model = Some("gpt-5.4".to_string());
     app.remote_available_entries = vec!["gpt-5.4".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
         model: "gpt-5.4".to_string(),
         provider: "OpenAI".to_string(),
         api_method: "openai-oauth".to_string(),
@@ -883,10 +899,15 @@ fn test_remote_final_catalog_replaces_post_login_loading_state_in_place() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             provider_name: Some("Anthropic".to_string()),
             provider_model: Some("claude-opus-4.6".to_string()),
             available_models: vec!["claude-opus-4.6".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-opus-4.6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "anthropic-oauth".to_string(),
@@ -953,6 +974,9 @@ fn test_remote_model_switch_failure_shows_actionable_guidance() {
     app.is_remote = true;
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 7,
             model: "claude-opus-4.6".to_string(),
             provider_name: Some("Copilot".to_string()),
@@ -1064,6 +1088,9 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 8,
             model: "Qwen/Qwen3-32B-TEE".to_string(),
             provider_name: Some("Chutes".to_string()),
@@ -1127,6 +1154,9 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
         // Names-only frame: same model list, no route expansion.
         app.handle_server_event(
             crate::protocol::ServerEvent::AvailableModelsUpdated {
+                model_display_name: None,
+                model_context_window: None,
+                available_efforts: None,
                 provider_name: Some("Copilot".to_string()),
                 provider_model: Some("claude-opus-4.6".to_string()),
                 available_models: vec!["claude-opus-4.6".to_string()],
@@ -1138,10 +1168,15 @@ fn test_detailed_catalog_replaces_placeholder_routes_after_names_only_update() {
         // Detailed frame with identical model names but real routes.
         let detailed_redraw = app.handle_server_event(
             crate::protocol::ServerEvent::AvailableModelsUpdated {
+                model_display_name: None,
+                model_context_window: None,
+                available_efforts: None,
                 provider_name: Some("Copilot".to_string()),
                 provider_model: Some("claude-opus-4.6".to_string()),
                 available_models: vec!["claude-opus-4.6".to_string()],
                 available_model_routes: vec![crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "claude-opus-4.6".to_string(),
                     provider: "Copilot".to_string(),
                     api_method: "copilot".to_string(),

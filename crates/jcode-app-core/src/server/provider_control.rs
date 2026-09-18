@@ -53,6 +53,9 @@ fn available_models_snapshot_into_event(snapshot: ModelCatalogSnapshot) -> Serve
     ServerEvent::AvailableModelsUpdated {
         provider_name: snapshot.provider_name,
         provider_model: snapshot.provider_model,
+        model_display_name: snapshot.model_display_name,
+        model_context_window: snapshot.model_context_window,
+        available_efforts: snapshot.available_efforts,
         available_models: snapshot.available_models,
         available_model_routes: snapshot.model_routes,
     }
@@ -385,6 +388,7 @@ fn send_model_changed_result(
     id: u64,
     result: anyhow::Result<(String, String)>,
     fallback_model: String,
+    agent: &Agent,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
@@ -400,6 +404,9 @@ fn send_model_changed_result(
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
                 id,
+                model_display_name: agent.model_display_name_for(&updated),
+                model_context_window: agent.provider_context_window_wire(),
+                available_efforts: agent.provider_available_efforts_wire(),
                 model: updated,
                 provider_name: Some(provider_name),
                 error: None,
@@ -416,6 +423,9 @@ fn send_model_changed_result(
             );
             let _ = client_event_tx.send(ServerEvent::ModelChanged {
                 id,
+                model_display_name: agent.model_display_name_for(&fallback_model),
+                model_context_window: agent.provider_context_window_wire(),
+                available_efforts: agent.provider_available_efforts_wire(),
                 model: fallback_model,
                 provider_name: None,
                 error: Some(error.to_string()),
@@ -434,6 +444,9 @@ fn apply_cycle_model(
     if models.is_empty() {
         let _ = client_event_tx.send(ServerEvent::ModelChanged {
             id,
+            model_display_name: agent.provider_model_display_name(),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
             model: agent.provider_model(),
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
@@ -467,7 +480,7 @@ fn apply_cycle_model(
         }
         result.map(|_| (agent.provider_model(), agent.provider_name()))
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_cycle_model(
@@ -571,6 +584,9 @@ fn apply_set_model(
         );
         let _ = client_event_tx.send(ServerEvent::ModelChanged {
             id,
+            model_display_name: agent.model_display_name_for(&current),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
             model: current,
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
@@ -586,7 +602,7 @@ fn apply_set_model(
         }
         result.map(|_| (agent.provider_model(), agent.provider_name()))
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 fn apply_set_route(
@@ -619,6 +635,9 @@ fn apply_set_route(
         );
         let _ = client_event_tx.send(ServerEvent::ModelChanged {
             id,
+            model_display_name: agent.model_display_name_for(&current),
+            model_context_window: agent.provider_context_window_wire(),
+            available_efforts: agent.provider_available_efforts_wire(),
             model: current,
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
@@ -634,7 +653,7 @@ fn apply_set_route(
         }
         result.map(|_| (agent.provider_model(), agent.provider_name()))
     };
-    send_model_changed_result(id, result, current, client_event_tx);
+    send_model_changed_result(id, result, current, agent, client_event_tx);
 }
 
 pub(super) async fn handle_set_model(
@@ -1572,6 +1591,7 @@ mod tests {
                 model,
                 provider_name: Some(provider_name),
                 error: None,
+                ..
             }) if model == "test-model-b" && provider_name == "test-effort"
         ));
     }

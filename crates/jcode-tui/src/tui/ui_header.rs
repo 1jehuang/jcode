@@ -197,6 +197,20 @@ fn prettify_model_id(model: &str) -> String {
 fn header_model_display_name(model: &str, provider_name: &str) -> String {
     let raw = model.trim();
 
+    // An explicit `display_name` on the active `[providers.<profile>]`
+    // model entry is the authoritative label for custom endpoints. Resolve
+    // via the displayed provider name too: the TUI client process may not
+    // carry the agent's `JCODE_NAMED_PROVIDER_PROFILE` env var.
+    if let Some(label) =
+        crate::provider_catalog::named_provider_model_display_name_for_provider_label(
+            provider_name,
+            raw,
+        )
+        .or_else(|| crate::provider_catalog::unique_named_provider_model_display_name(raw))
+    {
+        return label;
+    }
+
     // Claude family ids ("claude-opus-4-6", "claude-3-5-sonnet-latest",
     // "claude-haiku-4.5") render as "Claude <version> <Family>" for any
     // version, instead of only the hardcoded 3.5/4.5 cases.
@@ -495,12 +509,14 @@ fn header_provider_label(
     if trimmed.is_empty() {
         return String::new();
     }
+    // Auth-tag lookup is case-insensitive, but the emitted label preserves
+    // the provider's configured casing (e.g. `display_name = "Viola Router"`).
     let name = trimmed.to_lowercase();
     let auth_tag = header_provider_auth_tag(&name, auth, active);
     if auth_tag.is_empty() {
-        name
+        trimmed.to_string()
     } else {
-        format!("{}:{}", auth_tag, name)
+        format!("{}:{}", auth_tag, trimmed)
     }
 }
 
@@ -624,7 +640,9 @@ fn build_persistent_header_with_auth(
     // client. Keep the connection icon as a separate trailing hint instead.
     let icon = crate::id::session_icon(&session_name);
     let connection_icon = connection_type_icon(app.connection_type().as_deref());
-    let nice_model = header_model_display_name(&model, &app.provider_name());
+    let nice_model = app
+        .provider_model_display_name()
+        .unwrap_or_else(|| header_model_display_name(&model, &app.provider_name()));
     let align = Alignment::Left;
     let mut lines: Vec<Line> = Vec::new();
     let w = width as usize;

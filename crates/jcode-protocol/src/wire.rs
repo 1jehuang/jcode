@@ -1128,6 +1128,18 @@ pub enum ServerEvent {
         /// Model name (e.g. "claude-sonnet-4-20250514")
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Configured `display_name` for `provider_model`, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_display_name: Option<String>,
+        /// Server-resolved context window for `provider_model`, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_context_window: Option<u64>,
+        /// Server-declared selectable effort ladder for the current model.
+        /// `Some(vec)` is authoritative (empty = no effort support); `None`
+        /// means the server predates this field and clients should fall back
+        /// to local inference.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_efforts: Option<Vec<String>>,
         /// Available models for this provider
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_models: Vec<String>,
@@ -1263,6 +1275,18 @@ pub enum ServerEvent {
         model: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         provider_name: Option<String>,
+        /// Configured `display_name` for `model` on the server's
+        /// `[providers.<profile>]` entry, when any. Remote clients use it to
+        /// render the same label the server would instead of prettifying the
+        /// raw model id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_display_name: Option<String>,
+        /// Server-resolved context window for `model`, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_context_window: Option<u64>,
+        /// Server-declared selectable effort ladder (see History).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_efforts: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -1317,6 +1341,15 @@ pub enum ServerEvent {
         provider_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_model: Option<String>,
+        /// Configured `display_name` for `provider_model`, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_display_name: Option<String>,
+        /// Server-resolved context window for `provider_model`, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_context_window: Option<u64>,
+        /// Server-declared selectable effort ladder (see History).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available_efforts: Option<Vec<String>>,
         available_models: Vec<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         available_model_routes: Vec<jcode_provider_core::ModelRoute>,

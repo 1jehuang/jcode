@@ -8,6 +8,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
     app.is_remote = true;
     app.remote_available_entries = vec!["old-model".to_string()];
     app.remote_model_options = vec![crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
         model: "old-model".to_string(),
         provider: "OldProvider".to_string(),
         api_method: "old-api".to_string(),
@@ -23,6 +25,8 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
             provider_model: Some("new-model".to_string()),
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
             available_model_routes: vec![crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "new-model".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -126,6 +130,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
     app.pending_remote_model_refresh_snapshot = Some((
         vec!["old-model".to_string()],
         vec![crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "old-model".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "responses".to_string(),
@@ -143,6 +149,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
             available_models: vec!["old-model".to_string(), "new-model".to_string()],
             available_model_routes: vec![
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "old-model".to_string(),
                     provider: "OpenAI".to_string(),
                     api_method: "responses".to_string(),
@@ -152,6 +160,8 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
                     cheapness: None,
                 },
                 crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: "new-model".to_string(),
                     provider: "OpenRouter".to_string(),
                     api_method: "chat".to_string(),

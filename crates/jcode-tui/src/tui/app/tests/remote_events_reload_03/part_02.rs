@@ -33,6 +33,9 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: session_id.to_string(),
             messages: vec![],
@@ -105,6 +108,9 @@ fn test_duplicate_history_for_same_session_is_ignored_after_fast_path_restore() 
 
     app.handle_server_event(
         crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "ses_fast_path".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
@@ -387,4 +393,3 @@ fn test_remote_error_with_retry_after_keeps_pending_for_auto_retry() {
     assert_eq!(last.role, "system");
     assert!(last.content.contains("Will auto-retry in 3 seconds"));
 }
-

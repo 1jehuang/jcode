@@ -89,7 +89,7 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
         let mut provider_spans = vec![
             Span::styled("☁ ", Style::default().fg(rgb(140, 180, 255))),
             Span::styled(
-                provider.to_lowercase(),
+                provider.to_string(),
                 Style::default().fg(rgb(140, 180, 255)),
             ),
         ];
@@ -220,7 +220,7 @@ pub(super) fn render_model_info(data: &InfoWidgetData, inner: Rect) -> Vec<Line<
             .filter(|s| !s.is_empty())
         {
             detail_spans.push(Span::styled(
-                provider.to_lowercase(),
+                provider.to_string(),
                 Style::default().fg(rgb(140, 180, 255)),
             ));
         }

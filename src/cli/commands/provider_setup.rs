@@ -155,6 +155,7 @@ pub(crate) fn configure_provider_profile(
 
     let profile = NamedProviderConfig {
         provider_type: NamedProviderType::OpenAiCompatible,
+        display_name: None,
         base_url: api_base.clone(),
         api: None,
         auth: auth.clone(),
@@ -178,6 +179,7 @@ pub(crate) fn configure_provider_profile(
         allow_provider_pinning: options.provider_routing,
         models: vec![NamedProviderModelConfig {
             id: model.clone(),
+            display_name: None,
             reasoning: None,
             reasoning_effort: None,
             context_window: options.context_window,

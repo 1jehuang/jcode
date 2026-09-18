@@ -690,6 +690,19 @@ impl crate::tui::TuiState for App {
         }
     }
 
+    fn provider_model_display_name(&self) -> Option<String> {
+        // Only remote clients receive the label over the wire; locally the
+        // header resolves `display_name` from the local provider config.
+        if !self.is_remote {
+            return None;
+        }
+        self.remote_model_display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(ToString::to_string)
+    }
+
     fn upstream_provider(&self) -> Option<String> {
         self.upstream_provider.clone()
     }

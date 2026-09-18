@@ -1046,6 +1046,9 @@ impl Agent {
                 self.persist_session_best_effort("model fallback");
                 let _ = event_tx.send(ServerEvent::ModelChanged {
                     id: 0,
+                    model_display_name: self.model_display_name_for(&model_after_stream),
+                    model_context_window: self.provider_context_window_wire(),
+                    available_efforts: self.provider_available_efforts_wire(),
                     model: model_after_stream,
                     provider_name: Some(provider_name),
                     error: None,

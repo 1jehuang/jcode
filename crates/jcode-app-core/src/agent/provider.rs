@@ -83,13 +83,54 @@ impl Agent {
         }
     }
 
+    /// Configured `display_name` for `model` on this agent's active
+    /// `[providers.<profile>]` entry, if any. Resolved server-side because
+    /// remote clients cannot see the server config; the session's persisted
+    /// `provider_key` is preferred over the process-global profile env var.
+    pub fn model_display_name_for(&self, model: &str) -> Option<String> {
+        crate::provider_catalog::named_provider_model_display_name_for_provider_key(
+            self.session.provider_key.as_deref(),
+            model,
+        )
+    }
+
+    /// Display label for the *current* model, see [`Self::model_display_name_for`].
+    pub fn provider_model_display_name(&self) -> Option<String> {
+        let model = self.provider_model();
+        self.model_display_name_for(&model)
+    }
+
+    /// Server-resolved context window for the current model, for the wire
+    /// `model_context_window` field (remote clients cannot resolve the
+    /// server's per-model config themselves).
+    pub fn provider_context_window_wire(&self) -> Option<u64> {
+        u64::try_from(self.provider_handle().context_window()).ok()
+    }
+
+    /// Server-declared selectable effort ladder for the current model, for the
+    /// wire `available_efforts` field. `Some(vec)` is authoritative including
+    /// an empty list (provider has no effort support).
+    pub fn provider_available_efforts_wire(&self) -> Option<Vec<String>> {
+        Some(
+            self.provider_handle()
+                .available_efforts()
+                .iter()
+                .map(|effort| effort.to_string())
+                .collect(),
+        )
+    }
+
     pub fn model_catalog_snapshot(&self) -> jcode_provider_core::ModelCatalogSnapshot {
-        jcode_provider_core::ModelCatalogSnapshot::new(
+        let mut snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
             Some(self.provider_name()),
             Some(self.provider_model()),
             self.available_models_display(),
             self.model_routes(),
-        )
+        );
+        snapshot.model_display_name = self.provider_model_display_name();
+        snapshot.model_context_window = self.provider_context_window_wire();
+        snapshot.available_efforts = self.provider_available_efforts_wire();
+        snapshot
     }
 
     pub fn registry(&self) -> Registry {

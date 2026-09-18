@@ -817,6 +817,8 @@ impl Provider for AntigravityProvider {
             return catalog
                 .into_iter()
                 .map(|model| jcode_provider_core::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: model.id.clone(),
                     provider: "Antigravity".to_string(),
                     api_method: "https".to_string(),
@@ -831,6 +833,8 @@ impl Provider for AntigravityProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model,
                 provider: "Antigravity".to_string(),
                 api_method: "https".to_string(),

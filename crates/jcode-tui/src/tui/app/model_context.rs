@@ -571,8 +571,7 @@ impl App {
         // stand-in. Local sessions read the real provider. This keeps the cycle
         // and the picker consistent (both expose swarm / swarm-deep).
         let efforts = if self.is_remote {
-            let (provider_name, provider_model) = self.remote_effort_identity();
-            inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref())
+            self.available_effort_names_for_current_model()
         } else {
             self.provider.available_efforts()
         };
@@ -627,13 +626,35 @@ impl App {
         }
     }
 
+    /// Selectable effort levels for the current model. Remote sessions prefer
+    /// the server-declared ladder (`available_efforts` wire field); `None`
+    /// (older server) falls back to local model-derived inference. Local
+    /// sessions read the real provider.
+    pub(super) fn available_effort_names_for_current_model(&self) -> Vec<&str> {
+        if self.is_remote {
+            if let Some(efforts) = &self.remote_available_efforts {
+                return efforts.iter().map(String::as_str).collect();
+            }
+            let (provider_name, provider_model) = self.remote_effort_identity();
+            return inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref());
+        }
+        self.provider.available_efforts()
+    }
+
     pub(super) fn update_context_limit_for_model(&mut self, model: &str) {
         let limit = if self.is_remote {
-            crate::provider::context_limit_for_model_with_provider(
-                model,
-                self.remote_provider_name.as_deref(),
-            )
-            .unwrap_or(self.provider.context_window())
+            // The server resolves its own per-model config (`context_window`,
+            // catalog metadata) that the client cannot see; prefer the value
+            // it sent over the wire before falling back to local resolution.
+            self.remote_model_context_window
+                .map(|window| window as usize)
+                .or_else(|| {
+                    crate::provider::context_limit_for_model_with_provider(
+                        model,
+                        self.remote_provider_name.as_deref(),
+                    )
+                })
+                .unwrap_or(self.provider.context_window())
         } else {
             self.provider.context_window()
         };

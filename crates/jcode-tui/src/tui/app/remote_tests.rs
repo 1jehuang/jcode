@@ -636,6 +636,9 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
 
 fn startup_history(session_id: &str) -> ServerEvent {
     ServerEvent::History {
+        model_display_name: None,
+        model_context_window: None,
+        available_efforts: None,
         id: 1,
         session_id: session_id.to_string(),
         messages: vec![],

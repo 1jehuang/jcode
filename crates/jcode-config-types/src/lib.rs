@@ -438,6 +438,10 @@ pub enum NamedProviderAuth {
 #[serde(default)]
 pub struct NamedProviderModelConfig {
     pub id: String,
+    /// Optional human-facing label for this model (e.g. `display_name = "SWE 2"`).
+    /// When set, the UI shows this instead of prettifying the raw model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Explicitly enable or disable `/effort` for this model. When omitted,
     /// the provider-level setting and built-in model-family detection apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,7 +472,16 @@ pub struct NamedProviderModelConfig {
 pub struct NamedProviderConfig {
     #[serde(rename = "type")]
     pub provider_type: NamedProviderType,
+    /// Optional human-facing label shown in the UI (e.g. `display_name = "Viola Router"`).
+    /// Falls back to the profile key (e.g. `[providers.viola]` -> "viola") when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub base_url: String,
+    /// Wire API the endpoint speaks. Unset or `"openai-chat-completions"`
+    /// uses `POST {base_url}/chat/completions` (the default). Set
+    /// `api = "openai-responses"` (alias `"responses"`) for endpoints that
+    /// implement the OpenAI Responses API (`POST {base_url}/responses`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api: Option<String>,
     pub auth: NamedProviderAuth,
     pub auth_header: Option<String>,
@@ -517,6 +530,7 @@ impl Default for NamedProviderConfig {
     fn default() -> Self {
         Self {
             provider_type: NamedProviderType::OpenAiCompatible,
+            display_name: None,
             base_url: String::new(),
             api: None,
             auth: NamedProviderAuth::Bearer,

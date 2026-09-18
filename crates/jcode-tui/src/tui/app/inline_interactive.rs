@@ -369,6 +369,17 @@ fn remote_model_catalog_snapshot_is_safe(
         !remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES, false)
     }) || snapshot.provider_model.as_deref().is_some_and(|value| {
         !remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES, false)
+    }) || snapshot.model_display_name.as_deref().is_some_and(|value| {
+        !remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES, false)
+    }) || snapshot.model_context_window.is_some_and(|window| {
+        // Reject absurd budgets; a forged huge window would silently disable
+        // compaction warnings on the client.
+        window == 0 || window > 64 * 1024 * 1024
+    }) || snapshot.available_efforts.as_ref().is_some_and(|efforts| {
+        efforts.len() > 32
+            || efforts.iter().any(|effort| {
+                !remote_catalog_text_is_safe(effort, REMOTE_MODEL_CATALOG_MAX_MODEL_BYTES, false)
+            })
     }) {
         return false;
     }
@@ -389,6 +400,9 @@ fn remote_model_catalog_snapshot_is_safe(
                 REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES,
                 false,
             )
+            && route.display_name.as_deref().is_none_or(|value| {
+                remote_catalog_text_is_safe(value, REMOTE_MODEL_CATALOG_MAX_PROVIDER_BYTES, false)
+            })
             && remote_catalog_text_is_safe(
                 &route.detail,
                 REMOTE_MODEL_CATALOG_MAX_DETAIL_BYTES,
@@ -638,12 +652,16 @@ impl App {
     pub(super) fn remote_model_catalog_snapshot(
         &self,
     ) -> jcode_provider_core::ModelCatalogSnapshot {
-        jcode_provider_core::ModelCatalogSnapshot::new(
+        let mut snapshot = jcode_provider_core::ModelCatalogSnapshot::new(
             self.remote_provider_name.clone(),
             self.remote_provider_model.clone(),
             self.remote_available_entries.clone(),
             self.remote_model_options.clone(),
-        )
+        );
+        snapshot.model_display_name = self.remote_model_display_name.clone();
+        snapshot.model_context_window = self.remote_model_context_window;
+        snapshot.available_efforts = self.remote_available_efforts.clone();
+        snapshot
     }
 
     pub(super) fn replace_remote_model_catalog_snapshot(
@@ -658,6 +676,39 @@ impl App {
             self.remote_provider_name = Some(name);
             provider_meta_changed = true;
             provider_name_changed = true;
+        }
+        // Server-supplied `display_name` label for the current model. Track it
+        // whenever the snapshot carries a model id so later config edits (or a
+        // server that stops sending a label) propagate instead of going stale.
+        // Also seed the remote label table: providers with `model_catalog =
+        // false` send no routes, so without this pair picker rows/overlays
+        // never learn the configured label and fall back to prettifying the
+        // raw model id.
+        let current_model_label = snapshot
+            .provider_model
+            .clone()
+            .map(|model| (model, snapshot.model_display_name.clone()));
+        if snapshot.provider_model.is_some()
+            && self.remote_model_display_name != snapshot.model_display_name
+        {
+            self.remote_model_display_name = snapshot.model_display_name.clone();
+            provider_meta_changed = true;
+        }
+        // Same wire fields for the context budget and effort ladder. Both are
+        // tracked whenever a model id is present; `available_efforts` is
+        // `None` only when the server predates the field (local inference
+        // fallback stays engaged in that case).
+        if snapshot.provider_model.is_some()
+            && self.remote_model_context_window != snapshot.model_context_window
+        {
+            self.remote_model_context_window = snapshot.model_context_window;
+            provider_meta_changed = true;
+        }
+        if snapshot.provider_model.is_some()
+            && self.remote_available_efforts != snapshot.available_efforts
+        {
+            self.remote_available_efforts = snapshot.available_efforts.clone();
+            provider_meta_changed = true;
         }
         if let Some(model) = snapshot.provider_model
             && self.remote_provider_model.as_deref() != Some(model.as_str())
@@ -689,7 +740,20 @@ impl App {
         }
         self.remote_available_entries = snapshot.available_models;
         if replace_routes {
+            crate::provider_catalog::replace_remote_model_display_names(
+                snapshot.model_routes.iter().filter_map(|route| {
+                    route
+                        .display_name
+                        .clone()
+                        .map(|label| (route.model.clone(), label))
+                }),
+            );
             self.remote_model_options = snapshot.model_routes;
+        }
+        // Applied after the wholesale route-label replace so the current
+        // model's authoritative label survives the table rebuild.
+        if let Some((model, label)) = current_model_label {
+            crate::provider_catalog::set_remote_model_display_name(&model, label);
         }
         self.invalidate_model_picker_cache();
         CatalogReplaceOutcome {
@@ -741,6 +805,8 @@ impl App {
             })
         {
             routes.push(crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: model.id.to_string(),
                 provider: crate::subscription_catalog::JCODE_PROVIDER_DISPLAY_NAME.to_string(),
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
@@ -900,10 +966,21 @@ impl App {
         }
         if self.remote_provider_model.is_none() {
             self.remote_provider_model = snapshot.provider_model;
+            self.remote_model_display_name = snapshot.model_display_name;
+            self.remote_model_context_window = snapshot.model_context_window;
+            self.remote_available_efforts = snapshot.available_efforts;
         }
         if self.remote_available_entries.is_empty() {
             self.remote_available_entries = snapshot.available_models;
         }
+        crate::provider_catalog::replace_remote_model_display_names(
+            snapshot.model_routes.iter().filter_map(|route| {
+                route
+                    .display_name
+                    .clone()
+                    .map(|label| (route.model.clone(), label))
+            }),
+        );
         self.remote_model_options = snapshot.model_routes;
         self.invalidate_model_picker_cache();
         true
@@ -1209,10 +1286,7 @@ impl App {
             self.provider.reasoning_effort()
         };
         let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
+            self.available_effort_names_for_current_model()
         } else {
             self.provider.available_efforts()
         };
@@ -1456,10 +1530,7 @@ impl App {
             self.provider.reasoning_effort()
         };
         let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
+            self.available_effort_names_for_current_model()
         } else {
             self.provider.available_efforts()
         };
@@ -1563,6 +1634,8 @@ impl App {
 
         let routes = if routes.is_empty() && self.is_remote && current_model != "unknown" {
             vec![crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: current_model.clone(),
                 provider: self
                     .remote_provider_name
@@ -2103,10 +2176,7 @@ impl App {
             self.provider.reasoning_effort()
         };
         let available_efforts = if self.is_remote {
-            inferred_reasoning_efforts(
-                self.remote_provider_name.as_deref(),
-                self.remote_provider_model.as_deref(),
-            )
+            self.available_effort_names_for_current_model()
         } else {
             self.provider.available_efforts()
         };
@@ -4569,6 +4639,8 @@ mod tests {
 
     fn model_route(model: &str, provider: &str, api_method: &str) -> crate::provider::ModelRoute {
         crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: model.to_string(),
             provider: provider.to_string(),
             api_method: api_method.to_string(),

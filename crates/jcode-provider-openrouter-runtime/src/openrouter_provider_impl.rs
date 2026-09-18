@@ -42,6 +42,13 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
+
+        if self.wire_api == WireApi::Responses {
+            return self
+                .complete_responses(messages, tools, system, &model)
+                .await;
+        }
+
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -618,6 +625,8 @@ impl Provider for OpenRouterProvider {
                     detail.clone()
                 };
                 jcode_provider_core::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model,
                     provider: provider_label.clone(),
                     api_method: api_method.clone(),
@@ -779,6 +788,7 @@ impl Provider for OpenRouterProvider {
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
+            wire_api: self.wire_api,
             reasoning_effort_support: self.reasoning_effort_support,
             disable_reasoning_heuristics: self.disable_reasoning_heuristics,
             static_reasoning_config: self.static_reasoning_config.clone(),

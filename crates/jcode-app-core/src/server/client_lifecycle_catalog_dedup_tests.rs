@@ -25,6 +25,8 @@ fn relative_age_text_is_normalized_out_of_the_catalog_dedup_key() {
 #[test]
 fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
     let route = |detail: &str| crate::provider::ModelRoute {
+        display_name: None,
+        context_window: None,
         model: "claude-opus-4.6".to_string(),
         provider: "OpenRouter".to_string(),
         api_method: "openrouter".to_string(),
@@ -36,6 +38,9 @@ fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
     let event = |detail: &str| ServerEvent::AvailableModelsUpdated {
         provider_name: Some("OpenRouter".to_string()),
         provider_model: Some("claude-opus-4.6".to_string()),
+        model_display_name: None,
+        model_context_window: None,
+        available_efforts: None,
         available_models: vec!["claude-opus-4.6".to_string()],
         available_model_routes: vec![route(detail)],
     };

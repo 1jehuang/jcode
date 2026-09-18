@@ -89,12 +89,8 @@ fn test_remote_model_command_opens_picker_without_catalog_request() {
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
     let request_id_before = remote.next_request_id_for_test();
 
-    rt.block_on(app.handle_remote_key(
-        KeyCode::Enter,
-        KeyModifiers::empty(),
-        &mut remote,
-    ))
-    .unwrap();
+    rt.block_on(app.handle_remote_key(KeyCode::Enter, KeyModifiers::empty(), &mut remote))
+        .unwrap();
 
     assert!(app.inline_interactive_state.is_some());
     assert_eq!(
@@ -147,6 +143,8 @@ impl AuthUxStateSpaceProvider {
         let mut routes = Vec::new();
         if self.include_wrong_profile_first {
             routes.push(crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "wrong-profile-first".to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: "openai-compatible:other-provider".to_string(),
@@ -162,6 +160,8 @@ impl AuthUxStateSpaceProvider {
         }
         for model in self.models {
             routes.push(crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: (*model).to_string(),
                 provider: self.provider_label.to_string(),
                 api_method: format!("openai-compatible:{}", self.provider_id),
@@ -176,6 +176,8 @@ impl AuthUxStateSpaceProvider {
             });
             if self.include_generic_profile_duplicate {
                 routes.push(crate::provider::ModelRoute {
+                    display_name: None,
+                    context_window: None,
                     model: (*model).to_string(),
                     provider: self.provider_label.to_string(),
                     api_method: "openai-compatible".to_string(),
@@ -198,6 +200,8 @@ impl MixedModelRoutesProvider {
     fn routes() -> Vec<crate::provider::ModelRoute> {
         vec![
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "gpt-5.5".to_string(),
                 provider: "OpenAI".to_string(),
                 api_method: "openai-oauth".to_string(),
@@ -207,6 +211,8 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "claude-opus-4-6".to_string(),
                 provider: "Anthropic".to_string(),
                 api_method: "claude-oauth".to_string(),
@@ -216,6 +222,8 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string(),
                 provider: "Chutes".to_string(),
                 api_method: "openai-compatible:chutes".to_string(),
@@ -225,6 +233,8 @@ impl MixedModelRoutesProvider {
                 cheapness: None,
             },
             crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: "deepseek/deepseek-v4-pro".to_string(),
                 provider: "auto".to_string(),
                 api_method: "openrouter".to_string(),
@@ -476,6 +486,8 @@ impl Provider for CountingModelRoutesProvider {
         }
         (0..self.route_count)
             .map(|idx| crate::provider::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model: if idx < 26 {
                     format!("counting-{}", (b'a' + idx as u8) as char)
                 } else {
@@ -545,11 +557,16 @@ fn test_subagent_model_large_catalog_uses_cached_searchable_picker() {
     app.handle_key(KeyCode::Char('3'), KeyModifiers::empty())
         .unwrap();
     let picker = app.inline_interactive_state.as_ref().unwrap();
-    assert!(!picker.filtered.is_empty(), "typed input should filter models");
+    assert!(
+        !picker.filtered.is_empty(),
+        "typed input should filter models"
+    );
     assert!(picker.filtered.len() < picker.entries.len());
 
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
-    app.handle_key(KeyCode::Enter, KeyModifiers::empty()).unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
     assert!(app.session.subagent_model.is_some());
     assert_eq!(app.provider.model(), "counting-a");
 }
@@ -1614,6 +1631,8 @@ impl Provider for AzureLoginMockProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: self.model(),
             provider: "Azure OpenAI".to_string(),
             api_method: "openai-compatible".to_string(),

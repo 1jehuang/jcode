@@ -136,6 +136,8 @@ impl Provider for OpenRouterSpecCaptureProvider {
 
     fn model_routes(&self) -> Vec<crate::provider::ModelRoute> {
         vec![crate::provider::ModelRoute {
+            display_name: None,
+            context_window: None,
             model: "gpt-5.4".to_string(),
             provider: "OpenAI".to_string(),
             api_method: "openrouter".to_string(),
@@ -452,10 +454,8 @@ fn with_temp_jcode_home<T>(f: impl FnOnce() -> T) -> T {
 /// silently following a config default they do not control.
 fn with_reasoning_current_home<T>(f: impl FnOnce() -> T) -> T {
     with_temp_jcode_home(|| {
-        crate::config::Config::set_reasoning_display(
-            crate::config::ReasoningDisplayMode::Current,
-        )
-        .expect("pin reasoning display to current for the test config");
+        crate::config::Config::set_reasoning_display(crate::config::ReasoningDisplayMode::Current)
+            .expect("pin reasoning display to current for the test config");
         crate::config::invalidate_config_cache();
         f()
     })

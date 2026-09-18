@@ -1345,3 +1345,70 @@ fn novita_static_models_are_available_before_live_catalog_refresh() {
         assert!(models.iter().any(|candidate| candidate == model));
     }
 }
+
+#[test]
+fn remote_model_display_name_registry_replaces_wholesale() {
+    use crate::provider_catalog::{remote_model_display_name, replace_remote_model_display_names};
+
+    replace_remote_model_display_names([
+        ("swe-2".to_string(), "SWE 2".to_string()),
+        ("kimi-k3".to_string(), "Kimi K3".to_string()),
+    ]);
+    assert_eq!(remote_model_display_name("swe-2").as_deref(), Some("SWE 2"));
+    assert_eq!(
+        remote_model_display_name("kimi-k3").as_deref(),
+        Some("Kimi K3")
+    );
+    assert!(remote_model_display_name("unknown-model").is_none());
+
+    // A later snapshot replaces the table wholesale — labels from a previous
+    // server must not leak into the new session.
+    replace_remote_model_display_names([("other".to_string(), "Other".to_string())]);
+    assert!(remote_model_display_name("swe-2").is_none());
+    assert_eq!(remote_model_display_name("other").as_deref(), Some("Other"));
+
+    // Restore an empty table so no state leaks into other tests.
+    replace_remote_model_display_names(Vec::<(String, String)>::new());
+}
+
+#[test]
+fn remote_model_display_name_seeded_from_current_model_label() {
+    use crate::provider_catalog::{
+        remote_model_display_name, replace_remote_model_display_names,
+        set_remote_model_display_name,
+    };
+
+    // Unique id — the registry is process-global and tests run in parallel.
+    let model = "upset-seed-model-x1";
+
+    // The provider sends no routes (model_catalog = false), so the model is not
+    // in the table — this was the bug: picker rows prettified the raw id.
+    assert!(remote_model_display_name(model).is_none());
+
+    // History/ModelChanged metadata carries the current model's resolved label;
+    // seeding it must make lookups resolve the server label.
+    set_remote_model_display_name(model, Some("SEED LABEL".to_string()));
+    assert_eq!(
+        remote_model_display_name(model).as_deref(),
+        Some("SEED LABEL")
+    );
+
+    // Seeding after a wholesale replace re-registers the label (server switch,
+    // then first History from the new server).
+    replace_remote_model_display_names(Vec::<(String, String)>::new());
+    assert!(remote_model_display_name(model).is_none());
+    set_remote_model_display_name(model, Some("SEED LABEL".to_string()));
+    assert_eq!(
+        remote_model_display_name(model).as_deref(),
+        Some("SEED LABEL")
+    );
+
+    // Server stops sending a label: None removes the entry.
+    set_remote_model_display_name(model, None);
+    assert!(remote_model_display_name(model).is_none());
+
+    // Whitespace-only labels are treated as removal; blank ids are ignored.
+    set_remote_model_display_name(model, Some("   ".to_string()));
+    assert!(remote_model_display_name(model).is_none());
+    set_remote_model_display_name("  ", Some("X".to_string()));
+}

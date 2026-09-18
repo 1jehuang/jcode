@@ -899,6 +899,33 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
     true
 }
 
+/// Wire protocol a direct OpenAI-compatible endpoint speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum WireApi {
+    /// `POST {base}/chat/completions` (the default for every profile today).
+    #[default]
+    Chat,
+    /// `POST {base}/responses` (OpenAI Responses API).
+    Responses,
+}
+
+impl WireApi {
+    /// Parse a `[providers.<name>] api = "..."` value. Accepts
+    /// `openai-responses`/`responses` for the Responses API; anything else
+    /// (including unset) keeps the chat/completions default.
+    fn from_config(api: Option<&str>) -> Self {
+        match api.map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v)
+                if v.eq_ignore_ascii_case("responses")
+                    || v.eq_ignore_ascii_case("openai-responses") =>
+            {
+                Self::Responses
+            }
+            _ => Self::Chat,
+        }
+    }
+}
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
@@ -908,6 +935,11 @@ pub struct OpenRouterProvider {
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
+    /// Wire API this endpoint speaks: `chat` = OpenAI chat/completions
+    /// (default), `responses` = OpenAI Responses API (`POST {base}/responses`).
+    /// Set via `api = "openai-responses"` (or `"responses"`) on a
+    /// `[providers.<name>]` profile.
+    wire_api: WireApi,
     /// Explicit `supports_reasoning_effort` override from named-profile config.
     /// `None` means auto-detect (deepseek profile id or DeepSeek-family model).
     reasoning_effort_support: Option<bool>,
@@ -1301,6 +1333,17 @@ impl OpenRouterProvider {
             if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
                 return profile.display_name.to_string();
             }
+            // User-defined `[providers.<name>]` profiles carry an optional
+            // `display_name`; use it before falling back to the raw key.
+            if let Some(label) = jcode_base::config::config()
+                .providers
+                .get(profile_id)
+                .and_then(|profile| profile.display_name.as_deref())
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+            {
+                return label.to_string();
+            }
             return profile_id.to_string();
         }
 
@@ -1347,9 +1390,20 @@ impl OpenRouterProvider {
             .profile_id
             .as_deref()
             .map(|profile_id| {
-                openai_compatible_profile_by_id(profile_id)
-                    .map(|profile| profile.display_name.to_string())
-                    .unwrap_or_else(|| profile_id.to_string())
+                if let Some(profile) = openai_compatible_profile_by_id(profile_id) {
+                    return profile.display_name.to_string();
+                }
+                // Named `[providers.<name>]` profiles may define a display_name.
+                if let Some(label) = jcode_base::config::config()
+                    .providers
+                    .get(profile_id)
+                    .and_then(|profile| profile.display_name.as_deref())
+                    .map(str::trim)
+                    .filter(|label| !label.is_empty())
+                {
+                    return label.to_string();
+                }
+                profile_id.to_string()
             })
             .unwrap_or_else(|| "OpenAI-compatible".to_string());
         let api_method = self
@@ -1491,6 +1545,7 @@ impl OpenRouterProvider {
                     jcode_base::config::NamedProviderType::OpenRouter
                 ),
             profile_id: Some(profile_name.to_string()),
+            wire_api: WireApi::from_config(profile.api.as_deref()),
             reasoning_effort_support: profile.supports_reasoning_effort,
             disable_reasoning_heuristics: profile.disable_reasoning_heuristics,
             static_reasoning_config,
@@ -1704,6 +1759,9 @@ impl OpenRouterProvider {
             supports_provider_features,
             supports_model_catalog,
             profile_id,
+            // The env-var based runtime has no `[providers.<name>]` profile to
+            // read `api` from; it always speaks chat/completions.
+            wire_api: WireApi::Chat,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1748,6 +1806,7 @@ impl OpenRouterProvider {
             supports_provider_features: true,
             supports_model_catalog: true,
             profile_id: None,
+            wire_api: WireApi::Chat,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -1820,6 +1879,7 @@ impl OpenRouterProvider {
             supports_provider_features: false,
             supports_model_catalog: true,
             profile_id: Some(resolved.id.clone()),
+            wire_api: WireApi::Chat,
             reasoning_effort_support: None,
             disable_reasoning_heuristics: false,
             static_reasoning_config: HashMap::new(),
@@ -2026,6 +2086,7 @@ impl OpenRouterProvider {
                 supports_provider_features: true,
                 supports_model_catalog: true,
                 profile_id: None,
+                wire_api: WireApi::Chat,
                 reasoning_effort_support: None,
                 disable_reasoning_heuristics: false,
                 static_reasoning_config: HashMap::new(),

@@ -445,6 +445,14 @@ pub trait TuiState {
     // ---- Provider ----
     fn provider_name(&self) -> String;
     fn provider_model(&self) -> String;
+    /// Server-supplied `display_name` label for the current model, when the
+    /// remote server resolved one from its `[providers.<profile>]` config.
+    /// `None` locally (the header resolves it from local config) and whenever
+    /// the server has no configured label — the header falls back to
+    /// prettifying the raw model id in both cases.
+    fn provider_model_display_name(&self) -> Option<String> {
+        None
+    }
     /// Upstream provider (e.g., which provider OpenRouter routed to)
     fn upstream_provider(&self) -> Option<String>;
     /// Active transport/connection type (websocket/https/etc.)

@@ -50,6 +50,7 @@ fn explicit_context_window_still_wins_over_the_ollama_clamp() {
         auth: jcode_base::config::NamedProviderAuth::None,
         default_model: Some("qwen3:35b".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
+            display_name: None,
             id: "qwen3:35b".to_string(),
             context_window: Some(65_536),
             reasoning: None,

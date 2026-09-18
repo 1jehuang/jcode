@@ -1108,6 +1108,8 @@ impl Provider for GeminiProvider {
         self.available_models_display()
             .into_iter()
             .map(|model| jcode_provider_core::ModelRoute {
+                display_name: None,
+                context_window: None,
                 model,
                 provider: "Gemini".to_string(),
                 api_method: "code-assist-oauth".to_string(),

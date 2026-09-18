@@ -407,6 +407,7 @@ fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
 fn direct_deepseek_profile_unknown_model_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         ..make_custom_compatible_provider()
     };
@@ -437,6 +438,7 @@ fn deepseek_image_input_capability_matrix() {
     ] {
         let provider = OpenRouterProvider {
             profile_id: Some(profile.to_string()),
+            wire_api: WireApi::Chat,
             model: Arc::new(RwLock::new(model.to_string())),
             supports_provider_features: provider_features,
             ..make_custom_compatible_provider()
@@ -525,6 +527,7 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
             api_base,
             model: Arc::new(RwLock::new(model.to_string())),
             profile_id: Some(profile.to_string()),
+            wire_api: WireApi::Chat,
             supports_provider_features: false,
             supports_model_catalog: false,
             static_image_input_support: override_support
@@ -571,6 +574,7 @@ fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
 fn direct_zai_profile_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("zai".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         ..make_custom_compatible_provider()
     };
@@ -585,6 +589,7 @@ fn direct_deepseek_profile_omits_image_url_parts() {
     let provider = OpenRouterProvider {
         api_base,
         profile_id: Some("deepseek".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -658,6 +663,7 @@ fn interrupted_reasoning_only_assistant_message_is_not_sent_empty() {
     let provider = OpenRouterProvider {
         api_base,
         profile_id: Some("deepseek".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -751,6 +757,7 @@ fn interrupted_reasoning_only_assistant_message_keeps_reasoning_with_content() {
     let provider = OpenRouterProvider {
         api_base,
         profile_id: None,
+        wire_api: WireApi::Chat,
         supports_provider_features: true,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -844,6 +851,7 @@ fn kimi_for_coding_tool_call_message_includes_reasoning_content() {
         // The dedicated Kimi coding endpoint is a direct OpenAI-compatible
         // profile (no OpenRouter provider routing features).
         profile_id: Some("kimi".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         model: Arc::new(RwLock::new("kimi-for-coding".to_string())),
@@ -938,6 +946,7 @@ fn direct_compatible_deepseek_tool_call_replays_reasoning_content() {
     let provider = OpenRouterProvider {
         api_base,
         profile_id: Some("opencode-zen".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         model: Arc::new(RwLock::new("deepseek-v4-flash-free".to_string())),
@@ -1434,6 +1443,7 @@ fn make_provider() -> OpenRouterProvider {
         supports_provider_features: true,
         supports_model_catalog: true,
         profile_id: None,
+        wire_api: WireApi::Chat,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1466,6 +1476,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        wire_api: WireApi::Chat,
         reasoning_effort_support: None,
         disable_reasoning_heuristics: false,
         static_reasoning_config: HashMap::new(),
@@ -1546,6 +1557,7 @@ fn spawn_single_response_chat_server() -> (String, mpsc::Receiver<String>) {
 fn direct_deepseek_profile_exposes_max_reasoning_effort() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         ..make_custom_compatible_provider()
     };
@@ -1572,6 +1584,7 @@ fn direct_deepseek_profile_exposes_max_reasoning_effort() {
 fn direct_zai_profile_exposes_openai_reasoning_effort_ladder() {
     let provider = OpenRouterProvider {
         profile_id: Some("zai".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         ..make_custom_compatible_provider()
     };
@@ -1600,6 +1613,7 @@ fn direct_zai_profile_applies_configured_effort_on_construction_and_model_switch
 
     let provider = OpenRouterProvider {
         profile_id: Some("zai".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         reasoning_effort: Arc::new(RwLock::new(None)),
         ..make_custom_compatible_provider()
@@ -1643,6 +1657,7 @@ fn openrouter_with_openrouter_profile_id_exposes_unified_reasoning_effort() {
     // (regression: /effort failed with "Reasoning effort is not supported").
     let provider = OpenRouterProvider {
         profile_id: Some("openrouter".to_string()),
+        wire_api: WireApi::Chat,
         ..make_provider()
     };
 
@@ -1844,6 +1859,7 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         api_base,
         model: Arc::new(RwLock::new("deepseek-v4-pro".to_string())),
         profile_id: Some("deepseek".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         send_openrouter_headers: false,
@@ -1971,6 +1987,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        wire_api: WireApi::Chat,
         reasoning_effort_support: None,
         static_models: vec!["static-login-flow-fallback".to_string()],
         send_openrouter_headers: false,
@@ -2022,6 +2039,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: None,
+        wire_api: WireApi::Chat,
         reasoning_effort_support: None,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
@@ -2059,6 +2077,7 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("cerebras".to_string()),
+        wire_api: WireApi::Chat,
         static_models: vec!["gpt-oss-120b".to_string(), "zai-glm-4.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
@@ -2089,6 +2108,7 @@ fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_cat
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("opencode".to_string()),
+        wire_api: WireApi::Chat,
         static_models: vec!["minimax-m2.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
@@ -2115,6 +2135,7 @@ fn cerebras_live_catalog_models_are_selectable_on_explicit_switch() {
         supports_provider_features: false,
         supports_model_catalog: true,
         profile_id: Some("cerebras".to_string()),
+        wire_api: WireApi::Chat,
         static_models: vec!["gpt-oss-120b".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
@@ -2254,6 +2275,7 @@ fn explicit_cached_context_window_precedes_zai_family_fallback() {
     let provider = OpenRouterProvider {
         model: Arc::new(RwLock::new(model.to_string())),
         profile_id: Some("zai".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -2276,6 +2298,7 @@ fn named_openai_compatible_model_context_window_overrides_default() {
         api_key: Some("test".to_string()),
         default_model: Some("custom-long-context".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
+            display_name: None,
             id: "custom-long-context".to_string(),
             context_window: Some(512_000),
             reasoning: None,
@@ -2305,6 +2328,7 @@ fn named_profile_context_window_survives_provider_qualified_model() {
         auth: jcode_base::config::NamedProviderAuth::None,
         default_model: Some("qwen3.6-35b-a2000-128k".to_string()),
         models: vec![jcode_base::config::NamedProviderModelConfig {
+            display_name: None,
             id: "qwen3.6-35b-a2000-128k".to_string(),
             context_window: Some(131_072),
             reasoning: None,
@@ -2376,6 +2400,7 @@ fn named_profile_set_model_strips_own_session_routing_prefix() {
     // upstream API never sees `tokenrouter:MiniMax-M3` (issues #382/#383/#363).
     let provider = OpenRouterProvider {
         profile_id: Some("tokenrouter".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -2395,6 +2420,7 @@ fn named_profile_set_model_strips_other_known_profile_prefix() {
     // reattached under another must still normalize to the bare model id.
     let provider = OpenRouterProvider {
         profile_id: Some("tokenrouter".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -2410,6 +2436,7 @@ fn named_profile_set_model_keeps_builtin_routing_prefixes() {
     // switch the active provider from a saved session.
     let provider = OpenRouterProvider {
         profile_id: Some("tokenrouter".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -2431,6 +2458,7 @@ fn named_profile_set_model_keeps_unknown_prefix_with_colon() {
     // built-in profile must be preserved verbatim (it may be a real model id).
     let provider = OpenRouterProvider {
         profile_id: Some("tokenrouter".to_string()),
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()
@@ -3500,6 +3528,7 @@ model_catalog = false
     let provider = OpenRouterProvider {
         api_base,
         profile_id: None,
+        wire_api: WireApi::Chat,
         supports_provider_features: false,
         supports_model_catalog: false,
         ..make_custom_compatible_provider()

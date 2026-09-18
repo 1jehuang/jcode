@@ -3501,6 +3501,9 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
     let ServerEvent::AvailableModelsUpdated {
         provider_name,
         provider_model,
+        model_display_name,
+        model_context_window,
+        available_efforts,
         available_models,
         ..
     } = event
@@ -3510,6 +3513,9 @@ fn names_only_available_models_event(event: &ServerEvent) -> Option<ServerEvent>
     Some(ServerEvent::AvailableModelsUpdated {
         provider_name: provider_name.clone(),
         provider_model: provider_model.clone(),
+        model_display_name: model_display_name.clone(),
+        model_context_window: *model_context_window,
+        available_efforts: available_efforts.clone(),
         available_models: available_models.clone(),
         available_model_routes: Vec::new(),
     })
