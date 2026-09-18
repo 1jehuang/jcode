@@ -832,6 +832,24 @@ impl Config {
         } else if self.provider.gemini_force_oauth {
             crate::env::set_var("JCODE_GEMINI_FORCE_OAUTH", "1");
         }
+
+        // Gemini Code Assist project: same pattern. The runtime only reads
+        // GOOGLE_CLOUD_PROJECT, and env-only config (launchctl setenv, .zshrc)
+        // does not reach processes started from the menubar or older shells.
+        if let Ok(v) = std::env::var("GOOGLE_CLOUD_PROJECT") {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.gemini_project = Some(v.to_string());
+            }
+        } else if let Some(project) = self
+            .provider
+            .gemini_project
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            crate::env::set_var("GOOGLE_CLOUD_PROJECT", project);
+        }
     }
 }
 

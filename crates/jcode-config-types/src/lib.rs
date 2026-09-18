@@ -1259,6 +1259,10 @@ pub struct ProviderConfig {
     /// this an API key silently wins and every turn bills per token on the
     /// key's project. Mirrors `JCODE_GEMINI_FORCE_OAUTH`; the env var wins.
     pub gemini_force_oauth: bool,
+    /// Google Cloud project for Gemini Code Assist OAuth. Workspace accounts
+    /// require one; without it every turn fails with "requires setting
+    /// GOOGLE_CLOUD_PROJECT". Mirrors `GOOGLE_CLOUD_PROJECT`; the env var wins.
+    pub gemini_project: Option<String>,
     /// When set (non-empty), /model only lists routes from these providers.
     /// Entries match provider labels ("openai", "anthropic", "copilot",
     /// "openrouter", ...), api methods ("claude-oauth",
@@ -1294,6 +1298,7 @@ impl Default for ProviderConfig {
             same_provider_account_failover: true,
             copilot_premium: None,
             gemini_force_oauth: false,
+            gemini_project: None,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
