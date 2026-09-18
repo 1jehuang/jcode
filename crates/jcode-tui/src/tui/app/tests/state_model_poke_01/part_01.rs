@@ -6,6 +6,9 @@ fn test_context_limit_error_detection() {
     assert!(is_context_limit_error(
         "request too large: prompt is too long for context window"
     ));
+    assert!(is_context_limit_error(
+        "This model's maximum prompt length is 500000 but the request contains 500562 tokens."
+    ));
     assert!(!is_context_limit_error(
         "rate limit exceeded, retry after 20s"
     ));

@@ -311,6 +311,12 @@ impl Provider for GrokBuildProvider {
         self.http.is_none()
     }
 
+    fn supports_compaction(&self) -> bool {
+        // HTTP path: Jcode owns history, same as Claude OAuth. ACP leaves
+        // compaction to Grok CLI.
+        self.http.is_some()
+    }
+
     fn transport(&self) -> Option<String> {
         if self.http.is_some() {
             Some("Grok CLI subscription HTTP".to_string())
@@ -1851,6 +1857,17 @@ fn cached_login_hint(prefix: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn acp_transport_leaves_compaction_to_grok_cli() {
+        let mut process = GrokBuildProcess::from_env();
+        process
+            .env
+            .insert("JCODE_FAKE_GROK_ACP_LOG".into(), "1".into());
+        let provider = GrokBuildProvider::with_process(process);
+        assert!(!provider.supports_compaction());
+        assert!(provider.handles_tools_internally());
+    }
 
     #[test]
     fn chooses_cached_subscription_auth_and_rejects_api_key_only() {
