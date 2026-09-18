@@ -352,7 +352,8 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
 ///
 /// This deliberately returns the role's *default* color, not the configured
 /// one: substitution happens once per frame in
-/// [`adapt_buffer_for_palette`]. Returning the configured color here would let
+/// [`crate::theme_mode::adapt_buffer_for_display`]. Returning the configured
+/// color here would let
 /// the same cell be remapped twice (once by the accessor, once by the buffer
 /// pass), which compounds the hue/lightness offsets.
 pub fn role_color(role: Role) -> Color {
@@ -367,16 +368,13 @@ pub fn role_color(role: Role) -> Color {
 /// hundreds of ad hoc `rgb(...)` literals and ratatui's named colors, without
 /// editing each call site. No-op when nothing is configured.
 ///
-/// # Ordering with the light-theme pass
+/// Legacy palette-only adapter for colors that have only had their luminance
+/// flipped. Role defaults are pre-flipped the same way before comparison.
 ///
-/// This must run **after** [`crate::theme_mode::adapt_buffer_for_theme`]. That
-/// pass exists because jcode's *built-in* palette is designed for dark
-/// terminals, so it flips luminance to make the built-in colors work on light
-/// ones. A color the user configured is already the color they want, so letting
-/// the flip touch it turns a deliberately dark red into an unreadable pale one.
-///
-/// Running last means an incoming literal has already been flipped, so role
-/// defaults are pre-flipped the same way before comparison. See `match_target`.
+/// Production rendering should use
+/// [`crate::theme_mode::adapt_buffer_for_display`] instead. It attributes roles
+/// from native colors before contrast repair can collapse distinct muted colors
+/// to the same output, and preserves explicit user colors without inversion.
 pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
     if !HAS_OVERRIDES.load(Ordering::Relaxed) {
         return;
