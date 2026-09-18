@@ -270,8 +270,19 @@ prompt_entry_animation = true
 # warning = "#ffc864"
 # error = "#ff6464"
 
-# Hand-written rate rules. These outrank models.dev and every other source;
-# with this section left empty the cost path behaves exactly as before.
+# Hand-written rate rules and price sources.
+#
+# The main path is a *price source*: one line in this file pointing at a
+# models.dev-shaped JSON document (a local file or an `https://` URL), and
+# jcode prices every provider and model that sheet covers from it. A local file
+# is re-read when it changes, so saving it takes effect at the next lookup; a
+# URL is cached and refreshed in the background, and a source that cannot be
+# read (unreachable, malformed) is skipped, never guessed at.
+#
+# An inline `[pricing.providers]` card outranks a source. It is the escape
+# hatch, not the usual configuration: it is the only way to override one rate
+# field and keep the rest from the sheet, and the only way to refuse to price a
+# call with `on_rule_expiry = "no_price"`.
 #
 # Examples only — uncomment what you need. Every commented line below is valid
 # TOML on its own; `schedule` and `context_tiers` are written as arrays of
@@ -283,14 +294,27 @@ prompt_entry_animation = true
 # rates (a `multiplier`, or explicit prices) instead of the base rates. Tiers
 # are matched in declaration order, first match wins.
 #
-# `[[pricing.sources]]` are extra price sheets: point jcode at your own
-# models.dev-shaped JSON, at a URL or in a local file, and it prices anything
-# your rules above leave unsaid, still ahead of the catalog jcode ships. A
-# source that cannot be read (unreachable, malformed, or past its
-# `refresh_secs`) is skipped, never guessed at.
+# `fx_base`/`fx_rates` only matter for a card written in another currency.
 #
-# The example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC, Mon-Fri.
+# The first source example is the one-line form: no `id` is needed, jcode
+# derives one from the file name. The second names an `id`, scopes the sheet to
+# some provider identities and model globs, and sets `priority` (lower wins
+# between sources) and `refresh_secs` (the remote cache TTL).
+#
+# The card example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC,
+# Mon-Fri.
 [pricing]
+# [[pricing.sources]]
+# url = "file:///home/me/prices.json"
+#
+# [[pricing.sources]]
+# id = "corp-mirror"
+# url = "https://gitlab.internal/pricing/models_dev.mirror.json"
+# scope = ["deepseek", "openai-compatible:my-gateway"]
+# models = ["deepseek-v4-*"]
+# refresh_secs = 86400
+# priority = 10
+#
 # fx_base = "USD"
 #
 # [pricing.fx_rates]
@@ -316,14 +340,6 @@ prompt_entry_animation = true
 # [[pricing.providers."deepseek".models."deepseek-v4-pro".context_tiers]]
 # min_input_tokens = 200_000
 # multiplier = 2.0
-#
-# [[pricing.sources]]
-# id = "corp-mirror"
-# url = "https://gitlab.internal/pricing/models_dev.mirror.json"
-# scope = ["deepseek", "openai-compatible:my-gateway"]
-# models = ["deepseek-v4-*"]
-# refresh_secs = 86400
-# priority = 10
 
 [features]
 # Check for and install updates during startup. Set to false for the persistent
@@ -899,6 +915,15 @@ mod tests {
                 .iter()
                 .any(|source| source.id.as_deref() == Some("corp-mirror")),
             "the example should demonstrate an extra price sheet, got {:?}",
+            parsed.pricing.sources
+        );
+        assert!(
+            parsed
+                .pricing
+                .sources
+                .iter()
+                .any(|source| source.id.is_none() && source.url.starts_with("file://")),
+            "the example should lead with the one-line id-less source form, got {:?}",
             parsed.pricing.sources
         );
 
