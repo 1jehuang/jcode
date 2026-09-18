@@ -1,7 +1,13 @@
-//! Tracking of active session process IDs under `~/.jcode/active_pids`.
+//! Session process-ownership markers under the historical `~/.jcode/active_pids` name.
 //!
-//! This is pure filesystem state keyed by session ID, used to discover which
-//! sessions are currently running (and to map a PID back to its session). It
+//! “Active” means a process owns the session, not that a window is open, a client
+//! is connected, or a model is generating. In server mode, the owning PID is the
+//! daemon's PID and can be shared by many sessions, including disconnected ones.
+//! Markers can outlive their owner, so consumers needing live sessions must check
+//! PID liveness (as [`session_presence`] does).
+//!
+//! This is pure filesystem state keyed by session ID, used to discover session
+//! ownership (and to map a PID back to one of its sessions). It
 //! lives in the storage crate because it only needs [`jcode_dir`] and is a
 //! low-level concern shared by session management, dictation, and crash
 //! recovery, none of which should pull the full `session` module into scope.
@@ -9,7 +15,8 @@
 use crate::jcode_dir;
 use std::path::PathBuf;
 
-/// Directory holding one file per active session ID (`~/.jcode/active_pids`).
+/// Directory holding one ownership marker per session ID (`~/.jcode/active_pids`).
+/// Each file contains the owning process PID, not a client/window PID in server mode.
 pub fn active_pids_dir() -> Option<PathBuf> {
     jcode_dir().ok().map(|d| d.join("active_pids"))
 }
@@ -104,7 +111,9 @@ impl Drop for StreamingGuard {
     }
 }
 
-/// Find the active session ID currently owned by the given process ID.
+/// Find one session ID registered to the given process ID, without a liveness check.
+/// A daemon may own multiple sessions, so the returned session is not necessarily
+/// connected to a client or focused in a window.
 pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     let dir = active_pids_dir()?;
     for entry in std::fs::read_dir(dir).ok()? {
@@ -118,7 +127,8 @@ pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     None
 }
 
-/// List active session IDs currently tracked in `~/.jcode/active_pids`.
+/// List session IDs with ownership markers in `~/.jcode/active_pids`.
+/// Does not check PID liveness or whether a client/window is connected.
 pub fn active_session_ids() -> Vec<String> {
     let Some(dir) = active_pids_dir() else {
         return Vec::new();
@@ -153,6 +163,7 @@ fn process_is_running(pid: u32) -> bool {
 /// Live snapshot of how many jcode sessions are running, and how many of those
 /// are actively streaming a model response right now. Used by the menu bar
 /// indicator (`jcode menubar`) and any other presence UI.
+/// These are process-owned session counts, not open-window or connected-client counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionCounts {
     /// Number of live sessions (registered PID is still running).
@@ -183,6 +194,7 @@ pub struct SessionPresence {
 /// streaming markers, skipping any entries whose owning process is no longer
 /// alive. This is a cheap O(n) scan over a handful of tiny files; used by the
 /// menu bar indicator and other presence UI.
+/// A live owner does not imply a connected client or an open window.
 pub fn session_presence() -> Vec<SessionPresence> {
     let Some(active_dir) = active_pids_dir() else {
         return Vec::new();
