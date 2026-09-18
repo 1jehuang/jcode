@@ -3751,6 +3751,7 @@ dependencies = [
  "jcode-message-types",
  "jcode-provider-core",
  "serde_json",
+ "similar",
  "tempfile",
  "tokio",
  "tokio-stream",

@@ -408,6 +408,69 @@ async fn initialize_and_authenticate(
     Ok(response)
 }
 
+fn resume_session_is_missing(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text.contains("FS_NOT_FOUND")
+        || text.contains("Path not found")
+        || text.contains("No such file or directory")
+}
+
+fn grok_sessions_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".grok").join("sessions"))
+}
+
+fn percent_decode_path(encoded: &str) -> PathBuf {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(high) = from_hex(bytes[index + 1])
+            && let Some(low) = from_hex(bytes[index + 2])
+        {
+            out.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    PathBuf::from(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Grok CLI stores ACP sessions under `~/.grok/sessions/<percent-encoded-cwd>/<id>`.
+/// Jcode's process cwd often differs (daemon at `$HOME`, TUI `/cd` drift), so
+/// resume must use the workspace folder that actually contains the session.
+fn grok_resume_cwd(session_id: &str) -> Option<PathBuf> {
+    grok_resume_cwd_in(grok_sessions_root()?, session_id)
+}
+
+fn grok_resume_cwd_in(sessions_root: PathBuf, session_id: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(sessions_root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join(session_id).is_dir() {
+            let encoded = entry.file_name();
+            return Some(percent_decode_path(&encoded.to_string_lossy()));
+        }
+    }
+    None
+}
+
 async fn timeout_request<T>(
     name: &'static str,
     future: impl std::future::Future<Output = acp::Result<T>>,
@@ -439,21 +502,38 @@ fn run_turn_thread(
     local.block_on(&runtime, async move {
         with_connection(process, tx.clone(), async move |connection| {
             initialize_and_authenticate(&connection).await?;
-            let cwd = std::env::current_dir().context("Failed to determine working directory")?;
+            let process_cwd =
+                std::env::current_dir().context("Failed to determine working directory")?;
             let (session_id, session_model) = if let Some(session_id) = resume_session_id {
-                let response = timeout_request(
+                let resume_cwd = grok_resume_cwd(&session_id).unwrap_or_else(|| process_cwd.clone());
+                match timeout_request(
                     "session/resume",
                     connection.resume_session(acp::ResumeSessionRequest::new(
                         session_id.clone(),
-                        cwd,
+                        resume_cwd,
                     )),
                 )
-                .await?;
-                (acp::SessionId::new(session_id), response.models)
+                .await
+                {
+                    Ok(response) => (acp::SessionId::new(session_id), response.models),
+                    Err(error) if resume_session_is_missing(&error) => {
+                        let response = timeout_request(
+                            "session/new",
+                            connection.new_session(
+                                acp::NewSessionRequest::new(process_cwd).mcp_servers(Vec::new()),
+                            ),
+                        )
+                        .await?;
+                        (response.session_id, response.models)
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 let response = timeout_request(
                     "session/new",
-                    connection.new_session(acp::NewSessionRequest::new(cwd).mcp_servers(Vec::new())),
+                    connection.new_session(
+                        acp::NewSessionRequest::new(process_cwd).mcp_servers(Vec::new()),
+                    ),
                 )
                 .await?;
                 (response.session_id, response.models)
@@ -699,12 +779,13 @@ impl acp::Client for GrokAcpClient {
                 let id = call.tool_call_id.0.to_string();
                 self.events_for_acp_tool(
                     id,
-                    Some(call.kind),
+                    acp_nonzero_kind(call.kind),
                     Some(call.title),
-                    Some(call.status),
+                    acp_nonzero_status(call.status),
                     call.content,
                     call.locations,
                     call.raw_input,
+                    call.meta,
                 )
             }
             acp::SessionUpdate::ToolCallUpdate(update) => {
@@ -717,6 +798,7 @@ impl acp::Client for GrokAcpClient {
                     update.fields.content.unwrap_or_default(),
                     update.fields.locations.unwrap_or_default(),
                     update.fields.raw_input,
+                    update.meta,
                 )
             }
             _ => Vec::new(),
@@ -738,8 +820,12 @@ impl GrokAcpClient {
         content: Vec<acp::ToolCallContent>,
         locations: Vec<acp::ToolCallLocation>,
         raw_input: Option<Value>,
+        meta: Option<acp::Meta>,
     ) -> Vec<StreamEvent> {
-        let diffs = acp_tool_diffs(&content);
+        let mut diffs = acp_tool_diffs(&content);
+        if diffs.is_empty() {
+            diffs = diffs_from_raw_input(raw_input.as_ref());
+        }
         let file_path = diffs
             .first()
             .map(|(path, _, _)| path.clone())
@@ -748,22 +834,35 @@ impl GrokAcpClient {
                     .first()
                     .map(|location| location.path.display().to_string())
             })
-            .or_else(|| {
-                raw_input.as_ref().and_then(|value| {
-                    value
-                        .get("file_path")
-                        .or_else(|| value.get("path"))
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-            });
-        let name = acp_tool_name(kind, title.as_deref(), &diffs);
+            .or_else(|| raw_input_path(raw_input.as_ref()));
+        let mut name = acp_tool_name(
+            kind,
+            title.as_deref(),
+            meta.as_ref(),
+            raw_input.as_ref(),
+            &diffs,
+        );
+        if name == "tool" && !diffs.is_empty() {
+            name = if diffs.iter().any(|(_, old, _)| old.as_deref().unwrap_or("").is_empty())
+            {
+                "write"
+            } else {
+                "edit"
+            };
+        }
+        if name == "edit"
+            && diffs.len() == 1
+            && diffs[0].1.as_deref().unwrap_or("").is_empty()
+        {
+            name = "write";
+        }
         let input = acp_tool_input(name, file_path.as_deref(), &diffs, raw_input);
         let completed = matches!(
             status,
             Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
         ) || !diffs.is_empty();
         let failed = matches!(status, Some(acp::ToolCallStatus::Failed));
+        let ready = name != "tool" || completed;
 
         let mut started = self
             .started_tools
@@ -778,17 +877,20 @@ impl GrokAcpClient {
         }
 
         let mut events = Vec::new();
-        if !started.contains(&id) {
+        if let Some(detail) = title.clone()
+            && !started.contains(&id)
+            && !ready
+        {
+            events.push(StreamEvent::StatusDetail { detail });
+        }
+        if ready && !started.contains(&id) {
             started.insert(id.clone());
             events.push(StreamEvent::ToolUseStart {
                 id: id.clone(),
                 name: name.to_string(),
             });
-            if let Some(detail) = title.clone() {
-                events.push(StreamEvent::StatusDetail { detail });
-            }
         }
-        if completed {
+        if completed && started.contains(&id) {
             finished.insert(id.clone());
             drop(started);
             drop(finished);
@@ -809,11 +911,61 @@ impl GrokAcpClient {
     }
 }
 
+fn acp_nonzero_kind(kind: acp::ToolKind) -> Option<acp::ToolKind> {
+    match kind {
+        acp::ToolKind::Other => None,
+        other => Some(other),
+    }
+}
+
+fn acp_nonzero_status(status: acp::ToolCallStatus) -> Option<acp::ToolCallStatus> {
+    match status {
+        acp::ToolCallStatus::Pending => None,
+        other => Some(other),
+    }
+}
+
+fn grok_meta_tool_name(meta: Option<&acp::Meta>) -> Option<&str> {
+    meta.and_then(|meta| meta.get("x.ai/tool"))
+        .and_then(Value::as_object)
+        .and_then(|tool| tool.get("name"))
+        .and_then(Value::as_str)
+}
+
+fn grok_tool_alias(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "search_replace" | "str_replace" | "strreplace" | "file_edit" | "edit" => Some("edit"),
+        "write_file" | "file_write" | "write" => Some("write"),
+        "read_file" | "file_read" | "read" => Some("read"),
+        "run_terminal_command" | "shell_exec" | "bash" => Some("bash"),
+        "list_dir" | "ls" => Some("ls"),
+        "todo_write" | "todo_read" | "todo" => Some("todo"),
+        "grep" | "file_grep" => Some("grep"),
+        "glob" | "file_glob" => Some("glob"),
+        _ => None,
+    }
+}
+
 fn acp_tool_name(
     kind: Option<acp::ToolKind>,
     title: Option<&str>,
+    meta: Option<&acp::Meta>,
+    raw_input: Option<&Value>,
     diffs: &[(String, Option<String>, String)],
 ) -> &'static str {
+    if let Some(name) = grok_meta_tool_name(meta).and_then(grok_tool_alias) {
+        return name;
+    }
+    if let Some(name) = title.and_then(grok_tool_alias) {
+        return name;
+    }
+    if let Some(variant) = raw_input
+        .and_then(|value| value.get("variant"))
+        .and_then(Value::as_str)
+        && variant.eq_ignore_ascii_case("searchreplace")
+    {
+        return "edit";
+    }
     if diffs.iter().any(|(_, old, _)| old.is_none()) && diffs.len() == 1 {
         return "write";
     }
@@ -855,6 +1007,32 @@ fn acp_tool_diffs(content: &[acp::ToolCallContent]) -> Vec<(String, Option<Strin
         .collect()
 }
 
+fn raw_input_path(raw_input: Option<&Value>) -> Option<String> {
+    raw_input.and_then(|value| {
+        value
+            .get("file_path")
+            .or_else(|| value.get("target_file"))
+            .or_else(|| value.get("path"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn diffs_from_raw_input(raw_input: Option<&Value>) -> Vec<(String, Option<String>, String)> {
+    let Some(value) = raw_input else {
+        return Vec::new();
+    };
+    let old = value.get("old_string").and_then(Value::as_str);
+    let new = value.get("new_string").and_then(Value::as_str);
+    let Some(new) = new else {
+        return Vec::new();
+    };
+    let Some(path) = raw_input_path(Some(value)) else {
+        return Vec::new();
+    };
+    vec![(path, old.map(ToOwned::to_owned), new.to_string())]
+}
+
 fn acp_tool_input(
     name: &str,
     file_path: Option<&str>,
@@ -865,8 +1043,14 @@ fn acp_tool_input(
         if let Some(path) = file_path
             && !object.contains_key("file_path")
             && !object.contains_key("path")
+            && !object.contains_key("target_file")
         {
             object.insert("file_path".to_string(), Value::String(path.to_string()));
+        }
+        if let Some(target) = object.remove("target_file")
+            && !object.contains_key("file_path")
+        {
+            object.insert("file_path".to_string(), target);
         }
         if name == "edit"
             && let Some((_, old, new)) = diffs.first()
@@ -920,16 +1104,21 @@ fn acp_tool_result_text(title: Option<&str>, diffs: &[(String, Option<String>, S
 }
 
 fn format_unified_diff(path: &str, old: &str, new: &str) -> String {
-    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
-    for line in old.lines() {
-        out.push('-');
-        out.push_str(line);
-        out.push('\n');
+    // Leading newline so the TUI's `[edit] {output}` wrapper does not glue onto
+    // the `--- a/` header (that made collect_diff_lines miss the first hunk).
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut out = format!("\n--- a/{path}\n+++ b/{path}\n");
+    let mut hunks = 0usize;
+    for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
+        hunks += 1;
+        out.push_str(&format!("{hunk}"));
     }
-    for line in new.lines() {
-        out.push('+');
-        out.push_str(line);
-        out.push('\n');
+    if hunks == 0 && old != new {
+        for line in new.lines() {
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+        }
     }
     out
 }
@@ -946,7 +1135,13 @@ mod acp_tool_display_tests {
             "fn new() {}\n".to_string(),
         )];
         assert_eq!(
-            acp_tool_name(Some(acp::ToolKind::Edit), Some("Editing"), &diffs),
+            acp_tool_name(
+                Some(acp::ToolKind::Edit),
+                Some("Editing"),
+                None,
+                None,
+                &diffs
+            ),
             "edit"
         );
         let input = acp_tool_input("edit", Some("src/lib.rs"), &diffs, None);
@@ -962,11 +1157,129 @@ mod acp_tool_display_tests {
     fn new_file_diff_becomes_write_tool() {
         let diffs = vec![("new.rs".to_string(), None, "hello\n".to_string())];
         assert_eq!(
-            acp_tool_name(Some(acp::ToolKind::Edit), None, &diffs),
+            acp_tool_name(Some(acp::ToolKind::Edit), None, None, None, &diffs),
             "write"
         );
         let input = acp_tool_input("write", Some("new.rs"), &diffs, None);
         assert_eq!(input["content"], "hello\n");
+    }
+
+    #[test]
+    fn grok_search_replace_raw_input_is_an_edit_tool() {
+        let raw = serde_json::json!({
+            "file_path": "src/lib.rs",
+            "old_string": "fn old() {}\n",
+            "new_string": "fn new() {}\n"
+        });
+        let diffs = diffs_from_raw_input(Some(&raw));
+        assert_eq!(diffs[0].0, "src/lib.rs");
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "x.ai/tool".to_string(),
+            serde_json::json!({"name": "search_replace", "kind": "edit"}),
+        );
+        assert_eq!(
+            acp_tool_name(None, Some("search_replace"), Some(&meta), None, &[]),
+            "edit"
+        );
+        assert_eq!(grok_tool_alias("search_replace"), Some("edit"));
+        assert_eq!(grok_tool_alias("read_file"), Some("read"));
+        assert_eq!(grok_tool_alias("run_terminal_command"), Some("bash"));
+    }
+
+    #[test]
+    fn grok_resume_cwd_decodes_percent_encoded_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let encoded = temp.path().join("%2Fmnt%2Fc%2FUsers%2FHASAKI");
+        std::fs::create_dir_all(encoded.join("01a0b27f-session")).unwrap();
+        assert_eq!(
+            grok_resume_cwd_in(temp.path().to_path_buf(), "01a0b27f-session"),
+            Some(PathBuf::from("/mnt/c/Users/HASAKI"))
+        );
+        assert!(resume_session_is_missing(&anyhow!(
+            "Grok CLI ACP session/resume failed: Path not found.: {{\"code\":\"FS_NOT_FOUND\"}}"
+        )));
+    }
+
+    #[test]
+    fn grok_live_search_replace_session_update_deserializes_and_emits_diff() {
+        let json = serde_json::json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-9f471bec-7f60-4839-977d-7647d60f7a7d-120",
+            "title": "search_replace",
+            "rawInput": {
+                "file_path": "consts/call_bot.consts.go",
+                "old_string": "\tCallBotResultSuccess = \"success\"\n\tCallBotResultFail    = \"fail\"\n)",
+                "new_string": "\tCallBotResultSuccess = \"success\"\n\tCallBotResultFail    = \"fail\"\n\tCallBotScenarioClinicNoShow = \"clinic_no_show\"\n)"
+            },
+            "_meta": {
+                "x.ai/tool": {
+                    "name": "search_replace",
+                    "kind": "edit"
+                }
+            }
+        });
+        let update: acp::SessionUpdate =
+            serde_json::from_value(json).expect("Grok tool_call JSON must deserialize");
+        let acp::SessionUpdate::ToolCall(call) = update else {
+            panic!("expected ToolCall, got {update:?}");
+        };
+        assert!(
+            call.raw_input.is_some(),
+            "rawInput dropped during deserialize: {call:?}"
+        );
+
+        let (tx, _rx) = mpsc::channel(8);
+        let client = GrokAcpClient {
+            tx,
+            received_message: Arc::new(AtomicBool::new(false)),
+            started_tools: Mutex::new(HashSet::new()),
+            finished_tools: Mutex::new(HashSet::new()),
+        };
+        let events = client.events_for_acp_tool(
+            call.tool_call_id.0.to_string(),
+            acp_nonzero_kind(call.kind),
+            Some(call.title),
+            acp_nonzero_status(call.status),
+            call.content,
+            call.locations,
+            call.raw_input,
+            call.meta,
+        );
+        let input = events.iter().find_map(|event| match event {
+            StreamEvent::ToolInputDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        });
+        let input = input.expect(&format!("missing ToolInputDelta in {events:?}"));
+        assert!(
+            input.contains("old_string"),
+            "input missing old_string: {input}"
+        );
+        assert!(
+            input.contains("new_string"),
+            "input missing new_string: {input}"
+        );
+        let result = events.iter().find_map(|event| match event {
+            StreamEvent::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        });
+        let result = result.expect("missing ToolResult");
+        assert!(
+            result.contains("CallBotScenarioClinicNoShow")
+                && result.contains('-')
+                && result.contains('+'),
+            "result is not a diff: {result:?}"
+        );
+        let dump = format_unified_diff(
+            "consts/call_bot.consts.go",
+            "\tCallBotResultSuccess = \"success\"\n\tCallBotResultFail    = \"fail\"\n)",
+            "\tCallBotResultSuccess = \"success\"\n\tCallBotResultFail    = \"fail\"\n\tCallBotScenarioClinicNoShow = \"clinic_no_show\"\n)",
+        );
+        assert!(
+            dump.contains("CallBotScenarioClinicNoShow"),
+            "similar produced no hunks: {dump:?}"
+        );
+        assert!(dump.contains('\n'));
     }
 }
 

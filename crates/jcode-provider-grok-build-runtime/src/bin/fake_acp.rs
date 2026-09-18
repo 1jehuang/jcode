@@ -122,16 +122,19 @@ fn main() {
                             "update":{
                                 "sessionUpdate":"tool_call",
                                 "toolCallId":"edit-1",
-                                "title":"Editing src/lib.rs",
-                                "kind":"edit",
-                                "status":"completed",
-                                "locations":[{"path":"src/lib.rs"}],
-                                "content":[{
-                                    "type":"diff",
-                                    "path":"src/lib.rs",
-                                    "oldText":"fn old() {}\n",
-                                    "newText":"fn new() {}\n"
-                                }]
+                                "title":"search_replace",
+                                "rawInput":{
+                                    "file_path":"src/lib.rs",
+                                    "old_string":"fn old() {}\n",
+                                    "new_string":"fn new() {}\n"
+                                },
+                                "_meta":{
+                                    "x.ai/tool":{
+                                        "name":"search_replace",
+                                        "kind":"edit",
+                                        "label":"Edit"
+                                    }
+                                }
                             }
                         }
                     }));
