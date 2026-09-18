@@ -824,6 +824,14 @@ impl Config {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
             }
         }
+
+        // Gemini OAuth pin: env var overrides config; config -> env otherwise so
+        // the Gemini runtime (which only reads the env) honors it.
+        if let Ok(v) = std::env::var("JCODE_GEMINI_FORCE_OAUTH") {
+            self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
+        } else if self.provider.gemini_force_oauth {
+            crate::env::set_var("JCODE_GEMINI_FORCE_OAUTH", "1");
+        }
     }
 }
 

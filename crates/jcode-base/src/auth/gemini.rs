@@ -53,6 +53,26 @@ pub fn has_api_key() -> bool {
     api_key().is_some()
 }
 
+/// True when the `gemini` provider must stay on Code Assist OAuth even though
+/// an API key exists (`JCODE_GEMINI_FORCE_OAUTH`, or `[provider]
+/// gemini_force_oauth = true`, which the config loader mirrors into that env
+/// var). The `gemini-api` provider is unaffected: it always uses the key.
+pub fn force_oauth() -> bool {
+    std::env::var("JCODE_GEMINI_FORCE_OAUTH")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false)
+}
+
+/// True when the `gemini` provider will actually send with an API key: a key
+/// is present and OAuth is not pinned. Use this, not `has_api_key`, when the
+/// question is "which route will `gemini` take".
+pub fn uses_api_key() -> bool {
+    !force_oauth() && has_api_key()
+}
+
 /// Persist a Gemini Developer API key to the `gemini.env` config file under the
 /// canonical `GEMINI_API_KEY` name.
 pub fn save_api_key(key: &str) -> Result<()> {

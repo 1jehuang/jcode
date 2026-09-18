@@ -860,14 +860,17 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
 
-    assert_eq!(
-        parameters["anyOf"][0]["required"],
-        json!(["action"]),
-        "the undefined `label` requirement must be pruned from the branch"
+    // Code Assist rejects a root `anyOf` beside `type`/`properties`
+    // ("specified other fields alongside any_of"), so the GEMINI dialect now
+    // flattens root combiners into the union object. The branch-only `label`
+    // requirement must not leak into the root `required`.
+    assert!(
+        parameters.get("anyOf").is_none(),
+        "root anyOf must be flattened for Code Assist"
     );
-    // Requirements that are actually defined are preserved.
     assert_eq!(parameters["required"], json!(["action"]));
     assert_eq!(parameters["properties"]["label"]["type"], json!("string"));
+    assert_eq!(parameters["properties"]["action"]["type"], json!("string"));
 }
 
 #[test]

@@ -138,13 +138,7 @@ impl GeminiProvider {
     /// cloudcode-pa tier. Set `JCODE_GEMINI_FORCE_OAUTH=1` to pin OAuth even when
     /// a key is present.
     fn auth_mode() -> GeminiAuthMode {
-        let force_oauth = std::env::var("JCODE_GEMINI_FORCE_OAUTH")
-            .map(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false);
-        if !force_oauth && let Some(api_key) = gemini_auth::api_key() {
+        if !gemini_auth::force_oauth() && let Some(api_key) = gemini_auth::api_key() {
             return GeminiAuthMode::ApiKey(api_key);
         }
         GeminiAuthMode::Oauth

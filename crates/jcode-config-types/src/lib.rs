@@ -1254,6 +1254,11 @@ pub struct ProviderConfig {
     /// Copilot premium request mode: "normal", "one", or "zero"
     /// "zero" means all requests are free (no premium requests consumed)
     pub copilot_premium: Option<String>,
+    /// Pin the `gemini` provider to Code Assist OAuth even when a Gemini
+    /// Developer API key (`gemini.env` / `GEMINI_API_KEY`) is present. Without
+    /// this an API key silently wins and every turn bills per token on the
+    /// key's project. Mirrors `JCODE_GEMINI_FORCE_OAUTH`; the env var wins.
+    pub gemini_force_oauth: bool,
     /// When set (non-empty), /model only lists routes from these providers.
     /// Entries match provider labels ("openai", "anthropic", "copilot",
     /// "openrouter", ...), api methods ("claude-oauth",
@@ -1288,6 +1293,7 @@ impl Default for ProviderConfig {
             cross_provider_failover: CrossProviderFailoverMode::Countdown,
             same_provider_account_failover: true,
             copilot_premium: None,
+            gemini_force_oauth: false,
             model_picker_providers: None,
             stream_idle_timeout_secs: 180,
             max_retries: 8,
