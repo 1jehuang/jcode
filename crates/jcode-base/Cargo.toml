@@ -108,6 +108,7 @@ jcode-message-types = { path = "../jcode-message-types" }
 jcode-plan = { path = "../jcode-plan" }
 jcode-protocol = { path = "../jcode-protocol" }
 jcode-session-types = { path = "../jcode-session-types" }
+jcode-selfdev-types = { path = "../jcode-selfdev-types" }
 jcode-storage = { path = "../jcode-storage" }
 jcode-task-types = { path = "../jcode-task-types" }
 jcode-tool-core = { path = "../jcode-tool-core" }

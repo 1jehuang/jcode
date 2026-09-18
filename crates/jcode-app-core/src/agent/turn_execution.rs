@@ -501,7 +501,11 @@ impl Agent {
                 !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        Self::apply_selfdev_tool_surface(
+            &mut tools,
+            self.session.is_canary,
+            self.is_desktop_selfdev(),
+        );
         self.apply_mcp_tool_exposure(&mut tools);
         tools
     }
@@ -536,7 +540,23 @@ impl Agent {
     /// The registry keeps the implementation available for self-dev sessions,
     /// but regular agents should not spend tool-list context on an internal
     /// development surface.
-    fn apply_selfdev_tool_surface(tools: &mut Vec<ToolDefinition>, is_canary: bool) {
+    fn apply_selfdev_tool_surface(
+        tools: &mut Vec<ToolDefinition>,
+        is_canary: bool,
+        is_desktop: bool,
+    ) {
+        // Desktop development is a separate product mode, not a CLI canary.
+        // Never advertise CLI build/reload or TUI debug sockets in that mode.
+        if is_desktop {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "selfdev" | "debug_socket" | "jcode_docs"
+                )
+            });
+            return;
+        }
+        tools.retain(|tool| tool.name != "desktop_selfdev");
         if !is_canary {
             tools.retain(|tool| tool.name != "selfdev");
             return;
@@ -657,7 +677,19 @@ impl Agent {
     }
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
-        if self.session.is_canary && name == "jcode_docs" {
+        let is_desktop = self.is_desktop_selfdev();
+        if is_desktop && matches!(name, "selfdev" | "debug_socket") {
+            return Err(anyhow::anyhow!(
+                "Tool '{}' targets Jcode CLI, not Desktop. Use 'desktop_selfdev' in Desktop self-development mode.",
+                name
+            ));
+        }
+        if !is_desktop && name == "desktop_selfdev" {
+            return Err(anyhow::anyhow!(
+                "Tool 'desktop_selfdev' is only available in a Jcode Desktop source checkout."
+            ));
+        }
+        if (self.session.is_canary || is_desktop) && name == "jcode_docs" {
             return Err(anyhow::anyhow!(
                 "Tool 'jcode_docs' is disabled in self-development mode. Read the working tree documentation instead."
             ));

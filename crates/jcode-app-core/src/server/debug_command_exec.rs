@@ -372,6 +372,18 @@ pub(super) async fn execute_debug_command(
         .to_string());
     }
 
+    if trimmed == "agent:context:prepare" {
+        let mut agent = agent.lock().await;
+        return Ok(serde_json::to_string_pretty(
+            &agent.prepare_debug_context().await,
+        )?);
+    }
+
+    if trimmed == "agent:context" {
+        let agent = agent.lock().await;
+        return Ok(serde_json::to_string_pretty(&agent.debug_context().await)?);
+    }
+
     if trimmed == "agent:info" {
         let agent = agent.lock().await;
         let info = agent.debug_info();
@@ -516,7 +528,7 @@ pub(super) async fn execute_debug_command(
 
     if trimmed == "help" {
         return Ok(
-            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
+            "debug commands: state, usage, history, tools, tools:full, mcp:servers, mcp:tools, mcp:connect:<server> <json>, mcp:disconnect:<server>, mcp:reload, mcp:call:<server>:<tool> <json>, last_response, message:<text>, message_async:<text>, swarm_message:<text>, swarm_message_async:<text>, tool:<name> <json>, queue_interrupt:<content>, queue_interrupt_urgent:<content>, agent:info, agent:context, agent:context:prepare, agent:memory, allocator, allocator:profile:on, allocator:profile:off, allocator:profile:prefix:<prefix>, allocator:profile:dump [path], jobs, job_status:<id>, job_wait:<id>, sessions, create_session, create_session:<path>, create_session:selfdev:<path>, set_model:<model>, set_provider:<name>, trigger_extraction, available_models, reload, help".to_string()
         );
     }
 
@@ -704,6 +716,78 @@ mod tests {
         fn fork(&self) -> Arc<dyn Provider> {
             Arc::new(Self)
         }
+    }
+
+    #[tokio::test]
+    async fn debug_agent_context_inspects_modes_without_inference_or_locking() {
+        let _env_lock = lock_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvGuard::set("JCODE_HOME", home.path().to_str().unwrap());
+        let provider: Arc<dyn Provider> = Arc::new(TestProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let mut agent =
+            Agent::new_with_initial_working_dir(provider, registry, home.path().to_str());
+        agent.set_system_prompt("debug context sentinel");
+        let agent = Arc::new(AsyncMutex::new(agent));
+        let jobs = Arc::new(RwLock::new(HashMap::new()));
+        let before = agent.lock().await.debug_info()["session"].clone();
+        for _ in 0..2 {
+            let output =
+                execute_debug_command(agent.clone(), "agent:context", jobs.clone(), None, None)
+                    .await
+                    .unwrap();
+            let context: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(context["mode"], "regular");
+            assert_eq!(context["system_prompt"]["static"], "debug context sentinel");
+            assert_eq!(context["system_prompt"]["dynamic"], "");
+            assert_eq!(context["tools_locked"], false);
+            assert!(context["locked_tool_names"].is_null());
+            assert_eq!(context["effective_tools"], context["current_tools"]);
+            assert_eq!(agent.lock().await.debug_info()["session"], before);
+        }
+        let output = execute_debug_command(
+            agent.clone(),
+            "agent:context:prepare",
+            jobs.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let prepared: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(prepared["tools_locked"], true);
+        assert_eq!(prepared["prepared_tools"], prepared["effective_tools"]);
+        let inspected = agent.lock().await.debug_context().await;
+        assert_eq!(inspected["effective_tools"], prepared["prepared_tools"]);
+        assert_eq!(
+            inspected["locked_tool_names"],
+            prepared["locked_tool_names"]
+        );
+        agent.lock().await.set_canary("self-dev");
+        assert_eq!(agent.lock().await.debug_context().await["mode"], "cli");
+
+        let desktop = home.path().join("desktop-checkout");
+        std::fs::create_dir_all(desktop.join("crates/jcode-desktop-ui/src")).unwrap();
+        std::fs::write(
+            desktop.join("Cargo.toml"),
+            "[package]\nname = \"jcode-desktop\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            desktop.join("crates/jcode-desktop-ui/Cargo.toml"),
+            "[package]\nname = \"jcode-desktop-ui\"\n",
+        )
+        .unwrap();
+        agent
+            .lock()
+            .await
+            .set_working_dir(desktop.to_str().unwrap());
+        let context = agent.lock().await.debug_context().await;
+        assert_eq!(
+            context["mode"], "desktop",
+            "Desktop takes priority over canary"
+        );
+        assert_eq!(context["tools_locked"], false);
     }
 
     #[tokio::test]

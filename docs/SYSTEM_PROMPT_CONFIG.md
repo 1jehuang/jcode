@@ -8,7 +8,9 @@ files, so you can tune agent behavior without rebuilding.
 1. **Base system prompt** — built-in `crates/jcode-base/src/prompt/system_prompt.md`,
    overridable by file (see below).
 2. Capability modules (e.g. Mermaid guidance).
-3. Self-dev guidance (self-dev sessions only).
+3. Product-specific self-dev guidance. Sessions rooted in a Jcode Desktop
+   checkout automatically receive the Desktop prompt and `desktop_selfdev` tool,
+   separate from CLI/TUI self-dev flags, `selfdev`, and `debug_socket`.
 4. `AGENTS.md` — project `./AGENTS.md` and global `~/AGENTS.md`.
 5. Prompt overlay — `./.jcode/prompt-overlay.md` and `~/.jcode/prompt-overlay.md`.
 6. Preferred tools — `./.jcode/preferred-tools.md` and `~/.jcode/preferred-tools.md`.

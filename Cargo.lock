@@ -3227,6 +3227,7 @@ dependencies = [
  "jcode-provider-openrouter",
  "jcode-provider-openrouter-runtime",
  "jcode-render-core",
+ "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-storage",
@@ -3889,6 +3890,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
