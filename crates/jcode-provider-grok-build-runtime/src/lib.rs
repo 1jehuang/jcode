@@ -14,7 +14,7 @@ use jcode_message_types::{
 };
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -661,8 +661,7 @@ where
     let client = GrokAcpClient {
         tx: event_tx,
         received_message: Arc::clone(&received_message),
-        started_tools: Mutex::new(HashSet::new()),
-        finished_tools: Mutex::new(HashSet::new()),
+        tools: Mutex::new(HashMap::new()),
     };
     let (connection, io) =
         acp::ClientSideConnection::new(client, stdin.compat_write(), stdout.compat(), |future| {
@@ -734,8 +733,19 @@ async fn capture_stderr(
 struct GrokAcpClient {
     tx: mpsc::Sender<Result<StreamEvent>>,
     received_message: Arc<AtomicBool>,
-    started_tools: Mutex<HashSet<String>>,
-    finished_tools: Mutex<HashSet<String>>,
+    tools: Mutex<HashMap<String, TrackedAcpTool>>,
+}
+
+#[derive(Default)]
+struct TrackedAcpTool {
+    name: String,
+    file_path: Option<String>,
+    diffs: Vec<(String, Option<String>, String)>,
+    result_text: Option<String>,
+    title: Option<String>,
+    raw_input: Option<Value>,
+    started: bool,
+    finished: bool,
 }
 
 #[async_trait(?Send)]
@@ -822,11 +832,14 @@ impl GrokAcpClient {
         raw_input: Option<Value>,
         meta: Option<acp::Meta>,
     ) -> Vec<StreamEvent> {
-        let mut diffs = acp_tool_diffs(&content);
-        if diffs.is_empty() {
-            diffs = diffs_from_raw_input(raw_input.as_ref());
-        }
-        let file_path = diffs
+        let incoming_diffs = {
+            let mut diffs = acp_tool_diffs(&content);
+            if diffs.is_empty() {
+                diffs = diffs_from_raw_input(raw_input.as_ref());
+            }
+            diffs
+        };
+        let incoming_path = incoming_diffs
             .first()
             .map(|(path, _, _)| path.clone())
             .or_else(|| {
@@ -835,77 +848,96 @@ impl GrokAcpClient {
                     .map(|location| location.path.display().to_string())
             })
             .or_else(|| raw_input_path(raw_input.as_ref()));
-        let mut name = acp_tool_name(
+        let incoming_name = acp_tool_name(
             kind,
             title.as_deref(),
             meta.as_ref(),
             raw_input.as_ref(),
-            &diffs,
+            &incoming_diffs,
         );
-        if name == "tool" && !diffs.is_empty() {
-            name = if diffs.iter().any(|(_, old, _)| old.as_deref().unwrap_or("").is_empty())
-            {
-                "write"
-            } else {
-                "edit"
-            };
-        }
-        if name == "edit"
-            && diffs.len() == 1
-            && diffs[0].1.as_deref().unwrap_or("").is_empty()
-        {
-            name = "write";
-        }
-        let input = acp_tool_input(name, file_path.as_deref(), &diffs, raw_input);
-        let completed = matches!(
+        let incoming_text = acp_tool_content_text(&content);
+        let failed = matches!(status, Some(acp::ToolCallStatus::Failed));
+        let status_done = matches!(
             status,
             Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
-        ) || !diffs.is_empty();
-        let failed = matches!(status, Some(acp::ToolCallStatus::Failed));
-        let ready = name != "tool" || completed;
+        );
 
-        let mut started = self
-            .started_tools
+        let mut tools = self
+            .tools
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut finished = self
-            .finished_tools
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if finished.contains(&id) {
+        let tracked = tools.entry(id.clone()).or_default();
+        if tracked.finished {
             return Vec::new();
         }
+        if incoming_name != "tool" {
+            tracked.name = incoming_name.to_string();
+        }
+        if let Some(path) = incoming_path {
+            tracked.file_path = Some(path);
+        }
+        if !incoming_diffs.is_empty() {
+            tracked.diffs = incoming_diffs;
+        }
+        if let Some(text) = incoming_text {
+            tracked.result_text = Some(text);
+        }
+        if let Some(title) = title.clone() {
+            tracked.title = Some(title);
+        }
+        merge_raw_input(&mut tracked.raw_input, raw_input);
+        if tracked.name == "edit"
+            && tracked.diffs.len() == 1
+            && tracked.diffs[0].1.as_deref().unwrap_or("").is_empty()
+        {
+            tracked.name = "write".to_string();
+        }
+
+        let completed = status_done
+            || !tracked.diffs.is_empty()
+            || (tracked.name == "read" && tracked.result_text.is_some())
+            || (tracked.name == "bash" && tracked.result_text.is_some());
+        if tracked.name.is_empty() {
+            tracked.name = "tool".to_string();
+        }
+        let ready = tracked.name != "tool" || completed;
 
         let mut events = Vec::new();
-        if let Some(detail) = title.clone()
-            && !started.contains(&id)
+        if let Some(detail) = tracked.title.clone()
+            && !tracked.started
             && !ready
         {
             events.push(StreamEvent::StatusDetail { detail });
         }
-        if ready && !started.contains(&id) {
-            started.insert(id.clone());
+        if ready && !tracked.started {
+            tracked.started = true;
             events.push(StreamEvent::ToolUseStart {
                 id: id.clone(),
-                name: name.to_string(),
+                name: tracked.name.clone(),
             });
         }
-        if completed && started.contains(&id) {
-            finished.insert(id.clone());
-            drop(started);
-            drop(finished);
+        if completed && tracked.started && !tracked.finished {
+            tracked.finished = true;
+            let input = acp_tool_input(
+                &tracked.name,
+                tracked.file_path.as_deref(),
+                &tracked.diffs,
+                tracked.raw_input.clone(),
+            );
+            let result = acp_tool_result_text(
+                tracked.title.as_deref(),
+                &tracked.diffs,
+                tracked.result_text.as_deref(),
+            );
             events.push(StreamEvent::ToolInputDelta(
                 serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
             ));
             events.push(StreamEvent::ToolUseEnd);
             events.push(StreamEvent::ToolResult {
                 tool_use_id: id,
-                content: acp_tool_result_text(title.as_deref(), &diffs),
+                content: result,
                 is_error: failed,
             });
-        } else {
-            drop(started);
-            drop(finished);
         }
         events
     }
@@ -1023,7 +1055,11 @@ fn diffs_from_raw_input(raw_input: Option<&Value>) -> Vec<(String, Option<String
         return Vec::new();
     };
     let old = value.get("old_string").and_then(Value::as_str);
-    let new = value.get("new_string").and_then(Value::as_str);
+    let new = value
+        .get("new_string")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("contents").and_then(Value::as_str))
+        .or_else(|| value.get("content").and_then(Value::as_str));
     let Some(new) = new else {
         return Vec::new();
     };
@@ -1031,6 +1067,34 @@ fn diffs_from_raw_input(raw_input: Option<&Value>) -> Vec<(String, Option<String
         return Vec::new();
     };
     vec![(path, old.map(ToOwned::to_owned), new.to_string())]
+}
+
+fn acp_tool_content_text(content: &[acp::ToolCallContent]) -> Option<String> {
+    let parts: Vec<String> = content
+        .iter()
+        .filter_map(|block| match block {
+            acp::ToolCallContent::Content(block) => match &block.content {
+                acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect();
+    (!parts.is_empty()).then_some(parts.join("\n"))
+}
+
+fn merge_raw_input(existing: &mut Option<Value>, incoming: Option<Value>) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    match (existing.take(), incoming) {
+        (Some(Value::Object(mut current)), Value::Object(next)) => {
+            current.extend(next);
+            *existing = Some(Value::Object(current));
+        }
+        (_, incoming) => *existing = Some(incoming),
+    }
 }
 
 fn acp_tool_input(
@@ -1092,15 +1156,22 @@ fn acp_tool_input(
     Value::Object(object)
 }
 
-fn acp_tool_result_text(title: Option<&str>, diffs: &[(String, Option<String>, String)]) -> String {
-    if diffs.is_empty() {
-        return title.unwrap_or("ok").to_string();
+fn acp_tool_result_text(
+    title: Option<&str>,
+    diffs: &[(String, Option<String>, String)],
+    result_text: Option<&str>,
+) -> String {
+    if !diffs.is_empty() {
+        return diffs
+            .iter()
+            .map(|(path, old, new)| format_unified_diff(path, old.as_deref().unwrap_or(""), new))
+            .collect::<Vec<_>>()
+            .join("\n");
     }
-    diffs
-        .iter()
-        .map(|(path, old, new)| format_unified_diff(path, old.as_deref().unwrap_or(""), new))
-        .collect::<Vec<_>>()
-        .join("\n")
+    if let Some(text) = result_text.map(str::trim).filter(|text| !text.is_empty()) {
+        return text.to_string();
+    }
+    title.unwrap_or("ok").to_string()
 }
 
 fn format_unified_diff(path: &str, old: &str, new: &str) -> String {
@@ -1148,7 +1219,7 @@ mod acp_tool_display_tests {
         assert_eq!(input["file_path"], "src/lib.rs");
         assert_eq!(input["old_string"], "fn old() {}\n");
         assert_eq!(input["new_string"], "fn new() {}\n");
-        let result = acp_tool_result_text(Some("Editing"), &diffs);
+        let result = acp_tool_result_text(Some("Editing"), &diffs, None);
         assert!(result.contains("-fn old() {}"));
         assert!(result.contains("+fn new() {}"));
     }
@@ -1233,8 +1304,7 @@ mod acp_tool_display_tests {
         let client = GrokAcpClient {
             tx,
             received_message: Arc::new(AtomicBool::new(false)),
-            started_tools: Mutex::new(HashSet::new()),
-            finished_tools: Mutex::new(HashSet::new()),
+            tools: Mutex::new(HashMap::new()),
         };
         let events = client.events_for_acp_tool(
             call.tool_call_id.0.to_string(),
@@ -1280,6 +1350,113 @@ mod acp_tool_display_tests {
             "similar produced no hunks: {dump:?}"
         );
         assert!(dump.contains('\n'));
+    }
+
+    #[test]
+    fn grok_read_file_update_keeps_target_path_and_body() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = GrokAcpClient {
+            tx,
+            received_message: Arc::new(AtomicBool::new(false)),
+            tools: Mutex::new(HashMap::new()),
+        };
+        let first = client.events_for_acp_tool(
+            "read-1".to_string(),
+            None,
+            Some("read_file".to_string()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(serde_json::json!({"target_file": "src/main.go"})),
+            None,
+        );
+        assert!(
+            first.iter().any(|event| matches!(
+                event,
+                StreamEvent::ToolUseStart { name, .. } if name == "read"
+            )),
+            "missing read start: {first:?}"
+        );
+        assert!(
+            !first
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolResult { .. })),
+            "read should not complete before content: {first:?}"
+        );
+
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "x.ai/tool".to_string(),
+            serde_json::json!({"name": "read_file", "kind": "read"}),
+        );
+        let content = vec![acp::ToolCallContent::from("package main\n")];
+        let second = client.events_for_acp_tool(
+            "read-1".to_string(),
+            None,
+            None,
+            Some(acp::ToolCallStatus::Completed),
+            content,
+            Vec::new(),
+            None,
+            Some(meta),
+        );
+        let input = second.iter().find_map(|event| match event {
+            StreamEvent::ToolInputDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        });
+        let input = input.expect(&format!("missing ToolInputDelta in {second:?}"));
+        assert!(
+            input.contains("src/main.go"),
+            "read lost target_file: {input}"
+        );
+        assert!(
+            second.iter().any(|event| matches!(
+                event,
+                StreamEvent::ToolResult { content, .. } if content.contains("package main")
+            )),
+            "read lost body: {second:?}"
+        );
+    }
+
+    #[test]
+    fn grok_new_file_search_replace_is_write_with_content() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = GrokAcpClient {
+            tx,
+            received_message: Arc::new(AtomicBool::new(false)),
+            tools: Mutex::new(HashMap::new()),
+        };
+        let events = client.events_for_acp_tool(
+            "write-1".to_string(),
+            None,
+            Some("search_replace".to_string()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "file_path": "watch.sh",
+                "old_string": "",
+                "new_string": "#!/bin/bash\necho hi\n"
+            })),
+            None,
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ToolUseStart { name, .. } if name == "write"
+            )),
+            "missing write start: {events:?}"
+        );
+        let input = events.iter().find_map(|event| match event {
+            StreamEvent::ToolInputDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        });
+        let input = input.expect("missing write input");
+        assert!(input.contains("watch.sh"), "{input}");
+        assert!(
+            input.contains("echo hi") || input.contains("new_string") || input.contains("content"),
+            "{input}"
+        );
     }
 }
 

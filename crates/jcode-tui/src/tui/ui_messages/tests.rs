@@ -2712,6 +2712,37 @@ fn render_tool_message_colors_high_token_badge() {
 }
 
 #[test]
+fn render_tool_message_shows_inline_diff_for_grok_write() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[write] watch.sh".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("watch.sh".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call-grok-write".to_string(),
+            name: "write".to_string(),
+            input: serde_json::json!({
+                "file_path": "watch.sh",
+                "content": "#!/bin/bash\necho hi\n"
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(plain.contains("echo hi"), "plain={plain}");
+}
+
+#[test]
 fn render_tool_message_shows_inline_diff_for_grok_search_replace() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
