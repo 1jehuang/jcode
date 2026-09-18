@@ -2666,3 +2666,38 @@ fn hidden_system_reminder_is_forwarded_without_visible_content_or_no_reply() {
     };
     assert!(message.get("system_reminder").is_none());
 }
+
+#[test]
+fn session_list_exposes_durable_edit_stats_without_phantom_sidecar_sessions() {
+    let home = ScopedJcodeHome::new("edit-stats-list");
+    write_session_record(&home.path, "session_edits", Path::new("/workspace"));
+    let stats = jcode_harness_api::SessionEditStats {
+        added: 42,
+        removed: 9,
+        approximate: false,
+    };
+    jcode_harness_api::record_session_edit(&home.path.join("sessions"), "session_edits", stats)
+        .unwrap();
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({"req":"list_sessions","id":77}));
+    let Outbound::Reply(frame) = &out[0] else {
+        panic!("expected direct reply")
+    };
+    let ApiEvent::Sessions { sessions } = &frame.event else {
+        panic!("expected sessions")
+    };
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "session_edits");
+    assert_eq!(sessions[0].edit_stats, Some(stats));
+    // Repeated refresh reads the updated sidecar, without a daemon restart.
+    jcode_harness_api::record_session_edit(&home.path.join("sessions"), "session_edits", stats)
+        .unwrap();
+    let out = state.api_request_to_legacy(&json!({"req":"list_sessions","id":78}));
+    let Outbound::Reply(frame) = &out[0] else {
+        panic!("expected direct reply")
+    };
+    let ApiEvent::Sessions { sessions } = &frame.event else {
+        panic!("expected sessions")
+    };
+    assert_eq!(sessions[0].edit_stats.unwrap().added, 84);
+}

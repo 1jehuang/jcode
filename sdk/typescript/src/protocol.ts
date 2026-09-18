@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 3;
+export const API_VERSION_MINOR = 4;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -19,7 +19,15 @@ export type ErrorCode =
   | "invalid_request"
   | "internal";
 
+/** Cumulative built-in file-tool changes, not net worktree diff. */
+export interface SessionEditStats {
+  added: number;
+  removed: number;
+  approximate: boolean;
+}
+
 export interface SessionInfo {
+  edit_stats?: SessionEditStats;
   session_id: string;
   /** Swarm owner, never the transcript's ordinary fork parent. */
   parent_session_id?: string;
