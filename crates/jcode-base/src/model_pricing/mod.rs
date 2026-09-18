@@ -1152,15 +1152,15 @@ output = 13.5
     /// hand-written card does, so it must be held to the same finite,
     /// non-negative rule and fail with the field path that caused it.
     #[test]
-    fn a_sheet_stating_a_negative_rate_is_rejected_with_its_path() {
+    fn a_catalog_entry_stating_a_negative_rate_is_rejected_with_its_path() {
         let body = r#"{"deepseek":{"models":{"deepseek-v4-pro":{
             "cost":{"input":-5.0,"output":1.0}
         }}}}"#;
-        let error = parse_api_response(body).expect_err("a negative sheet rate is rejected");
+        let error = parse_api_response(body).expect_err("a negative catalog rate is rejected");
         let message = format!("{error:#}");
         assert!(
             message.contains("deepseek.deepseek-v4-pro.cost.input"),
-            "the sheet error must name the field: {message}"
+            "the catalog error must name the field: {message}"
         );
     }
 

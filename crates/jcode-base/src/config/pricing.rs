@@ -261,7 +261,8 @@ fn is_jcode_cache_file_name(name: &str) -> bool {
 /// cannot be listed literally: `<namespace>_models.json` (the OpenRouter catalog
 /// and every named profile), `<namespace>_endpoints_<model>.json` (its endpoint
 /// cache), and `session_search_<source>_index_v2.bin` (the session-search
-/// indexes). Matching by shape refuses a bare sheet name that would collide with
+/// indexes). Matching by shape refuses a bare vendor file name that would collide
+/// with
 /// any of them.
 fn is_jcode_cache_generated_name(name: &str) -> bool {
     let models = "_models.json";
