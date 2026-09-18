@@ -902,6 +902,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         }
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
+        "grok-build" => Some("grok-build"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1189,6 +1190,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openai-api") => format!("openai-api:{}", model),
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
+        Some("grok-build") => crate::provider::grok_build_model_spec(model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1424,6 +1426,7 @@ mod tests {
             ("openai-key", "openai-api", "OpenAI API"),
             ("openrouter", "openrouter", "OpenRouter"),
             ("subscription", "jcode", "Jcode Subscription"),
+            ("grok-build", "grok-build", "Grok Build"),
             ("bedrock", "bedrock", "AWS Bedrock"),
             ("cursor", "cursor", "Cursor"),
             ("copilot", "copilot", "GitHub Copilot"),
@@ -1464,6 +1467,30 @@ mod tests {
     }
 
     #[test]
+    fn grok_build_login_selects_subscription_route_and_preserves_prefix() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let activation = activate_auth_change(&AuthActivationRequest::new(
+            None,
+            Some(AuthChanged::new("grok-build")),
+        ));
+        assert_eq!(activation.provider_id.as_deref(), Some("grok-build"));
+        assert_eq!(activation.provider_label.as_deref(), Some("Grok Build"));
+        let routes = vec![
+            route("grok-4.6", "xAI", "openrouter", true),
+            route("grok-build:grok-4.6", "Grok Build", "grok-build-acp", true),
+        ];
+        let selected = provider_model_to_select_after_auth(&activation, Some("grok-4.6"), &routes);
+        assert_eq!(selected.as_deref(), Some("grok-build:grok-4.6"));
+        assert!(validate_catalog_invariants(&activation, selected.as_deref(), &routes).ok());
+        for model in ["grok-4.6", "grok-build:grok-4.6"] {
+            assert_eq!(
+                activation.model_switch_request("OpenRouter", model),
+                "grok-build:grok-4.6"
+            );
+        }
+    }
+
+    #[test]
     fn direct_login_provider_activation_sets_runtime_identity_and_active_provider() {
         // Sandbox JCODE_HOME so activation's env-file credential sync (#453)
         // cannot read the developer's real ~/.config/jcode/*.env files and
@@ -1477,6 +1504,7 @@ mod tests {
             ("openai-api", "openai-api", "openai"),
             ("openrouter", "openrouter", "openrouter"),
             ("jcode", "jcode", "openrouter"),
+            ("grok-build", "grok-build", "openrouter"),
             ("bedrock", "bedrock", "bedrock"),
             ("cursor", "cursor", "cursor"),
             ("copilot", "copilot", "copilot"),
@@ -1519,6 +1547,9 @@ mod tests {
             let Some((normalized, runtime, active, switch_prefix)) = (match provider.target {
                 crate::provider_catalog::LoginProviderTarget::Jcode => {
                     Some(("jcode", "jcode", "openrouter", ""))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))
@@ -1623,6 +1654,7 @@ mod tests {
             "openai-api",
             "openrouter",
             "jcode",
+            "grok-build",
             "bedrock",
             "cursor",
             "copilot",
