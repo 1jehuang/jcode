@@ -346,6 +346,8 @@ mod capture {
                 .as_ref()
                 .is_none_or(|worker| worker.is_finished())
         }
+        /// Finish capture and return its WAV without cancelling the caller's
+        /// shared operation token. Any cancellation already requested is preserved.
         pub fn stop(mut self) -> Result<Vec<u8>, VoiceError> {
             let _ = self.command.send(Command::Stop);
             self.worker
@@ -360,9 +362,11 @@ mod capture {
     }
     impl Drop for MicrophoneRecording {
         fn drop(&mut self) {
-            self.cancel.store(true, Ordering::SeqCst);
-            let _ = self.command.send(Command::Cancel);
+            // stop() takes and joins the worker itself. Its consumed handle must
+            // not cancel the shared recording/transcription operation afterward.
             if let Some(worker) = self.worker.take() {
+                self.cancel.store(true, Ordering::SeqCst);
+                let _ = self.command.send(Command::Cancel);
                 let _ = worker.join();
             }
         }
@@ -536,17 +540,28 @@ mod capture {
 
         #[test]
         fn stop_joins_and_returns_audio() {
-            assert_eq!(fake_recording(true).0.stop().unwrap(), [42]);
+            let (recording, completed) = fake_recording(true);
+            let cancel = recording.cancel.clone();
+            assert_eq!(recording.stop().unwrap(), [42]);
+            assert!(completed.load(Ordering::SeqCst));
+            assert!(
+                !cancel.load(Ordering::SeqCst),
+                "successful stop must allow transcription"
+            );
         }
 
         #[test]
         fn cancel_and_drop_signal_worker_and_join() {
             // Dedicated fake worker checks the command without opening a device.
             let (recording, completed) = fake_recording(false);
+            let cancel = recording.cancel.clone();
             recording.cancel();
+            assert!(cancel.load(Ordering::SeqCst));
             assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
             let (recording, completed) = fake_recording(false);
+            let cancel = recording.cancel.clone();
             drop(recording);
+            assert!(cancel.load(Ordering::SeqCst));
             assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
         }
     }
