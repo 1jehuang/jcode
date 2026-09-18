@@ -2712,6 +2712,45 @@ fn render_tool_message_colors_high_token_badge() {
 }
 
 #[test]
+fn render_tool_message_shows_inline_diff_for_grok_search_replace() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[edit] consts/call_bot.consts.go".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("consts/call_bot.consts.go".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call-grok-search-replace".to_string(),
+            name: "edit".to_string(),
+            input: serde_json::json!({
+                "file_path": "consts/call_bot.consts.go",
+                "old_string": "\tCallBotResultFail    = \"fail\"\n)",
+                "new_string": "\tCallBotResultFail    = \"fail\"\n\tCallBotScenarioClinicNoShow = \"clinic_no_show\"\n)"
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(
+        plain.contains("CallBotScenarioClinicNoShow"),
+        "plain={plain}"
+    );
+    assert!(
+        plain.contains("(+") || plain.contains("+1") || plain.contains('+'),
+        "plain={plain}"
+    );
+}
+
+#[test]
 fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
