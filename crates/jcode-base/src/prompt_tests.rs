@@ -673,3 +673,106 @@ fn project_system_prompt_file_replaces_default_base_prompt() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+fn desktop_prompt_checkout() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("crates/jcode-desktop-ui/src")).unwrap();
+    std::fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = 'jcode-desktop'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn desktop_prompt_auto_detects_and_overrides_cli_in_full_and_split_modes() {
+    let root = desktop_prompt_checkout();
+    for relative in ["", "crates/jcode-desktop-ui/src"] {
+        let cwd = root.path().join(relative);
+        for cli_selfdev in [false, true] {
+            let (full, full_info) =
+                build_system_prompt_full(None, &[], cli_selfdev, None, Some(&cwd));
+            let (split, split_info) =
+                build_system_prompt_split(None, &[], cli_selfdev, None, Some(&cwd));
+            for prompt in [&full, &split.static_part] {
+                assert!(prompt.contains("# Jcode Desktop Self-Development Mode"));
+                assert!(prompt.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+                assert!(!prompt.contains("# Self-Development Mode"));
+                assert!(!prompt.contains("selfdev build target=tui"));
+                assert!(!prompt.contains("You are working on the jcode codebase itself."));
+            }
+            assert!(
+                !split
+                    .dynamic_part
+                    .contains("# Jcode Desktop Self-Development Mode")
+            );
+            assert_eq!(full_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+            assert_eq!(split_info.selfdev_chars, DESKTOP_SELFDEV_MODE_PROMPT.len());
+        }
+        assert!(build_session_context(Some(&cwd)).contains("Self-development mode: desktop"));
+    }
+}
+
+#[test]
+fn desktop_prompt_leaves_normal_and_cli_sessions_unchanged() {
+    assert!(!is_desktop_working_dir(None));
+    let unrelated = tempfile::tempdir().unwrap();
+    for cli_selfdev in [false, true] {
+        let (full, full_info) =
+            build_system_prompt_full(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        let (split, split_info) =
+            build_system_prompt_split(None, &[], cli_selfdev, None, Some(unrelated.path()));
+        for prompt in [&full, &split.static_part] {
+            assert!(!prompt.contains("# Jcode Desktop Self-Development Mode"));
+            assert_eq!(prompt.contains("# Self-Development Mode"), cli_selfdev);
+        }
+        assert_eq!(full_info.selfdev_chars > 0, cli_selfdev);
+        assert_eq!(split_info.selfdev_chars > 0, cli_selfdev);
+    }
+    assert!(
+        !build_session_context(Some(unrelated.path())).contains("Self-development mode: desktop")
+    );
+}
+
+#[test]
+fn desktop_prompt_documents_safe_product_specific_workflow() {
+    for action in [
+        "status",
+        "build",
+        "reload",
+        "build-reload",
+        "test",
+        "screenshot",
+        "inspect",
+    ] {
+        assert!(DESKTOP_SELFDEV_MODE_PROMPT.contains(&format!("`{action}`")));
+    }
+    for instruction in [
+        "desktop_selfdev",
+        "Ctrl+R",
+        "must not rebuild the CLI",
+        "preserving the current application state",
+        "require a safe restart, not UI hot reload",
+        "scripts/screenshot.py",
+        "Do not depend on niri",
+    ] {
+        assert!(
+            DESKTOP_SELFDEV_MODE_PROMPT.contains(instruction),
+            "missing {instruction}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_prompt_detects_symlinked_nested_working_directory() {
+    let root = desktop_prompt_checkout();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("renamed-ui");
+    std::os::unix::fs::symlink(root.path().join("crates/jcode-desktop-ui/src"), &link).unwrap();
+    let (full, _) = build_system_prompt_full(None, &[], false, None, Some(&link));
+    let (split, _) = build_system_prompt_split(None, &[], false, None, Some(&link));
+    assert!(full.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+    assert!(split.static_part.contains(DESKTOP_SELFDEV_MODE_PROMPT));
+}

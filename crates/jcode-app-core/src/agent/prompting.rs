@@ -3,6 +3,45 @@ use crate::logging;
 use crate::message::{Message, ToolDefinition};
 
 impl Agent {
+    /// Explicitly prepare/freeze the same tool surface used by provider turns.
+    /// Unlike `debug_context`, this may update the tool cache. It never calls a provider.
+    pub async fn prepare_debug_context(&mut self) -> serde_json::Value {
+        let prepared_tools = self.tool_definitions().await;
+        let mut context = self.debug_context().await;
+        context["prepared_tools"] = serde_json::json!(prepared_tools);
+        context
+    }
+
+    /// Inspect the next request's static context without inference, prewarming,
+    /// or locking a new tool snapshot. Pending memory is deliberately not consumed.
+    pub async fn debug_context(&self) -> serde_json::Value {
+        let prompt = self.build_system_prompt_split(None);
+        let current_tools = self.tool_definitions_for_debug().await;
+        let effective_tools = self.locked_tools.as_ref().unwrap_or(&current_tools);
+        let locked_tool_names = self.locked_tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        });
+        serde_json::json!({
+            "session_id": self.session.id,
+            "working_dir": self.session.working_dir,
+            "mode": if self.is_desktop_selfdev() { "desktop" }
+                else if self.session.is_canary { "cli" } else { "regular" },
+            "is_canary": self.session.is_canary,
+            "system_prompt": {
+                "static": prompt.static_part,
+                "dynamic": prompt.dynamic_part,
+                "pending_memory_included": false,
+            },
+            "tools_locked": self.locked_tools.is_some(),
+            "locked_tool_names": locked_tool_names,
+            "effective_tools": effective_tools,
+            "current_tools": current_tools,
+        })
+    }
+
     pub(super) fn log_prompt_prefix_accounting(
         &self,
         split: &crate::prompt::SplitSystemPrompt,

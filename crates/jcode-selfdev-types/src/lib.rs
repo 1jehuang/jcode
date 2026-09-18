@@ -3,6 +3,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod desktop;
+pub use desktop::desktop_repo_root;
+
 /// Environment variable that marks a child process as running in self-dev client
 /// mode. Defined here (a low-level crate) so cross-cutting consumers (telemetry,
 /// process title, server tester spawning) can reference it without depending on

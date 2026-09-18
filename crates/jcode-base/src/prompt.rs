@@ -192,6 +192,7 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
 /// alongside the other prompt templates.
 pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
+const DESKTOP_SELFDEV_MODE_PROMPT: &str = include_str!("prompt/desktop_selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
@@ -447,9 +448,11 @@ pub fn build_system_prompt_full_with_capabilities(
         ..Default::default()
     };
 
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
+    // Desktop checkout identity takes precedence over the CLI self-dev flag.
+    if is_desktop_working_dir(working_dir) {
+        info.selfdev_chars = DESKTOP_SELFDEV_MODE_PROMPT.len();
+        parts.push(DESKTOP_SELFDEV_MODE_PROMPT.to_string());
+    } else if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         parts.push(selfdev_prompt);
@@ -584,9 +587,11 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
 
     // === STATIC CONTENT (cacheable) ===
 
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
+    // Keep Desktop guidance cacheable and separate from CLI self-development.
+    if is_desktop_working_dir(working_dir) {
+        info.selfdev_chars = DESKTOP_SELFDEV_MODE_PROMPT.len();
+        static_parts.push(DESKTOP_SELFDEV_MODE_PROMPT.to_string());
+    } else if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt_static_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         static_parts.push(selfdev_prompt);
@@ -649,6 +654,13 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     )
 }
 
+/// Detect Desktop independently of the CLI self-development flag.
+fn is_desktop_working_dir(working_dir: Option<&Path>) -> bool {
+    working_dir
+        .and_then(jcode_selfdev_types::desktop_repo_root)
+        .is_some()
+}
+
 /// Build self-dev tools prompt section (static version without dynamic socket path)
 #[cfg(test)]
 fn build_selfdev_prompt_static() -> String {
@@ -698,6 +710,10 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
 /// Build immutable session context captured once per session.
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
     let mut lines = vec!["# Session Context".to_string()];
+
+    if is_desktop_working_dir(working_dir) {
+        lines.push("Self-development mode: desktop".to_string());
+    }
 
     lines.extend(session_datetime_lines());
     lines.push(format!("OS: {}", std::env::consts::OS));

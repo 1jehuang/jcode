@@ -14,6 +14,9 @@ mod concurrency;
 #[path = "agent_tests/concurrency_construction.rs"]
 mod concurrency_construction;
 
+#[path = "agent_tests/desktop_selfdev.rs"]
+mod desktop_selfdev;
+
 struct DelayedProvider {
     open_delay: Duration,
     first_event_delay: Duration,
