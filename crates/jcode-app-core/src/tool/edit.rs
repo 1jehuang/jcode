@@ -152,14 +152,17 @@ impl Tool for EditTool {
             &new_content,
         );
 
-        Ok(ToolOutput::new(body).with_title(params.file_path.clone()))
+        Ok(super::file_diff::attach(
+            ToolOutput::new(body).with_title(params.file_path.clone()),
+            super::file_diff::unified(&params.file_path, &params.file_path, &content, &new_content),
+        ))
     }
 }
 
 /// Find the 1-based line number where a substring starts
 fn find_line_number(content: &str, substring: &str) -> usize {
     if let Some(pos) = content.find(substring) {
-        content[..pos].lines().count() + 1
+        content[..pos].bytes().filter(|&byte| byte == b'\n').count() + 1
     } else {
         1
     }
@@ -382,6 +385,7 @@ mod tests {
 
         assert_eq!(find_line_number(content, "line 1"), 1);
         assert_eq!(find_line_number(content, "line 2"), 2);
+        assert_eq!(find_line_number(content, "ine 2"), 2);
         assert_eq!(find_line_number(content, "line 3"), 3);
         assert_eq!(find_line_number(content, "line 4"), 4);
         assert_eq!(find_line_number(content, "not found"), 1);

@@ -17,6 +17,7 @@ mod discover;
 mod discover_secrets;
 mod edit;
 mod edit_stats;
+mod file_diff;
 mod feedback;
 mod gmail;
 mod goal;

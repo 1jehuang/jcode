@@ -86,6 +86,23 @@ impl Tool for ApplyPatchTool {
         // threading before/after content through each branch.
         let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
 
+        // Capture whole-file states, including move destinations and AddFile
+        // overwrites. Diff the final state so repeated hunks share one coordinate
+        // system and failed operations cannot produce a speculative preview.
+        let mut before = std::collections::BTreeMap::new();
+        for hunk in &hunks {
+            let (path, destination) = match hunk {
+                PatchHunk::AddFile { path, .. } | PatchHunk::DeleteFile { path } => (path, None),
+                PatchHunk::UpdateFile { path, move_to, .. } => (path, move_to.as_ref()),
+            };
+            for path in std::iter::once(path).chain(destination) {
+                if !before.contains_key(path) {
+                    let resolved = ctx.resolve_path(Path::new(path));
+                    before.insert(path.clone(), super::file_diff::snapshot(&resolved).await);
+                }
+            }
+        }
+
         let mut results = Vec::new();
         let mut touched_paths = Vec::new();
 
@@ -286,7 +303,64 @@ impl Tool for ApplyPatchTool {
         } else {
             let mut body = results.join("\n");
             config_watch.finish(&mut body);
-            let output = ToolOutput::new(body);
+            let mut unified = String::new();
+            let mut after = std::collections::BTreeMap::new();
+            for path in before.keys() {
+                after.insert(
+                    path.clone(),
+                    super::file_diff::snapshot(&ctx.resolve_path(Path::new(path))).await,
+                );
+            }
+            let complete = before.values().chain(after.values()).all(Option::is_some);
+            let mut combined = std::collections::BTreeSet::new();
+            // A simple successful move to a new path can retain the source's
+            // coordinates. For overwrites or move chains, keep net per-path
+            // diffs instead of hiding destination text that was overwritten.
+            for hunk in &hunks {
+                if let PatchHunk::UpdateFile {
+                    path,
+                    move_to: Some(dest),
+                    ..
+                } = hunk
+                    && let (
+                        Some(Some((true, old))),
+                        Some(Some((false, _))),
+                        Some(Some((false, _))),
+                        Some(Some((true, new))),
+                    ) = (
+                        before.get(path),
+                        before.get(dest),
+                        after.get(path),
+                        after.get(dest),
+                    )
+                    && !combined.contains(path)
+                    && !combined.contains(dest)
+                {
+                    unified.push_str(&super::file_diff::unified(path, dest, old, new));
+                    combined.insert(path.clone());
+                    combined.insert(dest.clone());
+                }
+            }
+            for (path, old) in before {
+                if combined.contains(&path) {
+                    continue;
+                }
+                if let (Some((old_exists, old)), Some(Some((new_exists, new)))) =
+                    (old, after.remove(&path))
+                {
+                    unified.push_str(&super::file_diff::unified(
+                        if old_exists { &path } else { "/dev/null" },
+                        if new_exists { &path } else { "/dev/null" },
+                        &old,
+                        &new,
+                    ));
+                }
+            }
+            let output = if complete {
+                super::file_diff::attach(ToolOutput::new(body), unified)
+            } else {
+                ToolOutput::new(body)
+            };
             if touched_paths.len() == 1 {
                 Ok(output.with_title(touched_paths[0].clone()))
             } else {
