@@ -1285,6 +1285,35 @@ async fn summary_command_timeout_falls_through() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn summary_command_streaming_stdout_does_not_deadlock() {
+    // A summarizer that streams stdout while incrementally reading stdin:
+    // sequential write-then-drain deadlocks (child blocks on its full
+    // stdout pipe, stops reading stdin). Concurrent halves complete.
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let streamer = write_summary_script(
+        temp.path(),
+        "streamer.py",
+        "#!/usr/bin/env python3\nimport sys\npart = sys.stdin.read(4096)\nsys.stdout.write('x' * 100000)\nsys.stdout.flush()\nrest = sys.stdin.read()\nsys.stdout.write('DONE:' + str(len(part) + len(rest)))\nsys.stdout.flush()\n",
+    );
+    let _env = SummaryCommandEnv::set(Some(&streamer.to_string_lossy()), Some("15000"));
+    // Payload over the pipe buffer so a sequential write would block while
+    // the child fills its own stdout pipe.
+    let mut bulky = two_messages();
+    for _ in 0..32 {
+        bulky.push(make_text_message(Role::User, &"z".repeat(4096)));
+    }
+    let start = std::time::Instant::now();
+    let result = run_summary_command(&bulky, None, "reactive").await;
+    assert!(result.is_some(), "streaming summarizer must succeed");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(14),
+        "concurrent IO must finish well inside the deadline"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn summary_command_blocked_stdin_times_out() {
     // A child that never reads stdin must not wedge the write past the
     // deadline: the whole interaction shares one timeout and the child is

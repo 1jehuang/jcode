@@ -1932,46 +1932,57 @@ async fn run_summary_command(
             .max(1),
     );
     let deadline = tokio::time::Instant::now() + timeout;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let write_result = tokio::time::timeout_at(deadline, async {
-            stdin.write_all(request_json.as_bytes()).await?;
-            stdin.shutdown().await
-        })
-        .await;
-        match write_result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                crate::logging::warn(&format!(
-                    "Summary command '{command_line}' stdin write failed: {error} (using built-in summarizer)"
-                ));
-                return None;
-            }
-            Err(_elapsed) => {
-                let _ = child.kill().await;
-                crate::logging::warn(&format!(
-                    "Summary command '{command_line}' stdin write timed out after {}ms (using built-in summarizer)",
+    // Stdin and stdout run concurrently: a summarizer that streams stdout
+    // while incrementally reading stdin would otherwise deadlock against a
+    // sequential write-then-drain (each side blocking on the other's full
+    // pipe). One shared deadline covers both halves; expiry kills the child.
+    let stdin_future = async {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let result = tokio::time::timeout_at(deadline, async {
+                stdin.write_all(request_json.as_bytes()).await?;
+                stdin.shutdown().await
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(format!("stdin write failed: {error}")),
+                Err(_elapsed) => Some(format!(
+                    "stdin write timed out after {}ms",
                     timeout.as_millis()
-                ));
-                return None;
+                )),
+            }
+        } else {
+            None
+        }
+    };
+    let stdout_future = async {
+        use tokio::io::AsyncReadExt;
+        let mut capped: Vec<u8> = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            let mut limited = stdout.take((SUMMARY_COMMAND_STDOUT_LIMIT + 1) as u64);
+            if tokio::time::timeout_at(deadline, limited.read_to_end(&mut capped))
+                .await
+                .is_err()
+            {
+                return (
+                    capped,
+                    Some(format!(
+                        "stdout read timed out after {}ms",
+                        timeout.as_millis()
+                    )),
+                );
             }
         }
-    }
-    let mut capped: Vec<u8> = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        use tokio::io::AsyncReadExt;
-        let mut limited = stdout.take((SUMMARY_COMMAND_STDOUT_LIMIT + 1) as u64);
-        if tokio::time::timeout_at(deadline, limited.read_to_end(&mut capped))
-            .await
-            .is_err()
-        {
-            let _ = child.kill().await;
-            crate::logging::warn(&format!(
-                "Summary command '{command_line}' stdout read timed out after {}ms (using built-in summarizer)",
-                timeout.as_millis()
-            ));
-            return None;
-        }
+        (capped, None)
+    };
+    let (stdin_error, (mut capped, stdout_error)) = tokio::join!(stdin_future, stdout_future);
+    if let Some(reason) = stdin_error.or(stdout_error) {
+        let _ = child.kill().await;
+        crate::logging::warn(&format!(
+            "Summary command '{command_line}' {reason} (using built-in summarizer)"
+        ));
+        return None;
     }
     let status = match tokio::time::timeout_at(deadline, child.wait()).await {
         Ok(Ok(status)) => status,
