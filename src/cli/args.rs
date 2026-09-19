@@ -273,6 +273,12 @@ pub(crate) enum Command {
     /// Update jcode to the latest version
     Update,
 
+    /// Inspect and install GitHub-hosted jcode plugin bundles
+    Plugin {
+        #[command(subcommand)]
+        action: PluginCommand,
+    },
+
     /// Show build/version information in human or JSON form
     Version {
         /// Emit JSON instead of plain text
@@ -589,6 +595,59 @@ pub(crate) enum Command {
         /// Starts the shared daemon if needed; does not create an API socket.
         #[arg(long, conflicts_with = "api_socket")]
         stdio: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum PluginCommand {
+    /// Inspect a local bundle or GitHub repository without installing it
+    Inspect {
+        /// Local bundle path or owner/repository[@ref]
+        source: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a GitHub bundle into the immutable plugin store
+    Add {
+        /// owner/repository[@ref], or an HTTPS GitHub URL
+        source: String,
+        /// Mark a contained external provider trusted after validation
+        #[arg(long)]
+        trusted: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Update an installed GitHub plugin from its recorded source
+    Update {
+        /// Installed plugin name
+        name: String,
+        #[arg(long)]
+        trusted: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List installed plugin versions and pinned commits
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate installed plugin metadata and provider manifests
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Trust an installed plugin's external provider
+    Trust {
+        /// Provider ID from `jcode plugin list` or `jcode provider extension list`
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove all installed versions of a plugin and its provider registration
+    Remove {
+        name: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1041,6 +1100,117 @@ pub(crate) enum ProviderCommand {
         model_catalog: bool,
 
         /// Emit JSON instead of human-readable setup output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage independently-upgradable external provider extensions
+    #[command(subcommand)]
+    Extension(ProviderExtensionCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ProviderExtensionCommand {
+    /// List registered external providers
+    List {
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Register a provider.toml manifest or a portable plugin bundle directory
+    Add {
+        /// Path to provider.toml or a plugin bundle directory containing provider.toml
+        manifest: String,
+
+        /// Mark the provider trusted without an interactive prompt
+        #[arg(long)]
+        trusted: bool,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a registered external provider
+    Remove {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Enable a registered external provider
+    Enable {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Disable a registered external provider without removing it
+    Disable {
+        /// Stable provider ID
+        id: String,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate registered provider manifests and executable availability
+    Doctor {
+        /// Optional stable provider ID to check
+        id: Option<String>,
+
+        /// Emit JSON instead of human-readable output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Invoke a trusted external provider through the versioned protocol
+    Run {
+        /// Stable provider ID
+        id: String,
+
+        /// Prompt to send to the provider
+        message: String,
+
+        /// Grant the provider's declared network permission for this invocation
+        #[arg(long)]
+        allow_network: bool,
+
+        /// Grant the provider's declared filesystem permission for this invocation
+        #[arg(long)]
+        allow_filesystem: bool,
+
+        /// Grant the provider's declared environment permission for this invocation
+        #[arg(long)]
+        allow_environment: bool,
+
+        /// Grant the provider's declared subprocess permission for this invocation
+        #[arg(long)]
+        allow_subprocess: bool,
+
+        /// Grant the provider's declared native-tools permission for this invocation
+        #[arg(long)]
+        allow_native_tools: bool,
+
+        /// Emit the complete protocol exchange as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Inspect a Claude/Codex-style plugin bundle without executing it
+    Inspect {
+        /// Path to the plugin bundle directory
+        path: String,
+
+        /// Emit the complete bundle metadata as JSON
         #[arg(long)]
         json: bool,
     },

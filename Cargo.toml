@@ -48,6 +48,9 @@ members = [
     "crates/jcode-provider-metadata",
     "crates/jcode-provider-env",
     "crates/jcode-provider-core",
+    "crates/jcode-provider-protocol",
+    "crates/jcode-provider-subprocess",
+    "crates/jcode-provider-extensions",
     "crates/jcode-schema-dialect",
     "crates/jcode-provider-bedrock",
     "crates/jcode-provider-anthropic",
@@ -189,6 +192,8 @@ jcode-tui = { path = "crates/jcode-tui", default-features = false }
 # `jcode provider-doctor` / provider diagnostics; sits downstream of jcode-base
 # so doctor edits do not rebuild the base -> app-core -> tui spine.
 jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }
+# External provider manifests and the local provider registry.
+jcode-provider-extensions = { path = "crates/jcode-provider-extensions" }
 # Gemini provider runtime; sits downstream of jcode-base so gemini edits do
 # not rebuild the base -> app-core -> tui spine. Registered with the external
 # provider registry at startup (src/cli/startup.rs).

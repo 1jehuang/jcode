@@ -1,7 +1,7 @@
 use super::{App, DisplayMessage, ProcessingStatus, is_context_limit_error};
 use crate::bus::{
     BackgroundTaskCompleted, BackgroundTaskProgressEvent, BusEvent, InputShellCompleted,
-    ManualToolCompleted, UiActivity, UiActivityKind,
+    ManualToolCompleted, PluginOperationCompleted, UiActivity, UiActivityKind,
 };
 use crate::message::{
     ContentBlock, Message, Role, background_task_status_notice,
@@ -173,6 +173,10 @@ pub(super) fn handle_bus_event(
         }
         Ok(BusEvent::InputShellCompleted(shell)) => {
             handle_input_shell_completed(app, shell);
+            true
+        }
+        Ok(BusEvent::PluginOperationCompleted(result)) => {
+            handle_plugin_operation_completed(app, result);
             true
         }
         Ok(BusEvent::ClipboardPasteCompleted(result)) => {
@@ -594,6 +598,18 @@ fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
         crate::message::format_input_shell_result_markdown(&shell.result),
     ));
     app.set_status_notice(crate::message::input_shell_status_notice(&shell.result));
+}
+
+fn handle_plugin_operation_completed(app: &mut App, result: PluginOperationCompleted) {
+    if result.session_id != app.session.id {
+        return;
+    }
+    app.push_display_message(DisplayMessage::system(result.output));
+    app.set_status_notice(if result.success {
+        "Plugin operation completed"
+    } else {
+        "Plugin operation failed"
+    });
 }
 
 pub(super) fn finish_turn(app: &mut App) {

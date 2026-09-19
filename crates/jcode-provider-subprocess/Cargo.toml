@@ -1,0 +1,16 @@
+[package]
+name = "jcode-provider-subprocess"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded subprocess transport for external jcode providers"
+license = "MIT"
+repository = "https://github.com/1jehuang/jcode"
+
+[dependencies]
+jcode-provider-protocol = { path = "../jcode-provider-protocol", version = "0.1.0" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
