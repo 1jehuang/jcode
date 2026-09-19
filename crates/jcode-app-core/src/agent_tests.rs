@@ -285,6 +285,79 @@ fn pressure_notice_fires_once_then_rearms_after_relief() {
 }
 
 #[test]
+fn pressure_notice_fired_flag_tracks_crossing_turn() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2600),
+            cache_control: None,
+        }],
+    );
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1000);
+    }
+    agent.messages_for_provider();
+    assert!(
+        agent.pressure_notice_fired_this_turn,
+        "crossing turn must raise the rebuild flag"
+    );
+    agent.current_turn_system_reminder = None;
+    agent.messages_for_provider();
+    assert!(
+        !agent.pressure_notice_fired_this_turn,
+        "non-firing turn must lower the flag or the loop rebuilds every turn"
+    );
+}
+
+#[test]
+fn pressure_band_rearms_on_session_restore() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.last_pressure_band = 2;
+    agent.reset_runtime_state_for_session_change();
+    assert_eq!(agent.last_pressure_band, 0);
+    assert!(!agent.pressure_notice_fired_this_turn);
+}
+
+#[test]
+fn pressure_notice_stays_tool_neutral_without_memory() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let session = Session::create(None, None);
+    let mut agent = Agent::new_with_session(
+        provider,
+        Registry::empty(),
+        session,
+        Some(HashSet::from(["bash".to_string()])),
+    );
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(2600),
+            cache_control: None,
+        }],
+    );
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1000);
+    }
+    agent.messages_for_provider();
+    let notice = agent
+        .current_turn_system_reminder
+        .clone()
+        .expect("notice must fire");
+    assert!(
+        !notice.contains("memory tool"),
+        "restricted session got: {notice}"
+    );
+    assert!(notice.contains("% full"), "got: {notice}");
+}
+
+#[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);

@@ -126,6 +126,7 @@ impl Agent {
                 .prewarm(&tools, &split_prompt.static_part)
                 .await;
             let (messages, compaction_event) = self.messages_for_provider();
+            let had_compaction_event = compaction_event.is_some();
             if let Some(event) = compaction_event {
                 // Reset cache tracker and tool lock on compaction since the message history changes
                 self.cache_tracker.reset();
@@ -155,6 +156,12 @@ impl Agent {
                 split_prompt = self.build_system_prompt_split(None);
             }
 
+            // A pressure notice fired on the crossing turn: the prompt above
+            // was built before messages_for_provider set the reminder, so
+            // rebuild it now (compaction already rebuilt above; skip twice).
+            if self.pressure_notice_fired_this_turn && !had_compaction_event {
+                split_prompt = self.build_system_prompt_split(None);
+            }
             let messages: std::sync::Arc<[Message]> = messages.into();
             // Non-blocking memory: uses pending result from last turn, spawns check for next turn
             let memory_pending = self.build_memory_prompt_nonblocking_shared(

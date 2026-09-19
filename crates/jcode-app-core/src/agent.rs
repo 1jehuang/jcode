@@ -213,6 +213,10 @@ pub struct Agent {
     /// regrowth. Backs the deterministic budget notices: the session model
     /// pages its own memory instead of needing a manager model.
     last_pressure_band: u8,
+    /// Set when messages_for_provider fires a pressure notice this call, so
+    /// the turn loop rebuilds the already-built prompt and the crossing turn
+    /// carries the notice instead of arriving a turn late.
+    pressure_notice_fired_this_turn: bool,
     /// Tool call ids observed in the current session transcript.
     tool_call_ids: HashSet<String>,
     /// Tool result ids observed in the current session transcript.
@@ -329,6 +333,7 @@ impl Agent {
             pending_alerts: Vec::new(),
             current_turn_system_reminder: None,
             last_pressure_band: 0,
+            pressure_notice_fired_this_turn: false,
             tool_call_ids: HashSet::new(),
             tool_result_ids: HashSet::new(),
             tool_output_scan_index: 0,
@@ -640,6 +645,10 @@ impl Agent {
         self.last_status_detail = None;
         self.pending_alerts.clear();
         self.current_turn_system_reminder = None;
+        // Pressure state belongs to a session's cycle: a restored session
+        // above the old band must still get its own notice.
+        self.last_pressure_band = 0;
+        self.pressure_notice_fired_this_turn = false;
         self.reset_tool_output_tracking();
         if let Ok(mut queue) = self.soft_interrupt_queue.lock() {
             queue.clear();
@@ -760,18 +769,35 @@ impl Agent {
     /// Render the pressure notice for a band. Names only tools that exist
     /// (`memory` with remember/recall/search), so the session model can act
     /// immediately: bank durable facts now, recall on demand later.
-    fn pressure_notice(band: u8, usage_pct: f64, tokens: u64) -> String {
+    /// Render the pressure notice for a band. Names the `memory` tool only
+    /// when the session can actually call it; otherwise stays tool-neutral
+    /// so a restricted session never burns context on an unavailable tool.
+    fn pressure_notice(band: u8, usage_pct: f64, tokens: u64, memory_exposed: bool) -> String {
+        let bank_line = if memory_exposed {
+            "Bank anything the next session must know with the memory tool (remember) NOW"
+        } else {
+            "Bank anything the next session must know in durable notes NOW"
+        };
+        let recall_line = if memory_exposed {
+            "Recall (recall/search) on demand instead of keeping everything live."
+        } else {
+            "Keep only what is needed live."
+        };
         match band {
             2 => format!(
                 "Context is {usage_pct:.0}% full (~{tokens} tokens) and compaction is near. \
-                 Bank anything the next session must know with the memory tool (remember) NOW — \
-                 after compaction only the summary survives. Recall (recall/search) on demand instead of keeping everything live.",
+                 {bank_line} — after compaction only the summary survives. {recall_line}",
             ),
             _ => format!(
                 "Context is {usage_pct:.0}% full (~{tokens} tokens). Before continuing, consider \
-                 banking durable facts and decisions with the memory tool (remember) and recalling \
-                 (recall/search) only what is needed, so the coming compaction has less to summarize. \
+                 banking durable facts and decisions ({}) and recalling \
+                 only what is needed, so the coming compaction has less to summarize. \
                  No action needed if the remaining work is short.",
+                if memory_exposed {
+                    "with the memory tool (remember)"
+                } else {
+                    "in durable notes"
+                },
             ),
         }
     }
@@ -814,21 +840,35 @@ impl Agent {
                     // budget state so it pages its own memory via tools
                     // (remember/recall) instead of needing a manager model.
                     let usage = manager.context_usage_with(&messages) as f64;
+                    self.pressure_notice_fired_this_turn = false;
                     if usage < Self::PRESSURE_REARM {
                         self.last_pressure_band = 0;
-                    } else if event.is_none() {
-                        if let Some(band) =
+                    } else if event.is_none()
+                        && let Some(band) =
                             Self::pressure_band_for_usage(usage, self.last_pressure_band)
-                        {
-                            self.last_pressure_band = band;
-                            let tokens = manager.effective_token_count_with(&messages) as u64;
-                            self.current_turn_system_reminder =
-                                Some(Self::pressure_notice(band, usage * 100.0, tokens));
-                            logging::info(&format!(
-                                "Context pressure band {band} notified ({:.0}% full)",
-                                usage * 100.0
-                            ));
-                        }
+                    {
+                        self.last_pressure_band = band;
+                        self.pressure_notice_fired_this_turn = true;
+                        let tokens = manager.effective_token_count_with(&messages) as u64;
+                        let memory_exposed = self
+                            .allowed_tools
+                            .as_ref()
+                            .is_none_or(|allowed| allowed.contains("memory"))
+                            && !self.disabled_tools.contains("memory")
+                            && crate::tool::session_tool_policy_allows_tool(
+                                &self.session.id,
+                                "memory",
+                            );
+                        self.current_turn_system_reminder = Some(Self::pressure_notice(
+                            band,
+                            usage * 100.0,
+                            tokens,
+                            memory_exposed,
+                        ));
+                        logging::info(&format!(
+                            "Context pressure band {band} notified ({:.0}% full)",
+                            usage * 100.0
+                        ));
                     }
                     if event.is_some() || discarded_oversized_native {
                         self.sync_session_compaction_state_from_manager(&manager);
