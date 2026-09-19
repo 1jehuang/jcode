@@ -463,7 +463,7 @@ impl App {
     /// held at the top/bottom edge of a pane. Called once per UI tick; returns
     /// true if it scrolled (so the caller can request a redraw).
     pub(super) fn progress_copy_selection_edge_autoscroll(&mut self) -> bool {
-        let Some((pane, upward)) = self.copy_selection_edge_autoscroll else {
+        let Some((pane, upward, speed)) = self.copy_selection_edge_autoscroll else {
             return false;
         };
         // Only active during an in-progress mouse drag selection.
@@ -471,11 +471,20 @@ impl App {
             self.copy_selection_edge_autoscroll = None;
             return false;
         }
-        // Extend the selection to the current edge line, then scroll once more.
-        if let Some(point) = crate::tui::ui::copy_pane_autoscroll_edge_point(pane, upward) {
+        // Scroll `speed` lines (faster the closer the drag sits to the edge),
+        // then extend the selection to the freshly revealed edge line.
+        let mut moved = false;
+        for _ in 0..speed {
+            if !self.step_copy_selection_scroll(pane, upward) {
+                break;
+            }
+            moved = true;
+        }
+        if moved && let Some(point) = crate::tui::ui::copy_pane_autoscroll_edge_point(pane, upward)
+        {
             self.update_selection_with_point(point, true);
         }
-        self.step_copy_selection_scroll(pane, upward)
+        moved
     }
 
     fn copy_selection_scroll_target(
@@ -575,18 +584,23 @@ impl App {
                 // mouse is simply held at the edge (no further movement needed), just
                 // like dragging a selection past the edge of a browser window.
                 if let Some(pane) = active_pane
-                    && let Some((edge_point, upward)) =
+                    && let Some((edge_point, upward, speed)) =
                         crate::tui::ui::copy_pane_vertical_edge_point(pane, mouse.column, mouse.row)
                 {
                     self.update_selection_with_point(edge_point, true);
                     // Nudge once when the drag first enters the edge band (or
                     // flips direction). While it stays in the band the tick loop
                     // owns scrolling, so moving the cursor within the band cannot
-                    // outpace a cursor held still.
-                    if self.copy_selection_edge_autoscroll != Some((pane, upward)) {
+                    // outpace a cursor held still. Re-arming always refreshes the
+                    // proximity speed without an extra nudge.
+                    let same_direction = matches!(
+                        self.copy_selection_edge_autoscroll,
+                        Some((armed_pane, armed_up, _)) if armed_pane == pane && armed_up == upward
+                    );
+                    if !same_direction {
                         self.step_copy_selection_scroll(pane, upward);
-                        self.copy_selection_edge_autoscroll = Some((pane, upward));
                     }
+                    self.copy_selection_edge_autoscroll = Some((pane, upward, speed));
                     return Some(false);
                 }
                 // Left the edge: stop the continuous autoscroll.

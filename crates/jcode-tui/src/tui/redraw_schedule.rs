@@ -18,10 +18,11 @@ pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(5000);
 pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
 /// Tick cadence while a drag-held edge autoscroll runs. The autoscroll advances
-/// exactly one line per tick, so pacing the tick here rather than at
-/// `redraw_fps` makes the scroll speed a property of the gesture instead of the
-/// display refresh rate, and keeps it stable on perf tiers that clamp fps.
-pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
+/// 1-3 lines per tick (scaled by how close the drag is to the edge), so pacing
+/// the tick here rather than at `redraw_fps` makes the speed a property of the
+/// gesture instead of the display refresh rate. At 60ms this is ~17 lines/s at
+/// the slow end and ~50 lines/s right on the edge.
+pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(60);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether this session has been left alone long enough to be treated as

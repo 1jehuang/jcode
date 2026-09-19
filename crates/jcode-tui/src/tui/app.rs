@@ -1146,7 +1146,7 @@ pub struct App {
     /// While drag-selecting with the mouse held at the top/bottom edge of a pane,
     /// keep auto-scrolling on every tick (browser-style) until the drag leaves the
     /// edge or ends. Stores the pane and whether to scroll upward.
-    copy_selection_edge_autoscroll: Option<(crate::tui::CopySelectionPane, bool)>,
+    copy_selection_edge_autoscroll: Option<(crate::tui::CopySelectionPane, bool, u16)>,
     // Debug socket broadcast channel (if enabled)
     debug_tx: Option<tokio::sync::broadcast::Sender<super::backend::DebugEvent>>,
     // Remote provider info (set when running in remote mode)

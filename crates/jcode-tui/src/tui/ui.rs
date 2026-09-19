@@ -2147,7 +2147,7 @@ pub(crate) fn copy_pane_vertical_edge_point(
     pane: crate::tui::CopySelectionPane,
     column: u16,
     row: u16,
-) -> Option<(crate::tui::CopySelectionPoint, bool)> {
+) -> Option<(crate::tui::CopySelectionPoint, bool, u16)> {
     // The prompt composer cannot be wheel-scrolled, so it has no browser-style
     // edge auto-scroll. Drags past its edge clamp via `copy_pane_drag_point`.
     if pane == crate::tui::CopySelectionPane::Input {
@@ -2188,7 +2188,17 @@ pub(crate) fn copy_pane_vertical_edge_point(
 
     let clamped_col = column.clamp(area.x, area.x.saturating_add(area.width).saturating_sub(1));
 
-    copy_point_from_snapshot(&snapshot, clamped_col, edge_row).map(|point| (point, upward))
+    // Proximity speed: right on the boundary row scrolls fastest, the inner edge
+    // of the hot zone scrolls one line per tick, so the drag is easy to control
+    // when it is barely in the band. Yields 1..=3 lines per tick.
+    let depth = if upward {
+        row.saturating_sub(area.y)
+    } else {
+        last_row.saturating_sub(row)
+    };
+    let speed = zone.saturating_sub(depth).clamp(1, 3);
+
+    copy_point_from_snapshot(&snapshot, clamped_col, edge_row).map(|point| (point, upward, speed))
 }
 
 /// Resolve the selection point for a drag at `(column, row)`, clamping vertical
