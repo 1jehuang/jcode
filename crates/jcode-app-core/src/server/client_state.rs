@@ -537,8 +537,26 @@ async fn send_history_from_persisted_session(
     activity: Option<SessionActivitySnapshot>,
     supports_pdf_panels: bool,
 ) -> Result<()> {
-    let session = crate::session::Session::load_for_remote_startup(session_id)
-        .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
+    let session = match crate::session::Session::load_for_remote_startup(session_id)
+        .or_else(|_| crate::session::Session::load_startup_stub(session_id))
+    {
+        Ok(session) => session,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && sessions.read().await.contains_key(session_id) =>
+        {
+            // Fresh sessions intentionally have no transcript on disk until
+            // their first visible message. Metadata prefetch (or another
+            // history request) can still briefly own their agent mutex. An
+            // empty persisted view is valid here and must not disconnect the
+            // client or wait behind a turn. Provider metadata is filled below.
+            // Do not save this synthetic snapshot or mask other I/O errors.
+            Session::create_with_id(session_id.to_string(), None, None)
+        }
+        Err(error) => return Err(error),
+    };
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
@@ -613,44 +631,6 @@ async fn send_history_from_persisted_session(
     };
 
     write_event(writer, &history_event).await
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "history payload assembly includes agent state, sessions, counts, writer, activity, payload mode, and server identity"
-)]
-pub(super) async fn send_history(
-    id: u64,
-    session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
-    sessions: &SessionAgents,
-    client_count: &Arc<RwLock<usize>>,
-    writer: &Arc<Mutex<WriteHalf>>,
-    server_name: &str,
-    server_icon: &str,
-    was_interrupted: Option<bool>,
-    activity: Option<SessionActivitySnapshot>,
-    payload_mode: HistoryPayloadMode,
-    include_model_catalog: bool,
-    supports_pdf_panels: bool,
-) -> Result<()> {
-    let agent_guard = agent.lock().await;
-    send_history_with_guard(
-        id,
-        session_id,
-        agent_guard,
-        sessions,
-        client_count,
-        writer,
-        server_name,
-        server_icon,
-        was_interrupted,
-        activity,
-        payload_mode,
-        include_model_catalog,
-        supports_pdf_panels,
-    )
-    .await
 }
 
 #[expect(

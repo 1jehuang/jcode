@@ -123,6 +123,140 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "test serializes storage environment and deliberately holds the busy agent"
+)]
+async fn handle_get_history_busy_fresh_session_returns_empty_without_waiting() {
+    let _env_guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().unwrap();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let session_id = "session_fresh_busy_history";
+    let session = crate::session::Session::create_with_id(session_id.into(), None, None);
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider(Some("priority")));
+    let agent = Arc::new(Mutex::new(Agent::new_with_session(
+        provider.clone(),
+        Registry::empty(),
+        session,
+        None,
+    )));
+    let snapshot_path = crate::session::session_path(session_id).unwrap();
+    assert!(
+        !snapshot_path.exists(),
+        "fresh empty sessions are not persisted"
+    );
+    let sessions = Arc::new(RwLock::new(HashMap::from([(
+        session_id.to_string(),
+        agent.clone(),
+    )])));
+    let connections = Arc::new(RwLock::new(HashMap::new()));
+    let count = Arc::new(RwLock::new(1));
+    let (stream, mut peer) = crate::transport::stream_pair().unwrap();
+    let (_reader, write_half) = stream.into_split();
+    let writer = Arc::new(Mutex::new(write_half));
+    let busy_guard = agent.lock().await;
+
+    // Keep the mutex held throughout, representing either idle prefetch or a
+    // real turn. Concurrent requests must not queue behind either lock owner.
+    let request = |id, processing| {
+        handle_get_history(
+            id,
+            session_id,
+            processing,
+            &agent,
+            &provider,
+            &sessions,
+            &connections,
+            &count,
+            &writer,
+            "test-server",
+            "test",
+            None,
+            false,
+        )
+    };
+    for processing in [false, true] {
+        let results = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                request(1, processing),
+                request(2, processing),
+                request(3, processing)
+            )
+        })
+        .await
+        .expect("fresh history must not wait for busy agent");
+        results.0.unwrap();
+        results.1.unwrap();
+        results.2.unwrap();
+    }
+    assert!(
+        !snapshot_path.exists(),
+        "fallback must not persist synthetic state"
+    );
+
+    // A nonexistent session is not the same as a registered, unsaved one.
+    sessions.write().await.clear();
+    assert!(request(4, false).await.is_err());
+    sessions
+        .write()
+        .await
+        .insert(session_id.into(), agent.clone());
+    // Corrupt snapshots must not silently become empty history either.
+    std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot_path, b"not valid session json").unwrap();
+    assert!(request(5, false).await.is_err());
+
+    drop(busy_guard);
+    drop(writer);
+    let mut bytes = Vec::new();
+    peer.read_to_end(&mut bytes).await.unwrap();
+    let events: Vec<crate::protocol::ServerEvent> = std::io::Cursor::new(bytes)
+        .lines()
+        .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+        .collect();
+    assert_eq!(events.len(), 6);
+    for (index, event) in events.into_iter().enumerate() {
+        match event {
+            crate::protocol::ServerEvent::History {
+                session_id: returned_id,
+                messages,
+                images,
+                provider_name,
+                provider_model,
+                reasoning_effort,
+                service_tier,
+                activity,
+                all_sessions,
+                client_count,
+                ..
+            } => {
+                assert_eq!(returned_id, session_id);
+                assert!(messages.is_empty());
+                assert!(images.is_empty());
+                assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
+                assert_eq!(provider_model.as_deref(), Some("mock-model"));
+                assert_eq!(reasoning_effort.as_deref(), Some("high"));
+                assert_eq!(service_tier.as_deref(), Some("priority"));
+                assert_eq!(
+                    activity.is_some_and(|activity| activity.is_processing),
+                    index >= 3
+                );
+                assert_eq!(all_sessions, vec![session_id.to_string()]);
+                assert_eq!(client_count, Some(1));
+            }
+            other => panic!("expected history, got {other:?}"),
+        }
+    }
+    if let Some(home) = prev_home {
+        crate::env::set_var("JCODE_HOME", home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[tokio::test]
 async fn pdf_panels_history_capability_covers_live_and_persisted_paths() {
     for busy in [false, true] {
         for supports_pdf_panels in [false, true] {
