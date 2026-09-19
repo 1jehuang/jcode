@@ -96,6 +96,7 @@ impl AmbientManager {
             every_minutes: repeat.every_minutes,
             remaining: repeat.max_iterations,
             recurrence_id: format!("recur_{:08x}", rand::random::<u32>()),
+            skipped: 0,
         });
         let item = ScheduledItem {
             id: id.clone(),

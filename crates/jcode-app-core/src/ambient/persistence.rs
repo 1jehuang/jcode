@@ -197,15 +197,24 @@ impl ScheduledQueue {
             None => None,
         };
         let now = Utc::now();
+        let interval = chrono::Duration::minutes(repeat.every_minutes.max(1) as i64);
         let base = item.scheduled_for.max(now);
+        // Missed intervals between due time and now collapse into this one
+        // catch-up fire; count them so `schedule list` shows the folding.
+        let skipped_now = if now > item.scheduled_for {
+            ((now - item.scheduled_for).num_seconds() / interval.num_seconds().max(1)) as u64
+        } else {
+            0
+        };
         let next = ScheduledItem {
             id: format!("sched_{:08x}", rand::random::<u32>()),
-            scheduled_for: base + chrono::Duration::minutes(repeat.every_minutes.max(1) as i64),
+            scheduled_for: base + interval,
             created_at: now,
             repeat: Some(RepeatState {
                 every_minutes: repeat.every_minutes,
                 remaining,
                 recurrence_id: repeat.recurrence_id.clone(),
+                skipped: repeat.skipped + skipped_now,
             }),
             ..item.clone()
         };

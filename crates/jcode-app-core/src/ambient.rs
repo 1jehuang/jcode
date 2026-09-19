@@ -160,6 +160,11 @@ pub struct RepeatState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<u32>,
     pub recurrence_id: String,
+    /// Intervals collapsed by catch-up so far. When the runner wakes late,
+    /// all missed intervals fold into one catch-up fire (BufferOne); this
+    /// counts the folded ones for observability. Old queues load as 0.
+    #[serde(default)]
+    pub skipped: u64,
 }
 
 /// Persistent ambient state

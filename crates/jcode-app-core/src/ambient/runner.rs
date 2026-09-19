@@ -301,6 +301,7 @@ impl AmbientRunnerHandle {
                             "recurrence_id": item.repeat.as_ref().map(|r| r.recurrence_id.clone()),
                             "repeat_every_minutes": item.repeat.as_ref().map(|r| r.every_minutes),
                             "repeat_remaining": item.repeat.as_ref().and_then(|r| r.remaining),
+                            "repeat_skipped": item.repeat.as_ref().map(|r| r.skipped),
                             "context": item.context,
                             "task_description": item.task_description,
                             "priority": format!("{:?}", item.priority),

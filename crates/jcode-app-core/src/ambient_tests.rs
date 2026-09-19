@@ -637,6 +637,7 @@ fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
             every_minutes: 60,
             remaining,
             recurrence_id: "recur_test".into(),
+            skipped: 0,
         }),
     }
 }
@@ -666,6 +667,48 @@ fn test_recurring_pop_requeues_next_occurrence() {
         "next due about one interval out, got {:?}",
         gap
     );
+}
+
+#[test]
+fn test_recurring_late_wake_folds_missed_intervals_into_one() {
+    // BufferOne: 10 missed hourly intervals produce exactly one catch-up
+    // fire, and the folded count is observable (not silently dropped like
+    // cron, not replayed like BufferAll).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("late", None);
+    item.scheduled_for = Utc::now() - Duration::minutes(600);
+    queue.push(item).expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    // Exactly one catch-up queued, not ten.
+    assert_eq!(queue.len(), 1);
+    let next = &queue.items()[0];
+    let repeat = next.repeat.as_ref().expect("series survives");
+    assert_eq!(repeat.skipped, 10, "10 folded intervals counted");
+    assert_eq!(repeat.remaining, None, "forever series unaffected");
+    let gap = next.scheduled_for - Utc::now();
+    assert!(
+        gap >= Duration::minutes(55) && gap <= Duration::minutes(65),
+        "catch-up anchors at now + one interval, got {:?}",
+        gap
+    );
+}
+
+#[test]
+fn test_recurring_skipped_accumulates_across_wakes() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("late-again", None);
+    item.scheduled_for = Utc::now() - Duration::minutes(120);
+    item.repeat.as_mut().expect("repeat").skipped = 5;
+    queue.push(item).expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    let next = &queue.items()[0];
+    assert_eq!(next.repeat.as_ref().expect("repeat").skipped, 7);
 }
 
 #[test]
