@@ -1011,6 +1011,23 @@ impl BridgeState {
         }))
     }
 
+    fn side_panel_frame(session_id: &str, snapshot: &Value) -> Option<ServerFrame> {
+        if session_id.is_empty() {
+            return None;
+        }
+        // Missing history state means empty: native history omits empty panels.
+        // Malformed snapshots must not clear a previously valid document.
+        let snapshot = if snapshot.is_null() {
+            jcode_harness_api::SidePanelSnapshot::default()
+        } else {
+            serde_json::from_value(snapshot.clone()).ok()?
+        };
+        Some(ServerFrame::event(ApiEvent::SidePanelState {
+            session_id: session_id.to_string(),
+            snapshot,
+        }))
+    }
+
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
@@ -1114,6 +1131,9 @@ impl BridgeState {
                             },
                         },
                     )];
+                    if let Some(snapshot) = event.get("side_panel") {
+                        frames.extend(Self::side_panel_frame(&session_id, snapshot));
+                    }
                     if fresh_activity {
                         frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                             session_id,
@@ -1168,6 +1188,15 @@ impl BridgeState {
                 output: event["output"].as_str().unwrap_or("").to_string(),
                 error: event["error"].as_str().map(str::to_string),
             })],
+            "side_panel_state" => {
+                let session_id = event["session_id"].as_str().or(self.session_id.as_deref());
+                match (session_id, event.get("snapshot")) {
+                    (Some(session_id), Some(snapshot)) if !snapshot.is_null() => {
+                        Self::side_panel_frame(session_id, snapshot).into_iter().collect()
+                    }
+                    _ => vec![],
+                }
+            }
             "side_pane_images" => vec![ServerFrame::event(ApiEvent::SidePaneImages {
                 session_id: event["session_id"]
                     .as_str()
@@ -1304,7 +1333,12 @@ impl BridgeState {
                     })
                 {
                     self.pending_recovery_history = None;
-                    return Self::attachment_recovery(event).into_iter().collect();
+                    let mut frames: Vec<_> = Self::attachment_recovery(event).into_iter().collect();
+                    frames.extend(Self::side_panel_frame(
+                        event["session_id"].as_str().unwrap_or_default(),
+                        &event["side_panel"],
+                    ));
+                    return frames;
                 }
                 // The catalog probe rides the same `history` reply shape but
                 // carries no messages: it is model identity, not transcript.
@@ -1378,6 +1412,14 @@ impl BridgeState {
                         session_id: session(self),
                         status: if active { "running" } else { "idle" }.into(),
                     }));
+                }
+                // Correlation establishes ownership, but reject a conflicting
+                // explicit session id rather than hydrating the wrong panel.
+                if event["session_id"]
+                    .as_str()
+                    .is_none_or(|sid| Some(sid) == self.session_id.as_deref())
+                {
+                    frames.extend(Self::side_panel_frame(&session(self), &event["side_panel"]));
                 }
                 frames
             }

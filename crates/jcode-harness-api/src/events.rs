@@ -89,6 +89,14 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
+    /// Complete session-scoped Markdown side-panel state. Replace the previous
+    /// snapshot, including when pages is empty. Sent live and during attachment
+    /// hydration, possibly before `Attached`. Subscribe before attaching.
+    SidePanelState {
+        session_id: String,
+        snapshot: crate::SidePanelSnapshot,
+    },
+
     /// Usage for the latest provider call, not cumulative session or turn totals.
     /// Input/cache accounting is provider-specific: Anthropic reports cache
     /// reads and writes separately, while OpenAI includes cache reads in input.
