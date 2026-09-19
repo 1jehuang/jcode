@@ -141,6 +141,19 @@ fn read_validation_graph(
     Ok(graph)
 }
 
+fn semantic_signature(entry: &super::MemoryEntry) -> anyhow::Result<String> {
+    // Include everything sent to Jev plus semantic/rendering metadata. Access
+    // counters and embeddings do not change the fact that was judged.
+    Ok(serde_json::to_string(&(
+        &entry.content,
+        &entry.category,
+        &entry.tags,
+        &entry.source,
+        &entry.trust,
+        &entry.updated_at,
+    ))?)
+}
+
 fn snapshot_selected_memories(
     project_dir: Option<&str>,
     ids: &[String],
@@ -175,14 +188,7 @@ fn snapshot_selected_memories(
         );
         // Compare semantic/rendered metadata exactly, not a collision-prone hash.
         // Access counters and embeddings are deliberately excluded.
-        let signature = serde_json::to_string(&(
-            &entry.content,
-            &entry.category,
-            &entry.tags,
-            &entry.source,
-            &entry.trust,
-            &entry.updated_at,
-        ))?;
+        let signature = semantic_signature(entry)?;
         anyhow::ensure!(
             snapshots
                 .insert(
@@ -351,6 +357,52 @@ pub fn set_pending_memory_for_project(
     display_prompt: Option<String>,
     project_dir: Option<&str>,
 ) {
+    publish_scoped_memory(
+        session_id,
+        prompt,
+        count,
+        memory_ids,
+        display_prompt,
+        project_dir,
+        None,
+    );
+}
+
+/// Automatic publishers must retain the entries actually judged by Jev. A
+/// canonical prompt alone cannot detect tags-only edits while inference was in
+/// flight, because tags are model input but not part of the rendered prompt.
+pub(crate) fn set_pending_memory_for_project_with_selection(
+    session_id: &str,
+    prompt: String,
+    count: usize,
+    selected_entries: &[super::MemoryEntry],
+    display_prompt: Option<String>,
+    project_dir: Option<&str>,
+) {
+    let memory_ids = selected_entries
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    publish_scoped_memory(
+        session_id,
+        prompt,
+        count,
+        memory_ids,
+        display_prompt,
+        project_dir,
+        Some(selected_entries),
+    );
+}
+
+fn publish_scoped_memory(
+    session_id: &str,
+    prompt: String,
+    count: usize,
+    memory_ids: Vec<String>,
+    display_prompt: Option<String>,
+    project_dir: Option<&str>,
+    selected_entries: Option<&[super::MemoryEntry]>,
+) {
     let Ok((snapshots, entries)) = snapshot_selected_memories(project_dir, &memory_ids) else {
         crate::memory_log::log_pending_discarded(
             session_id,
@@ -358,6 +410,26 @@ pub fn set_pending_memory_for_project(
         );
         return;
     };
+    if let Some(selected) = selected_entries {
+        let matches_selection = selected.len() == memory_ids.len()
+            && selected.iter().zip(&memory_ids).all(|(entry, id)| {
+                entry.id == *id
+                    && entry.active
+                    && entry.superseded_by.is_none()
+                    && semantic_signature(entry).is_ok_and(|signature| {
+                        snapshots
+                            .get(id)
+                            .is_some_and(|current| current.signature == signature)
+                    })
+            });
+        if !matches_selection {
+            crate::memory_log::log_pending_discarded(
+                session_id,
+                "selected memory metadata changed during relevance evaluation",
+            );
+            return;
+        }
+    }
     if super::format_relevant_prompt(&entries, entries.len())
         .as_deref()
         .map(str::trim)
@@ -835,6 +907,46 @@ mod scoped_tests {
             assert!(!is_memory_injected("publish-race", &old.id));
             publish("publish-race", None, std::slice::from_ref(&current));
             assert!(take_pending_memory_for_project("publish-race", None).is_some());
+        });
+    }
+
+    #[test]
+    fn tags_only_change_during_selection_is_rejected_before_publication() {
+        fixture(|| {
+            let mut selected = fact("Use the documented database configuration");
+            selected.tags = vec!["postgres".into()];
+            let mut current = selected.clone();
+            current.tags = vec!["sqlite".into()];
+            // Keep content, category and timestamps identical: canonical prompt
+            // comparison cannot detect this changed input to the Jev decision.
+            let prompt =
+                super::super::format_relevant_prompt(std::slice::from_ref(&selected), 1).unwrap();
+            assert_eq!(
+                Some(prompt.clone()),
+                super::super::format_relevant_prompt(std::slice::from_ref(&current), 1)
+            );
+            save(Some("/project/a"), false, std::slice::from_ref(&current));
+            set_pending_memory_for_project_with_selection(
+                "tags-race",
+                prompt.clone(),
+                1,
+                std::slice::from_ref(&selected),
+                None,
+                Some("/project/a"),
+            );
+            assert!(!has_pending_memory("tags-race"));
+            assert!(!is_memory_injected("tags-race", &selected.id));
+
+            // An evaluation performed against the new metadata remains usable.
+            set_pending_memory_for_project_with_selection(
+                "tags-race",
+                prompt,
+                1,
+                std::slice::from_ref(&current),
+                None,
+                Some("/project/a"),
+            );
+            assert!(take_pending_memory_for_project("tags-race", Some("/project/a")).is_some());
         });
     }
 

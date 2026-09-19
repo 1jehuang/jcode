@@ -43,6 +43,7 @@ pub use activity::{
     get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
+pub(crate) use pending::set_pending_memory_for_project_with_selection;
 pub use pending::{
     PendingMemory, clear_all_injected_memories, clear_all_pending_memory, clear_injected_memories,
     clear_pending_memory, has_any_pending_memory, has_pending_memory, is_memory_injected,
@@ -173,6 +174,15 @@ pub struct MemoryManager {
     /// When true, use isolated test storage instead of real memory
     test_mode: bool,
     include_skills: bool,
+}
+
+/// Recall output retains the exact entries supplied to the relevance judge so
+/// publication can reject even non-rendered metadata changes during inference.
+#[derive(Default)]
+pub struct MemoryRelevanceResult {
+    pub prompt: Option<String>,
+    pub display_prompt: Option<String>,
+    pub selected_entries: Vec<MemoryEntry>,
 }
 
 impl MemoryManager {
@@ -1059,27 +1069,17 @@ impl MemoryManager {
                 .get_relevant_parallel(&sid, &messages, event_tx.clone())
                 .await
             {
-                Ok((Some(prompt), memory_ids, display_prompt)) => {
-                    let count = prompt
-                        .lines()
-                        .map(str::trim_start)
-                        .filter(|line| {
-                            line.starts_with("- ")
-                                || line
-                                    .split_once(". ")
-                                    .map(|(prefix, _)| {
-                                        !prefix.is_empty()
-                                            && prefix.chars().all(|c| c.is_ascii_digit())
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .count()
-                        .max(1);
-                    set_pending_memory_for_project(
+                Ok(MemoryRelevanceResult {
+                    prompt: Some(prompt),
+                    display_prompt,
+                    selected_entries,
+                }) => {
+                    let count = selected_entries.len();
+                    set_pending_memory_for_project_with_selection(
                         &sid,
                         prompt,
                         count,
-                        memory_ids,
+                        &selected_entries,
                         display_prompt,
                         manager
                             .project_dir
@@ -1088,7 +1088,7 @@ impl MemoryManager {
                     );
                     emit_memory_activity(event_tx.as_ref());
                 }
-                Ok((None, _, _)) => {
+                Ok(MemoryRelevanceResult { prompt: None, .. }) => {
                     clear_pending_memory(&sid);
                     set_state(MemoryState::Idle);
                     emit_memory_activity(event_tx.as_ref());
@@ -1115,11 +1115,11 @@ impl MemoryManager {
         session_id: &str,
         messages: &[crate::message::Message],
         event_tx: Option<MemoryEventSink>,
-    ) -> Result<(Option<String>, Vec<String>, Option<String>)> {
+    ) -> Result<MemoryRelevanceResult> {
         let query = format_focused_query_for_relevance(messages);
         let query = crate::util::truncate_str(&query, crate::memory_jev::MAX_QUERY_BYTES);
         if query.trim().is_empty() {
-            return Ok((None, Vec::new(), None));
+            return Ok(MemoryRelevanceResult::default());
         }
         pipeline_start();
         let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
@@ -1188,7 +1188,6 @@ impl MemoryManager {
                 StepStatus::Pending
             };
         });
-        let ids = relevant.iter().map(|entry| entry.id.clone()).collect();
         let prompt = format_relevant_prompt(&relevant, 5);
         let display = format_relevant_display_prompt(&relevant, 5);
         set_state(if count == 0 {
@@ -1197,7 +1196,11 @@ impl MemoryManager {
             MemoryState::FoundRelevant { count }
         });
         emit_memory_activity(event_tx.as_ref());
-        Ok((prompt, ids, display))
+        Ok(MemoryRelevanceResult {
+            prompt,
+            display_prompt: display,
+            selected_entries: relevant,
+        })
     }
 
     /// Load the existing project graph without generating embeddings.

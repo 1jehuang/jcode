@@ -269,17 +269,21 @@ impl MemoryAgent {
         if !memory::memory_runtime_active() {
             return Ok(());
         }
-        let (prompt, ids, display) = manager
+        let memory::MemoryRelevanceResult {
+            prompt,
+            display_prompt,
+            selected_entries,
+        } = manager
             .get_relevant_parallel(session_id, messages, None)
             .await?;
         if let Some(prompt) = prompt {
-            let count = ids.len();
-            memory::set_pending_memory_for_project(
+            let count = selected_entries.len();
+            memory::set_pending_memory_for_project_with_selection(
                 session_id,
                 prompt,
                 count,
-                ids,
-                display,
+                &selected_entries,
+                display_prompt,
                 self.sessions
                     .get(session_id)
                     .and_then(|state| state.working_dir.as_deref()),
