@@ -30,6 +30,17 @@ enum Phase {
     Finished,
 }
 
+#[cfg(not(target_os = "android"))]
+fn clipboard_text_arboard() -> Option<String> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    clipboard.get_text().ok()
+}
+
+#[cfg(target_os = "android")]
+fn clipboard_text_arboard() -> Option<String> {
+    None
+}
+
 // Intentionally not Debug/Clone: the input buffer can contain an OAuth secret.
 pub(super) struct RemoteLogin {
     target: Target,
@@ -375,10 +386,8 @@ impl App {
             if code == KeyCode::Char('v')
                 && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
             {
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
-                        self.append_ssh_login_input(&text);
-                    }
+                if let Some(text) = clipboard_text_arboard() {
+                    self.append_ssh_login_input(&text);
                 }
                 return true;
             }
@@ -413,10 +422,8 @@ impl App {
                     || modifiers.contains(KeyModifiers::SUPER) =>
             {
                 // Explicit text clipboard paste only. Never invoke smart file/image paste.
-                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                    if let Ok(text) = clipboard.get_text() {
-                        self.append_ssh_login_input(&text);
-                    }
+                if let Some(text) = clipboard_text_arboard() {
+                    self.append_ssh_login_input(&text);
                 }
             }
             KeyCode::Backspace => {
