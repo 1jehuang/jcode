@@ -1671,6 +1671,73 @@ pub(super) fn crashed_sessions_from_all_sessions(
     })
 }
 
+/// Build a [`SessionInfo`] from a daemon `list_sessions` wire entry.
+///
+/// Used by the remote `/resume` picker (SSH mode). Mirrors
+/// `parse_jcode_session_info` minus local-file-only concerns: transcript
+/// search text arrives later via the lazy preview path instead of the summary
+/// pass, so the initial index covers title/name/id/dir/label only.
+pub fn session_info_from_wire(
+    entry: crate::protocol::SessionListEntry,
+    catchup_seen: &crate::catchup::CatchupSeenSnapshot,
+) -> SessionInfo {
+    let short_name = entry
+        .short_name
+        .clone()
+        .or_else(|| extract_session_name(&entry.id).map(str::to_string))
+        .unwrap_or_else(|| entry.id.clone());
+    let icon = session_icon(&short_name);
+    let needs_catchup =
+        catchup_seen.needs_catchup(&entry.id, entry.last_message_time, &entry.status);
+    let source = classify_session_source(
+        &entry.id,
+        entry.provider_key.as_deref(),
+        entry.model.as_deref(),
+    );
+    let search_index = build_search_index(
+        &entry.id,
+        &short_name,
+        &entry.title,
+        entry.working_dir.as_deref(),
+        entry.save_label.as_deref(),
+        &[],
+    );
+
+    SessionInfo {
+        id: entry.id.clone(),
+        parent_id: entry.parent_id,
+        short_name,
+        icon: icon.to_string(),
+        title: entry.title,
+        message_count: entry.message_count,
+        user_message_count: entry.user_message_count,
+        assistant_message_count: entry.assistant_message_count,
+        created_at: entry.created_at,
+        last_message_time: entry.last_message_time,
+        last_active_at: entry.last_active_at,
+        working_dir: entry.working_dir,
+        model: entry.model,
+        provider_key: entry.provider_key,
+        is_canary: entry.is_canary,
+        is_debug: entry.is_debug,
+        saved: entry.saved,
+        save_label: entry.save_label,
+        status: entry.status,
+        needs_catchup,
+        estimated_tokens: entry.estimated_tokens,
+        first_user_prompt: entry.first_user_prompt,
+        messages_preview: Vec::new(),
+        search_index,
+        server_name: None,
+        server_icon: None,
+        source,
+        resume_target: ResumeTarget::JcodeSession {
+            session_id: entry.id,
+        },
+        external_path: None,
+    }
+}
+
 /// Parse a single jcode session snapshot (+ journal) into a [`SessionInfo`],
 /// returning `None` for empty/imported sessions or read/parse errors. Pulled out
 /// of `load_sessions` so the summary pass can run across a scoped thread pool.

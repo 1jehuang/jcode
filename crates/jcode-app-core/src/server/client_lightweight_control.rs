@@ -797,6 +797,35 @@ pub(super) async fn handle_lightweight_control_request(
             )
             .await;
         }
+        Request::ListSessions { id } => {
+            super::session_listing::handle_list_sessions(
+                id,
+                sessions,
+                client_connections,
+                &client_event_tx,
+            )
+            .await;
+        }
+        Request::SessionPreview { id, session_id } => {
+            super::session_listing::handle_session_preview(id, session_id, &client_event_tx);
+        }
+        Request::SetSessionSaved {
+            id,
+            session_id,
+            saved,
+            save_label,
+        } => {
+            super::session_listing::handle_set_session_saved(
+                id,
+                session_id,
+                saved,
+                save_label,
+                &client_event_tx,
+            );
+        }
+        Request::GetTodos { id, session_id } => {
+            super::session_listing::handle_get_todos(id, session_id, &client_event_tx);
+        }
         other => {
             let _ = client_event_tx.send(ServerEvent::Error {
                 id: other.id(),

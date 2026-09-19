@@ -41,18 +41,31 @@ impl App {
     /// transcript keeps at most one card so repeated toggles don't stack.
     pub(super) fn show_todo_card(&mut self) {
         if crate::tui::is_ssh_remote() {
-            self.set_status_notice(
-                "Local todo view unavailable for SSH; ask the remote agent for todos",
-            );
+            // Todo state lives on the server — request it and render the card
+            // when the `ServerEvent::Todos` reply lands.
+            self.pending_remote_todos_request = true;
+            self.set_status_notice("Fetching todos from remote session...");
             return;
         }
         let session_id = self.active_client_session_id().map(str::to_string);
         let todos = load_current_session_todos(session_id.as_deref());
         let goals = load_current_session_goals(session_id.as_deref());
         let plan = load_current_session_plan(session_id.as_deref());
-        let content = todo_card_payload_json(&todos, &plan, &goals);
-        self.todo_card_rendered_hash =
-            hash_todos_payload(session_id.as_deref(), &todos, &plan, &goals);
+        self.render_todo_card(session_id.as_deref(), &todos, &plan, &goals);
+    }
+
+    /// Render (or refresh in place) the inline todo card from an explicit
+    /// todo/plan/goals payload. Used by both the local path and the remote
+    /// `ServerEvent::Todos` reply.
+    fn render_todo_card(
+        &mut self,
+        session_id: Option<&str>,
+        todos: &[TodoItem],
+        plan: &crate::todo::TodoPlan,
+        goals: &[crate::todo::TodoGoal],
+    ) {
+        let content = todo_card_payload_json(todos, plan, goals);
+        self.todo_card_rendered_hash = hash_todos_payload(session_id, todos, plan, goals);
 
         if let Some(idx) = self.latest_todo_card_index() {
             if idx + 1 == self.display_messages.len() {
@@ -63,6 +76,19 @@ impl App {
         }
         self.push_display_message(crate::tui::DisplayMessage::todos(content));
         self.set_status_notice("Todos card");
+    }
+
+    /// Apply a `ServerEvent::Todos` payload — renders the inline card from the
+    /// remote session's stored todo state.
+    pub(super) fn apply_remote_todos(
+        &mut self,
+        todos: Vec<TodoItem>,
+        goals: Vec<crate::todo::TodoGoal>,
+        plan: Option<crate::todo::TodoPlan>,
+    ) {
+        let plan = plan.unwrap_or_default();
+        let session_id = self.active_client_session_id().map(str::to_string);
+        self.render_todo_card(session_id.as_deref(), &todos, &plan, &goals);
     }
 
     /// Live-refresh the inline todo card when the session todo list changed.

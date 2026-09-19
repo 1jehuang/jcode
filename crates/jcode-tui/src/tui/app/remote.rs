@@ -43,8 +43,8 @@ pub(super) use reconnect::{
 };
 use reconnect::{format_disconnect_reason, reconnect_status_message};
 use session_persistence::{
-    persist_remote_session_metadata, persist_replay_display_message, persist_swarm_plan_snapshot,
-    persist_swarm_status_snapshot,
+    persist_remote_session_metadata, persist_remote_session_mode_flag,
+    persist_replay_display_message, persist_swarm_plan_snapshot, persist_swarm_status_snapshot,
 };
 use workspace::{handle_workspace_command, handle_workspace_navigation_key};
 
@@ -137,6 +137,47 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.poll_model_picker_load();
     needs_redraw |= app.poll_session_picker_load();
     needs_redraw |= app.poll_session_picker_presence();
+
+    // Remote session picker (SSH `/resume`): send the one-shot list request
+    // plus the preview prefetch queue the picker seeded when the list landed.
+    if app.pending_remote_session_list {
+        app.pending_remote_session_list = false;
+        if let Err(err) = remote.list_sessions().await {
+            app.session_picker_overlay = None;
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to load remote sessions: {}",
+                err
+            )));
+            needs_redraw = true;
+        }
+    }
+    // SSH `/todos`: ask the daemon for the session's stored todo items; the
+    // reply arrives as `ServerEvent::Todos` and renders the inline card.
+    if app.pending_remote_todos_request {
+        app.pending_remote_todos_request = false;
+        let session_id = app
+            .active_client_session_id()
+            .unwrap_or_else(|| app.session.id.as_str())
+            .to_string();
+        if let Err(err) = remote.get_todos(&session_id).await {
+            app.push_display_message(DisplayMessage::error(format!(
+                "Failed to load remote todos: {}",
+                err
+            )));
+            needs_redraw = true;
+        }
+    }
+    // Keep a small window of preview requests in flight so the picker warms
+    // its cache in list order without hammering the daemon.
+    for session_id in app.take_remote_preview_requests(4) {
+        if let Err(err) = remote.session_preview(&session_id).await {
+            if let Some(picker) = app.session_picker_overlay.as_ref() {
+                picker.borrow_mut().mark_preview_failed(&session_id);
+            }
+            app.set_status_notice(format!("Session preview failed: {}", err));
+            needs_redraw = true;
+        }
+    }
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();

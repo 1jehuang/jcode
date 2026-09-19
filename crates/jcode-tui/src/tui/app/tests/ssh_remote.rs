@@ -158,6 +158,9 @@ fn ssh_remote_history_is_authoritative_even_when_empty_or_server_version_differs
         let _entered = runtime.enter();
         let mut remote = crate::tui::backend::RemoteConnection::dummy();
         let event = crate::protocol::ServerEvent::History {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 1,
             session_id: "remote-only-session".into(),
             messages: vec![],

@@ -26,8 +26,8 @@ use crossterm::event::{
 };
 use debug::DebugTrace;
 use futures::StreamExt;
-use helpers::*;
 pub(crate) use helpers::effort_display_label;
+use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
@@ -1653,6 +1653,19 @@ pub struct App {
     session_picker_overlay: Option<RefCell<super::session_picker::SessionPicker>>,
     session_picker_mode: SessionPickerMode,
     pending_session_picker_load: Option<PendingSessionPickerLoad>,
+    /// SSH mode: the remote picker was opened and the client still owes the
+    /// daemon a `list_sessions` request (drained on the remote poll loop).
+    pending_remote_session_list: bool,
+    /// SSH mode: `/todos` asked the remote daemon for the session's todo
+    /// items (drained on the remote poll loop; the reply arrives as a
+    /// `ServerEvent::Todos` and renders the card).
+    pending_remote_todos_request: bool,
+    /// SSH mode: `/catchup next` asked for a remote session list and should
+    /// resume the first catchup candidate once it lands.
+    pending_catchup_next: bool,
+    /// SSH mode: catchup candidates stashed from the most recent remote
+    /// `SessionList` event so `/catchup next` can skip a re-fetch.
+    remote_catchup_candidates: Vec<String>,
     catchup_return_stack: Vec<String>,
     pending_catchup_resume: Option<PendingCatchupResume>,
     in_flight_catchup_resume: Option<PendingCatchupResume>,

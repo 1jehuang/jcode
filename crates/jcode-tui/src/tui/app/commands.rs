@@ -1406,6 +1406,30 @@ fn handle_catchup_command(app: &mut App, trimmed: &str) -> bool {
                 app.set_status_notice("Finish current work before Catch Up");
                 return true;
             }
+            if crate::tui::is_ssh_remote() {
+                // Candidates come from the remote `list_sessions` reply — use
+                // the stash from the last picker refresh, else fetch it and
+                // let `apply_remote_session_list` queue the resume.
+                if app.remote_catchup_candidates.is_empty() {
+                    app.pending_remote_session_list = true;
+                    app.pending_catchup_next = true;
+                    app.set_status_notice("Checking remote sessions for Catch Up...");
+                    return true;
+                }
+                let target = app.remote_catchup_candidates[0].clone();
+                let total = app.remote_catchup_candidates.len();
+                let source_session_id = active_session_id(app);
+                let target_name = crate::id::extract_session_name(&target)
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| target.clone());
+                app.queue_catchup_resume(target, Some(source_session_id), Some((1, total)), true);
+                app.push_display_message(DisplayMessage::system(format!(
+                    "Queued Catch Up for {}.",
+                    target_name,
+                )));
+                app.set_status_notice(format!("Catch Up → {}", target_name));
+                return true;
+            }
             let candidates = load_catchup_candidates(app);
             let total = candidates.len();
             let Some(target) = candidates.first() else {

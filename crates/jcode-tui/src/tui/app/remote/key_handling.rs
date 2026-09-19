@@ -67,13 +67,16 @@ async fn apply_remote_effort_direction(
     remote: &mut RemoteConnection,
     direction: i8,
 ) -> Result<()> {
-    // Use the best-known provider/model identity (server-reported when
-    // available, header hints during the pre-History bootstrap window) so
-    // effort cycling works immediately after spawn instead of claiming the
-    // provider does not support it until the History payload settles.
-    let (provider_name, provider_model) = app.remote_effort_identity();
-    let efforts =
-        app_mod::inferred_reasoning_efforts(provider_name.as_deref(), provider_model.as_deref());
+    // Use the server-declared ladder when the catalog wire fields carried it;
+    // fall back to the model-derived inference for older servers. The identity
+    // used by the fallback is the best-known remote provider/model so effort
+    // cycling works immediately after spawn instead of claiming the provider
+    // does not support it until the History payload settles.
+    let efforts: Vec<String> = app
+        .available_effort_names_for_current_model()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     if efforts.is_empty() {
         app.set_status_notice("Reasoning effort not available for this provider");
         return Ok(());
@@ -81,7 +84,7 @@ async fn apply_remote_effort_direction(
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
     let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
+        .and_then(|c| efforts.iter().position(|e| e.as_str() == c))
         .unwrap_or(efforts.len() - 1);
     let len = efforts.len();
     let next_index = if direction > 0 {
@@ -95,7 +98,7 @@ async fn apply_remote_effort_direction(
     } else {
         current_index - 1
     };
-    let next_effort = efforts[next_index];
+    let next_effort = efforts[next_index].as_str();
     if Some(next_effort) == current {
         let label = app_mod::effort_display_label(next_effort);
         app.set_status_notice(format!(
@@ -430,12 +433,8 @@ async fn handle_remote_key_internal(
     }
 
     if app.open_resume_key_matches(code, modifiers) {
-        if crate::tui::is_ssh_remote() {
-            app.set_status_notice(
-                "Local session picker disabled for SSH; use --ssh HOST --resume REMOTE_ID",
-            );
-            return Ok(());
-        }
+        // `open_session_picker` handles SSH mode itself: it opens a remote
+        // picker and issues a `list_sessions` wire request.
         app.open_session_picker();
         return Ok(());
     }
@@ -989,6 +988,19 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/cancel" || trimmed == "/stop" {
+                    // Client-side bookkeeping first (interleave queue, pending
+                    // retry, soft interrupts), then the wire cancel — the
+                    // `cancel_requested` flag this sets is only consumed by
+                    // the local turn loop, so a remote session needs the RPC.
+                    let _ = app_mod::commands::handle_cancel_command(app, trimmed);
+                    if app.is_processing {
+                        remote.cancel_with_reason("slash_cancel").await?;
+                    }
+                    app.cancel_requested = false;
+                    return Ok(());
+                }
+
                 if handle_remote_rewind_command(app, remote, trimmed).await? {
                     return Ok(());
                 }
@@ -1029,6 +1041,20 @@ async fn handle_remote_key_internal(
                     let session_id = app.reload_handoff_session_id();
                     app.save_input_for_reload(&session_id);
                     app.reload_requested = Some(session_id);
+                    app.should_quit = true;
+                    return Ok(());
+                }
+
+                if trimmed == "/restart" {
+                    // Same-binary client re-exec, preserving the remote session
+                    // id for handoff. The SSH launch args are recovered by
+                    // `tui_launch`/`hot_exec` from the connection env.
+                    app.push_display_message(DisplayMessage::system(
+                        "Restarting client (same binary, session preserved)...".to_string(),
+                    ));
+                    let session_id = app.reload_handoff_session_id();
+                    app.save_input_for_reload(&session_id);
+                    app.restart_requested = Some(session_id);
                     app.should_quit = true;
                     return Ok(());
                 }
@@ -1221,11 +1247,7 @@ async fn handle_remote_key_internal(
                     let label = current
                         .map(app_mod::effort_display_label)
                         .unwrap_or("default");
-                    let (provider_name, provider_model) = app.remote_effort_identity();
-                    let efforts = app_mod::inferred_reasoning_efforts(
-                        provider_name.as_deref(),
-                        provider_model.as_deref(),
-                    );
+                    let efforts = app.available_effort_names_for_current_model();
                     if efforts.is_empty() {
                         app.push_display_message(DisplayMessage::system(
                             "Reasoning effort not available for this provider.".to_string(),
@@ -1257,12 +1279,8 @@ async fn handle_remote_key_internal(
                         app.push_display_message(DisplayMessage::error("Usage: /effort <level>"));
                         return Ok(());
                     }
-                    let (provider_name, provider_model) = app.remote_effort_identity();
-                    let efforts = app_mod::inferred_reasoning_efforts(
-                        provider_name.as_deref(),
-                        provider_model.as_deref(),
-                    );
-                    if efforts.contains(&level) {
+                    let efforts = app.available_effort_names_for_current_model();
+                    if efforts.iter().any(|effort| *effort == level) {
                         app.remote_reasoning_effort = Some(level.to_string());
                         app.invalidate_model_picker_cache();
                         app.set_status_notice(format!(
@@ -1775,6 +1793,38 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                // Catch Up navigation works over the remote session list:
+                // `handle_catchup_command` consumes `remote_catchup_candidates`
+                // (or requests a fresh `list_sessions`), and `/back` pops the
+                // return stack through `queue_catchup_resume`.
+                if trimmed == "/catchup" || trimmed.starts_with("/catchup ") || trimmed == "/back" {
+                    let _ = app_mod::commands::handle_session_command(app, trimmed);
+                    return Ok(());
+                }
+
+                // `/git` runs on the remote host via the `input_shell` wire
+                // request (server-side `bash -c`), using the session's remote
+                // working directory.
+                if trimmed == "/git" || trimmed == "/git status" {
+                    let dir = app.session.working_dir.clone().unwrap_or_default();
+                    let command = if dir.is_empty() {
+                        "git status --short --branch".to_string()
+                    } else {
+                        format!(
+                            "git -C '{}' status --short --branch",
+                            dir.replace('\'', "'\\''")
+                        )
+                    };
+                    input_dispatch::submit_remote_input_shell(
+                        app,
+                        remote,
+                        trimmed.to_string(),
+                        command,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+
                 if trimmed == "/observe"
                     || trimmed == "/observe on"
                     || trimmed == "/observe off"
@@ -1880,7 +1930,27 @@ async fn handle_remote_key_internal(
                     } else {
                         Some(label.to_string())
                     };
-                    if let Err(e) = persist_remote_session_metadata(app, |session| {
+                    if crate::tui::is_ssh_remote() {
+                        // The session file lives on the server — persist the
+                        // flag over the wire, then mirror it locally so the
+                        // UI reflects the bookmark immediately. A failure
+                        // surfaces as an Error server event.
+                        let session_id = app
+                            .active_client_session_id()
+                            .unwrap_or_else(|| app.session.id.as_str())
+                            .to_string();
+                        if let Err(e) = remote
+                            .set_session_saved(&session_id, true, label.clone())
+                            .await
+                        {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to save session: {}",
+                                e
+                            )));
+                            return Ok(());
+                        }
+                        app.session.mark_saved(label.clone());
+                    } else if let Err(e) = persist_remote_session_metadata(app, |session| {
                         session.mark_saved(label.clone());
                     }) {
                         app.push_display_message(DisplayMessage::error(format!(
@@ -1916,7 +1986,20 @@ async fn handle_remote_key_internal(
                 }
 
                 if trimmed == "/unsave" {
-                    if let Err(e) = persist_remote_session_metadata(app, |session| {
+                    if crate::tui::is_ssh_remote() {
+                        let session_id = app
+                            .active_client_session_id()
+                            .unwrap_or_else(|| app.session.id.as_str())
+                            .to_string();
+                        if let Err(e) = remote.set_session_saved(&session_id, false, None).await {
+                            app.push_display_message(DisplayMessage::error(format!(
+                                "Failed to save session: {}",
+                                e
+                            )));
+                            return Ok(());
+                        }
+                        app.session.unmark_saved();
+                    } else if let Err(e) = persist_remote_session_metadata(app, |session| {
                         session.unmark_saved();
                     }) {
                         app.push_display_message(DisplayMessage::error(format!(
@@ -2148,6 +2231,20 @@ async fn handle_remote_key_internal(
                     return Ok(());
                 }
 
+                if trimmed == "/zstatus" {
+                    use crate::provider::copilot::PremiumMode;
+                    let label = match app.provider.premium_mode() {
+                        PremiumMode::Normal => "normal",
+                        PremiumMode::OnePerSession => "one premium per session",
+                        PremiumMode::Zero => "zero premium requests",
+                    };
+                    app.push_display_message(DisplayMessage::system(format!(
+                        "Premium mode: {} (applies to the remote session)",
+                        label,
+                    )));
+                    return Ok(());
+                }
+
                 if trimmed == "/z" || trimmed == "/zz" || trimmed == "/zzz" {
                     use crate::provider::copilot::PremiumMode;
                     let current = app.provider.premium_mode();
@@ -2155,10 +2252,15 @@ async fn handle_remote_key_internal(
                     if trimmed == "/z" {
                         app.provider.set_premium_mode(PremiumMode::Normal);
                         let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
-                        let _ = crate::config::Config::set_copilot_premium(None);
+                        // The mode is applied to the server session over the
+                        // wire; do not persist it into the laptop's local
+                        // config where it would leak into local sessions.
+                        if !crate::tui::is_ssh_remote() {
+                            let _ = crate::config::Config::set_copilot_premium(None);
+                        }
                         app.set_status_notice("Premium: normal");
                         app.push_display_message(DisplayMessage::system(
-                            "Premium request mode reset to normal. (saved to config)".to_string(),
+                            "Premium request mode reset to normal.".to_string(),
                         ));
                         return Ok(());
                     }
@@ -2171,10 +2273,12 @@ async fn handle_remote_key_internal(
                     if current == mode {
                         app.provider.set_premium_mode(PremiumMode::Normal);
                         let _ = remote.set_premium_mode(PremiumMode::Normal as u8).await;
-                        let _ = crate::config::Config::set_copilot_premium(None);
+                        if !crate::tui::is_ssh_remote() {
+                            let _ = crate::config::Config::set_copilot_premium(None);
+                        }
                         app.set_status_notice("Premium: normal");
                         app.push_display_message(DisplayMessage::system(
-                            "Premium request mode reset to normal. (saved to config)".to_string(),
+                            "Premium request mode reset to normal.".to_string(),
                         ));
                     } else {
                         app.provider.set_premium_mode(mode);
@@ -2184,7 +2288,9 @@ async fn handle_remote_key_internal(
                             PremiumMode::OnePerSession => "one",
                             PremiumMode::Normal => "normal",
                         };
-                        let _ = crate::config::Config::set_copilot_premium(Some(config_val));
+                        if !crate::tui::is_ssh_remote() {
+                            let _ = crate::config::Config::set_copilot_premium(Some(config_val));
+                        }
                         let label = match mode {
                             PremiumMode::OnePerSession => "one premium per session",
                             PremiumMode::Zero => "zero premium requests",
@@ -2192,7 +2298,7 @@ async fn handle_remote_key_internal(
                         };
                         app.set_status_notice(format!("Premium: {}", label));
                         app.push_display_message(DisplayMessage::system(format!(
-                            "Premium mode: {}. Toggle off with /z. (saved to config)",
+                            "Premium mode: {}. Toggle off with /z.",
                             label,
                         )));
                     }
@@ -2308,7 +2414,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             };
 
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode =
                                     Some(app_mod::commands::session_improve_mode_for(mode));
                             })?;
@@ -2377,7 +2483,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             }
 
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode = None;
                             })?;
                             app.improve_mode = None;
@@ -2408,7 +2514,7 @@ async fn handle_remote_key_internal(
                         }
                         Ok(app_mod::commands::ImproveCommand::Run { plan_only, focus }) => {
                             let mode = app_mod::commands::improve_mode_for(plan_only);
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode =
                                     Some(app_mod::commands::session_improve_mode_for(mode));
                             })?;
@@ -2490,7 +2596,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             };
 
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode =
                                     Some(app_mod::commands::session_improve_mode_for(mode));
                             })?;
@@ -2559,7 +2665,7 @@ async fn handle_remote_key_internal(
                                 return Ok(());
                             }
 
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode = None;
                             })?;
                             app.improve_mode = None;
@@ -2590,7 +2696,7 @@ async fn handle_remote_key_internal(
                         }
                         Ok(app_mod::commands::RefactorCommand::Run { plan_only, focus }) => {
                             let mode = app_mod::commands::refactor_mode_for(plan_only);
-                            persist_remote_session_metadata(app, |session| {
+                            persist_remote_session_mode_flag(app, |session| {
                                 session.improve_mode =
                                     Some(app_mod::commands::session_improve_mode_for(mode));
                             })?;

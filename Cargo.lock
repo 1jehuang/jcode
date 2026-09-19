@@ -3599,6 +3599,7 @@ name = "jcode-protocol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "jcode-batch-types",
  "jcode-config-types",
  "jcode-message-types",
@@ -3607,6 +3608,7 @@ dependencies = [
  "jcode-selfdev-types",
  "jcode-session-types",
  "jcode-side-panel-types",
+ "jcode-task-types",
  "rand 0.9.3",
  "serde",
  "serde_json",

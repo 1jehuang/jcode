@@ -2316,8 +2316,10 @@ pub(in crate::tui::app) fn handle_server_event(
         }
         ServerEvent::ModelUsageUpdated { route } => {
             for cached in &mut app.remote_model_options {
-                if cached.model == route.model && cached.provider == route.provider
-                    && cached.api_method == route.api_method {
+                if cached.model == route.model
+                    && cached.provider == route.provider
+                    && cached.api_method == route.api_method
+                {
                     cached.usage = route.usage.clone();
                 }
             }
@@ -2913,6 +2915,18 @@ pub(in crate::tui::app) fn handle_server_event(
                 app.set_status_notice(format!("Resuming {} sessions", resumed));
             }
             false
+        }
+        ServerEvent::SessionList { sessions, .. } => app.apply_remote_session_list(sessions),
+        ServerEvent::SessionPreviewResult {
+            session_id,
+            messages,
+            ..
+        } => app.apply_remote_session_preview(&session_id, messages),
+        ServerEvent::Todos {
+            todos, goals, plan, ..
+        } => {
+            app.apply_remote_todos(todos, goals, plan);
+            true
         }
         ServerEvent::StdinRequest { .. } => {
             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");

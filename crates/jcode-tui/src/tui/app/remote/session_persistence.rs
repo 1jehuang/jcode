@@ -43,6 +43,21 @@ pub(super) fn persist_swarm_plan_snapshot(
     let _ = app.session.save();
 }
 
+/// Best-effort version of [`persist_remote_session_metadata`] for session-mode
+/// flags (`improve_mode`/`refactor_mode`). Over SSH the session file lives on
+/// the server and there is no metadata RPC for these fields, so skipping is
+/// correct: the mode is still applied to `app` and carried in the prompt.
+/// Hard failures still propagate outside SSH so callers surface real errors.
+pub(super) fn persist_remote_session_mode_flag<F>(app: &mut App, update: F) -> Result<()>
+where
+    F: FnOnce(&mut crate::session::Session),
+{
+    if crate::tui::is_ssh_remote() {
+        return Ok(());
+    }
+    persist_remote_session_metadata(app, update)
+}
+
 pub(super) fn persist_remote_session_metadata<F>(app: &mut App, update: F) -> Result<()>
 where
     F: FnOnce(&mut crate::session::Session),

@@ -175,7 +175,7 @@ pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
 pub use wire::TaskGraphNodeSpec;
-pub use wire::{Request, ServerEvent};
+pub use wire::{Request, ServerEvent, SessionListEntry, SessionPreviewMessage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -643,6 +643,8 @@ impl Request {
             Request::CommSubscribeChannel { id, .. } => *id,
             Request::CommUnsubscribeChannel { id, .. } => *id,
             Request::CommAwaitMembers { id, .. } => *id,
+            Request::ListSessions { id } | Request::SessionPreview { id, .. } => *id,
+            Request::SetSessionSaved { id, .. } | Request::GetTodos { id, .. } => *id,
         }
     }
 
@@ -679,6 +681,10 @@ impl Request {
                 | Request::CommSubscribeChannel { .. }
                 | Request::CommUnsubscribeChannel { .. }
                 | Request::CommAwaitMembers { .. }
+                | Request::ListSessions { .. }
+                | Request::SessionPreview { .. }
+                | Request::SetSessionSaved { .. }
+                | Request::GetTodos { .. }
         )
     }
 }

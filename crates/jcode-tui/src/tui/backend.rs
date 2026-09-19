@@ -636,6 +636,63 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Ask the server for the daemon-owned session list used by the remote
+    /// `/resume` picker. Returns the request id so the client can correlate
+    /// the `SessionList` event.
+    pub async fn list_sessions(&mut self) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::ListSessions { id }).await?;
+        Ok(id)
+    }
+
+    /// Ask the server for a bounded message preview of one session. Returns
+    /// the request id for correlating the `SessionPreviewResult` event.
+    pub async fn session_preview(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SessionPreview {
+            id,
+            session_id: session_id.to_string(),
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Toggle the saved/bookmarked flag on a server-owned session. Used by
+    /// `/save`/`/unsave` when the client cannot write the session file itself
+    /// (SSH remotes, picker rows for non-attached sessions).
+    pub async fn set_session_saved(
+        &mut self,
+        session_id: &str,
+        saved: bool,
+        save_label: Option<String>,
+    ) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::SetSessionSaved {
+            id,
+            session_id: session_id.to_string(),
+            saved,
+            save_label,
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Fetch the todo items stored for a session on the server. The response
+    /// arrives as a `ServerEvent::Todos` correlated by the returned id.
+    pub async fn get_todos(&mut self, session_id: &str) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::GetTodos {
+            id,
+            session_id: session_id.to_string(),
+        })
+        .await?;
+        Ok(id)
+    }
+
     /// Re-request the session history payload from the server.
     ///
     /// Used by the client-side history-recovery watchdog: if the bootstrap
@@ -661,7 +718,11 @@ impl RemoteConnection {
     pub async fn request_model_catalog(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::GetModelCatalog { id, subscribe_usage_updates: true }).await?;
+        self.send_request(Request::GetModelCatalog {
+            id,
+            subscribe_usage_updates: true,
+        })
+        .await?;
         Ok(id)
     }
 

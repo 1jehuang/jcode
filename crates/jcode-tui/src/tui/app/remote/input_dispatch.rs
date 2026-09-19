@@ -177,14 +177,34 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
         if app_mod::commands_dispatch::handle_ssh_unsupported_command(app, trimmed) {
             return Ok(());
         }
-        if matches!(
-            trimmed.split_whitespace().next(),
-            Some("/cancel" | "/stop" | "/help" | "/?" | "/commands" | "/diff")
-        ) {
-            app_mod::commands_dispatch::dispatch_local_command(app, trimmed);
+        if app_mod::commands_dispatch::dispatch_ssh_local_command(app, trimmed) {
             return Ok(());
         }
-        // Only the server knows remote skills and their multi-word names.
+        // Skills live on the server. Resolve the invocation against the
+        // wire-synced name list (`remote_skills`), mark it active so the next
+        // prompt carries `active_skill`, and let the server expand the body.
+        if let Some((skill_name, prompt)) = remote_skill_invocation(app, &prepared.raw_input) {
+            app.active_skill = Some(skill_name.clone());
+            app.push_display_message(DisplayMessage::system(format!(
+                "Activated skill: {skill_name}"
+            )));
+            let Some(prompt) = prompt else {
+                return Ok(());
+            };
+            return submit_prepared_remote_input(
+                app,
+                remote,
+                input::PreparedInput {
+                    raw_input: prepared.raw_input,
+                    expanded: prompt,
+                    images: prepared.images,
+                },
+            )
+            .await;
+        }
+        // Slash-shaped text that is neither a blocked local-only command nor a
+        // client-handled builtin nor a remote skill is ordinary prompt text
+        // (same fallback as local mode).
         return submit_prepared_remote_input(app, remote, prepared).await;
     }
 
@@ -451,7 +471,7 @@ async fn submit_remote_transcript_input(
     Ok(())
 }
 
-async fn submit_remote_input_shell(
+pub(super) async fn submit_remote_input_shell(
     app: &mut App,
     remote: &mut RemoteConnection,
     raw_input: String,
@@ -569,4 +589,30 @@ pub(in crate::tui::app) fn stage_turn_for_remote_tick_loop(app: &mut App, input:
     app.queued_messages.push(input.to_string());
     app.pending_images.clear();
     true
+}
+
+/// Resolve `/name [prompt]` against the server-advertised skill names
+/// (`App::remote_skills`). Names may contain spaces; the longest matching name
+/// wins. Returns `(skill_name, trailing_prompt)` where a `None` prompt means a
+/// bare activation like `/name`.
+fn remote_skill_invocation<'a>(app: &App, raw_input: &'a str) -> Option<(String, Option<String>)> {
+    let body = raw_input.trim().strip_prefix('/')?;
+    if body.is_empty() || body.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    // Longest match first so `/my skill` beats `/my` when both exist.
+    let mut names: Vec<&String> = app.remote_skills.iter().collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    for name in names {
+        if body == name.as_str() {
+            return Some((name.clone(), None));
+        }
+        if let Some(rest) = body.strip_prefix(name.as_str())
+            && rest.starts_with(char::is_whitespace)
+        {
+            let prompt = rest.trim().to_string();
+            return Some((name.clone(), (!prompt.is_empty()).then_some(prompt)));
+        }
+    }
+    None
 }

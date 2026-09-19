@@ -213,6 +213,17 @@ pub enum Request {
     #[serde(rename = "resume_all_sessions")]
     ResumeAllSessions { id: u64 },
 
+    /// List the daemon-owned sessions for the remote session picker
+    /// (`/resume` over SSH). Read-only; returns summary metadata per session
+    /// and never message bodies.
+    #[serde(rename = "list_sessions")]
+    ListSessions { id: u64 },
+
+    /// Fetch a bounded message preview for one session. Used lazily by the
+    /// remote session picker as the user moves the selection.
+    #[serde(rename = "session_preview")]
+    SessionPreview { id: u64, session_id: String },
+
     /// Deliver a scheduled task to a currently live session.
     #[serde(rename = "notify_session")]
     NotifySession {
@@ -748,6 +759,24 @@ pub enum Request {
         #[serde(default = "default_true")]
         wake: bool,
     },
+
+    /// Toggle the saved/bookmarked flag on a session owned by the server.
+    /// `/save`/`/unsave` over a remote connection cannot write the session
+    /// file locally, so they round-trip through this request.
+    #[serde(rename = "set_session_saved")]
+    SetSessionSaved {
+        id: u64,
+        session_id: String,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_label: Option<String>,
+    },
+
+    /// Fetch the todo items stored for a session on the server. `/todos` over
+    /// a remote connection reads server-side state, so the client requests it
+    /// instead of scanning local files.
+    #[serde(rename = "get_todos")]
+    GetTodos { id: u64, session_id: String },
 }
 
 /// Server event sent to client
@@ -1332,7 +1361,9 @@ pub enum ServerEvent {
 
     /// Usage delta for a route, independent of catalog availability or Agent locks.
     #[serde(rename = "model_usage_updated")]
-    ModelUsageUpdated { route: jcode_provider_core::ModelRoute },
+    ModelUsageUpdated {
+        route: jcode_provider_core::ModelRoute,
+    },
 
     /// Available models updated (pushed after auth changes)
     #[serde(rename = "available_models_updated")]
@@ -1526,6 +1557,24 @@ pub enum ServerEvent {
         message: String,
     },
 
+    /// Response to list_sessions — one entry per daemon-owned session.
+    #[serde(rename = "session_list")]
+    SessionList {
+        id: u64,
+        #[serde(default)]
+        sessions: Vec<SessionListEntry>,
+    },
+
+    /// Response to session_preview — bounded preview rows for one session.
+    /// An empty `messages` vec means the session could not be previewed.
+    #[serde(rename = "session_preview_result")]
+    SessionPreviewResult {
+        id: u64,
+        session_id: String,
+        #[serde(default)]
+        messages: Vec<SessionPreviewMessage>,
+    },
+
     /// A running command is waiting for stdin input from the user
     #[serde(rename = "stdin_request")]
     StdinRequest {
@@ -1539,4 +1588,89 @@ pub enum ServerEvent {
         /// Tool call ID this is associated with
         tool_call_id: String,
     },
+
+    /// Response to `get_todos` — the session's todo items as stored on the
+    /// server. Sent as an event rather than an ack so the client can render
+    /// them directly.
+    #[serde(rename = "todos")]
+    Todos {
+        id: u64,
+        #[serde(default)]
+        todos: Vec<jcode_task_types::TodoItem>,
+        #[serde(default)]
+        goals: Vec<jcode_task_types::TodoGoal>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<jcode_task_types::TodoPlan>,
+    },
+}
+
+/// One session row returned by `list_sessions`. Mirrors the field set the
+/// local session picker consumes (`SessionInfo`), minus lazy preview data,
+/// so the TUI can render the remote picker without touching local storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionListEntry {
+    /// Full session id (file stem, e.g. `session_...`).
+    pub id: String,
+    /// Parent session for spawned/delegate sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Friendly short name, if the session has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
+    /// Display title (custom title, short name, or derived).
+    pub title: String,
+    /// Visible conversation message count (user + assistant).
+    pub message_count: usize,
+    pub user_message_count: usize,
+    pub assistant_message_count: usize,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Timestamp of the last visible conversation message.
+    pub last_message_time: chrono::DateTime<chrono::Utc>,
+    /// Last time a client attached to this session, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    #[serde(default)]
+    pub is_canary: bool,
+    #[serde(default)]
+    pub is_debug: bool,
+    /// Whether the session was marked saved on the server.
+    #[serde(default)]
+    pub saved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_label: Option<String>,
+    #[serde(default)]
+    pub status: jcode_session_types::SessionStatus,
+    /// Rough token estimate for display (chars/4 of visible content).
+    #[serde(default)]
+    pub estimated_tokens: usize,
+    /// First visible user prompt, truncated — used for search indexing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_prompt: Option<String>,
+    /// The daemon currently has a live agent attached to this session.
+    #[serde(default)]
+    pub live_attached: bool,
+    /// A connected client reports this session is still processing.
+    #[serde(default)]
+    pub live_processing: bool,
+}
+
+/// One preview row returned by `session_preview`. Mirrors the picker's
+/// `PreviewMessage` (role label + text + tool names).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionPreviewMessage {
+    /// "user" or "assistant".
+    pub role: String,
+    /// Text content, truncated per message.
+    pub content: String,
+    /// Names of tools invoked in this message, if any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }

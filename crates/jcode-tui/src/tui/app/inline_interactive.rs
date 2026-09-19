@@ -2504,6 +2504,20 @@ impl App {
     }
 
     pub(super) fn open_session_picker(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            // Remote picker: the list is fetched from the daemon over the wire
+            // (`list_sessions`), previews are lazily fetched per selected row
+            // (`session_preview`), and resuming goes through `resume_session`.
+            let mut picker = SessionPicker::loading();
+            picker.set_remote_preview_mode(true);
+            picker.set_current_dir(self.session.working_dir.clone());
+            picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+            self.session_picker_overlay = Some(RefCell::new(picker));
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.pending_remote_session_list = true;
+            self.set_status_notice("Loading remote sessions...");
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
             return;
         }
@@ -2531,6 +2545,21 @@ impl App {
     /// which are ready for input. Reached via Left arrow on an empty input
     /// (when `display.active_sessions_manager` is enabled) or `/active`.
     pub(super) fn open_active_sessions_picker(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            // Same remote-list flow as the resume picker, but with the Active
+            // filter on — `live_attached`/`live_processing` in the wire rows
+            // drive the Working/Ready badges.
+            let mut picker = SessionPicker::loading();
+            picker.set_remote_preview_mode(true);
+            picker.set_current_dir(self.session.working_dir.clone());
+            picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+            picker.activate_active_filter();
+            self.session_picker_overlay = Some(RefCell::new(picker));
+            self.session_picker_mode = SessionPickerMode::ActiveSessions;
+            self.pending_remote_session_list = true;
+            self.set_status_notice("Loading remote active sessions...");
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local active-session picker") {
             return;
         }
@@ -2671,6 +2700,140 @@ impl App {
         }
     }
 
+    /// Apply a `SessionList` event arriving from the remote daemon (SSH mode):
+    /// build picker rows from the wire entries and seed them into the
+    /// already-open remote session picker.
+    pub(super) fn apply_remote_session_list(
+        &mut self,
+        entries: Vec<crate::protocol::SessionListEntry>,
+    ) -> bool {
+        let catchup_seen = crate::catchup::CatchupSeenSnapshot::load();
+        // Collect the prefetch order and live-presence flags before the
+        // entries are consumed by `session_info_from_wire`.
+        let preview_ids: Vec<String> = entries.iter().map(|entry| entry.id.clone()).collect();
+        let live_presences: Vec<crate::session::SessionPresence> = entries
+            .iter()
+            .filter(|entry| entry.live_attached || entry.live_processing)
+            .map(|entry| crate::session::SessionPresence {
+                session_id: entry.id.clone(),
+                // Remote pids are not meaningful on this host; presence only
+                // drives the working/ready badge and Active filter.
+                pid: 0,
+                streaming: entry.live_processing,
+                streaming_since: None,
+                internal: false,
+            })
+            .collect();
+        let sessions: Vec<session_picker::SessionInfo> = entries
+            .into_iter()
+            .map(|entry| session_picker::session_info_from_wire(entry, &catchup_seen))
+            .collect();
+
+        // Stash the remote catch-up candidates so `/catchup next` can jump
+        // straight to one without re-listing, and resolve a pending
+        // `/catchup next` that triggered this fetch.
+        let current_session_id = super::commands::active_session_id(self);
+        self.remote_catchup_candidates = sessions
+            .iter()
+            .filter(|session| session.needs_catchup && session.id != current_session_id)
+            .map(|session| session.id.clone())
+            .collect();
+        if self.pending_catchup_next {
+            self.pending_catchup_next = false;
+            let total = self.remote_catchup_candidates.len();
+            match self.remote_catchup_candidates.first() {
+                Some(target) => {
+                    let target_name = crate::id::extract_session_name(target)
+                        .map(|name| name.to_string())
+                        .unwrap_or_else(|| target.clone());
+                    self.queue_catchup_resume(
+                        target.clone(),
+                        Some(current_session_id),
+                        Some((1, total)),
+                        true,
+                    );
+                    self.push_display_message(DisplayMessage::system(format!(
+                        "Queued Catch Up for {}.",
+                        target_name,
+                    )));
+                    self.set_status_notice(format!("Catch Up → {}", target_name));
+                }
+                None => {
+                    self.push_display_message(DisplayMessage::system(
+                        "No sessions currently need catch up.".to_string(),
+                    ));
+                    self.set_status_notice("Catch Up: none waiting");
+                }
+            }
+            return true;
+        }
+
+        if self.session_picker_overlay.is_none() {
+            return false;
+        }
+        let group = session_picker::ServerGroup {
+            name: crate::tui::ssh_remote_host().unwrap_or_else(|| "remote".to_string()),
+            icon: "\u{1F310}".to_string(),
+            version: String::new(),
+            git_hash: String::new(),
+            is_running: true,
+            sessions,
+        };
+        let applied = self.apply_loaded_session_picker(vec![group], Vec::new());
+        if applied {
+            if let Some(picker_cell) = self.session_picker_overlay.as_ref() {
+                let mut picker = picker_cell.borrow_mut();
+                picker.set_remote_live_presence(live_presences);
+                // Prefetch every preview in list order so arrow-key paging
+                // renders from cache instead of waiting on a wire round trip
+                // per row. `handle_remote_tick` drains the queue a few
+                // requests at a time; the selected row jumps to the front.
+                picker.queue_remote_previews(preview_ids);
+            }
+        }
+        applied
+    }
+
+    /// Apply a `SessionPreviewResult` event arriving from the remote daemon to
+    /// the open remote session picker. Returns true when a redraw is needed.
+    pub(super) fn apply_remote_session_preview(
+        &mut self,
+        session_id: &str,
+        messages: Vec<crate::protocol::SessionPreviewMessage>,
+    ) -> bool {
+        let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
+            return false;
+        };
+        let mut picker = picker_cell.borrow_mut();
+        if messages.is_empty() {
+            picker.mark_preview_failed(session_id);
+            return false;
+        }
+        picker.apply_remote_preview(
+            session_id,
+            messages
+                .into_iter()
+                .map(|message| session_picker::PreviewMessage {
+                    role: message.role,
+                    content: message.content,
+                    tool_calls: message.tool_calls,
+                    tool_data: None,
+                    timestamp: message.timestamp,
+                })
+                .collect(),
+        );
+        true
+    }
+
+    /// Drain remote preview requests the open picker owes the daemon, up to
+    /// `limit` outstanding at once.
+    pub(super) fn take_remote_preview_requests(&mut self, limit: usize) -> Vec<String> {
+        self.session_picker_overlay
+            .as_ref()
+            .map(|picker| picker.borrow_mut().take_remote_preview_requests(limit))
+            .unwrap_or_default()
+    }
+
     pub(super) fn poll_session_picker_load(&mut self) -> bool {
         let recv_result = {
             let Some(pending) = self.pending_session_picker_load.as_ref() else {
@@ -2725,6 +2888,21 @@ impl App {
     }
 
     pub(super) fn open_catchup_picker(&mut self) {
+        if crate::tui::is_ssh_remote() {
+            // Same remote-list flow; the Catch Up filter keeps rows whose wire
+            // status needs attention (closed/reloaded/compacted/rate-limited/
+            // crashed/error) and that are newer than the last-seen stamp.
+            let mut picker = SessionPicker::loading();
+            picker.set_remote_preview_mode(true);
+            picker.set_current_dir(self.session.working_dir.clone());
+            picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+            picker.activate_catchup_filter();
+            self.session_picker_overlay = Some(RefCell::new(picker));
+            self.session_picker_mode = SessionPickerMode::CatchUp;
+            self.pending_remote_session_list = true;
+            self.set_status_notice("Loading remote Catch Up sessions...");
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local catch-up picker") {
             return;
         }
@@ -2760,6 +2938,13 @@ impl App {
     }
 
     pub(super) fn handle_session_picker_selection(&mut self, targets: &[ResumeTarget]) {
+        if crate::tui::is_ssh_remote() {
+            // Spawning a terminal on the laptop cannot attach a remote
+            // session; resume the first daemon-owned target over the wire in
+            // this terminal instead.
+            self.handle_remote_session_picker_selection(targets);
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(
             self,
             "Opening local session terminals",
@@ -2927,6 +3112,10 @@ impl App {
         &mut self,
         targets: &[ResumeTarget],
     ) {
+        if crate::tui::is_ssh_remote() {
+            self.handle_remote_session_picker_selection(targets);
+            return;
+        }
         if super::commands_dispatch::ssh_local_action_blocked(self, "Importing local sessions") {
             return;
         }
@@ -2998,6 +3187,58 @@ impl App {
             )));
         }
         self.workspace_client.queue_resume_session(session_id);
+        self.session_picker_overlay = None;
+        self.session_picker_mode = SessionPickerMode::Resume;
+        self.set_status_notice(format!("Switching → {}", name));
+    }
+
+    /// SSH-mode picker select: daemon-owned sessions resume over the wire in
+    /// this terminal (`resume_session`), external transcripts stay unavailable
+    /// (importing them would read the wrong machine's storage).
+    fn handle_remote_session_picker_selection(&mut self, targets: &[ResumeTarget]) {
+        let Some(target) = targets.first() else {
+            return;
+        };
+        let ResumeTarget::JcodeSession { session_id } = target else {
+            super::commands_dispatch::ssh_local_action_blocked(self, "Importing external sessions");
+            return;
+        };
+
+        let name = crate::id::extract_session_name(session_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| session_id.to_string());
+
+        if *session_id == super::commands::active_session_id(self) {
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.set_status_notice("Already in this session");
+            return;
+        }
+
+        if targets.len() > 1 {
+            self.push_display_message(DisplayMessage::system(format!(
+                "Selected {} sessions; resuming {} in this terminal.",
+                targets.len(),
+                name
+            )));
+        }
+        if self.session_picker_mode == SessionPickerMode::CatchUp {
+            // Keep the return stack so `/back` works, and record queue
+            // position against the remote candidates stash.
+            let current_session_id = super::commands::active_session_id(self);
+            let position = self
+                .remote_catchup_candidates
+                .iter()
+                .position(|id| id == session_id)
+                .map(|idx| (idx + 1, self.remote_catchup_candidates.len()));
+            self.queue_catchup_resume(session_id.clone(), Some(current_session_id), position, true);
+            self.session_picker_overlay = None;
+            self.session_picker_mode = SessionPickerMode::Resume;
+            self.set_status_notice(format!("Catch Up → {}", name));
+            return;
+        }
+        self.workspace_client
+            .queue_resume_session(session_id.clone());
         self.session_picker_overlay = None;
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(format!("Switching → {}", name));
@@ -3135,10 +3376,6 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Result<()> {
-        if super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
-            self.session_picker_overlay = None;
-            return Ok(());
-        }
         let action = {
             let Some(picker_cell) = self.session_picker_overlay.as_ref() else {
                 return Ok(());

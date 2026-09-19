@@ -555,7 +555,12 @@ mod tests {
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
         };
-        let cmd = target.command(RemoteShell::Posix, "unused-provider", "unused-flow", Operation::Status);
+        let cmd = target.command(
+            RemoteShell::Posix,
+            "unused-provider",
+            "unused-flow",
+            Operation::Status,
+        );
         let args: Vec<_> = cmd
             .as_std()
             .get_args()
@@ -715,7 +720,12 @@ mod tests {
             cwd: Some("/srv/a b".into()),
             socket: Some("/run/remote.sock".into()),
         };
-        let cmd = target.command(RemoteShell::Posix, "openai", "random_flow", Operation::Callback);
+        let cmd = target.command(
+            RemoteShell::Posix,
+            "openai",
+            "random_flow",
+            Operation::Callback,
+        );
         let args: Vec<_> = cmd
             .as_std()
             .get_args()
@@ -757,7 +767,12 @@ mod tests {
             socket: Some("/run/remote.sock".into()),
         };
         for provider in ["openai", "claude"] {
-            let cmd = target.command(RemoteShell::Posix, provider, "unused-flow", Operation::Import);
+            let cmd = target.command(
+                RemoteShell::Posix,
+                provider,
+                "unused-flow",
+                Operation::Import,
+            );
             let args: Vec<_> = cmd
                 .as_std()
                 .get_args()

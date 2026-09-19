@@ -21,6 +21,9 @@ fn test_handle_server_event_available_models_updated_replaces_remote_model_catal
 
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             provider_name: Some("OpenAI".to_string()),
             provider_model: Some("new-model".to_string()),
             available_models: vec!["new-model".to_string(), "second-model".to_string()],
@@ -109,10 +112,11 @@ fn test_refresh_model_list_command_shows_summary_and_status_notice() {
     assert!(last.content.contains("cerebras-fast"));
     assert!(last.content.contains("cerebras-large"));
     assert!(last.content.contains("cerebras-reasoning"));
-    assert!(!app
-        .display_messages
-        .iter()
-        .any(|message| message.role == "background_task"));
+    assert!(
+        !app.display_messages
+            .iter()
+            .any(|message| message.role == "background_task")
+    );
     assert!(app.background_task_rows_ref().iter().any(|row| {
         row.task_id == "refresh-model-list"
             && row.status == crate::tui::BackgroundTaskRowStatus::Completed
@@ -144,6 +148,9 @@ fn test_remote_available_models_updated_after_refresh_shows_summary_and_updates_
 
     let needs_redraw = app.handle_server_event(
         crate::protocol::ServerEvent::AvailableModelsUpdated {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             provider_name: None,
             provider_model: None,
             available_models: vec!["old-model".to_string(), "new-model".to_string()],
@@ -307,6 +314,9 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
 
     app.handle_server_event(
         crate::protocol::ServerEvent::ModelChanged {
+            model_display_name: None,
+            model_context_window: None,
+            available_efforts: None,
             id: 91,
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),

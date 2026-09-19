@@ -12,104 +12,135 @@ use super::App;
 
 /// Local-only operations must not interpret the remote session's paths or IDs
 /// against the laptop. Wire-backed commands are handled before local dispatch.
+///
+/// A command belongs on this list only when it is genuinely meaningless or
+/// misleading over SSH: it reads/writes laptop files while the real state lives
+/// on the server (auth, session metadata, todos, telemetry DBs), opens laptop
+/// terminals/paths, or configures the laptop client in ways the remote session
+/// cannot observe. Commands with a wire handler in `remote::key_handling` or a
+/// client-local presentation handler in `dispatch_ssh_local_command` must NOT
+/// be listed here — the list runs first, so entries shadow their real handlers.
 pub(super) fn ssh_unsupported_command(input: &str) -> bool {
     let mut words = input.split_whitespace();
     let command = words.next().unwrap_or_default();
-    if command.starts_with('!') {
-        return true;
-    }
+    // `/fast default` writes the *client's* startup default to the laptop
+    // config; the session-scoped `/fast on|off` is wire-backed and allowed.
     if command == "/fast" && words.next() == Some("default") {
         return true;
     }
     matches!(
         command,
+        // Accounts, credentials, and hosted billing live on the SSH server.
+        // `/login` has a dedicated SSH flow; the rest have no wire request yet.
         "/logout"
             | "/auth"
             | "/account"
             | "/accounts"
+            | "/hosted"
+            | "/subscribe"
+            | "/subscription"
+            | "/usage"
+            // Server-owned config/state files the laptop copy cannot
+            // stand in for.
             | "/config"
             | "/permissions"
             | "/permission"
             | "/agents"
             | "/swarm-prompt"
-            | "/keys"
-            | "/keybindings"
-            | "/alignment"
+            | "/initiatives"
+            | "/goals"
+            | "/overnight"
+            // Session metadata and per-session state owned by the server's
+            // session store; no wire request exists yet. (`/save`, `/unsave`,
+            // `/todo`, and `/todos` were removed when `set_session_saved` and
+            // `get_todos` landed — keep this list limited to gaps.)
+            | "/fix"
+            // Actions that would open paths or terminals on the laptop while
+            // the real files live on the remote host.
+            | "/transcript"
+            | "/open"
+            | "/file"
+            | "/new-terminal"
+            | "/selfdev"
+            | "/ssh"
+            | "/remote"
+            | "/log"
+            | "/support"
+            // Laptop-local stats/debug databases and provider knobs that do
+            // not describe the remote session.
+            | "/stats"
+            | "/productivity"
+            | "/wrapped"
+            | "/model-status"
+            | "/provider-test-coverage"
+            | "/cache"
+            // Simulators exercise local onboarding/update code paths.
+            | "/update-sim"
+            | "/onboarding-sim"
+            | "/onboarding-preview"
+    )
+}
+
+/// `/resume`-family picker opens are safe over SSH: the session list is
+/// fetched from the remote daemon (`list_sessions`), previews are fetched
+/// lazily (`session_preview`), and resuming goes over the wire
+/// (`resume_session`). Other session-shaped commands stay local-only and are
+/// still blocked by the table above.
+fn handle_ssh_session_picker_command(app: &mut App, trimmed: &str) -> bool {
+    if matches!(trimmed, "/resume" | "/sessions" | "/session") {
+        app.open_session_picker();
+        return true;
+    }
+    false
+}
+
+/// Slash commands that are safe to run inside an SSH client: they only render
+/// or configure what *this* process owns (the transcript view, display prefs,
+/// keybindings, telemetry consent, dictation microphone, debug UI tooling).
+/// Anything that would interpret remote session state against laptop files is
+/// not reachable from here.
+///
+/// Unlike [`dispatch_local_command`]'s SSH branch, this returns `false` for
+/// unmatched slash input so the connected remote path can still route unknown
+/// commands as remote skill invocations or plain prompts.
+pub(super) fn dispatch_ssh_local_command(app: &mut App, trimmed: &str) -> bool {
+    if super::commands::handle_cancel_command(app, trimmed)
+        || super::commands::handle_help_command(app, trimmed)
+        || super::commands::handle_diff_command(app, trimmed)
+        || handle_ssh_session_picker_command(app, trimmed)
+    {
+        return true;
+    }
+    // `/cls` clears only the rendered view in this client.
+    if trimmed == "/cls" || trimmed == "/clear-view" {
+        app.clear_view_keep_context();
+        return true;
+    }
+    // Client-side presentation and consent commands. `handle_config_command`
+    // is an umbrella handler; gating the command names first guarantees only
+    // the display-preference sub-handlers can fire (server-owned `/config`,
+    // `/agents`, etc. stay blocked upstream).
+    let command = trimmed.split_whitespace().next().unwrap_or_default();
+    let is_display_pref = matches!(
+        command,
+        "/alignment"
             | "/reasoning"
             | "/thinking"
             | "/thinking-display"
             | "/compact-notifications"
             | "/show-agentgrep-output"
             | "/tool-call-details"
-            | "/colors"
-            | "/theme"
-            | "/telemetry"
-            | "/ssh"
-            | "/remote"
-            | "/resume"
-            | "/sessions"
-            | "/session"
-            | "/active"
-            | "/catchup"
-            | "/back"
-            | "/save"
-            | "/unsave"
-            | "/transcript"
-            | "/git"
-            | "/open"
-            | "/file"
-            | "/selfdev"
-            | "/new-terminal"
-            | "/reload"
-            | "/client-reload"
-            | "/restart"
-            | "/rebuild"
-            | "/update"
-            | "/update-sim"
-            | "/onboarding-sim"
-            | "/onboarding-preview"
-            | "/usage"
-            | "/subscription"
-            | "/fix"
-            | "/support"
-            | "/feedback"
-            | "/productivity"
-            | "/wrapped"
-            | "/stats"
-            | "/log"
-            | "/cache"
-            | "/initiatives"
-            | "/goals"
-            | "/dictate"
-            | "/dictation"
-            | "/debug-fixture"
-            | "/debug-visual"
-            | "/screenshot"
-            | "/record"
-            | "/subagent-model"
-            | "/continue"
-            | "/resumeall"
-            | "/resume-all"
-            | "/z"
-            | "/zz"
-            | "/zzz"
-            | "/zstatus"
-            | "/autoreview"
-            | "/autojudge"
-            | "/todo"
-            | "/todos"
-            | "/observe"
-            | "/splitview"
-            | "/split-view"
-            | "/review"
-            | "/judge"
-            | "/subagent"
-            | "/fork"
-            | "/split"
-            | "/btw"
-            | "/transfer"
-            | "/workspace"
-    )
+    );
+    if is_display_pref && super::commands::handle_config_command(app, trimmed) {
+        return true;
+    }
+    super::commands::handle_keys_command(app, trimmed)
+        || super::commands::handle_dictation_command(app, trimmed)
+        || super::commands_colors::handle_colors_command(app, trimmed)
+        || super::commands::handle_feedback_command(app, trimmed)
+        || super::commands::handle_telemetry_command(app, trimmed)
+        || super::debug::handle_debug_command(app, trimmed)
+        || super::state_ui::handle_info_command(app, trimmed)
 }
 
 /// Return true after explaining why a laptop-local action is unavailable.
@@ -153,10 +184,7 @@ pub(super) fn dispatch_local_command(app: &mut App, trimmed: &str) -> bool {
     // remote dispatcher. In particular, a disconnected client must not fall
     // back to local session/model/storage handlers for a remote command.
     if crate::tui::is_ssh_remote() {
-        if super::commands::handle_cancel_command(app, trimmed)
-            || super::commands::handle_help_command(app, trimmed)
-            || super::commands::handle_diff_command(app, trimmed)
-        {
+        if dispatch_ssh_local_command(app, trimmed) {
             return true;
         }
         if trimmed.starts_with('/') {
@@ -243,8 +271,23 @@ mod tests {
             assert!(app.inline_interactive_state.is_none(), "{command}");
         }
         app.open_session_picker();
+        // The remote picker opens immediately as a loading overlay; the
+        // daemon `list_sessions` request is queued for the remote poll loop.
+        assert!(app.session_picker_overlay.is_some());
+        assert!(app.pending_remote_session_list);
+        app.session_picker_overlay = None;
+        app.pending_remote_session_list = false;
+        // `/active` and `/catchup` use the same remote-list picker flow.
         app.open_active_sessions_picker();
+        assert!(app.session_picker_overlay.is_some());
+        assert!(app.pending_remote_session_list);
+        app.session_picker_overlay = None;
+        app.pending_remote_session_list = false;
         app.open_catchup_picker();
+        assert!(app.session_picker_overlay.is_some());
+        assert!(app.pending_remote_session_list);
+        app.session_picker_overlay = None;
+        app.pending_remote_session_list = false;
         app.open_login_picker_inline();
         app.open_agents_picker();
         app.handle_new_terminal_hotkey();
@@ -284,28 +327,18 @@ mod tests {
             "/config edit",
             "/permissions",
             "/open /etc/passwd",
-            "/git",
-            "/save name",
-            "/resume",
             "/selfdev status",
-            "/reload",
-            "/client-reload",
-            "/rebuild",
             "/fast default on",
             "/agents",
-            "/subagent-model",
             "/transcript path",
-            "!cat ~/.ssh/config",
             "/ssh connect host",
-            "/fork prompt",
-            "/split",
-            "/btw question",
-            "/transfer",
-            "/workspace",
-            "/workspace split",
-            "/todos",
-            "/review",
-            "/subagent investigate",
+            "/fix",
+            "/usage",
+            "/overnight",
+            "/hosted",
+            "/subscribe",
+            "/cache",
+            "/stats",
         ] {
             assert!(super::ssh_unsupported_command(command), "{command}");
         }
@@ -314,6 +347,9 @@ mod tests {
             "hello",
             "explain !commands",
             "/cancel",
+            "/resume",
+            "/sessions",
+            "/session",
             "/model remote-model",
             "/effort high",
             "/server-reload",
@@ -326,6 +362,31 @@ mod tests {
             "/diff",
             "/login-custom-skill",
             "/configurable-skill",
+            // Wire-backed or client-rendered commands — not blocked.
+            "/reload",
+            "/client-reload",
+            "/restart",
+            "/rebuild",
+            "/git",
+            "/save name",
+            "/unsave",
+            "/todo",
+            "/todos",
+            "/review",
+            "/subagent-model",
+            "/subagent investigate",
+            "/fork prompt",
+            "/split",
+            "/btw question",
+            "/transfer",
+            "/workspace",
+            "/workspace split",
+            "/catchup",
+            "/catchup next",
+            "/back",
+            "/zstatus",
+            "/z",
+            "/active",
         ] {
             assert!(!super::ssh_unsupported_command(command), "{command}");
         }

@@ -36,7 +36,7 @@ use loading::collect_recent_session_stems;
 use loading::{build_messages_preview, build_search_index, crashed_sessions_from_all_sessions};
 pub use loading::{
     invalidate_session_list_cache, load_cached_sessions_grouped, load_servers, load_sessions,
-    load_sessions_grouped,
+    load_sessions_grouped, session_info_from_wire,
 };
 
 const SEARCH_CONTENT_BUDGET_BYTES: usize = 12_000;
@@ -264,6 +264,20 @@ pub struct SessionPicker {
     loading_message: Option<String>,
     pending_preview_load: Option<PendingSessionPreviewLoad>,
     preview_load_failures: HashSet<String>,
+    /// Remote (SSH) mode: previews are fetched from the daemon over the wire
+    /// instead of a local thread. `remote_preview_queue` holds session ids
+    /// that still need a `session_preview` request; it is seeded with every
+    /// listed session when the remote list lands so paging through rows never
+    /// waits on a per-selection round trip, and the selected row is moved to
+    /// the front. `remote_preview_inflight` bounds how many requests are on
+    /// the wire at once.
+    remote_preview_mode: bool,
+    remote_preview_queue: std::collections::VecDeque<String>,
+    remote_preview_inflight: HashSet<String>,
+    /// Live presence derived from remote `SessionListEntry` flags
+    /// (`live_attached` / `live_processing`). Remote mode cannot consult the
+    /// local pid registry, so `refresh_live_presence` re-applies this instead.
+    remote_live_presence: std::collections::HashMap<String, crate::session::SessionPresence>,
     /// Onboarding banner shown at the top of the picker (first-run "resume or
     /// start new" experience). When set, the picker reserves space at the top
     /// for the formatted onboarding prompt and shows selectable action rows
@@ -334,6 +348,10 @@ impl SessionPicker {
             loading_message: None,
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
+            remote_preview_mode: false,
+            remote_preview_queue: std::collections::VecDeque::new(),
+            remote_preview_inflight: HashSet::new(),
+            remote_live_presence: std::collections::HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -379,6 +397,10 @@ impl SessionPicker {
             loading_message: Some("Loading sessions…".to_string()),
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
+            remote_preview_mode: false,
+            remote_preview_queue: std::collections::VecDeque::new(),
+            remote_preview_inflight: HashSet::new(),
+            remote_live_presence: std::collections::HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -456,6 +478,10 @@ impl SessionPicker {
             loading_message: None,
             pending_preview_load: None,
             preview_load_failures: HashSet::new(),
+            remote_preview_mode: false,
+            remote_preview_queue: std::collections::VecDeque::new(),
+            remote_preview_inflight: HashSet::new(),
+            remote_live_presence: std::collections::HashMap::new(),
             onboarding_banner: None,
             onboarding_action: None,
             preview_cache: None,
@@ -511,6 +537,14 @@ impl SessionPicker {
 
     /// Snapshot the active-pid registry + streaming markers into the picker.
     pub(super) fn refresh_live_presence(&mut self) {
+        if self.remote_preview_mode {
+            // The local pid registry knows nothing about sessions on the
+            // remote host; presence comes from the wire flags seeded when the
+            // session list landed.
+            self.live_presence = self.remote_live_presence.clone();
+            self.live_presence_refreshed_at = Some(std::time::Instant::now());
+            return;
+        }
         self.live_presence = crate::session::session_presence()
             .into_iter()
             .map(|presence| (presence.session_id.clone(), presence))
@@ -678,7 +712,14 @@ impl SessionPicker {
             .chain(orphan_sessions.iter())
             .cloned()
             .collect();
-        self.crashed_sessions = crashed_sessions_from_all_sessions(&all_for_crash);
+        // Remote pickers cannot run local crash recovery, so the crashed-group
+        // banner (and its `r` restore shortcut) is suppressed there; rows keep
+        // their Crashed status badge.
+        self.crashed_sessions = if self.remote_preview_mode {
+            None
+        } else {
+            crashed_sessions_from_all_sessions(&all_for_crash)
+        };
         self.crashed_session_ids = self
             .crashed_sessions
             .as_ref()
@@ -973,6 +1014,95 @@ impl SessionPicker {
         }
     }
 
+    /// Enable/disable remote (SSH) preview mode, where selecting a row queues
+    /// a `session_preview` wire request instead of a local file read.
+    pub(crate) fn set_remote_preview_mode(&mut self, enabled: bool) {
+        self.remote_preview_mode = enabled;
+    }
+
+    /// Queue remote previews for every listed session so paging through the
+    /// picker does not wait on a per-row round trip. Ids already in-flight,
+    /// queued, or marked failed are skipped.
+    pub(crate) fn queue_remote_previews(&mut self, ids: impl IntoIterator<Item = String>) {
+        for id in ids {
+            if self.remote_preview_inflight.contains(&id)
+                || self.remote_preview_queue.contains(&id)
+                || self.preview_load_failures.contains(&id)
+            {
+                continue;
+            }
+            self.remote_preview_queue.push_back(id);
+        }
+    }
+
+    /// Move `session_id` to the front of the remote preview queue so the row
+    /// the user is looking at resolves first.
+    fn prioritize_remote_preview(&mut self, session_id: String) {
+        if self.remote_preview_inflight.contains(&session_id) {
+            return;
+        }
+        if let Some(pos) = self
+            .remote_preview_queue
+            .iter()
+            .position(|id| id == &session_id)
+        {
+            self.remote_preview_queue.remove(pos);
+        }
+        self.remote_preview_queue.push_front(session_id);
+    }
+
+    /// Drain queued session ids into the in-flight set until `limit` requests
+    /// are outstanding. The caller sends a `session_preview` wire request for
+    /// each returned id; responses clear the id via `apply_remote_preview` or
+    /// `mark_preview_failed`, which lets the next tick dispatch more.
+    pub(crate) fn take_remote_preview_requests(&mut self, limit: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        while self.remote_preview_inflight.len() < limit {
+            let Some(id) = self.remote_preview_queue.pop_front() else {
+                break;
+            };
+            if self.remote_preview_inflight.contains(&id)
+                || self.preview_load_failures.contains(&id)
+            {
+                continue;
+            }
+            self.remote_preview_inflight.insert(id.clone());
+            out.push(id);
+        }
+        out
+    }
+
+    /// Record that a remote preview request failed (or the session could not
+    /// be previewed) so the picker stops retrying the row.
+    pub(crate) fn mark_preview_failed(&mut self, session_id: &str) {
+        self.remote_preview_inflight.remove(session_id);
+        self.remote_preview_queue
+            .retain(|id| id != session_id);
+        self.preview_load_failures.insert(session_id.to_string());
+    }
+
+    /// Apply a preview that arrived from the daemon.
+    pub(crate) fn apply_remote_preview(&mut self, session_id: &str, preview: Vec<PreviewMessage>) {
+        self.remote_preview_inflight.remove(session_id);
+        self.preview_load_failures.remove(session_id);
+        self.apply_session_preview(session_id, preview);
+    }
+
+    /// Seed live presence from the remote `SessionListEntry` flags so the
+    /// working/ready badges and Active filter work without a local pid
+    /// registry.
+    pub(crate) fn set_remote_live_presence(
+        &mut self,
+        presences: Vec<crate::session::SessionPresence>,
+    ) {
+        self.remote_live_presence = presences
+            .into_iter()
+            .map(|p| (p.session_id.clone(), p))
+            .collect();
+        self.live_presence = self.remote_live_presence.clone();
+        self.live_presence_refreshed_at = Some(std::time::Instant::now());
+    }
+
     fn poll_preview_load(&mut self) -> bool {
         let recv_result = {
             let Some(pending) = self.pending_preview_load.as_ref() else {
@@ -1038,7 +1168,21 @@ impl SessionPicker {
                 .pending_preview_load
                 .as_ref()
                 .is_some_and(|pending| pending.session_id == cache_session_id)
+            || self.remote_preview_inflight.contains(&cache_session_id)
         {
+            return;
+        }
+
+        // Remote mode: previews come from the daemon over the wire. Only
+        // JcodeSession targets are previewable remotely; external transcripts
+        // live outside the daemon's session store. The selected row is moved
+        // to the front of the prefetch queue so it resolves first.
+        if self.remote_preview_mode {
+            if matches!(resume_target, ResumeTarget::JcodeSession { .. }) {
+                self.prioritize_remote_preview(cache_session_id);
+            } else {
+                self.preview_load_failures.insert(cache_session_id);
+            }
             return;
         }
 
