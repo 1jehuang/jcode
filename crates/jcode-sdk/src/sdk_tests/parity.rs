@@ -171,6 +171,8 @@ const RUST_ONLY: &[&str] = &[
     // Rust's native process transport/launch strategy. TypeScript accepts a
     // caller-supplied transport; a built-in SSH launcher is not yet mirrored.
     "connect_ssh",
+    // Rust-only shared OpenSSH ownership lease for independent reconnects.
+    "shared_ssh_transport",
     // `connect_with` is the explicit transport seam Rust tests use; TypeScript
     // accepts its transport through the options passed to `connect`.
     "connect_with",

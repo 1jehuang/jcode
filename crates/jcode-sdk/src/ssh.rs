@@ -123,6 +123,10 @@ impl SshConnectOptions {
     }
 
     pub(crate) fn command(&self) -> Result<Command> {
+        self.command_with_control(None)
+    }
+
+    fn command_with_control(&self, control: Option<(&std::path::Path, bool)>) -> Result<Command> {
         self.validate()?;
         let mut command = Command::new("ssh");
         command.args([
@@ -147,13 +151,31 @@ impl SshConnectOptions {
             "StdinNull=no",
             "-o",
             "RemoteCommand=none",
-            "-o",
-            "SessionType=default",
-            "-o",
-            "ControlMaster=no",
-            "-S",
-            "none",
         ]);
+        command
+            .arg("-o")
+            .arg(if control.is_some_and(|(_, master)| master) {
+                "SessionType=none"
+            } else {
+                "SessionType=default"
+            });
+        if let Some((path, master)) = control {
+            command.arg("-o").arg(if master {
+                "ControlMaster=yes"
+            } else {
+                "ControlMaster=no"
+            });
+            command
+                .args(["-o", "ControlPersist=no", "-S"])
+                .arg(path.to_string_lossy().replace('%', "%%"));
+            if !master {
+                // OpenSSH normally falls back to a new connection if multiplexing
+                // fails. Never invoke the user's costly SSH/SSM proxy in that case.
+                command.args(["-o", "ProxyCommand=/bin/false", "-o", "ProxyJump=none"]);
+            }
+        } else {
+            command.args(["-o", "ControlMaster=no", "-S", "none"]);
+        }
         command.arg("-o").arg(format!(
             "ConnectTimeout={}",
             self.connect_timeout.as_secs().max(1)
@@ -170,8 +192,195 @@ impl SshConnectOptions {
             "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; export PATH; exec {} --no-update api --stdio",
             shell_quote(&self.remote_binary)
         );
-        command.arg("--").arg(&self.host).arg(remote);
+        command.arg("--").arg(&self.host);
+        if !control.is_some_and(|(_, master)| master) {
+            command.arg(remote);
+        }
         Ok(command)
+    }
+}
+
+/// An opt-in, run-scoped authenticated SSH connection shared by independent clients.
+///
+/// `new` validates options but performs no network I/O. Clones share one lazily
+/// started foreground OpenSSH master. Each `connect` starts a separate remote
+/// `jcode api --stdio` bridge, never a clone of an attached API connection.
+/// Returned clients retain the master even if all public transport handles drop.
+/// The final owner kills/reaps only its own master/process group and removes its
+/// private 0700 temporary directory. No remote daemon is stopped.
+///
+/// Options and target identity are immutable per instance. SSH config is resolved
+/// at first connection, not watched: replace this object when config/alias targets
+/// change. A failed/dead master is not restarted and channels never fall back to
+/// a fresh authenticated connection. Replace the owner explicitly to reconnect.
+/// Server `MaxSessions` limits apply (commonly 10 channels per master). Failed
+/// connection attempts are safe to retry with a new owner, but session creation
+/// requests must never be retried automatically after an ambiguous disconnect.
+///
+/// This synchronous API has bounded startup, not an asynchronous cancellation
+/// token. Run it on a blocking worker. Dropping an unstarted owner is immediate.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct SharedSshTransport {
+    inner: Arc<SharedSshInner>,
+}
+
+/// A non-owning pool entry. Idle entries cannot keep a VM's SSH connection alive.
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct WeakSharedSshTransport {
+    inner: std::sync::Weak<SharedSshInner>,
+}
+
+#[cfg(unix)]
+impl WeakSharedSshTransport {
+    pub fn upgrade(&self) -> Option<SharedSshTransport> {
+        self.inner
+            .upgrade()
+            .map(|inner| SharedSshTransport { inner })
+    }
+}
+
+#[cfg(unix)]
+struct SharedSshInner {
+    options: SshConnectOptions,
+    // Drop the process before the directory, even on setup errors.
+    master: Mutex<Option<Result<Arc<SshProcess>>>>,
+    directory: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl SharedSshTransport {
+    pub fn downgrade(&self) -> WeakSharedSshTransport {
+        WeakSharedSshTransport {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub fn new(options: SshConnectOptions) -> Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        options.validate()?;
+        let directory = tempfile::Builder::new()
+            .prefix("jcode-ssh-")
+            .tempdir()
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::ConnectFailed,
+                    format!("private SSH directory: {e}"),
+                )
+            })?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::ConnectFailed,
+                    format!("private SSH permissions: {e}"),
+                )
+            })?;
+        if directory.path().join("master").as_os_str().len() >= 100 {
+            return Err(Error::new(
+                ErrorKind::InvalidOption,
+                "temporary directory path is too long for an SSH control socket",
+            ));
+        }
+        Ok(Self {
+            inner: Arc::new(SharedSshInner {
+                options,
+                master: Mutex::new(None),
+                directory,
+            }),
+        })
+    }
+
+    /// Open an independent API connection. The deadline includes waiting for
+    /// concurrent initial setup, master authentication, and the API handshake.
+    pub fn connect(&self) -> Result<crate::JcodeClient> {
+        self.connect_with(|command| command)
+    }
+
+    fn connect_with(&self, configure: impl Fn(Command) -> Command) -> Result<crate::JcodeClient> {
+        let deadline = std::time::Instant::now() + self.inner.options.connect_timeout;
+        let socket = self.inner.directory.path().join("master");
+        let timeout = || {
+            Error::new(
+                ErrorKind::StartupTimeout,
+                "shared SSH startup and handshake timed out",
+            )
+        };
+        // A timed acquisition prevents queued concurrent callers exceeding their
+        // own budget while a single caller authenticates the initial master.
+        let mut state = loop {
+            match self.inner.master.try_lock() {
+                Ok(state) => break state,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    return Err(Error::new(
+                        ErrorKind::ConnectFailed,
+                        "shared SSH setup was interrupted",
+                    ));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(timeout());
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        };
+        if state.is_none() {
+            *state = Some((|| {
+                let transport = SshTransport::spawn_command(configure(
+                    self.inner
+                        .options
+                        .command_with_control(Some((&socket, true)))?,
+                ))?;
+                let process = Arc::clone(&transport.process);
+                drop(transport);
+                loop {
+                    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                        return Ok(process);
+                    }
+                    let exited = process.stderr_done.lock().ok().is_some_and(|done| {
+                        done.as_ref().is_some_and(|rx| {
+                            !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+                        })
+                    });
+                    if exited || std::time::Instant::now() >= deadline {
+                        process.shutdown();
+                        return Err(Error::new(
+                            if exited {
+                                ErrorKind::ConnectFailed
+                            } else {
+                                ErrorKind::StartupTimeout
+                            },
+                            process.diagnostic(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })());
+        }
+        state
+            .as_ref()
+            .expect("initialized master")
+            .as_ref()
+            .map_err(Clone::clone)?;
+        drop(state);
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(timeout)?;
+        // Even if the socket disappears after setup, ProxyCommand=false ensures
+        // OpenSSH cannot silently establish a second authenticated connection.
+        let mut transport = SshTransport::spawn_command(configure(
+            self.inner
+                .options
+                .command_with_control(Some((&socket, false)))?,
+        ))?;
+        let process = Arc::get_mut(&mut transport.process).expect("new SSH process");
+        process.shared_owner = Mutex::new(Some(Arc::clone(&self.inner)));
+        process.was_shared = true;
+        let mut options = self.inner.options.clone();
+        options.connect_timeout = remaining;
+        crate::JcodeClient::over_ssh(transport, options)
     }
 }
 
@@ -185,15 +394,35 @@ const STDERR_LIMIT: usize = 16 * 1024;
 #[path = "ssh_integration_tests.rs"]
 mod integration_tests;
 
+#[cfg(all(test, unix))]
+#[path = "shared_ssh_tests.rs"]
+mod shared_tests;
+
 pub(crate) struct SshProcess {
     pub(crate) timed_out: AtomicBool,
     child: Mutex<Option<Child>>,
     status: Mutex<Option<std::process::ExitStatus>>,
     stderr: Arc<Mutex<Vec<u8>>>,
     stderr_done: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    // Session channels retain the master even after the public owner is dropped.
+    #[cfg(unix)]
+    shared_owner: Mutex<Option<Arc<SharedSshInner>>>,
+    #[cfg(unix)]
+    pub(crate) was_shared: bool,
 }
 
 impl SshProcess {
+    #[cfg(unix)]
+    pub(crate) fn shared_transport(&self) -> Option<SharedSshTransport> {
+        self.shared_owner
+            .lock()
+            .ok()?
+            .as_ref()
+            .map(|inner| SharedSshTransport {
+                inner: Arc::clone(inner),
+            })
+    }
+
     pub(crate) fn startup_deadline(
         self: &Arc<Self>,
         timeout: Duration,
@@ -227,6 +456,12 @@ impl SshProcess {
                     }
                 }
             }
+        }
+        // Retained EventStreams can outlive the last client. A closed channel
+        // must not retain an otherwise idle authenticated master.
+        #[cfg(unix)]
+        if let Ok(mut owner) = self.shared_owner.lock() {
+            owner.take();
         }
         // Usually EOF arrives immediately. Never hang cleanup on an inherited
         // stderr handle held by a configured external SSH helper.
@@ -327,6 +562,10 @@ impl SshTransport {
             status: Mutex::new(None),
             stderr,
             stderr_done: Mutex::new(Some(done_rx)),
+            #[cfg(unix)]
+            shared_owner: Mutex::new(None),
+            #[cfg(unix)]
+            was_shared: false,
         });
         Ok(Self {
             process,
