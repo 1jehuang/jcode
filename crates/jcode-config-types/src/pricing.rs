@@ -81,6 +81,20 @@ pub struct ContextTierFile {
 #[serde(default)]
 pub struct ModelPricingRuleFile {
     pub cost: Option<CostFile>,
+    /// Billing identities this rule is restricted to, e.g. `["openrouter"]` or
+    /// `["deepseek", "openai-compatible:deepseek"]`.
+    ///
+    /// Empty (the default) means the rule applies to every route, which is the
+    /// pre-`route` behaviour and stays byte-compatible with it. A non-empty list
+    /// narrows the rule: on a route it does not name, the rule is *skipped* and
+    /// the next layer prices the call, never mispriced by this rule. Uses the
+    /// same identity spelling as a vendor key / activity source key, and a
+    /// compatible profile may be named by its short form (`deepseek` matches
+    /// `openai-compatible:deepseek`).
+    ///
+    /// Never written back when empty (the lesson of commit `9da6f9831`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route: Vec<String>,
     pub tariffs: BTreeMap<String, TariffFile>,
     pub schedule: Vec<ScheduleRuleFile>,
     /// Long-context overlays, matched in declaration order, first match wins.

@@ -11,7 +11,10 @@
 //! config key this file hangs under (see `jcode_config_types::ProviderPricingFile`).
 //! Rules are matched by **model id regardless of route**, which is what lets a
 //! `provider = OpenRouter, model = deepseek-flash` call be priced from DeepSeek's
-//! official CNY numbers instead of silently falling back to models.dev's USD ones.
+//! official CNY numbers instead of silently falling back to models.dev's USD
+//! ones. A rule may opt into a `route = [...]` filter to narrow itself to
+//! specific billing identities; on any other route it is skipped and the next
+//! layer prices the call (see [`crate::model_pricing::entry::route_matches`]).
 //!
 //! Three properties are deliberate and are what its tests pin down:
 //!
@@ -130,23 +133,33 @@ static VENDOR_FILES_CACHE: Mutex<Option<(PathBuf, Arc<VendorFilesCache>)>> = Mut
 /// `save_catalog` takes both, in this order, and nothing takes them reversed.
 static VENDOR_FILES_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-/// The rule a vendor file states for `model`, if the file is readable and names
-/// it.
+/// The rule a vendor file states for `model` on the route `source_key`, if the
+/// file is readable, names the model, and the rule applies to that route.
 ///
 /// `None` means the file has nothing usable to say about the model (missing,
-/// unreadable, unparseable, oversized, or the model is simply absent). The
-/// caller then asks the next layer, which is the whole point: a file never turns
-/// "I do not know" into a number.
-pub(super) fn vendor_rule(vendor: &str, path: &Path, model: &str) -> Option<ModelPricingEntry> {
+/// unreadable, unparseable, oversized, the model is simply absent, or the rule's
+/// `route` filter excludes the call's identity). The caller then asks the next
+/// layer, which is the whole point: a file never turns "I do not know" into a
+/// number, and a route-scoped rule never prices a route it does not name.
+pub(super) fn vendor_rule(
+    vendor: &str,
+    path: &Path,
+    source_key: &str,
+    model: &str,
+) -> Option<ModelPricingEntry> {
     let cache = usable_catalog(vendor, path)?;
     let catalog = cache.vendors.get(vendor)?;
     let normalized = normalize_model_id(model);
     if let Some(entry) = catalog.models.get(normalized) {
-        return Some(entry.clone());
+        return entry.route_applies(source_key).then(|| entry.clone());
     }
     // OpenRouter-style ids may still carry their `provider/` prefix.
     if let Some((_, bare)) = normalized.rsplit_once('/') {
-        return catalog.models.get(bare).cloned();
+        return catalog
+            .models
+            .get(bare)
+            .filter(|entry| entry.route_applies(source_key))
+            .cloned();
     }
     None
 }

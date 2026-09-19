@@ -146,6 +146,39 @@ fn remote_provider_is_inherently_billed(provider_name: &str) -> bool {
             .is_some_and(|profile| profile.requires_api_key)
 }
 
+/// The memo key that identifies one derived price.
+///
+/// It carries everything that can make the *derived* layers resolve different
+/// rates for the same model:
+///
+/// * the model and the call's billing identity (`src`), because a route-scoped
+///   `route = [...]` rule prices one route and falls through on another, so a
+///   model-only key would let one route reuse the other route's rates;
+/// * the service tier (`/fast on`), which changes per-token rates;
+/// * the pricing generation, so a hand-edited `[pricing]` section re-prices;
+/// * the derived identity: the vendor file + tariff its `schedule` selected,
+///   and the long-context tier in force.
+pub(super) fn derived_price_memo_key(
+    model: &str,
+    source_key: &str,
+    service_tier: Option<&str>,
+    pricing_generation: u64,
+    identity: &crate::model_pricing::DerivedPriceIdentity,
+) -> String {
+    let key = match service_tier {
+        Some(tier) => format!("{model}|src{source_key}|{tier}|{pricing_generation}"),
+        None => format!("{model}|src{source_key}|{pricing_generation}"),
+    };
+    let key = match identity.context_tier {
+        Some(threshold) => format!("{key}|ctx{threshold}"),
+        None => key,
+    };
+    match identity.vendor_file.as_deref() {
+        Some(vendor_file) => format!("{key}|vf{vendor_file}"),
+        None => key,
+    }
+}
+
 /// Update cost calculation based on token usage (for API-key providers)
 impl App {
     pub(super) fn current_streaming_tps_elapsed(&self) -> Duration {
@@ -571,7 +604,7 @@ impl App {
                 // from the user's file to the next layer, which is exactly the
                 // class of bug this feature removes.
                 self.cost.pricing_notice =
-                    crate::model_pricing::vendor_file_rule_out_of_effect(model, at);
+                    crate::model_pricing::vendor_file_rule_out_of_effect(&source_key, model, at);
             }
         }
 
@@ -633,8 +666,11 @@ impl App {
     /// hand back a stale tariff. The derived layers themselves are not all
     /// time-independent either - a `[pricing.providers.<vendor>].file` can state
     /// a `schedule` - so the memo key carries the identity of the derived price
-    /// at `at` (the vendor file and its tariff, plus the long-context tier). That is what
-    /// makes an off-peak memo re-resolve once the peak window opens.
+    /// at `at` (the vendor file and its tariff, plus the long-context tier), and
+    /// the call's billing identity, since a route-scoped rule prices one route
+    /// and falls through on another. That is what makes an off-peak memo
+    /// re-resolve once the peak window opens, and keeps two routes from sharing
+    /// one memoized price (see [`derived_price_memo_key`]).
     fn refresh_cached_pricing(
         &mut self,
         at: SystemTime,
@@ -659,20 +695,13 @@ impl App {
         // Both are read at `at`, never the wall clock.
         let identity =
             crate::model_pricing::derived_price_identity(&source_key, model, at, input_tokens);
-        // Tier and pricing generation are both part of the memo key so toggling
-        // `/fast on` re-prices, and so does a hand-edited `[pricing]` section.
-        let price_key = match service_tier.as_deref() {
-            Some(tier) => format!("{model}|{tier}|{pricing_generation}"),
-            None => format!("{model}|{pricing_generation}"),
-        };
-        let price_key = match identity.context_tier {
-            Some(threshold) => format!("{price_key}|ctx{threshold}"),
-            None => price_key,
-        };
-        let price_key = match identity.vendor_file.as_deref() {
-            Some(vendor_file) => format!("{price_key}|vf{vendor_file}"),
-            None => price_key,
-        };
+        let price_key = derived_price_memo_key(
+            model,
+            &source_key,
+            service_tier.as_deref(),
+            pricing_generation,
+            &identity,
+        );
         if self.cost.cached_price_model.as_deref() == Some(price_key.as_str()) {
             return;
         }
@@ -834,7 +863,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{Currency, ResolvedTokenPricing, remote_provider_is_inherently_billed};
+    use super::{
+        Currency, ResolvedTokenPricing, derived_price_memo_key,
+        remote_provider_is_inherently_billed,
+    };
+    use crate::model_pricing::DerivedPriceIdentity;
 
     #[test]
     fn remote_billing_recognizes_deepseek_display_name() {
@@ -867,6 +900,39 @@ mod tests {
                 "{provider_name} should not be billed per token"
             );
         }
+    }
+
+    /// D3: the derived-price memo key carries the call's billing identity, so a
+    /// route-scoped `route = [...]` rule cannot let one route reuse another
+    /// route's memoized price.
+    ///
+    /// Pinned at the key-building level: the property lives entirely in the key,
+    /// and a full TUI test would have to drive two providers through the app for
+    /// it.
+    #[test]
+    fn switching_route_reprices_a_route_scoped_rule() {
+        let identity = DerivedPriceIdentity {
+            vendor_file: Some("deepseek#base".to_string()),
+            context_tier: None,
+        };
+        let openrouter = derived_price_memo_key("deepseek-flash", "openrouter", None, 7, &identity);
+        let deepseek = derived_price_memo_key("deepseek-flash", "deepseek", None, 7, &identity);
+        assert_ne!(
+            openrouter, deepseek,
+            "two routes must never share one memoized derived price"
+        );
+        assert!(openrouter.contains("srcopenrouter"), "{openrouter}");
+
+        // The memo still works: the same route and identity is the same key...
+        assert_eq!(
+            openrouter,
+            derived_price_memo_key("deepseek-flash", "openrouter", None, 7, &identity)
+        );
+        // ...and an unrelated part of the identity still changes it.
+        assert_ne!(
+            openrouter,
+            derived_price_memo_key("deepseek-flash", "openrouter", None, 8, &identity)
+        );
     }
 }
 

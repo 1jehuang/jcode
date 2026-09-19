@@ -196,7 +196,11 @@ impl PricingNotice {
 /// next layer (that is the existing fall-through); the notice is what tells the
 /// user their file stopped applying instead of a models.dev number taking over
 /// silently.
-pub fn vendor_file_rule_out_of_effect(model: &str, at: SystemTime) -> Option<PricingNotice> {
-    let (vendor, reason) = super::vendor_file_out_of_effect(model, at)?;
+pub fn vendor_file_rule_out_of_effect(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+) -> Option<PricingNotice> {
+    let (vendor, reason) = super::vendor_file_out_of_effect(provider, model, at)?;
     Some(PricingNotice::VendorFile { vendor, reason })
 }

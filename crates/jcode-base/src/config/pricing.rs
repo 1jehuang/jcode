@@ -105,6 +105,16 @@ pub struct ContextTier {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ModelPricingRule {
     pub cost: Option<CostFields>,
+    /// Billing identities this rule is restricted to, trimmed and
+    /// case-sensitive, in declaration order.
+    ///
+    /// Empty means "applies to every route", byte-compatible with the behaviour
+    /// before `route` existed. A non-empty list is matched against the call's
+    /// billing identity by
+    /// [`crate::model_pricing::ModelPricingEntry::route_applies`]; a route the
+    /// list does not name is *skipped* (the next layer prices the call) rather
+    /// than mispriced by this rule.
+    pub route: Vec<String>,
     pub tariffs: BTreeMap<String, Tariff>,
     pub schedule: Vec<ScheduleRule>,
     pub context_tiers: Vec<ContextTier>,
@@ -377,6 +387,18 @@ pub(crate) fn convert_rule(
     let context_tiers =
         convert_context_tiers(&rule.context_tiers, &format!("{path}.context_tiers"))?;
 
+    let mut route = Vec::with_capacity(rule.route.len());
+    for (index, entry) in rule.route.iter().enumerate() {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Err(PricingConfigError::new(
+                format!("{path}.route[{index}]"),
+                "a route entry must not be empty; omit `route` to apply the rule to every route",
+            ));
+        }
+        route.push(trimmed.to_string());
+    }
+
     if let Some(default) = &rule.default_tariff
         && !tariffs.contains_key(default)
     {
@@ -397,6 +419,7 @@ pub(crate) fn convert_rule(
 
     Ok(ModelPricingRule {
         cost,
+        route,
         tariffs,
         schedule,
         context_tiers,
@@ -1206,6 +1229,97 @@ mod tests {
         assert!(
             toml.contains("[pricing.fx_rates]"),
             "a configured [pricing] must survive a save:\n{toml}"
+        );
+    }
+
+    /// A `route` entry must name a route: an empty string is a half-written /
+    /// half-deleted entry, and silently ignoring it would make the rule apply to
+    /// nothing while looking like it applies to something.
+    #[test]
+    fn a_route_entry_must_not_be_empty() {
+        let file = parse_toml(
+            r#"
+            [providers.p.models.m]
+            route = ["openrouter", "  "]
+            "#,
+        );
+        let err = validate(&file).expect_err("an empty route entry is rejected");
+        assert_eq!(err.field_path, "pricing.providers.p.models.m.route[1]");
+        assert!(
+            err.message.contains("must not be empty"),
+            "the error must say what is wrong: {err}"
+        );
+
+        // The same conflict when the empty entry is first: the index follows the
+        // declaration order, so the user is pointed at the exact line.
+        let file = parse_toml(
+            r#"
+            [providers.p.models.m]
+            route = ["", "openrouter"]
+            "#,
+        );
+        let err = validate(&file).expect_err("an empty route entry is rejected");
+        assert_eq!(err.field_path, "pricing.providers.p.models.m.route[0]");
+    }
+
+    /// Surrounding whitespace is trimmed rather than rejected, so a rule that
+    /// names a route with a stray space still matches that route.
+    #[test]
+    fn route_entries_are_trimmed_and_kept_in_order() {
+        let file = parse_toml(
+            r#"
+            [providers.p.models.m]
+            route = [" openrouter ", "openai-compatible:deepseek", "openrouter"]
+            cost = { input = 1.0, output = 2.0 }
+            "#,
+        );
+        let (config, _) = validate(&file).expect("trimmable route entries are accepted");
+        assert_eq!(
+            config.providers["p"].models["m"].route,
+            vec![
+                "openrouter".to_string(),
+                "openai-compatible:deepseek".to_string(),
+                "openrouter".to_string(),
+            ],
+            "order is kept, entries are trimmed, duplicates are allowed"
+        );
+    }
+
+    /// A rule with no `route` must not bake `route = []` into the user's file the
+    /// next time anything saves (the lesson of `9da6f9831`).
+    #[test]
+    fn a_default_valued_route_is_never_written_back() {
+        let mut config = crate::config::Config::default();
+        config.pricing.providers.insert(
+            "deepseek".to_string(),
+            jcode_config_types::ProviderPricingFile {
+                file: None,
+                currency: Some("CNY".to_string()),
+                models: BTreeMap::from([(
+                    "m".to_string(),
+                    ModelPricingRuleFile {
+                        cost: Some(CostFile {
+                            input: Some(1.0),
+                            output: Some(2.0),
+                            cache_read: None,
+                            cache_write: None,
+                        }),
+                        ..Default::default()
+                    },
+                )]),
+            },
+        );
+        let toml = toml::to_string_pretty(&config).expect("serialize config");
+        assert!(
+            toml.contains("[pricing.providers.deepseek.models.m"),
+            "the model table is serialized, so the assertion below is not vacuous:\n{toml}"
+        );
+        let section = &toml[toml
+            .find("[pricing.providers.deepseek.models.m")
+            .expect("the model table is serialized")..];
+        assert!(
+            !section.contains("route"),
+            "an empty route list must not be baked into the user's config:\n{section}"
         );
     }
 }

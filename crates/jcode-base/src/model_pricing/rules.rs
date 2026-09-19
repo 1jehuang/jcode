@@ -363,6 +363,7 @@ mod tests {
                 cache_read: Some(0.15),
                 cache_write: Some(0.6),
             },
+            route: Vec::new(),
             tariffs,
             schedule: vec![rule(
                 "peak",

@@ -476,9 +476,12 @@ fn a_file_rule_that_is_out_of_effect_is_skipped_and_labelled_with_the_vendor() {
         None,
         "an out-of-effect file must not price the call"
     );
-    let notice =
-        crate::model_pricing::vendor_file_rule_out_of_effect("deepseek-v4-pro", SystemTime::now())
-            .expect("the out-of-effect file rule is reported");
+    let notice = crate::model_pricing::vendor_file_rule_out_of_effect(
+        "deepseek",
+        "deepseek-v4-pro",
+        SystemTime::now(),
+    )
+    .expect("the out-of-effect file rule is reported");
     let label = notice.label();
     assert!(
         label.contains("expired") && label.contains("deepseek"),
@@ -712,5 +715,75 @@ fn a_vendor_file_prices_from_its_own_rates_until_the_config_points_elsewhere() {
     assert!(
         (two.amount - reference_amount(3.0, 6.0)).abs() < 1e-12,
         "a path change must invalidate the cached copy, got {two:?}"
+    );
+}
+
+/// A `route = [...]` file rule prices only the routes it names; on any other
+/// route the file is skipped and the next layer answers, never mispriced.
+#[test]
+fn a_route_scoped_file_rule_prices_only_its_route() {
+    let env = Env::new();
+    env.save_models_dev();
+    let body = r#"{"models":{"deepseek-v4-pro":{"route":["openrouter"],"cost":{"input":5.0,"output":10.0}}}}"#;
+    let path = env.vendor_path("scoped.json", body);
+    env.write_config(&format!(
+        "[pricing.providers.deepseek]\nfile = \"{path}\"\n"
+    ));
+
+    assert_eq!(
+        priced_by("openrouter", "deepseek-v4-pro").as_deref(),
+        Some("deepseek"),
+        "the named route is priced by the file"
+    );
+    assert_eq!(
+        priced_by("deepseek", "deepseek-v4-pro"),
+        None,
+        "the file must be skipped on a route it does not name"
+    );
+
+    let at = SystemTime::now();
+    let on_route = crate::model_pricing::effective_cost("openrouter", "deepseek-v4-pro", at)
+        .expect("the file prices its own route");
+    assert!(
+        (on_route.amount - reference_amount(5.0, 10.0)).abs() < 1e-12,
+        "the file's own rates must price its route, got {on_route:?}"
+    );
+
+    let off_route = crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", at)
+        .expect("the unnamed route falls through to models.dev");
+    assert!(
+        (off_route.amount - reference_amount(0.66, 1.98)).abs() < 1e-12,
+        "the unnamed route must be priced by the next layer, got {off_route:?}"
+    );
+}
+
+/// A route the rule does not name is not a claim, so an expired rule that is
+/// skipped for its route must not be reported as "out of effect" for that call.
+#[test]
+fn a_route_skipped_rule_is_not_labelled_out_of_effect() {
+    let env = Env::new();
+    env.save_models_dev();
+    let body = r#"{"models":{"deepseek-v4-pro":{"route":["openrouter"],"effective_until":"2020-01-01T00:00:00Z","cost":{"input":5.0,"output":10.0}}}}"#;
+    let path = env.vendor_path("scoped-expired.json", body);
+    env.write_config(&format!(
+        "[pricing.providers.deepseek]\nfile = \"{path}\"\n"
+    ));
+
+    let at = SystemTime::now();
+    let on_route =
+        crate::model_pricing::vendor_file_rule_out_of_effect("openrouter", "deepseek-v4-pro", at)
+            .expect("the expired rule is the reason its own route fell through");
+    assert!(
+        matches!(
+            on_route,
+            crate::model_pricing::PricingNotice::VendorFile { .. }
+        ),
+        "the marker names the vendor file: {on_route:?}"
+    );
+
+    assert!(
+        crate::model_pricing::vendor_file_rule_out_of_effect("deepseek", "deepseek-v4-pro", at)
+            .is_none(),
+        "a rule skipped for its route must not be labelled out of effect"
     );
 }
