@@ -435,3 +435,35 @@ fn format_status_snapshot_includes_activity_and_metadata() {
     );
     assert!(output.output.contains("Files: src/server/comm_sync.rs"));
 }
+
+#[test]
+fn report_backfill_only_covers_done_members_missing_a_retained_report() {
+    let members = vec![
+        AwaitedMemberStatus {
+            session_id: "with-report".to_string(),
+            friendly_name: None,
+            status: "ready".to_string(),
+            done: true,
+            completion_report: Some("retained report".to_string()),
+        },
+        AwaitedMemberStatus {
+            session_id: "done-without-report".to_string(),
+            friendly_name: None,
+            status: "ready".to_string(),
+            done: true,
+            completion_report: None,
+        },
+        AwaitedMemberStatus {
+            session_id: "still-running".to_string(),
+            friendly_name: None,
+            status: "running".to_string(),
+            done: false,
+            completion_report: None,
+        },
+    ];
+
+    let selected: Vec<&str> = members_needing_report_backfill(&members)
+        .map(|member| member.session_id.as_str())
+        .collect();
+    assert_eq!(selected, vec!["done-without-report"]);
+}
