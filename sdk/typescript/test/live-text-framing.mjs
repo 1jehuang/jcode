@@ -28,6 +28,7 @@ const client = await JcodeClient.launch({
 });
 const home = client.instanceHome;
 console.log(`Private instance launched with ${binary}`);
+client.on("harness_error", (event) => console.error("Harness error:", event.code, event.message));
 const deadline = setTimeout(() => {
   console.error("Live acceptance exceeded 180 seconds");
   void client.close().finally(() => process.exit(1));
@@ -58,12 +59,16 @@ try {
     promise.catch(() => {});
     probes.push(promise);
   };
-  for (let i = 0; i < 3; i++) probe("idle");
-  await Promise.all(probes);
+  // Repeated fresh-session reads also race model-catalog prefetch, which can
+  // briefly own the agent lock before the first transcript has been saved.
+  for (let batch = 0; batch < 5; batch++) {
+    for (let i = 0; i < 3; i++) probe("idle");
+    await Promise.all(probes);
+  }
   const turnStarted = performance.now();
   const events = [];
   const turn = await client.run(session.session_id,
-    "This is an isolated SDK regression check. First emit exactly CHECKING_HISTORY as an assistant commentary message. Then call bash once with command `sleep 3; printf 'TOOL_OK\\n'`, run_in_background=false. Do not use batch. Wait for the tool result. Finally reply exactly FRAMED_OK. Do not edit files or call other tools.",
+    "This is an isolated SDK regression check. First emit exactly CHECKING_HISTORY as an assistant commentary message. Then call bash once with command `sleep 3; printf 'TOOL_OK\\n'`, run_in_background=false, accept_large_output=false, notify=false, wake=false, timeout=10000, and intent='Verify SDK history'. Boolean arguments must be false, never null. Do not use batch. Wait for the tool result. Finally reply exactly FRAMED_OK. Do not edit files or call other tools.",
     {
       autoApprove: true,
       onEvent(event) {
@@ -111,6 +116,15 @@ try {
     events: [...new Set(events)],
     finalHistoryMessages: history.length,
   }, null, 2));
+} catch (error) {
+  console.error("Acceptance failure before cleanup:", error);
+  const logs = path.join(home, "logs");
+  for (const name of fs.existsSync(logs) ? fs.readdirSync(logs) : []) {
+    if (!name.endsWith(".log")) continue;
+    const lines = fs.readFileSync(path.join(logs, name), "utf8").split("\n");
+    console.error(`Private daemon ${name} tail:\n${lines.slice(-60).join("\n")}`);
+  }
+  throw error;
 } finally {
   clearTimeout(deadline);
   await client.close();
