@@ -1013,7 +1013,7 @@ fn test_cache_retention_estimates_never_create_proactive_expiry_ui() {
             assert!(!info.expiring_soon());
             assert!(!info.expiry_notification_active());
             let state = TestState {
-                display_messages: vec![DisplayMessage::system("seed".into())],
+                display_messages: vec![DisplayMessage::system("seed")],
                 time_since_activity: Some(
                     crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1),
                 ),
