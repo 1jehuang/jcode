@@ -76,7 +76,9 @@ pub(super) async fn apply_pre_request_transform<'a>(
             "Hook 'pre_request' returned system_static: the static prefix is core-owned, ignoring",
         );
     }
-    let new_dynamic = out.system_dynamic.unwrap_or_else(|| system_dynamic.to_string());
+    let new_dynamic = out
+        .system_dynamic
+        .unwrap_or_else(|| system_dynamic.to_string());
 
     let messages: Vec<Message> = match serde_json::from_value(messages_value.clone()) {
         Ok(messages) => messages,

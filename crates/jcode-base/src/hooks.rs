@@ -628,20 +628,18 @@ async fn run_pre_request_command(
     // below fires first; either way it never outlives this function, so no
     // orphan task survives the call.
     let stderr_tail = match stderr_drain {
-        Some(handle) => {
-            match tokio::time::timeout_at(deadline, handle).await {
-                Ok(Ok(tail)) => String::from_utf8_lossy(&tail).into_owned(),
-                Ok(Err(_)) => String::new(),
-                Err(_) => {
-                    let _ = child.kill().await;
-                    crate::logging::warn(&format!(
-                        "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
-                        timeout.as_millis()
-                    ));
-                    return None;
-                }
+        Some(handle) => match tokio::time::timeout_at(deadline, handle).await {
+            Ok(Ok(tail)) => String::from_utf8_lossy(&tail).into_owned(),
+            Ok(Err(_)) => String::new(),
+            Err(_) => {
+                let _ = child.kill().await;
+                crate::logging::warn(&format!(
+                    "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                    timeout.as_millis()
+                ));
+                return None;
             }
-        }
+        },
         None => String::new(),
     };
     // Over-limit output closed the pipe early, so the child typically dies
