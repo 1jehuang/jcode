@@ -1327,33 +1327,42 @@ impl FileMentionCache {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return Vec::new();
         };
-        let mut matches: Vec<FileMatch> = Vec::new();
+        // Collect every matching entry name first: truncating before the
+        // sort would keep an arbitrary readdir-order subset instead of the
+        // lexically first results. Name filtering is a cheap string check
+        // and runs before the `stat` so a non-matching prefix never stats
+        // the whole directory.
+        let mut names: Vec<(String, bool)> = Vec::new();
         for entry in entries {
             let Ok(entry) = entry else {
                 continue;
             };
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
             let os_name = entry.file_name();
             let file_name = os_name.to_string_lossy();
             let name: &str = file_name.as_ref();
-            let is_directory = file_type.is_dir();
-            if is_directory && SKIP_DIRS.contains(&name) {
-                continue;
-            }
             if !partial.is_empty() && !name.starts_with(partial) {
                 continue;
             }
             if name.starts_with('.') && !partial.starts_with('.') {
                 continue;
             }
-            if matches.len() >= limits.max_results {
-                break;
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
             }
+            let is_directory = file_type.is_dir();
+            if is_directory && SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            names.push((name.to_string(), is_directory));
+        }
+        names.sort();
+        names.truncate(limits.max_results);
+
+        let mut matches: Vec<FileMatch> = Vec::with_capacity(names.len());
+        for (name, is_directory) in names {
             let display = if sub.is_empty() {
                 format!("{prefix}{name}")
             } else {
@@ -1362,7 +1371,7 @@ impl FileMentionCache {
             let is_likely_binary = if is_directory {
                 false
             } else {
-                match std::path::Path::new(name)
+                match std::path::Path::new(&name)
                     .extension()
                     .and_then(|ext| ext.to_str())
                 {
@@ -2051,6 +2060,46 @@ mod tests {
         let m = FileMentionCache::filesystem_candidates("~", &limits(3));
         restore_home(saved);
         assert_eq!(m.len(), 3);
+    }
+
+    /// Regression (PR review): the cap must apply after the lexical sort, so
+    /// a large directory keeps its alphabetically-first entries instead of
+    /// whichever readdir happened to yield first.
+    #[test]
+    fn filesystem_candidates_truncate_keeps_lexically_first_entries() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        // Reverse insertion order so readdir order differs from lexical
+        // order for any realistic directory layout.
+        for name in ["zulu", "yankee", "xray", "beta", "alpha"] {
+            std::fs::write(home.path().join(name), "x").unwrap();
+        }
+        let m = FileMentionCache::filesystem_candidates("~", &limits(3));
+        restore_home(saved);
+        assert_eq!(
+            sorted_paths(&m),
+            vec!["~/alpha", "~/beta", "~/xray"],
+            "cap must keep the lexically first entries, not readdir order"
+        );
+    }
+
+    /// Regression (PR review): a prefix that matches nothing must not stat
+    /// every entry in a large directory — filtering happens on the name
+    /// before `file_type()`. The observable contract is the empty result.
+
+
+    #[test]
+    fn filesystem_candidates_nonmatching_prefix_returns_empty() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        for i in 0..2000 {
+            std::fs::write(home.path().join(format!("file{i:04}.txt")), "x").unwrap();
+        }
+        let m = FileMentionCache::filesystem_candidates("~/nomatch", &limits(10));
+        restore_home(saved);
+        assert!(m.is_empty());
     }
 
     #[test]
