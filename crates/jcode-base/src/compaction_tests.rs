@@ -1165,6 +1165,7 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     cfg.save().unwrap();
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
+}
 // ── Custom summary command ───────────────────────────────────────────────
 
 /// Restores touched env vars and the config cache on drop.
