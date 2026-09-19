@@ -1,10 +1,23 @@
-//! Subscription-backed voice transcription. No provider credential is needed on clients.
+//! Native Nari streaming and subscription-backed WAV transcription.
 //!
 //! Capability checks never open a microphone. Call `MicrophoneRecording::start` only
 //! after an explicit user action. Capture is opt-in via the `voice-capture` feature.
+//! `NariRecording` combines confirmed network setup and native capture for desktop
+//! clients. `NariSession` and `nari_pcm_channel` accept bounded mono 16 kHz PCM16
+//! from any source without the capture feature. Nari requires a caller-supplied
+//! provider key. The existing subscription APIs still need no provider key.
 use crate::{subscription_api, subscription_catalog};
 use serde::Deserialize;
 use std::{fmt, time::Duration};
+
+mod nari;
+pub use nari::{NARI_PCM_CHUNK_SAMPLES, NariEvent, NariSession, nari_api_key, nari_pcm_channel};
+#[cfg(any(feature = "voice-capture", test))]
+mod resample;
+#[cfg(feature = "voice-capture")]
+mod streaming_capture;
+#[cfg(feature = "voice-capture")]
+pub use streaming_capture::{NariRecording, PcmRecording};
 
 pub const MAX_AUDIO_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_RECORDING_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -14,6 +27,9 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// Deliberately retains no URLs, credentials, provider errors, or response bodies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceError {
+    NariNotConfigured,
+    NariCreditsExhausted,
+    NariRejected,
     NotConfigured,
     InvalidAudio,
     InvalidLanguage,
@@ -30,6 +46,15 @@ pub enum VoiceError {
 impl fmt::Display for VoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NariNotConfigured => {
+                f.write_str("Configure a valid Nari API key to use voice transcription")
+            }
+            Self::NariCreditsExhausted => {
+                f.write_str("Nari credits are exhausted. Add credits before retrying")
+            }
+            Self::NariRejected => f.write_str(
+                "Nari rejected the voice session. Check your key, credits, and settings",
+            ),
             Self::NotConfigured => f.write_str("Sign in to Jcode to use voice transcription"),
             Self::InvalidAudio => {
                 f.write_str("Audio must be a nonempty mono PCM16 WAV, at most 5 minutes and 10 MiB")
