@@ -664,50 +664,51 @@ async fn run_pre_request_command(
         None => String::new(),
     };
     // Over-limit output closed the pipe early, so the child typically dies
-    // of SIGPIPE; its exit status is meaningless. Either way the outcome is
-    // the same fail-open None, so skip the status check on that path.
+    // of SIGPIPE — but the exit status still carries the veto: a hook that
+    // aborts (exit 2) while logging verbosely must still abort. An abort
+    // needs only the code plus the stderr tail, never the stdout that blew
+    // the cap, so the status check runs on every path; only rewrites are
+    // gated on the cap below.
     let over_limit = capped.len() > TRANSFORM_STDOUT_LIMIT;
-    if !over_limit {
-        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(error)) => {
-                crate::logging::warn(&format!(
-                    "Hook 'pre_request' command '{command_line}' failed: {error} (sending original request)"
-                ));
-                return None;
-            }
-            Err(_elapsed) => {
-                let _ = child.kill().await;
-                crate::logging::warn(&format!(
-                    "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
-                    timeout.as_millis()
-                ));
-                return None;
-            }
-        };
-        if !status.success() {
-            // Exit 2 aborts the turn with the stderr tail as the reason;
-            // remaining chained commands are skipped by the caller. Cap the
-            // reason: the tail buffer is already bounded.
-            if status.code() == Some(2) {
-                let reason = stderr_tail.trim().to_string();
-                crate::logging::warn(&format!(
-                    "Hook 'pre_request' command '{command_line}' aborted the turn"
-                ));
-                return Some(Err(reason));
-            }
-            let stderr_note = if stderr_tail.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" stderr: {}", stderr_tail.trim())
-            };
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
             crate::logging::warn(&format!(
-                "Hook 'pre_request' command '{command_line}' exited with {:?}{} (sending original request)",
-                status.code(),
-                stderr_note
+                "Hook 'pre_request' command '{command_line}' failed: {error} (sending original request)"
             ));
             return None;
         }
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' timed out after {}ms (sending original request)",
+                timeout.as_millis()
+            ));
+            return None;
+        }
+    };
+    if !status.success() {
+        // Exit 2 aborts the turn with the stderr tail as the reason;
+        // remaining chained commands are skipped by the caller. Cap the
+        // reason: the tail buffer is already bounded.
+        if status.code() == Some(2) {
+            let reason = stderr_tail.trim().to_string();
+            crate::logging::warn(&format!(
+                "Hook 'pre_request' command '{command_line}' aborted the turn"
+            ));
+            return Some(Err(reason));
+        }
+        let stderr_note = if stderr_tail.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" stderr: {}", stderr_tail.trim())
+        };
+        crate::logging::warn(&format!(
+            "Hook 'pre_request' command '{command_line}' exited with {:?}{} (sending original request)",
+            status.code(),
+            stderr_note
+        ));
+        return None;
     }
     if over_limit {
         crate::logging::warn(&format!(
@@ -973,6 +974,25 @@ mod tests {
         assert!(!out.changed);
         let reason = out.aborted.expect("exit 2 must abort");
         assert!(reason.contains("prompt injection"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_oversized_stdout_keeps_veto() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        // Vetoes while spewing past the 1MB stdout cap: the rewrite must
+        // die, the abort must live.
+        let veto = write_executable_script(
+            temp.path(),
+            "loud-veto.sh",
+            "#!/bin/sh\nhead -c 2000000 /dev/zero | tr '\\0' 'x'\necho veto-loud >&2\nexit 2\n",
+        );
+        let _env = transform_test_config(&veto.to_string_lossy(), 15000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(!out.changed, "over-cap stdout is never a rewrite");
+        let reason = out.aborted.expect("exit 2 veto survives the cap");
+        assert!(reason.contains("veto-loud"), "{reason}");
     }
 
     #[cfg(unix)]
