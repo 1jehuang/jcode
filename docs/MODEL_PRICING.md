@@ -6,7 +6,8 @@ model is one idea:
 > **`config.toml` names your own vendor rules.** Each `[pricing.providers.
 > <vendor>]` entry either writes rate cards inline or points at a local JSON
 > price file. A rule is matched by **model id**, so it prices that model no
-> matter which route a call actually uses.
+> matter which route a call actually uses — unless the rule scopes itself with
+> an optional `route = [...]` filter.
 
 So the answer to "why is it this price?" has **two layers**:
 
@@ -15,7 +16,9 @@ So the answer to "why is it this price?" has **two layers**:
    everything jcode derives itself. Rules are matched by model id, not by route
    key: a rule for `deepseek-flash` prices that model whether it is reached
    through `deepseek` or through `openrouter`, which is what you want when
-   models.dev has no entry or has a USD price where your vendor bills CNY.
+   models.dev has no entry or has a USD price where your vendor bills CNY. Add
+   an optional `route = [...]` filter when one model id is billed at different
+   prices per route.
 2. **jcode's own chain**, used for anything your rules do not price: the
    curated static tables shipping with jcode, then provider-specific caches
    (OpenRouter endpoints), then the [models.dev](https://models.dev) catalog,
@@ -108,17 +111,54 @@ output = 4.0
 | `currency` | Currency every number under this vendor is denominated in, inline or in the file. Defaults to `USD`. |
 | `models.<model>` | An inline rule for one model, in the shape of [A model rule](#a-model-rule) below. Outranks the same model in `file`. |
 
-**Rules are matched by model id, not by route.** `[pricing.providers.deepseek.
-models."deepseek-flash"]` and a `deepseek-flash` entry in that vendor's file
-both price a call for `deepseek-flash`, whichever route reports it. This is
-deliberate: binding a rule to a route would silently fall back to models.dev's
-USD numbers for the exact case the feature exists to fix (a DeepSeek model run
-through OpenRouter). A `route = [...]` filter is a possible future extension and
-is **not implemented**; do not write it today.
+**Rules are matched by model id, not by route**, unless they opt into a
+`route = [...]` filter. `[pricing.providers.deepseek.models."deepseek-flash"]`
+and a `deepseek-flash` entry in that vendor's file both price a call for
+`deepseek-flash`, whichever route reports it. This is deliberate: binding every
+rule to a route would silently fall back to models.dev's USD numbers for the
+exact case the feature exists to fix (a DeepSeek model run through OpenRouter).
+
+One model id can still cost different amounts per route. Real example: DeepSeek
+bills `deepseek-flash` at $0.15/$0.60, while the same model through OpenRouter
+costs $0.04844/$0.09688. Scope a rule to the route(s) it is true for:
+
+```toml
+[pricing.providers.openrouter.models.deepseek-flash]
+route = ["openrouter"]
+cost = { input = 0.04844, output = 0.09688 }
+```
+
+`route` is a list of **billing identities** — the same spelling as a vendor key
+or activity source key: `"openrouter"`, `"deepseek"`, `"claude:api-key"`,
+`"openai-compatible:deepseek"`. A compatible profile may also be named by its
+short form, so `route = ["deepseek"]` matches both a `deepseek` call and an
+`openai-compatible:deepseek` one. Entries are trimmed, order is kept, and
+duplicates are allowed. An empty entry is rejected with its exact field path.
+
+**An empty `route` applies to every route**, which keeps a rule without the key
+exactly as it behaved before the key existed. A non-empty `route` applies only
+to the routes it names: on any other route the rule is **skipped**, and the next
+layer prices the call. It never produces a price, and never a "rule expired"
+marker — a route the rule does not name was never its claim. So the failure mode
+is a fall-through to the next layer, never a misprice.
+
+```toml
+# The same model at two per-route prices, each rule owning its own route.
+[pricing.providers.deepseek.models.deepseek-flash]
+route = ["deepseek", "openai-compatible:deepseek"]
+cost = { input = 0.15, output = 0.60 }
+
+[pricing.providers.openrouter.models.deepseek-flash]
+route = ["openrouter"]
+cost = { input = 0.04844, output = 0.09688 }
+```
+
+(The second rule can live in that vendor's `file` instead, and can use the same
+`route` key there.)
 
 Vendors are consulted in lexicographic order when two of them name the same
 model, and an inline card always outranks a file. Within one vendor, the first
-rule that names the model decides.
+**applicable** rule that names the model decides.
 
 ### A vendor price file
 
@@ -139,7 +179,7 @@ is rejected with a message naming the key to remove: the vendor is already the
 ambiguous.
 
 Each `models.<id>` value is exactly the rule shape an inline card uses, so a
-file rule can carry `cost`, `tariffs`, `schedule`, `context_tiers`,
+file rule can carry `route`, `cost`, `tariffs`, `schedule`, `context_tiers`,
 `default_tariff`, `effective_from`/`effective_until`, and `on_rule_expiry`. See
 [A model rule](#a-model-rule) below.
 
@@ -237,6 +277,7 @@ what a `models.<id>` entry in a vendor file may carry.
 
 ```toml
 [pricing.providers.deepseek.models."deepseek-v4-pro"]
+route = ["deepseek", "openai-compatible:deepseek"]   # optional; omit to match every route
 cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
 default_tariff = "off_peak"
 effective_until = "2026-12-31T23:59:59Z"
@@ -245,6 +286,7 @@ on_rule_expiry = "fallback"
 
 | Key | Meaning |
 | --- | --- |
+| `route` | Optional list of billing identities this rule is restricted to. Omit it (the default) and the rule matches every route, exactly as before the key existed. With a list, the rule applies only to the routes it names; on any other route it is skipped and the next layer prices the call (a fall-through, never a misprice and never a "rule expired" marker). |
 | `cost` | Rates per **million tokens**, in the vendor's `currency`. All four components (`input`, `output`, `cache_read`, `cache_write`) are optional; an unpriced component means "this rule cannot price that part of the call" and the next layer of the same currency fills it. |
 | `tariffs.<name>` | A named rate card: `multiplier = 2.0` multiplies `cost`, or write explicit `input`/`output`/`cache_read`/`cache_write` rates. |
 | `schedule` | When a tariff applies. An array of tables, please: `[[pricing...schedule]]`. |
