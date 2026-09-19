@@ -883,11 +883,17 @@ impl MemoryAgent {
                 }
             }
 
+            // Anchor citations at the enclosing repo root, not the raw
+            // working dir: nested sessions bank and verify against the same
+            // root, so paths resolve identically on both sides.
             let repo_root = self
                 .session_state(session_id)
                 .working_dir
                 .clone()
-                .map(std::path::PathBuf::from);
+                .map(|dir| {
+                    let path = std::path::PathBuf::from(dir);
+                    crate::memory_types::find_repo_root(&path)
+                });
             let prompt_opt = match repo_root {
                 Some(ref root) => {
                     memory::format_relevant_prompt_verified(&relevant, MAX_MEMORIES_PER_TURN, root)

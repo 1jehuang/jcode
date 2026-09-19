@@ -86,6 +86,18 @@ struct MemoryInput {
     /// For recall action: retrieval mode
     #[serde(default)]
     mode: Option<String>,
+    /// For remember: repo-relative source path the fact was drawn from.
+    /// With source_start_line/source_end_line the tool hashes the exact
+    /// span at bank time and attaches a citation (fail-soft: uncited when
+    /// the span is unreadable).
+    #[serde(default)]
+    source_path: Option<String>,
+    /// For remember: 0-based start line of the cited span (inclusive).
+    #[serde(default)]
+    source_start_line: Option<usize>,
+    /// For remember: 0-based end line of the cited span (exclusive).
+    #[serde(default)]
+    source_end_line: Option<usize>,
 }
 
 #[async_trait]
@@ -119,7 +131,10 @@ impl Tool for MemoryTool {
                 "scope": { "type": "string", "enum": ["project", "global", "all"] },
                 "from_id": { "type": "string" },
                 "to_id": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 0, "description": "Max results for recall, search, or list. Zero returns no results. Recall defaults to 10." }
+                "limit": { "type": "integer", "minimum": 0, "description": "Max results for recall, search, or list. Zero returns no results. Recall defaults to 10." },
+                "source_path": { "type": "string", "description": "For remember: repo-relative source path to cite." },
+                "source_start_line": { "type": "integer", "description": "For remember: 0-based start line of the cited span." },
+                "source_end_line": { "type": "integer", "description": "For remember: 0-based end line of the cited span." }
             },
             "required": ["action"]
         })
@@ -155,6 +170,29 @@ impl Tool for MemoryTool {
                 if let Some(tags) = input.tags {
                     entry = entry.with_tags(tags);
                 }
+                // Cite only exact, bank-time-verified spans. Anything else
+                // (no path, unreadable span, escape) stores uncited and says
+                // so, so the verification path never covers fuzzy provenance.
+                let mut citation_note = String::new();
+                if let (Some(path), Some(start), Some(end)) =
+                    (input.source_path, input.source_start_line, input.source_end_line)
+                {
+                    let anchor = ctx
+                        .working_dir
+                        .as_deref()
+                        .map(crate::memory_types::find_repo_root)
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    match crate::memory_types::SourceCitation::bank(&anchor, &path, start, end) {
+                        Some(citation) => {
+                            entry = entry.with_citation(citation);
+                        }
+                        None => {
+                            citation_note = format!(
+                                " (no citation attached: unreadable span {path}:{start}-{end})"
+                            );
+                        }
+                    }
+                }
                 let id = if scope == "global" {
                     manager.remember_global(entry)?
                 } else {
@@ -175,8 +213,8 @@ impl Tool for MemoryTool {
                 });
                 memory::set_state(MemoryState::Idle);
                 Ok(ToolOutput::new(format!(
-                    "Remembered {} ({}): \"{}\" [id: {}]",
-                    category, scope, content, id
+                    "Remembered {} ({}): \"{}\" [id: {}]{}",
+                    category, scope, content, id, citation_note
                 )))
             }
             "recall" => {
@@ -489,6 +527,9 @@ mod tests {
         assert!(!props.contains_key("weight"));
         assert!(!props.contains_key("depth"));
         assert!(!props.contains_key("mode"));
+        assert!(props.contains_key("source_path"));
+        assert!(props.contains_key("source_start_line"));
+        assert!(props.contains_key("source_end_line"));
     }
 
     fn test_ctx(working_dir: Option<std::path::PathBuf>) -> ToolContext {
@@ -684,6 +725,84 @@ mod tests {
     /// Issue #491 regression: project-scoped remember followed by list must
     /// round-trip through the real (non-test-mode) manager when the tool
     /// context carries a working dir.
+    #[tokio::test]
+    async fn remember_attaches_citation_for_exact_span() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+        std::fs::write(project.path().join("src.rs"), "fn cited() {}\nlet x = 1;\n").unwrap();
+
+        let tool = MemoryTool::new();
+        let out = tool
+            .execute(
+                json!({
+                    "action": "remember",
+                    "content": "cited() exists",
+                    "scope": "project",
+                    "source_path": "src.rs",
+                    "source_start_line": 0,
+                    "source_end_line": 1
+                }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("remember should succeed");
+        assert!(!out.output.contains("no citation attached"), "{out:?}");
+
+        // Recall the entry from the store and prove the citation persisted.
+        let manager =
+            MemoryTool::new().scoped_manager(&test_ctx(Some(project.path().to_path_buf())));
+        let found = manager
+            .list_all_scoped(crate::memory_types::MemoryScope::Project)
+            .expect("list")
+            .into_iter()
+            .find(|e| e.content == "cited() exists")
+            .expect("entry stored");
+        let citation = found.citation.expect("citation attached");
+        assert_eq!(citation.path, "src.rs");
+        assert_eq!((citation.start_line, citation.end_line), (0, 1));
+
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
+    #[tokio::test]
+    async fn remember_reports_unreadable_span_without_failing() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let prev_home = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", home.path());
+
+        let tool = MemoryTool::new();
+        let out = tool
+            .execute(
+                json!({
+                    "action": "remember",
+                    "content": "ghost fact",
+                    "scope": "project",
+                    "source_path": "gone.rs",
+                    "source_start_line": 0,
+                    "source_end_line": 1
+                }),
+                test_ctx(Some(project.path().to_path_buf())),
+            )
+            .await
+            .expect("remember stores uncited, never fails");
+        assert!(out.output.contains("no citation attached"), "{out:?}");
+
+        if let Some(prev) = prev_home {
+            crate::env::set_var("JCODE_HOME", prev);
+        } else {
+            crate::env::remove_var("JCODE_HOME");
+        }
+    }
+
     #[tokio::test]
     async fn project_scope_round_trips_with_working_dir() {
         let _guard = crate::storage::lock_test_env();

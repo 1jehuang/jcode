@@ -397,6 +397,11 @@ impl MemoryEntry {
         self
     }
 
+    pub fn with_citation(mut self, citation: SourceCitation) -> Self {
+        self.citation = Some(citation);
+        self
+    }
+
     pub fn with_trust(mut self, trust: TrustLevel) -> Self {
         self.trust = trust;
         self
@@ -656,6 +661,28 @@ fn selected_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Vec<&Me
     selected
 }
 
+/// Walk up from `start` to the enclosing repository root (a directory
+/// containing `.git`). Falls back to `start` itself for non-git trees so
+/// callers keep working without a repository. Used to anchor citation paths
+/// so nested working directories bank and verify against the same root.
+pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
+    let mut cursor = if start.is_file() {
+        start.parent().map(|p| p.to_path_buf())
+    } else {
+        Some(start.to_path_buf())
+    };
+    while let Some(dir) = cursor {
+        if dir.join(".git").exists() {
+            return dir;
+        }
+        match dir.parent() {
+            Some(parent) if parent != dir => cursor = Some(parent.to_path_buf()),
+            _ => break,
+        }
+    }
+    start.to_path_buf()
+}
+
 /// Provenance citation for a memory: the exact source span the fact was
 /// drawn from. A tripwire, not a judge: it answers whether the cited lines
 /// changed, never whether the meaning changed.
@@ -760,24 +787,93 @@ impl SourceCitation {
                 return CitationStatus::Fresh;
             }
         }
-        // Relocation: exact content search for the banked span lines.
+        // Relocation: exact content search for the banked span lines. A
+        // span match alone is not enough: an identical twin elsewhere must
+        // not mask the original's edit. The stored 5-line context each side
+        // disambiguates: full context match relocates, span match with
+        // context mismatch reads as Stale.
         let span_lines: Vec<&str> = self.span_text.lines().collect();
         if !span_lines.is_empty() && span_lines.len() == self.end_line - self.start_line {
             let n = span_lines.len();
             if n <= lines.len() {
+                let before: Vec<&str> = self.context_before.lines().collect();
+                let after: Vec<&str> = self.context_after.lines().collect();
                 for start in 0..=lines.len() - n {
-                    if lines[start..start + n] == span_lines[..]
-                        && Self::hash_span_lines(&lines[start..start + n]) == self.span_hash
+                    if lines[start..start + n] != span_lines[..]
+                        || Self::hash_span_lines(&lines[start..start + n]) != self.span_hash
                     {
+                        continue;
+                    }
+                    let end = start + n;
+                    // Strict: the candidate must offer exactly the stored
+                    // context on both sides. A file-start span (empty
+                    // stored context) only relocates to file start; a
+                    // mid-file twin with different surroundings reads as
+                    // Stale, never Relocated. No vacuous empty matches.
+                    let before_ok = if before.is_empty() {
+                        start == 0
+                    } else {
+                        start >= before.len() && lines[start - before.len()..start] == before[..]
+                    };
+                    let after_ok = if after.is_empty() {
+                        end == lines.len()
+                    } else {
+                        lines.len() - end >= after.len()
+                            && lines[end..end + after.len()] == after[..]
+                    };
+                    if before_ok && after_ok {
                         return CitationStatus::Relocated {
                             start_line: start,
-                            end_line: start + n,
+                            end_line: end,
                         };
                     }
                 }
             }
         }
         CitationStatus::Stale
+    }
+
+    /// Bank a citation: confine `path` under `repo_root`, read the file,
+    /// hash the exact span bytes, and capture the span text plus 5 lines of
+    /// context each side for relocation. Returns `None` (fail-soft: the
+    /// memory stores uncited) on any failure — bad range, missing file,
+    /// path escape, oversized span.
+    pub fn bank(
+        repo_root: &std::path::Path,
+        path: &str,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<SourceCitation> {
+        if end_line <= start_line || end_line - start_line > 200 {
+            return None;
+        }
+        let probe = SourceCitation {
+            path: path.to_string(),
+            start_line,
+            end_line,
+            span_hash: String::new(),
+            span_text: String::new(),
+            context_before: String::new(),
+            context_after: String::new(),
+        };
+        let full = probe.confined_path(repo_root)?;
+        let text = std::fs::read_to_string(&full).ok()?;
+        let lines: Vec<&str> = text.lines().collect();
+        if end_line > lines.len() {
+            return None;
+        }
+        let span = &lines[start_line..end_line];
+        let from = start_line.saturating_sub(CITATION_CONTEXT_LINES);
+        let to = (end_line + CITATION_CONTEXT_LINES).min(lines.len());
+        Some(SourceCitation {
+            path: path.to_string(),
+            start_line,
+            end_line,
+            span_hash: Self::hash_span_lines(span),
+            span_text: span.join("\n"),
+            context_before: lines[from..start_line].join("\n"),
+            context_after: lines[end_line..to].join("\n"),
+        })
     }
 }
 
@@ -1154,8 +1250,8 @@ pub mod ranking {
     mod tests {
         use super::*;
         use crate::{
-            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, format_relevant_prompt,
-            format_relevant_prompt_verified,
+            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, find_repo_root,
+            format_relevant_prompt, format_relevant_prompt_verified,
         };
 
         #[test]
@@ -1179,22 +1275,29 @@ pub mod ranking {
         fn write_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
             let dir = tempfile::TempDir::new().expect("temp dir");
             for (name, content) in files {
-                std::fs::write(dir.path().join(name), content).expect("write file");
+                let path = dir.path().join(name);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("mkdir");
+                }
+                std::fs::write(&path, content).expect("write file");
             }
             dir
         }
 
         fn cite(path: &str, start: usize, end: usize, text: &str) -> SourceCitation {
+            // Mirrors SourceCitation::bank: exact span plus 5 lines each side.
             let lines: Vec<&str> = text.lines().collect();
             let span: Vec<&str> = lines[start..end].to_vec();
+            let from = start.saturating_sub(5);
+            let to = (end + 5).min(lines.len());
             SourceCitation {
                 path: path.to_string(),
                 start_line: start,
                 end_line: end,
                 span_hash: SourceCitation::hash_span_lines(&span),
                 span_text: span.join("\n"),
-                context_before: String::new(),
-                context_after: String::new(),
+                context_before: lines[from..start].join("\n"),
+                context_after: lines[end..to].join("\n"),
             }
         }
 
@@ -1370,6 +1473,72 @@ pub mod ranking {
             let out = format_relevant_prompt_verified(std::slice::from_ref(&entry), 10, dir.path())
                 .expect("prompt");
             assert!(!out.contains("source changed"));
+        }
+
+        #[test]
+        fn bank_hashes_exact_span_with_context() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let cited = SourceCitation::bank(dir.path(), "a.rs", 1, 4).expect("bank");
+            assert_eq!((cited.start_line, cited.end_line), (1, 4));
+            assert_eq!(cited.span_text, "fn alpha() {\n    let x = 1;\n}");
+            assert_eq!(cited.context_before, "line0");
+            assert_eq!(cited.context_after, "line4");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn bank_rejects_bad_ranges_and_escapes() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            assert!(SourceCitation::bank(dir.path(), "a.rs", 4, 1).is_none());
+            assert!(SourceCitation::bank(dir.path(), "a.rs", 0, 99).is_none());
+            assert!(SourceCitation::bank(dir.path(), "../a.rs", 1, 2).is_none());
+            assert!(SourceCitation::bank(dir.path(), "gone.rs", 1, 2).is_none());
+        }
+
+        #[test]
+        fn relocation_uses_context_to_break_twin_ties() {
+            // Two identical blocks; the cited (first) one is edited. The twin
+            // still matches the span text but its context differs, so the
+            // verdict must be Stale, not Relocated.
+            let text =
+                "fn twin() {\n    let v = 1;\n}\n// between\nfn twin() {\n    let v = 1;\n}\n";
+            let dir = write_tree(&[("t.rs", text)]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 4, 7).expect("bank");
+            // Edit the CITED (second) block only: line 5 v=1 -> v=9.
+            let mut edited_lines: Vec<&str> = text.lines().collect();
+            edited_lines[5] = "    let v = 9;";
+            let edited = edited_lines.join("\n") + "\n";
+            std::fs::write(dir.path().join("t.rs"), &edited).unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+        }
+
+        #[test]
+        fn relocation_finds_moved_block_with_intact_context() {
+            let text =
+                "fn twin() {\n    let v = 1;\n}\n// between\nfn other() {\n    let w = 0;\n}\n";
+            let dir = write_tree(&[("t.rs", text)]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 4, 7).expect("bank");
+            // Prepend lines: the block moves but its context moves with it.
+            let moved = "// h0\n// h1\n".to_string() + text;
+            std::fs::write(dir.path().join("t.rs"), &moved).unwrap();
+            assert_eq!(
+                cited.verify(dir.path()),
+                CitationStatus::Relocated {
+                    start_line: 6,
+                    end_line: 9
+                }
+            );
+        }
+
+        #[test]
+        fn find_repo_root_walks_up_and_falls_back() {
+            let dir = write_tree(&[("sub/nested/a.rs", "fn a() {}\n")]);
+            // No .git: falls back to the start dir itself.
+            let nested = dir.path().join("sub").join("nested");
+            assert_eq!(find_repo_root(&nested), nested);
+            // With .git at top: nested sessions anchor at the root.
+            std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+            assert_eq!(find_repo_root(&nested), dir.path().to_path_buf());
         }
 
         #[test]
