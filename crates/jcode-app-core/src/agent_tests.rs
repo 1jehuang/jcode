@@ -1309,19 +1309,49 @@ async fn restore_session_rehydrates_injected_memory_ids() {
 #[tokio::test]
 async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop() {
     let _guard = crate::storage::lock_test_env();
+    struct RestoreMemoryHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreMemoryHome {
+        fn drop(&mut self) {
+            crate::memory::clear_all_pending_memory();
+            match &self.0 {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().expect("isolated memory home");
+    let _restore = RestoreMemoryHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
     crate::memory::clear_all_pending_memory();
 
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let registry = Registry::new(provider.clone()).await;
-    let agent = Agent::new(provider, registry);
+    let mut agent = Agent::new(provider, registry);
+    agent.memory_enabled = true;
+    let project = home.path().join("project");
+    std::fs::create_dir(&project).expect("isolated project");
+    agent.session.working_dir = Some(project.to_string_lossy().into_owned());
     let session_id = agent.session.id.clone();
 
-    crate::memory::set_pending_memory_with_ids(
+    let entry =
+        crate::memory::MemoryEntry::new(crate::memory::MemoryCategory::Fact, "remember this later");
+    crate::memory::MemoryManager::new()
+        .with_project_dir(&project)
+        .remember_project(entry.clone())
+        .expect("persist the selected memory for scoped revalidation");
+    let prompt = crate::memory::format_relevant_prompt(std::slice::from_ref(&entry), 1)
+        .expect("canonical memory prompt");
+    crate::memory::set_pending_memory_for_project(
         &session_id,
-        "remember this later".to_string(),
+        prompt.clone(),
         1,
-        vec!["memory-deferred".to_string()],
+        vec![entry.id.clone()],
+        None,
+        agent.session.working_dir.as_deref(),
     );
+    assert!(crate::memory::has_pending_memory(&session_id));
 
     let tool_loop_messages = vec![
         Message::user("hello"),
@@ -1342,6 +1372,7 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
     let pending = agent.build_memory_prompt_nonblocking(&tool_loop_messages, None);
     assert!(pending.is_none(), "memory should not inject mid tool loop");
     assert!(crate::memory::has_pending_memory(&session_id));
+    assert!(!crate::memory::is_memory_injected(&session_id, &entry.id));
 
     let next_turn_messages = vec![Message::user("follow up")];
     let pending = agent.build_memory_prompt_nonblocking(&next_turn_messages, None);
@@ -1349,6 +1380,10 @@ async fn build_memory_prompt_nonblocking_defers_pending_memory_during_tool_loop(
         pending.is_some(),
         "memory should inject on the next real user turn"
     );
+    let pending = pending.unwrap();
+    assert_eq!(pending.prompt, prompt);
+    assert_eq!(pending.memory_ids, vec![entry.id.clone()]);
+    assert!(crate::memory::is_memory_injected(&session_id, &entry.id));
     assert!(!crate::memory::has_pending_memory(&session_id));
 
     crate::memory::clear_all_pending_memory();
