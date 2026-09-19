@@ -153,9 +153,7 @@ impl ScheduledQueue {
                 Ok(true) => return Ok(()),
                 Ok(false) => self.reload(),
                 Err(error) => {
-                    crate::logging::warn(&format!(
-                        "schedule queue save failed, retrying: {error}"
-                    ));
+                    crate::logging::warn(&format!("schedule queue save failed, retrying: {error}"));
                     self.reload();
                 }
             }

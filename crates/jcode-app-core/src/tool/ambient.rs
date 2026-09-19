@@ -947,7 +947,10 @@ impl ScheduleTool {
 
         let mut summary = format!("Scheduled task '{}' for {} (id: {})", task, when, id);
         if let Some(series) = series {
-            summary.push_str(&format!("\nSeries ID: {} (cancel the whole series)", series));
+            summary.push_str(&format!(
+                "\nSeries ID: {} (cancel the whole series)",
+                series
+            ));
         }
         if let Some(ref wd) = working_dir {
             summary.push_str(&format!("\nWorking directory: {}", wd));

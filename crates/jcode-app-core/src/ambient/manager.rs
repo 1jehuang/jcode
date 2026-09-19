@@ -79,9 +79,7 @@ impl AmbientManager {
                 anyhow::bail!("repeat.every_minutes must be >= 1");
             }
             if repeat.max_iterations == Some(0) {
-                anyhow::bail!(
-                    "repeat.max_iterations must be >= 1; omit it to repeat forever"
-                );
+                anyhow::bail!("repeat.max_iterations must be >= 1; omit it to repeat forever");
             }
             if !request.target.is_direct_delivery() {
                 anyhow::bail!(
