@@ -118,7 +118,7 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 #[tokio::test]
 async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy() {
     for tier in [Some("priority"), Some("flex"), None] {
-        assert_history_service_tier_and_pdf_capability(tier, true, false).await;
+        assert_history_service_tier_and_pdf_capability(tier, true, false, false).await;
     }
 }
 
@@ -126,9 +126,20 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
 async fn pdf_panels_history_capability_covers_live_and_persisted_paths() {
     for busy in [false, true] {
         for supports_pdf_panels in [false, true] {
-            assert_history_service_tier_and_pdf_capability(None, busy, supports_pdf_panels).await;
+            assert_history_service_tier_and_pdf_capability(None, busy, supports_pdf_panels, false)
+                .await;
         }
     }
+}
+
+#[tokio::test]
+async fn handle_get_history_uses_live_snapshot_when_agent_is_available() {
+    assert_history_service_tier_and_pdf_capability(None, false, false, false).await;
+}
+
+#[tokio::test]
+async fn history_guard_survives_racing_turn_and_is_released_before_write() {
+    assert_history_service_tier_and_pdf_capability(None, false, false, true).await;
 }
 
 #[expect(
@@ -139,6 +150,7 @@ async fn assert_history_service_tier_and_pdf_capability(
     tier: Option<&'static str>,
     busy: bool,
     supports_pdf_panels: bool,
+    racing_turn: bool,
 ) {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
@@ -176,12 +188,20 @@ async fn assert_history_service_tier_and_pdf_capability(
     let registry = Registry::empty();
     let mut live_session = session.clone();
     live_session.title = Some("live agent".to_string());
+    live_session.messages[0].content = vec![crate::message::ContentBlock::Text {
+        text: "live unsaved history".to_string(),
+        cache_control: None,
+    }];
     let agent = Arc::new(Mutex::new(Agent::new_with_session(
         provider.clone(),
         registry,
         live_session,
         None,
     )));
+    // Agent construction persists its session. Force a full snapshot of the
+    // older transcript rather than a metadata-only journal update.
+    session.replace_messages(session.messages.clone());
+    session.save().expect("restore persisted history snapshot");
     let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
     let sessions = Arc::new(RwLock::new(HashMap::from([(
@@ -195,23 +215,67 @@ async fn assert_history_service_tier_and_pdf_capability(
     let (_reader_a, writer_a) = stream_a.into_split();
     let writer = Arc::new(Mutex::new(writer_a));
 
-    handle_get_history(
-        42,
-        session_id,
-        busy,
-        &agent,
-        &provider,
-        &sessions,
-        &client_connections,
-        &client_count,
-        &writer,
-        "server-name",
-        "🔥",
-        None,
-        supports_pdf_panels,
-    )
-    .await
-    .expect("history should be written from persisted fallback");
+    if racing_turn {
+        // Reproduce the exact decision/preparation boundary without scheduler
+        // timing: a turn queues after the successful nonblocking acquisition.
+        let history_guard = agent.try_lock().expect("idle agent fast path");
+        let turn = agent.lock();
+        tokio::pin!(turn);
+        assert!(futures::poll!(&mut turn).is_pending());
+
+        // Socket backpressure lets us inspect the lock lifetime after snapshot
+        // preparation, while the history request is still in flight.
+        let writer_guard = writer.lock().await;
+        let history = super::send_history_with_guard(
+            42,
+            session_id,
+            history_guard,
+            &sessions,
+            &client_count,
+            &writer,
+            "server-name",
+            "🔥",
+            None,
+            None,
+            super::HistoryPayloadMode::Full,
+            true,
+            supports_pdf_panels,
+        );
+        tokio::pin!(history);
+        assert!(futures::poll!(&mut history).is_pending());
+        let turn_guard = match futures::poll!(&mut turn) {
+            std::task::Poll::Ready(guard) => guard,
+            std::task::Poll::Pending => panic!("snapshot must release agent before socket write"),
+        };
+        drop(writer_guard);
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut history)
+            .await
+            .expect("history must not reacquire the racing turn's lock")
+            .expect("write live history");
+        drop(turn_guard);
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_get_history(
+                42,
+                session_id,
+                busy,
+                &agent,
+                &provider,
+                &sessions,
+                &client_connections,
+                &client_count,
+                &writer,
+                "server-name",
+                "🔥",
+                None,
+                supports_pdf_panels,
+            ),
+        )
+        .await
+        .expect("history must complete without waiting for the held turn lock")
+        .expect("history should be written");
+    }
 
     drop(busy_guard);
     drop(writer);
@@ -268,7 +332,14 @@ async fn assert_history_service_tier_and_pdf_capability(
             assert_eq!(id, 42);
             assert_eq!(returned_session_id, session_id);
             assert_eq!(messages.len(), 1);
-            assert_eq!(messages[0].content, "persisted fallback history");
+            assert_eq!(
+                messages[0].content,
+                if busy {
+                    "persisted fallback history"
+                } else {
+                    "live unsaved history"
+                }
+            );
             assert_eq!(service_tier.as_deref(), tier);
             assert_eq!(
                 side_panel,
