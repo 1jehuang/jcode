@@ -175,6 +175,8 @@ def environment(runtime):
     for key in ('JCODE_SOCKET', 'JCODE_SESSION_ID', 'JCODE_PARENT_SESSION_ID'):
         env.pop(key, None)
     env['JCODE_RUNTIME_DIR'] = str(runtime)
+    # Readiness uses server:info, which is gated even in an isolated home.
+    env['JCODE_DEBUG_CONTROL'] = '1'
     return env
 
 
@@ -184,16 +186,19 @@ def start_server(binary, socket, env, log):
                                stdout=log, stderr=subprocess.STDOUT, env=env, start_new_session=True)
     try:
         deadline = time.monotonic() + 30
+        last_probe = 'No readiness probe completed'
         while time.monotonic() < deadline and process.poll() is None:
             try:
-                probe = subprocess.run([binary, '--no-update', '--no-selfdev', '--socket', str(socket),
-                                        'debug', 'server:info'], env=env, capture_output=True, timeout=2)
+                probe = subprocess.run([binary, '--no-update', '--no-selfdev',
+                                        'debug', '--socket', str(socket), 'server:info'], env=env, capture_output=True, timeout=2)
+                last_probe = (probe.stderr or probe.stdout).decode(errors='replace')[-2000:]
                 if probe.returncode == 0:
                     return process
             except subprocess.TimeoutExpired:
-                pass
+                last_probe = 'Readiness probe timed out'
             time.sleep(.2)
-        raise RuntimeError('Isolated daemon did not become ready. Inspect server.log.')
+        raise RuntimeError(f'Isolated daemon did not become ready. Inspect {log.name}. '
+                           f'Last readiness response: {last_probe}')
     except BaseException:
         terminate(process)
         raise
@@ -299,6 +304,7 @@ def self_test():
     assert trace['browser_calls'][0]['executed']
     assert trace['browser_calls'][0]['decision_provider'] == 'jcode'
     assert not extract_trace('{"type":"text_delta","text":"handoff"}')['browser_calls']
+    assert environment(Path('/isolated-runtime'))['JCODE_DEBUG_CONTROL'] == '1'
     assert summarize([])['median_direct_over_handoff_ratio'] is None
     normal = {'pair': 1, 'mode': 'normal', 'valid_success': True,
               'handoff_used': True, 'elapsed_seconds': 2}

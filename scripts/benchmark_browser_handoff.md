@@ -41,7 +41,10 @@ its own private `--socket`, runs a fresh `jcode run --ndjson` in a new workspace
 and terminates only that daemon/process group. Shared Jcode daemons are not
 restarted or repointed. The caller-prepared isolated home is used without copying credentials into
 reports. Browser-session and provider environment settings are inherited. Startup probing and daemon shutdown are excluded from elapsed time.
-Browser setup is a coordinator prerequisite, not a measured step.
+Browser setup is a coordinator prerequisite, not a measured step. The harness
+enables `JCODE_DEBUG_CONTROL=1` only in its isolated daemon/client environment
+for `debug --socket <trial-socket> server:info` readiness checks. Startup failures
+include the last probe response and the exact daemon log path.
 
 The normal prompt never mentions handoff. Both arms use the browser tool only
 and target the same explicit tab. A trial-unique localhost URL resets the task.
