@@ -683,10 +683,13 @@ pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
     start.to_path_buf()
 }
 
-/// Upstream remote URL for `root` (`remote.origin.url`), best-effort. Two
-/// clones share history (same root commit) but not provenance: the clone's
-/// origin points at its source, the original's at upstream. Moves preserve
-/// it; re-clones from the same upstream reproduce it. Absent outside git.
+/// Upstream remote URL for `root` (`remote.origin.url`), best-effort, with
+/// credentials stripped. HTTPS remotes can embed `user:token@` userinfo;
+/// persisting that would leak secrets into memory JSON and model prompts.
+/// Two clones share history (same root commit) but not provenance: the
+/// clone's origin points at its source, the original's at upstream. Moves
+/// preserve it; re-clones from the same upstream reproduce it. Absent
+/// outside git.
 pub fn repo_origin(root: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -696,7 +699,28 @@ pub fn repo_origin(root: &std::path::Path) -> Option<String> {
         .ok()
         .filter(|o| o.status.success())?;
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if url.is_empty() { None } else { Some(url) }
+    if url.is_empty() {
+        None
+    } else {
+        Some(strip_url_credentials(&url))
+    }
+}
+
+/// Remove `user[:password]@` userinfo from a remote URL. Malformed input
+/// passes through unchanged (fail-soft: identity, never auth).
+fn strip_url_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let Some((userinfo, host)) = rest.split_once('@') else {
+        return url.to_string();
+    };
+    // Only strip when the part before @ holds no '/': userinfo never
+    // contains one, so a slash means the @ belongs to the path.
+    if userinfo.contains('/') {
+        return url.to_string();
+    }
+    format!("{scheme}://{host}")
 }
 
 /// Stable repository identity for `root`: `git:<root-commit-hash>` when
@@ -1066,7 +1090,9 @@ pub fn citation_stale_mark(
     {
         return Some(format!(
             "  (source verified in a different checkout of this history (origin {}) — re-read the file if the project context matters)",
-            citation.origin.as_deref().unwrap_or("unknown"),
+            // Defense in depth: origins are redacted at capture, but a
+            // citation banked before the redaction still carries secrets.
+            strip_url_credentials(citation.origin.as_deref().unwrap_or("unknown")),
         ));
     }
     if citation.verify(root) == CitationStatus::Stale {
@@ -1417,7 +1443,7 @@ pub mod ranking {
         use crate::{
             CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, citation_stale_mark,
             find_repo_root, format_relevant_prompt, format_relevant_prompt_verified, git_head_for,
-            is_foreign_checkout,
+            is_foreign_checkout, strip_url_credentials,
         };
 
         #[test]
@@ -1948,6 +1974,91 @@ pub mod ranking {
             };
             let out = format_relevant_prompt_verified(&[entry], 10, &repo_b).expect("renders");
             assert!(out.contains("different checkout"), "{out}");
+        }
+
+        #[test]
+        fn credentialed_origins_never_persist_or_render() {
+            assert_eq!(
+                strip_url_credentials("https://user:s3cret@host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("https://user@host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("https://host.com/a.git"),
+                "https://host.com/a.git"
+            );
+            // No scheme or no userinfo: untouched.
+            assert_eq!(
+                strip_url_credentials("git@host.com:a.git"),
+                "git@host.com:a.git"
+            );
+            assert_eq!(
+                strip_url_credentials("/local/path@weird"),
+                "/local/path@weird"
+            );
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            // Bank under a credentialed origin, then re-point it clean: the
+            // stored origin must already be redacted, and the foreign mark
+            // must never render the secret.
+            let dir = write_tree(&[("s.rs", "fn a() {}\n")]);
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"]).status.success());
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "one"]).status.success());
+            assert!(
+                run(&[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://user:s3cret@host.com/a.git"
+                ])
+                .status
+                .success()
+            );
+            let cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            assert_eq!(
+                cited.origin.as_deref(),
+                Some("https://host.com/a.git"),
+                "secret stripped at capture"
+            );
+            // Legacy-shaped citation that still holds the secret (banked
+            // before redaction): the mark must scrub it at render.
+            let mut legacy = cited.clone();
+            legacy.origin = Some("https://user:s3cret@host.com/a.git".to_string());
+            let entry = MemoryEntry {
+                citation: Some(legacy),
+                ..MemoryEntry::new(MemoryCategory::Fact, "old fact")
+            };
+            // Point the checkout elsewhere so the mark fires as foreign.
+            assert!(
+                run(&["remote", "set-url", "origin", "https://other.com/b.git"])
+                    .status
+                    .success()
+            );
+            let out = format_relevant_prompt_verified(&[entry], 10, dir.path()).expect("renders");
+            assert!(out.contains("different checkout"), "{out}");
+            assert!(!out.contains("s3cret"), "{out}");
+            assert!(!out.contains("user@"), "{out}");
         }
 
         #[test]
