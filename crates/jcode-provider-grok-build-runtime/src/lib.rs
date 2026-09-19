@@ -1,8 +1,8 @@
-//! Grok Build subscription provider over Jcode's managed ACP backend.
+//! Grok Build subscription runtime.
 //!
-//! This runtime deliberately has no xAI HTTP or API-key path. Authentication is
-//! delegated to the official Grok Build ACP implementation provisioned by
-//! Jcode, which consumes its cached login after `initialize` advertises it.
+//! When a scoped Grok CLI OIDC token is available, chat goes to the CLI HTTP
+//! proxy and Jcode owns tools (same loop as Claude). Otherwise the official
+//! `grok agent stdio` ACP backend is used. Auth is never `XAI_API_KEY`.
 
 use acp::Agent as _;
 use agent_client_protocol as acp;
@@ -14,7 +14,7 @@ use jcode_message_types::{
 };
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,9 +60,6 @@ impl GrokBuildProcess {
 #[derive(Clone)]
 pub struct GrokBuildProvider {
     process: GrokBuildProcess,
-    /// When Grok CLI OIDC login is present, talk to the CLI chat proxy as a
-    /// model (Jcode owns tools). Fake ACP tests leave this unset.
-    http: Option<Arc<jcode_provider_openrouter_runtime::OpenRouterProvider>>,
     model: Arc<RwLock<String>>,
     models: Arc<RwLock<Vec<String>>>,
     model_selected: Arc<AtomicBool>,
@@ -74,25 +71,52 @@ impl GrokBuildProvider {
     }
 
     pub fn with_process(process: GrokBuildProcess) -> Self {
-        let fake_acp = process.env.contains_key("JCODE_FAKE_GROK_ACP_LOG");
-        let http = if fake_acp {
-            None
-        } else {
-            jcode_base::auth::grok_build::bearer_token().and_then(|token| {
-                jcode_provider_openrouter_runtime::OpenRouterProvider::new_grok_build_subscription(
-                    token,
-                )
-                .ok()
-                .map(Arc::new)
-            })
-        };
         Self {
             process,
-            http,
             model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
             models: Arc::new(RwLock::new(Vec::new())),
             model_selected: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn fake_acp(&self) -> bool {
+        self.process.env.contains_key("JCODE_FAKE_GROK_ACP_LOG")
+    }
+
+    fn uses_http(&self) -> bool {
+        !self.fake_acp() && jcode_base::auth::grok_build::has_cached_login()
+    }
+
+    async fn http_runtime(
+        &self,
+    ) -> Option<jcode_provider_openrouter_runtime::OpenRouterProvider> {
+        if self.fake_acp() {
+            return None;
+        }
+        let token = jcode_base::auth::grok_build::live_bearer_token().await?;
+        jcode_provider_openrouter_runtime::OpenRouterProvider::new_grok_build_subscription(token)
+            .ok()
+    }
+
+    async fn complete_http(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+        force_refresh: bool,
+    ) -> Result<EventStream> {
+        if force_refresh {
+            jcode_base::auth::grok_build::refresh_bearer_token().await;
+        }
+        let http = self
+            .http_runtime()
+            .await
+            .ok_or_else(|| anyhow!("Grok Build HTTP runtime requires a live OIDC token"))?;
+        http.set_model(&self.model())?;
+        let messages = sanitize_grok_turn_messages(messages);
+        http.complete(&messages, tools, system, resume_session_id)
+            .await
     }
 
     /// Verify that the CLI can initialize and authenticate with its own cached
@@ -156,13 +180,20 @@ impl Provider for GrokBuildProvider {
             // and Grok would redo/restate the same result (panda 339 vs 600).
             return Ok(skipped_auto_followup_stream());
         }
-        if let Some(http) = &self.http {
-            http.set_model(&self.model())?;
-            let messages = sanitize_grok_turn_messages(messages);
-            let stream = http
-                .complete(&messages, tools, system, resume_session_id)
-                .await?;
-            return Ok(wrap_repeat_guard(stream));
+        if self.uses_http() {
+            match self
+                .complete_http(messages, tools, system, resume_session_id, false)
+                .await
+            {
+                Ok(stream) => return Ok(wrap_repeat_guard(stream)),
+                Err(error) if grok_http_unauthorized(&error) => {
+                    let stream = self
+                        .complete_http(messages, tools, system, resume_session_id, true)
+                        .await?;
+                    return Ok(wrap_repeat_guard(stream));
+                }
+                Err(error) => return Err(error),
+            }
         }
         let prompt = build_prompt(messages, resume_session_id.is_some())?;
         let system = system.to_string();
@@ -238,9 +269,6 @@ impl Provider for GrokBuildProvider {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.to_string();
         self.model_selected.store(true, Ordering::Release);
-        if let Some(http) = &self.http {
-            http.set_model(model)?;
-        }
         Ok(())
     }
 
@@ -261,13 +289,13 @@ impl Provider for GrokBuildProvider {
             .map(|model| ModelRoute {
                 model,
                 provider: "Grok Build".to_string(),
-                api_method: if self.http.is_some() {
+                api_method: if self.uses_http() {
                     "grok-build".to_string()
                 } else {
                     "grok-build-acp".to_string()
                 },
                 available: true,
-                detail: if self.http.is_some() {
+                detail: if self.uses_http() {
                     "Grok Build subscription via Jcode tools".to_string()
                 } else {
                     "Grok Build subscription via Jcode-managed ACP".to_string()
@@ -279,7 +307,7 @@ impl Provider for GrokBuildProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.http.is_some() {
+        if self.uses_http() {
             self.update_models(DiscoveredModels {
                 current: Some("grok-4.6".to_string()),
                 available: vec![
@@ -308,17 +336,17 @@ impl Provider for GrokBuildProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
-        self.http.is_none()
+        !self.uses_http()
     }
 
     fn supports_compaction(&self) -> bool {
         // HTTP path: Jcode owns history, same as Claude OAuth. ACP leaves
         // compaction to Grok CLI.
-        self.http.is_some()
+        self.uses_http()
     }
 
     fn transport(&self) -> Option<String> {
-        if self.http.is_some() {
+        if self.uses_http() {
             Some("Grok CLI subscription HTTP".to_string())
         } else {
             Some("ACP stdio".to_string())
@@ -328,7 +356,6 @@ impl Provider for GrokBuildProvider {
     fn fork(&self) -> Arc<dyn Provider> {
         let fork = Self {
             process: self.process.clone(),
-            http: self.http.clone(),
             model: Arc::new(RwLock::new(self.model())),
             models: Arc::new(RwLock::new(self.available_models_display())),
             model_selected: Arc::new(AtomicBool::new(
@@ -888,6 +915,7 @@ struct TrackedAcpTool {
     raw_input: Option<Value>,
     started: bool,
     finished: bool,
+    emitted_input: Option<String>,
 }
 
 #[async_trait(?Send)]
@@ -1035,14 +1063,13 @@ impl GrokAcpClient {
             tracked.name = "write".to_string();
         }
 
-        // Edits can finish from rawInput diffs. Reads/bash wait for ACP
-        // `completed` so we do not emit the tool title/description as output
-        // and then feed that string back as the next user prompt.
-        let completed = status_done || !tracked.diffs.is_empty();
+        // Preview diffs while InProgress, but only finalize on Completed/Failed.
+        // Finalizing from a non-empty diff made later Failed updates a no-op.
+        let completed = status_done;
         if tracked.name.is_empty() {
             tracked.name = "tool".to_string();
         }
-        let ready = tracked.name != "tool" || completed;
+        let ready = tracked.name != "tool" || completed || !tracked.diffs.is_empty();
 
         let mut events = Vec::new();
         if let Some(detail) = tracked.title.clone()
@@ -1058,31 +1085,44 @@ impl GrokAcpClient {
                 name: tracked.name.clone(),
             });
         }
-        if completed && tracked.started && !tracked.finished {
-            tracked.finished = true;
+        if tracked.started && !tracked.finished {
             let input = acp_tool_input(
                 &tracked.name,
                 tracked.file_path.as_deref(),
                 &tracked.diffs,
                 tracked.raw_input.clone(),
             );
-            let result = acp_tool_result_text(
-                tracked.title.as_deref(),
-                &tracked.diffs,
-                tracked.result_text.as_deref(),
-            );
-            events.push(StreamEvent::ToolInputDelta(
-                serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
-            ));
-            events.push(StreamEvent::ToolUseEnd);
-            events.push(StreamEvent::ToolResult {
-                tool_use_id: id,
-                content: result,
-                is_error: failed,
-            });
+            let serialized = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+            if tracked.emitted_input.as_deref() != Some(serialized.as_str()) {
+                events.push(StreamEvent::ToolInputDelta(serialized.clone()));
+                tracked.emitted_input = Some(serialized);
+            }
+            if completed {
+                tracked.finished = true;
+                let result = acp_tool_result_text(
+                    tracked.title.as_deref(),
+                    &tracked.diffs,
+                    tracked.result_text.as_deref(),
+                );
+                events.push(StreamEvent::ToolUseEnd);
+                events.push(StreamEvent::ToolResult {
+                    tool_use_id: id,
+                    content: result,
+                    is_error: failed,
+                });
+            }
         }
         events
     }
+}
+
+fn grok_http_unauthorized(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("401")
+        && (text.contains("unauthorized")
+            || text.contains("invalid token")
+            || text.contains("expired")
+            || text.contains("unauthenticated"))
 }
 
 fn acp_nonzero_kind(kind: acp::ToolKind) -> Option<acp::ToolKind> {
@@ -1471,11 +1511,31 @@ mod acp_tool_display_tests {
             input.contains("new_string"),
             "input missing new_string: {input}"
         );
-        let result = events.iter().find_map(|event| match event {
-            StreamEvent::ToolResult { content, .. } => Some(content.as_str()),
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolResult { .. })),
+            "in-progress edit must not finalize: {events:?}"
+        );
+        let done = client.events_for_acp_tool(
+            call.tool_call_id.0.to_string(),
+            None,
+            None,
+            Some(acp::ToolCallStatus::Completed),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        );
+        let result = done.iter().find_map(|event| match event {
+            StreamEvent::ToolResult {
+                content,
+                is_error,
+                ..
+            } if !is_error => Some(content.as_str()),
             _ => None,
         });
-        let result = result.expect("missing ToolResult");
+        let result = result.expect("missing completed ToolResult");
         assert!(
             result.contains("CallBotScenarioClinicNoShow")
                 && result.contains('-')
@@ -1492,6 +1552,87 @@ mod acp_tool_display_tests {
             "similar produced no hunks: {dump:?}"
         );
         assert!(dump.contains('\n'));
+    }
+
+    #[test]
+    fn in_progress_edit_failed_update_is_not_dropped() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = GrokAcpClient {
+            tx,
+            received_message: Arc::new(AtomicBool::new(false)),
+            tools: Mutex::new(HashMap::new()),
+        };
+        let preview = client.events_for_acp_tool(
+            "edit-fail".to_string(),
+            Some(acp::ToolKind::Edit),
+            Some("search_replace".to_string()),
+            Some(acp::ToolCallStatus::InProgress),
+            Vec::new(),
+            Vec::new(),
+            Some(serde_json::json!({
+                "file_path": "src/lib.rs",
+                "old_string": "a",
+                "new_string": "b"
+            })),
+            None,
+        );
+        assert!(
+            preview
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolUseStart { .. })),
+            "{preview:?}"
+        );
+        assert!(
+            !preview
+                .iter()
+                .any(|event| matches!(event, StreamEvent::ToolResult { .. })),
+            "in-progress must not emit ToolResult: {preview:?}"
+        );
+        let failed = client.events_for_acp_tool(
+            "edit-fail".to_string(),
+            None,
+            None,
+            Some(acp::ToolCallStatus::Failed),
+            vec![acp::ToolCallContent::from("write failed")],
+            Vec::new(),
+            None,
+            None,
+        );
+        assert!(
+            failed.iter().any(|event| matches!(
+                event,
+                StreamEvent::ToolResult { is_error: true, content, .. }
+                    if content.contains("write failed") || content.contains("src/lib.rs")
+            )),
+            "failed update was dropped: {failed:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_mcp_overrides_global_duplicate_and_can_disable() {
+        let temp = tempfile::tempdir().unwrap();
+        let global = temp.path().join("global.json");
+        let project = temp.path().join("project.json");
+        std::fs::write(
+            &global,
+            r#"{"servers":{"dup":{"command":"global-bin"},"keep":{"command":"keep-bin"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"{"servers":{"dup":{"command":"project-bin"},"keep":{"disabled":true}}}"#,
+        )
+        .unwrap();
+        let servers = merge_mcp_server_files(&[global, project]);
+        let names: Vec<_> = servers
+            .iter()
+            .filter_map(mcp_server_name)
+            .collect();
+        assert_eq!(names, vec!["dup".to_string()]);
+        let acp::McpServer::Stdio(stdio) = &servers[0] else {
+            panic!("expected stdio");
+        };
+        assert_eq!(stdio.command, PathBuf::from("project-bin"));
     }
 
     #[test]
@@ -1542,11 +1683,14 @@ mod acp_tool_display_tests {
             None,
             Some(meta),
         );
-        let input = second.iter().find_map(|event| match event {
-            StreamEvent::ToolInputDelta(delta) => Some(delta.as_str()),
-            _ => None,
-        });
-        let input = input.expect(&format!("missing ToolInputDelta in {second:?}"));
+        let input = first
+            .iter()
+            .chain(second.iter())
+            .find_map(|event| match event {
+                StreamEvent::ToolInputDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            });
+        let input = input.expect("missing ToolInputDelta for read");
         assert!(
             input.contains("src/main.go"),
             "read lost target_file: {input}"
@@ -1634,8 +1778,6 @@ fn load_forwarded_mcp_servers() -> Vec<acp::McpServer> {
     if std::env::var_os("JCODE_GROK_ACP_DISABLE_MCP").is_some() {
         return Vec::new();
     }
-    let mut servers = Vec::new();
-    let mut seen = HashSet::new();
     let mut paths = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         paths.push(PathBuf::from(home).join(".jcode").join("mcp.json"));
@@ -1644,17 +1786,25 @@ fn load_forwarded_mcp_servers() -> Vec<acp::McpServer> {
         paths.push(cwd.join(".jcode").join("mcp.json"));
         paths.push(cwd.join(".mcp.json"));
     }
+    merge_mcp_server_files(&paths)
+}
+
+/// Later files win. A later `disabled`/`enabled: false` entry removes a name.
+fn merge_mcp_server_files(paths: &[PathBuf]) -> Vec<acp::McpServer> {
+    let mut by_name = std::collections::BTreeMap::new();
     for path in paths {
-        for server in mcp_servers_from_file(&path) {
-            let Some(name) = mcp_server_name(&server) else {
-                continue;
-            };
-            if seen.insert(name) {
-                servers.push(server);
+        for (name, server) in mcp_entries_from_file(path) {
+            match server {
+                Some(server) => {
+                    by_name.insert(name, server);
+                }
+                None => {
+                    by_name.remove(&name);
+                }
             }
         }
     }
-    servers
+    by_name.into_values().collect()
 }
 
 fn mcp_server_name(server: &acp::McpServer) -> Option<String> {
@@ -1667,6 +1817,13 @@ fn mcp_server_name(server: &acp::McpServer) -> Option<String> {
 }
 
 fn mcp_servers_from_file(path: &Path) -> Vec<acp::McpServer> {
+    mcp_entries_from_file(path)
+        .into_iter()
+        .filter_map(|(_, server)| server)
+        .collect()
+}
+
+fn mcp_entries_from_file(path: &Path) -> Vec<(String, Option<acp::McpServer>)> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -1683,11 +1840,10 @@ fn mcp_servers_from_file(path: &Path) -> Vec<acp::McpServer> {
     servers
         .iter()
         .filter_map(|(name, config)| {
-            if config.get("disabled").and_then(Value::as_bool) == Some(true) {
-                return None;
-            }
-            if config.get("enabled").and_then(Value::as_bool) == Some(false) {
-                return None;
+            if config.get("disabled").and_then(Value::as_bool) == Some(true)
+                || config.get("enabled").and_then(Value::as_bool) == Some(false)
+            {
+                return Some((name.clone(), None));
             }
             let command = config.get("command").and_then(Value::as_str)?.trim();
             if command.is_empty() {
@@ -1714,8 +1870,11 @@ fn mcp_servers_from_file(path: &Path) -> Vec<acp::McpServer> {
                         .collect()
                 })
                 .unwrap_or_default();
-            Some(acp::McpServer::Stdio(
-                acp::McpServerStdio::new(name, command).args(args).env(env),
+            Some((
+                name.clone(),
+                Some(acp::McpServer::Stdio(
+                    acp::McpServerStdio::new(name, command).args(args).env(env),
+                )),
             ))
         })
         .collect()
