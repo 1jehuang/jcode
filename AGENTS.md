@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Repository Scope
+
+- Jcode Desktop is in a separate repository.
+
 ## Development Workflow
 
 - **Use the user's Git identity** - Create commits with the configured
