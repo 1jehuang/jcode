@@ -683,6 +683,31 @@ pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
     start.to_path_buf()
 }
 
+/// Stable repository identity for `root`: `git:<root-commit-hash>` when
+/// determinable, else `path:<canonical-root>`. The root commit survives
+/// renames and moves of the checkout (same .git, same history); the path
+/// fallback preserves behavior for non-git trees and missing git.
+pub fn repo_identity(root: &std::path::Path) -> String {
+    let git_id = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-list", "--max-parents=0", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty())
+        .map(|h| format!("git:{h}"));
+    git_id.unwrap_or_else(|| {
+        let path = root
+            .canonicalize()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.to_string_lossy().into_owned());
+        format!("path:{path}")
+    })
+}
+
 /// Best-effort short git HEAD for `root` (`rev-parse --short HEAD`).
 /// `None` outside a repo, without git, or on any failure: revision is
 /// advisory metadata, never a banking requirement.
@@ -734,10 +759,10 @@ pub struct SourceCitation {
     /// `\n`). Relocation context only.
     #[serde(default)]
     pub context_after: String,
-    /// Canonicalized repo root the citation was banked against. Verified on
-    /// read: a global (cross-repo) memory resolved under a different root
-    /// reads as Unverifiable instead of checking an unrelated file with the
-    /// same relative path. Empty means legacy/unknown: the check is skipped.
+    /// Stable repo identity at bank time (`git:<root-commit>` normally,
+    /// `path:<canonical-root>` fallback). Verified on read: a global memory
+    /// resolved under a different repo reads as Unverifiable, while a mere
+    /// checkout move keeps verifying. Empty means legacy/unknown: skipped.
     #[serde(default)]
     pub repo_id: String,
     /// Short git HEAD at bank time (`rev-parse --short HEAD`), best-effort.
@@ -836,23 +861,25 @@ impl SourceCitation {
         // A global memory banked in another repo must not verify against an
         // unrelated file that happens to share the relative path. Empty
         // repo_id means legacy/unknown: skip the check.
-        if !self.repo_id.is_empty() {
-            let current = repo_root
-                .canonicalize()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if current != self.repo_id {
-                return CitationStatus::Unverifiable;
-            }
+        if !self.repo_id.is_empty() && repo_identity(repo_root) != self.repo_id {
+            return CitationStatus::Unverifiable;
         }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(_) => return CitationStatus::Unverifiable,
         };
         let lines: Vec<&str> = text.lines().collect();
+        // Persisted citations are untrusted input (hand-edited JSON, older
+        // versions): validate stored bounds against the live file BEFORE any
+        // arithmetic or indexing. end_line = usize::MAX overflowed
+        // `end_line + 1` and indexed the offset table out of bounds.
+        if self.end_line > lines.len() {
+            return CitationStatus::Unverifiable;
+        }
         let offsets = Self::line_byte_offsets(&text);
-        // Exact window first, on raw bytes (line-ending faithful).
+        // Exact window first, on raw bytes (line-ending faithful). Safe now:
+        // end_line <= lines.len() < usize::MAX, so end_line + 1 cannot
+        // overflow and both offsets indices are in range.
         if self.end_line + 1 <= offsets.len() {
             let window = &text.as_bytes()[offsets[self.start_line]..offsets[self.end_line]];
             if Self::hash_span_bytes(window) == self.span_hash {
@@ -934,11 +961,7 @@ impl SourceCitation {
         };
         let full = probe.confined_path(repo_root)?;
         let text = std::fs::read_to_string(&full).ok()?;
-        let repo_id = repo_root
-            .canonicalize()
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let repo_id = repo_identity(repo_root);
         let git_head = git_head_for(repo_root);
         let lines: Vec<&str> = text.lines().collect();
         if end_line > lines.len() {
@@ -1739,6 +1762,76 @@ pub mod ranking {
             assert!(mark.contains(&head_one), "{mark}");
             assert!(mark.contains(&head_two), "{mark}");
             assert!(mark.contains("re-read"), "{mark}");
+        }
+
+        #[test]
+        fn malformed_bounds_verify_unverifiable_never_panic() {
+            let dir = write_tree(&[("s.rs", "fn a() {}\n")]);
+            for (start, end) in [
+                (0usize, usize::MAX),
+                (usize::MAX, usize::MAX),
+                (5, 9),
+                (2, 2),
+            ] {
+                let bad = SourceCitation {
+                    path: "s.rs".to_string(),
+                    start_line: start,
+                    end_line: end,
+                    span_hash: "00".to_string(),
+                    span_text: String::new(),
+                    context_before: String::new(),
+                    context_after: String::new(),
+                    repo_id: String::new(),
+                    git_head: None,
+                };
+                assert_eq!(bad.verify(dir.path()), CitationStatus::Unverifiable);
+                // Recall-level: malformed citations render unmarked, no panic.
+                let entry = MemoryEntry {
+                    citation: Some(bad),
+                    ..MemoryEntry::new(MemoryCategory::Fact, "fragile fact")
+                };
+                let out = format_relevant_prompt_verified(&[entry], 10, dir.path())
+                    .expect("recall renders");
+                assert!(out.contains("fragile fact"));
+                assert!(!out.contains("source changed"));
+            }
+        }
+
+        #[test]
+        fn checkout_move_keeps_verifying() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let outer = tempfile::TempDir::new().expect("temp");
+            let repo = outer.path().join("checkout");
+            std::fs::create_dir_all(&repo).unwrap();
+            std::fs::write(repo.join("s.rs"), "fn a() {}\n").unwrap();
+            let run = |args: &[&str], dir: &std::path::Path| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"], &repo).status.success());
+            assert!(run(&["add", "."], &repo).status.success());
+            assert!(run(&["commit", "-qm", "one"], &repo).status.success());
+            let cited = SourceCitation::bank(&repo, "s.rs", 0, 1).expect("bank");
+            assert!(cited.repo_id.starts_with("git:"));
+            assert_eq!(cited.verify(&repo), CitationStatus::Fresh);
+            // Rename the checkout: identity follows the history, not the path.
+            let moved = outer.path().join("renamed");
+            std::fs::rename(&repo, &moved).unwrap();
+            assert_eq!(cited.verify(&moved), CitationStatus::Fresh);
         }
 
         #[test]
