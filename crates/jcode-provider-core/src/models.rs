@@ -433,9 +433,19 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
-    // --- xAI grok-code-fast: 256K context ---
-    if m.contains("grok-code-fast") {
+    // --- xAI Grok ---
+    // grok-4.6 / grok-4.5: 500K (xAI docs). grok-code-fast / grok-build-0.1: 256K.
+    // Without this, grok-4.6 falls through to DEFAULT_CONTEXT_LIMIT (200K) and
+    // the TUI meter / compaction budget under-report the real window.
+    if m.contains("grok-code-fast") || m.contains("grok-build-0") {
         return Some(256_000);
+    }
+    if m.contains("grok-4.6")
+        || m.contains("grok-4-6")
+        || m.contains("grok-4.5")
+        || m.contains("grok-4-5")
+    {
+        return Some(500_000);
     }
 
     // --- Perplexity Sonar: 128K context ---
@@ -525,6 +535,24 @@ mod tests {
         assert_eq!(
             ALL_OPENAI_MODELS.first().copied(),
             Some(DEFAULT_OPENAI_MODEL)
+        );
+    }
+
+    #[test]
+    fn grok_4_6_resolves_to_500k_context() {
+        assert_eq!(context_limit_for_model("grok-4.6"), Some(500_000));
+        assert_eq!(
+            context_limit_for_model_with_provider("grok-4.6", Some("grok-build")),
+            Some(500_000)
+        );
+        assert_eq!(
+            context_limit_for_model("grok-build:grok-4.6"),
+            Some(500_000)
+        );
+        assert_eq!(context_limit_for_model("grok-4.5"), Some(500_000));
+        assert_eq!(
+            context_limit_for_model("grok-code-fast-1"),
+            Some(256_000)
         );
     }
 

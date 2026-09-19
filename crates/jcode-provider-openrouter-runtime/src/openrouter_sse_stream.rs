@@ -189,6 +189,7 @@ async fn stream_response(
         &api_base,
         Some(&model),
     );
+    req = crate::apply_grok_cli_proxy_headers(req, &api_base, Some(&model));
 
     if send_openrouter_headers {
         req = req

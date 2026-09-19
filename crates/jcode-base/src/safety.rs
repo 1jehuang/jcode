@@ -415,6 +415,43 @@ pub fn record_permission_via_file(
     Ok(())
 }
 
+/// Queue a tool permission for the Jcode `/permissions` flow and return its id.
+pub fn enqueue_tool_permission(action: &str, description: &str, rationale: &str) -> String {
+    let id = format!(
+        "perm-{}-{}",
+        action.replace(|ch: char| !ch.is_ascii_alphanumeric(), "-"),
+        Utc::now().timestamp_millis()
+    );
+    let request = PermissionRequest {
+        id: id.clone(),
+        action: action.to_string(),
+        description: description.to_string(),
+        rationale: rationale.to_string(),
+        urgency: Urgency::High,
+        wait: true,
+        created_at: Utc::now(),
+        context: None,
+    };
+    let _ = SafetySystem::new().request_permission(request);
+    id
+}
+
+/// Latest recorded decision for `request_id`, if any. Callers that enqueue a
+/// permission from another process (ACP, IMAP) poll this until the TUI or
+/// `jcode permissions` writes history.
+pub fn decision_via_file(request_id: &str) -> Option<bool> {
+    let hp = history_path().ok()?;
+    if !hp.exists() {
+        return None;
+    }
+    let history: Vec<Decision> = storage::read_json(&hp).ok()?;
+    history
+        .iter()
+        .rev()
+        .find(|decision| decision.request_id == request_id)
+        .map(|decision| decision.approved)
+}
+
 /// Expire stale permission requests directly via queue/history files.
 /// Used by processes that don't hold the live SafetySystem instance.
 pub fn expire_stale_permissions_via_file(via: &str) -> Result<Vec<String>> {
@@ -717,6 +754,7 @@ mod tests {
                 !still_pending,
                 "request should have been removed from queue"
             );
+            assert_eq!(decision_via_file("req_file_test"), Some(true));
         });
     }
 }

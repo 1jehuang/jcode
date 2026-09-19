@@ -1,9 +1,8 @@
-//! Jcode-managed Grok Build backend discovery and provisioning.
+//! Jcode-managed Grok Build backend discovery, OIDC credentials, and CLI path.
 //!
-//! Grok Build currently exposes its subscription runtime through ACP. Jcode
-//! keeps that implementation as a private provider backend, downloading the
-//! official xAI binary into Jcode's data directory when first needed. Users do
-//! not need to install the `grok` CLI or put it on `PATH`.
+//! Subscription auth lives in the Grok CLI store (`GROK_HOME` or `~/.grok/auth.json`)
+//! under the xAI issuer/client scope. HTTP chat uses that scoped access token
+//! (with refresh); ACP still talks to the official `grok agent stdio` backend.
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
@@ -229,9 +228,181 @@ pub fn cli_available() -> bool {
     super::command_exists(cli_path().to_string_lossy().as_ref())
 }
 
+/// Version string the CLI chat proxy expects in `User-Agent: grok-cli/<ver>`.
+/// Missing this header makes the proxy report version `(none)` and return 426.
+pub fn cli_version_string() -> String {
+    static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            if let Ok(version) = std::env::var("JCODE_GROK_CLI_VERSION") {
+                let version = version.trim();
+                if !version.is_empty() {
+                    return version.to_string();
+                }
+            }
+            std::process::Command::new(cli_path())
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    text.split_whitespace()
+                        .nth(1)
+                        .map(|part| part.trim().to_string())
+                        .filter(|part| !part.is_empty())
+                })
+                .unwrap_or_else(|| "1.0.34".to_string())
+        })
+        .clone()
+}
+
+fn credential_scope_key() -> String {
+    format!("{OAUTH_ISSUER}::{OAUTH_CLIENT_ID}")
+}
+
+fn auth_json_path() -> Option<PathBuf> {
+    grok_home(
+        std::env::var_os("GROK_HOME"),
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+    .map(|home| home.join("auth.json"))
+}
+
+fn is_supported_oidc_credential(scope_key: &str, credential: &serde_json::Value) -> bool {
+    if scope_key != credential_scope_key() {
+        return false;
+    }
+    match credential.get("auth_mode").and_then(serde_json::Value::as_str) {
+        None | Some("") | Some("oidc") => {}
+        Some(_) => return false,
+    }
+    let issuer_ok = credential
+        .get("oidc_issuer")
+        .and_then(serde_json::Value::as_str)
+        .map(|issuer| issuer == OAUTH_ISSUER)
+        .unwrap_or(true);
+    let client_ok = credential
+        .get("oidc_client_id")
+        .and_then(serde_json::Value::as_str)
+        .map(|client| client == OAUTH_CLIENT_ID)
+        .unwrap_or(true);
+    issuer_ok && client_ok
+}
+
+fn credential_access_key(credential: &serde_json::Value) -> Option<String> {
+    credential
+        .get("key")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn scoped_credential_from_bytes(bytes: &[u8]) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(scopes) = serde_json::from_slice(bytes).ok()? else {
+        return None;
+    };
+    let key = credential_scope_key();
+    let credential = scopes.get(&key)?.clone();
+    is_supported_oidc_credential(&key, &credential).then_some(credential)
+}
+
+fn load_scoped_credential() -> Option<serde_json::Value> {
+    scoped_credential_from_bytes(&std::fs::read(auth_json_path()?).ok()?)
+}
+
+fn credential_is_expired(credential: &serde_json::Value) -> bool {
+    let Some(expires_at) = credential
+        .get("expires_at")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        return true;
+    };
+    expiry.with_timezone(&chrono::Utc) <= chrono::Utc::now() + chrono::Duration::seconds(60)
+}
+
 /// Whether the managed backend has a credential that it can attempt to use.
 /// Backend presence alone is not authentication and must not make `/login` or
 /// `jcode auth status` claim that Grok Build is ready.
+/// Bearer token from Grok CLI / Jcode Grok Build OIDC login.
+/// This is the subscription session token, not `XAI_API_KEY`.
+pub fn bearer_token() -> Option<String> {
+    if let Ok(key) = std::env::var("GROK_DEPLOYMENT_KEY") {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    credential_access_key(&load_scoped_credential()?)
+}
+
+/// Access token after honouring expiry / refresh. Falls back to ACP if refresh fails.
+pub async fn live_bearer_token() -> Option<String> {
+    live_bearer_token_inner(false).await
+}
+
+async fn live_bearer_token_inner(force_refresh: bool) -> Option<String> {
+    if let Ok(key) = std::env::var("GROK_DEPLOYMENT_KEY") {
+        let key = key.trim();
+        if !key.is_empty() {
+            return Some(key.to_string());
+        }
+    }
+    let credential = load_scoped_credential()?;
+    if force_refresh || credential_is_expired(&credential) {
+        refresh_scoped_oidc(&credential).await.ok()?;
+        return credential_access_key(&load_scoped_credential()?);
+    }
+    credential_access_key(&credential)
+}
+
+/// Force a refresh after a 401 from the CLI chat proxy.
+pub async fn refresh_bearer_token() -> Option<String> {
+    live_bearer_token_inner(true).await
+}
+
+async fn refresh_scoped_oidc(credential: &serde_json::Value) -> Result<()> {
+    let refresh = credential
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Grok Build OIDC credential has no refresh token"))?;
+    let client = reqwest::Client::new();
+    let response = oauth_headers(client.post(format!("{OAUTH_ISSUER}/oauth2/token")))
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", OAUTH_CLIENT_ID),
+        ])
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.bytes().await?;
+    if !status.is_success() {
+        let error: TokenError = serde_json::from_slice(&body).unwrap_or(TokenError {
+            error: status.to_string(),
+            error_description: None,
+        });
+        bail!(
+            "Grok Build token refresh failed: {}",
+            error.error_description.unwrap_or(error.error)
+        );
+    }
+    let mut tokens: TokenResponse =
+        serde_json::from_slice(&body).context("invalid xAI refresh token response")?;
+    if tokens.refresh_token.is_none() {
+        tokens.refresh_token = Some(refresh.to_string());
+    }
+    save_tokens(tokens)
+}
+
 pub fn has_cached_login() -> bool {
     if std::env::var("GROK_DEPLOYMENT_KEY")
         .ok()
@@ -239,25 +410,19 @@ pub fn has_cached_login() -> bool {
     {
         return true;
     }
-    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+    let Some(path) = auth_json_path() else {
         return false;
     };
-    let Ok(bytes) = std::fs::read(PathBuf::from(home).join(".grok").join("auth.json")) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
     credentials_json_has_login(&bytes)
 }
 
 fn credentials_json_has_login(bytes: &[u8]) -> bool {
-    let Ok(serde_json::Value::Object(scopes)) = serde_json::from_slice(bytes) else {
-        return false;
-    };
-    scopes.values().any(|credential| {
-        credential
-            .get("key")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|key| !key.trim().is_empty())
-    })
+    scoped_credential_from_bytes(bytes)
+        .and_then(|credential| credential_access_key(&credential))
+        .is_some()
 }
 
 fn platform_name() -> Result<&'static str> {
@@ -368,14 +533,60 @@ mod tests {
     }
 
     #[test]
+    fn cli_version_string_is_a_single_token() {
+        let version = super::cli_version_string();
+        assert!(!version.is_empty(), "CLI chat proxy treats empty as (none)");
+        assert!(
+            !version.contains(char::is_whitespace),
+            "User-Agent grok-cli/<ver> cannot contain whitespace: {version:?}"
+        );
+        assert_ne!(version, "none");
+    }
+
+    #[test]
     fn backend_presence_is_not_mistaken_for_login() {
         assert!(!credentials_json_has_login(br#"{}"#));
         assert!(!credentials_json_has_login(
-            br#"{"https://auth.x.ai::client":{"key":""}}"#
-        ));
-        assert!(credentials_json_has_login(
             br#"{"https://auth.x.ai::client":{"key":"token"}}"#
         ));
+        let scoped = format!(
+            r#"{{"{}":{{"key":"token","auth_mode":"oidc"}}}}"#,
+            super::credential_scope_key()
+        );
+        assert!(credentials_json_has_login(scoped.as_bytes()));
+        let empty_scoped = format!(
+            r#"{{"{}":{{"key":"","auth_mode":"oidc"}}}}"#,
+            super::credential_scope_key()
+        );
+        assert!(!credentials_json_has_login(empty_scoped.as_bytes()));
+    }
+
+    #[test]
+    fn bearer_token_ignores_unrelated_auth_store_entries() {
+        let _lock = crate::storage::lock_test_env();
+        let dir = tempfile::tempdir().unwrap();
+        let scope = super::credential_scope_key();
+        std::fs::write(
+            dir.path().join("auth.json"),
+            format!(
+                r#"{{
+                    "https://other.example::abc": {{"key":"wrong","auth_mode":"oidc"}},
+                    "{scope}": {{"key":"right","auth_mode":"oidc","oidc_issuer":"https://auth.x.ai","oidc_client_id":"b1a00492-073a-47ea-816f-4c329264a828"}}
+                }}"#
+            ),
+        )
+        .unwrap();
+        crate::env::set_var("GROK_HOME", dir.path());
+        crate::env::remove_var("GROK_DEPLOYMENT_KEY");
+        assert_eq!(super::bearer_token().as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn grok_home_prefers_grok_home_env() {
+        assert_eq!(
+            grok_home(Some("/tmp/grok-store".into()), Some("/home/me".into()), None),
+            Some(PathBuf::from("/tmp/grok-store"))
+        );
     }
 
     #[test]

@@ -96,6 +96,8 @@ impl Agent {
             || lower.contains("token limit")
             || lower.contains("too many tokens")
             || lower.contains("prompt is too long")
+            || lower.contains("maximum prompt length")
+            || lower.contains("max prompt length")
             || lower.contains("input is too long")
             || lower.contains("request too large")
             || lower.contains("length limit")

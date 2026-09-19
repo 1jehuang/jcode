@@ -8,6 +8,7 @@ pub(super) fn handle_tool_done(
     output: String,
     error: Option<String>,
 ) -> bool {
+    let parsed_input = remote.tool_input_for(&id);
     let display_output = remote.handle_tool_done(&id, &name, &output);
     let display_output = if error.is_some()
         && !display_output.starts_with("Error:")
@@ -23,13 +24,21 @@ pub(super) fn handle_tool_done(
         .iter()
         .find(|tc| tc.id == id)
         .cloned();
-    let tool_call = existing_tool_call.unwrap_or_else(|| ToolCall {
+    let mut tool_call = existing_tool_call.unwrap_or_else(|| ToolCall {
         id: id.clone(),
         name: name.clone(),
         input: serde_json::Value::Null,
         intent: None,
         thought_signature: None,
     });
+    if tool_input_has_edit_payload(&parsed_input) && !tool_input_has_edit_payload(&tool_call.input)
+    {
+        tool_call.input = parsed_input;
+        tool_call.refresh_intent_from_input();
+    } else if tool_call.input.is_null() && parsed_input.is_object() {
+        tool_call.input = parsed_input;
+        tool_call.refresh_intent_from_input();
+    }
     app.commit_pending_streaming_assistant_message();
     crate::tui::mermaid::clear_streaming_preview_diagram();
     let is_batch = tool_call.name == "batch";
@@ -54,6 +63,21 @@ pub(super) fn handle_tool_done(
     app.streaming_tool_calls.retain(|tc| tc.id != id);
     app.status = ProcessingStatus::Streaming;
     true
+}
+
+fn tool_input_has_edit_payload(input: &serde_json::Value) -> bool {
+    input
+        .get("old_string")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.is_empty())
+        || input
+            .get("new_string")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
+        || input
+            .get("content")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
 }
 
 pub(super) fn handle_generated_image(

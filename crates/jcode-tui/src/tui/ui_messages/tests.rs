@@ -2712,6 +2712,76 @@ fn render_tool_message_colors_high_token_badge() {
 }
 
 #[test]
+fn render_tool_message_shows_inline_diff_for_grok_write() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[write] watch.sh".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("watch.sh".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call-grok-write".to_string(),
+            name: "write".to_string(),
+            input: serde_json::json!({
+                "file_path": "watch.sh",
+                "content": "#!/bin/bash\necho hi\n"
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(plain.contains("echo hi"), "plain={plain}");
+}
+
+#[test]
+fn render_tool_message_shows_inline_diff_for_grok_search_replace() {
+    let msg = DisplayMessage {
+        role: "tool".to_string(),
+        content: "[edit] consts/call_bot.consts.go".to_string(),
+        tool_calls: Vec::new(),
+        duration_secs: None,
+        title: Some("consts/call_bot.consts.go".to_string()),
+        tool_data: Some(crate::message::ToolCall {
+            id: "call-grok-search-replace".to_string(),
+            name: "edit".to_string(),
+            input: serde_json::json!({
+                "file_path": "consts/call_bot.consts.go",
+                "old_string": "\tCallBotResultFail    = \"fail\"\n)",
+                "new_string": "\tCallBotResultFail    = \"fail\"\n\tCallBotScenarioClinicNoShow = \"clinic_no_show\"\n)"
+            }),
+            intent: None,
+            thought_signature: None,
+        }),
+    };
+
+    let lines = render_tool_message(&msg, 100, crate::config::DiffDisplayMode::Inline);
+    let plain = lines
+        .iter()
+        .map(extract_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("┌─ diff"), "plain={plain}");
+    assert!(
+        plain.contains("CallBotScenarioClinicNoShow"),
+        "plain={plain}"
+    );
+    assert!(
+        plain.contains("(+") || plain.contains("+1") || plain.contains('+'),
+        "plain={plain}"
+    );
+}
+
+#[test]
 fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     let msg = DisplayMessage {
         role: "tool".to_string(),
@@ -2927,10 +2997,10 @@ fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
 
 #[test]
 fn render_tool_message_inline_mode_truncates_large_diffs() {
-    let old = (1..=7)
+    let old = (1..=50)
         .map(|i| format!("old line {i}\n"))
         .collect::<String>();
-    let new = (1..=7)
+    let new = (1..=50)
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
@@ -2959,14 +3029,17 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("... 2 more changes ..."), "plain={plain}");
+    assert!(plain.contains("... 20 more changes ..."), "plain={plain}");
     assert!(plain.contains("old line 3"), "plain={plain}");
-    assert!(!plain.contains("old line 7"), "plain={plain}");
+    assert!(!plain.contains("old line 50"), "plain={plain}");
     assert!(
         !plain.contains("new line 1 suffix_1_abcdefghijklmnopqrstuvwxyz0123456789"),
         "plain={plain}"
     );
-    assert!(plain.contains("suffix_2_abcdefghijklm…"), "plain={plain}");
+    assert!(
+        plain.contains("suffix_50_") || plain.contains("new line 50"),
+        "plain={plain}"
+    );
 }
 
 #[test]

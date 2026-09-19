@@ -12,6 +12,7 @@ pub(crate) struct PendingFileDiff {
 #[derive(Default)]
 pub(crate) struct RemoteDiffTracker {
     pub(crate) pending_diffs: HashMap<String, PendingFileDiff>,
+    pub(crate) parsed_inputs: HashMap<String, Value>,
     pub(crate) current_tool_id: Option<String>,
     pub(crate) current_tool_name: Option<String>,
     pub(crate) current_tool_input: String,
@@ -26,19 +27,35 @@ impl RemoteDiffTracker {
 
     pub(crate) fn handle_tool_input(&mut self, delta: &str) {
         self.current_tool_input.push_str(delta);
+        if let Some(id) = self.current_tool_id.as_deref()
+            && let Ok(input) = serde_json::from_str::<Value>(&self.current_tool_input)
+        {
+            self.parsed_inputs.insert(id.to_string(), input);
+        }
     }
 
     pub(crate) fn current_tool_input_json(&self) -> Value {
         serde_json::from_str(&self.current_tool_input).unwrap_or(Value::Null)
     }
 
+    pub(crate) fn tool_input_for(&self, id: &str) -> Value {
+        self.parsed_inputs
+            .get(id)
+            .cloned()
+            .unwrap_or(self.current_tool_input_json())
+    }
+
     pub(crate) fn handle_tool_exec(&mut self, id: &str, name: &str) {
+        let parsed = serde_json::from_str::<Value>(&self.current_tool_input).ok();
+        if let Some(input) = parsed.clone() {
+            self.parsed_inputs.insert(id.to_string(), input);
+        }
         if show_diffs_enabled()
             && matches!(
                 crate::tui::ui::tools_ui::canonical_tool_name(name),
                 "edit" | "write" | "multiedit"
             )
-            && let Ok(input) = serde_json::from_str::<Value>(&self.current_tool_input)
+            && let Some(input) = parsed
             && let Some(file_path) = input.get("file_path").and_then(|v| v.as_str())
         {
             let resolved = resolve_diff_path(file_path);
@@ -58,24 +75,36 @@ impl RemoteDiffTracker {
     }
 
     pub(crate) fn finish_tool(&mut self, id: &str, name: &str, output: &str) -> String {
-        if let Some(pending) = self.pending_diffs.remove(id) {
+        let disk_diff = self.pending_diffs.remove(id).and_then(|pending| {
             let new_content = std::fs::read_to_string(&pending.file_path).unwrap_or_default();
             let diff =
                 generate_unified_diff(&pending.original_content, &new_content, &pending.file_path);
-            if !diff.is_empty() {
-                return format!("[{}] {}\n{}", name, pending.file_path, diff);
-            }
+            (!diff.is_empty()).then(|| format!("[{name}] {}\n{diff}", pending.file_path))
+        });
+        self.parsed_inputs.remove(id);
+        if let Some(diff) = disk_diff {
+            return diff;
         }
-
-        format!("[{}] {}", name, output)
+        if looks_like_unified_diff(output) {
+            return output.to_string();
+        }
+        format!("[{name}] {output}")
     }
 
     pub(crate) fn clear(&mut self) {
         self.pending_diffs.clear();
+        self.parsed_inputs.clear();
         self.current_tool_id = None;
         self.current_tool_name = None;
         self.current_tool_input.clear();
     }
+}
+
+fn looks_like_unified_diff(output: &str) -> bool {
+    output.contains("\n--- a/")
+        || output.contains("\n+++ b/")
+        || output.trim_start().starts_with("--- a/")
+        || output.trim_start().starts_with("+++ b/")
 }
 
 /// Check if client-side diff generation is enabled.
@@ -118,4 +147,32 @@ pub(crate) fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> St
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stores_parsed_input_per_tool_id_after_exec() {
+        let mut tracker = RemoteDiffTracker::default();
+        tracker.handle_tool_start("call-a", "edit");
+        tracker.handle_tool_input(r#"{"file_path":"a.go","old_string":"old","new_string":"new"}"#);
+        tracker.handle_tool_exec("call-a", "edit");
+        let input = tracker.tool_input_for("call-a");
+        assert_eq!(input["file_path"], "a.go");
+        assert_eq!(input["old_string"], "old");
+        assert_eq!(input["new_string"], "new");
+    }
+
+    #[test]
+    fn finish_tool_keeps_existing_unified_diff() {
+        let mut tracker = RemoteDiffTracker::default();
+        let output = "\n--- a/demo.go\n+++ b/demo.go\n@@ -1 +1 @@\n-old\n+new\n";
+        let finished = tracker.finish_tool("call-a", "edit", output);
+        assert!(finished.contains("--- a/demo.go"), "{finished}");
+        assert!(!finished.starts_with("[edit] ---"), "{finished}");
+        assert!(finished.contains("-old"), "{finished}");
+        assert!(finished.contains("+new"), "{finished}");
+    }
 }

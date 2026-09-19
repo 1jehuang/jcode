@@ -75,6 +75,8 @@ pub fn classify_failover_error_message(message: &str) -> FailoverDecision {
         "context window",
         "maximum context",
         "prompt is too long",
+        "maximum prompt length",
+        "max prompt length",
         "input is too long",
         "too many tokens",
         "max tokens",

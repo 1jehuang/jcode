@@ -11,6 +11,7 @@ fn fake_process(log: &Path) -> GrokBuildProcess {
         "JCODE_FAKE_GROK_ACP_LOG".to_string(),
         log.display().to_string(),
     );
+    env.insert("JCODE_GROK_ACP_DISABLE_MCP".to_string(), "1".to_string());
     GrokBuildProcess {
         command: env!("CARGO_BIN_EXE_jcode-fake-grok-acp").into(),
         args: Vec::new(),
@@ -89,9 +90,67 @@ async fn fake_subprocess_covers_handshake_models_new_prompt_and_auth_isolation()
     assert!(requests.contains("\"methodId\":\"cached_token\""));
     assert!(!requests.contains("\"methodId\":\"xai.api_key\""));
     assert!(requests.contains("\"method\":\"session/new\""));
-    assert!(requests.contains("\"mcpServers\":[]"));
     assert!(requests.contains("\"method\":\"session/set_model\""));
-    assert!(requests.contains("outer-system"));
+    assert!(requests.contains("\"rules\":\"outer-system\""));
+    assert!(requests.contains("\"yoloMode\":false"));
+    let prompt_line = requests
+        .lines()
+        .find(|line| line.contains("\"method\":\"session/prompt\""))
+        .expect("session/prompt was logged");
+    assert!(prompt_line.contains("AUTH_TEST_OK"), "{prompt_line}");
+    assert!(
+        !prompt_line.contains("outer-system"),
+        "Jcode system prompt must not be wrapped into session/prompt: {prompt_line}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fake_subprocess_surfaces_acp_file_diffs_as_edit_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let log = temp.path().join("edit.jsonl");
+    let mut process = fake_process(&log);
+    process
+        .env
+        .insert("JCODE_FAKE_GROK_ACP_EDIT".into(), "1".into());
+    let provider = GrokBuildProvider::with_process(process);
+    provider.prefetch_models().await.unwrap();
+
+    let mut stream = provider
+        .complete(&[Message::user("edit the file")], &[], "", None)
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.unwrap());
+    }
+
+    assert!(
+        events.iter().any(|event| {
+            matches!(event, StreamEvent::ToolUseStart { id, name } if id == "edit-1" && name == "edit")
+        }),
+        "missing ToolUseStart: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolInputDelta(delta) if delta.contains("src/lib.rs") && delta.contains("fn new() {}")
+        )),
+        "missing edit input: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolUseEnd)),
+        "missing ToolUseEnd: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            StreamEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "edit-1" && !*is_error && content.contains("-fn old() {}") && content.contains("+fn new() {}")
+        )),
+        "missing ToolResult diff: {events:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

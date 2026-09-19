@@ -287,6 +287,10 @@ pub(crate) trait RemoteEventState {
     fn handle_tool_start(&mut self, id: &str, name: &str);
     fn handle_tool_input(&mut self, delta: &str);
     fn get_current_tool_input(&self) -> serde_json::Value;
+    fn tool_input_for(&self, id: &str) -> serde_json::Value {
+        let _ = id;
+        self.get_current_tool_input()
+    }
     fn handle_tool_exec(&mut self, id: &str, name: &str);
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
     fn clear_pending(&mut self);
@@ -661,7 +665,11 @@ impl RemoteConnection {
     pub async fn request_model_catalog(&mut self) -> Result<u64> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.send_request(Request::GetModelCatalog { id, subscribe_usage_updates: true }).await?;
+        self.send_request(Request::GetModelCatalog {
+            id,
+            subscribe_usage_updates: true,
+        })
+        .await?;
         Ok(id)
     }
 
@@ -1381,6 +1389,10 @@ impl RemoteConnection {
         self.tool_diff.current_tool_input_json()
     }
 
+    pub fn tool_input_for(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_for(id)
+    }
+
     /// Handle tool exec - cache file content if edit/write
     pub fn handle_tool_exec(&mut self, id: &str, name: &str) {
         self.tool_diff.handle_tool_exec(id, name);
@@ -1418,6 +1430,10 @@ impl RemoteEventState for RemoteConnection {
 
     fn get_current_tool_input(&self) -> serde_json::Value {
         Self::get_current_tool_input(self)
+    }
+
+    fn tool_input_for(&self, id: &str) -> serde_json::Value {
+        Self::tool_input_for(self, id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
@@ -1464,6 +1480,10 @@ impl RemoteEventState for ReplayRemoteState {
 
     fn get_current_tool_input(&self) -> serde_json::Value {
         self.tool_diff.current_tool_input_json()
+    }
+
+    fn tool_input_for(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_for(id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
