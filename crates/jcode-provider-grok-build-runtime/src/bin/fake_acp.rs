@@ -122,6 +122,7 @@ fn main() {
                             "update":{
                                 "sessionUpdate":"tool_call",
                                 "toolCallId":"edit-1",
+                                "status":"completed",
                                 "title":"search_replace",
                                 "rawInput":{
                                     "file_path":"src/lib.rs",

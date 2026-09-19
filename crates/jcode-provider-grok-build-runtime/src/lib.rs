@@ -119,6 +119,51 @@ impl GrokBuildProvider {
             .await
     }
 
+    async fn complete_acp(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        system: &str,
+        resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let prompt = build_prompt(messages, resume_session_id.is_some())?;
+        let system = system.to_string();
+        let process = self.process.clone();
+        // Before catalog prefetch or an explicit `--model`/picker choice, let
+        // Grok CLI keep its advertised current model instead of forcing our
+        // display fallback onto a newer CLI catalog.
+        let selected_model = self
+            .model_selected
+            .load(Ordering::Acquire)
+            .then(|| self.model());
+        let resume_session_id = resume_session_id.map(ToOwned::to_owned);
+        let (tx, rx) = mpsc::channel(128);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+
+        let thread = std::thread::Builder::new()
+            .name("jcode-grok-build-acp".to_string())
+            .spawn(move || {
+                if let Err(error) = run_turn_thread(
+                    process,
+                    selected_model,
+                    resume_session_id,
+                    system,
+                    prompt,
+                    tx.clone(),
+                    cancel_rx,
+                ) {
+                    let _ = tx.blocking_send(Err(error));
+                }
+            })
+            .context("Failed to start Grok Build ACP runtime thread")?;
+
+        Ok(Box::pin(GrokEventStream {
+            inner: ReceiverStream::new(rx),
+            cancel: Some(cancel_tx),
+            thread: Some(thread),
+        }))
+    }
+
     /// Verify that the CLI can initialize and authenticate with its own cached
     /// subscription credential. This never reads or forwards credential data.
     pub async fn authenticate_cached_cli(&self) -> Result<()> {
@@ -185,52 +230,25 @@ impl Provider for GrokBuildProvider {
                 .complete_http(messages, tools, system, resume_session_id, false)
                 .await
             {
-                Ok(stream) => return Ok(wrap_repeat_guard(stream)),
-                Err(error) if grok_http_unauthorized(&error) => {
-                    let stream = self
-                        .complete_http(messages, tools, system, resume_session_id, true)
-                        .await?;
-                    return Ok(wrap_repeat_guard(stream));
+                Ok(stream) => {
+                    return Ok(wrap_repeat_guard(wrap_http_auth_retry(
+                        stream,
+                        self.clone(),
+                        messages.to_vec(),
+                        tools.to_vec(),
+                        system.to_string(),
+                        resume_session_id.map(ToOwned::to_owned),
+                    )));
                 }
-                Err(error) => return Err(error),
+                // Cached login can exist while the access token is expired and
+                // refresh is missing/revoked. Do not fail the turn: ACP still
+                // authenticates through Grok CLI.
+                Err(_) => {}
             }
         }
-        let prompt = build_prompt(messages, resume_session_id.is_some())?;
-        let system = system.to_string();
-        let process = self.process.clone();
-        // Before catalog prefetch or an explicit `--model`/picker choice, let
-        // Grok CLI keep its advertised current model instead of forcing our
-        // display fallback onto a newer CLI catalog.
-        let selected_model = self
-            .model_selected
-            .load(Ordering::Acquire)
-            .then(|| self.model());
-        let resume_session_id = resume_session_id.map(ToOwned::to_owned);
-        let (tx, rx) = mpsc::channel(128);
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-
-        let thread = std::thread::Builder::new()
-            .name("jcode-grok-build-acp".to_string())
-            .spawn(move || {
-                if let Err(error) = run_turn_thread(
-                    process,
-                    selected_model,
-                    resume_session_id,
-                    system,
-                    prompt,
-                    tx.clone(),
-                    cancel_rx,
-                ) {
-                    let _ = tx.blocking_send(Err(error));
-                }
-            })
-            .context("Failed to start Grok Build ACP runtime thread")?;
-
-        Ok(wrap_repeat_guard(Box::pin(GrokEventStream {
-            inner: ReceiverStream::new(rx),
-            cancel: Some(cancel_tx),
-            thread: Some(thread),
-        })))
+        self.complete_acp(messages, tools, system, resume_session_id)
+            .await
+            .map(wrap_repeat_guard)
     }
 
     fn name(&self) -> &str {
@@ -404,6 +422,116 @@ struct RepeatGuardStream {
 fn skipped_auto_followup_stream() -> EventStream {
     let (_tx, rx) = mpsc::channel(1);
     Box::pin(ReceiverStream::new(rx))
+}
+
+struct GrokHttpRetryArgs {
+    provider: GrokBuildProvider,
+    messages: Vec<Message>,
+    tools: Vec<ToolDefinition>,
+    system: String,
+    resume_session_id: Option<String>,
+}
+
+struct GrokHttpAuthRetryStream {
+    inner: EventStream,
+    pending: Option<Pin<Box<dyn std::future::Future<Output = Result<EventStream>> + Send>>>,
+    retried: bool,
+    retry: Option<GrokHttpRetryArgs>,
+}
+
+fn wrap_http_auth_retry(
+    inner: EventStream,
+    provider: GrokBuildProvider,
+    messages: Vec<Message>,
+    tools: Vec<ToolDefinition>,
+    system: String,
+    resume_session_id: Option<String>,
+) -> EventStream {
+    Box::pin(GrokHttpAuthRetryStream {
+        inner,
+        pending: None,
+        retried: false,
+        retry: Some(GrokHttpRetryArgs {
+            provider,
+            messages,
+            tools,
+            system,
+            resume_session_id,
+        }),
+    })
+}
+
+fn stream_item_is_unauthorized(item: &Result<StreamEvent>) -> bool {
+    match item {
+        Err(error) => grok_http_unauthorized(error),
+        Ok(StreamEvent::Error { message, .. }) => grok_http_unauthorized_text(message),
+        _ => false,
+    }
+}
+
+fn start_http_auth_retry(
+    args: GrokHttpRetryArgs,
+) -> Pin<Box<dyn std::future::Future<Output = Result<EventStream>> + Send>> {
+    Box::pin(async move {
+        match args
+            .provider
+            .complete_http(
+                &args.messages,
+                &args.tools,
+                &args.system,
+                args.resume_session_id.as_deref(),
+                true,
+            )
+            .await
+        {
+            Ok(stream) => Ok(stream),
+            Err(_) => {
+                args.provider
+                    .complete_acp(
+                        &args.messages,
+                        &args.tools,
+                        &args.system,
+                        args.resume_session_id.as_deref(),
+                    )
+                    .await
+            }
+        }
+    })
+}
+
+impl Stream for GrokHttpAuthRetryStream {
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(pending) = this.pending.as_mut() {
+                match pending.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(stream)) => {
+                        this.pending = None;
+                        this.inner = stream;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        this.pending = None;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+            match Pin::new(&mut this.inner).poll_next(cx) {
+                Poll::Ready(Some(item))
+                    if !this.retried && stream_item_is_unauthorized(&item) =>
+                {
+                    this.retried = true;
+                    let Some(args) = this.retry.take() else {
+                        return Poll::Ready(Some(item));
+                    };
+                    this.pending = Some(start_http_auth_retry(args));
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 fn wrap_repeat_guard(inner: EventStream) -> EventStream {
@@ -1117,12 +1245,17 @@ impl GrokAcpClient {
 }
 
 fn grok_http_unauthorized(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    text.contains("401")
-        && (text.contains("unauthorized")
-            || text.contains("invalid token")
-            || text.contains("expired")
-            || text.contains("unauthenticated"))
+    grok_http_unauthorized_text(&format!("{error:#}"))
+}
+
+fn grok_http_unauthorized_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("status: 401")
+        || (text.contains("401")
+            && (text.contains("unauthorized")
+                || text.contains("invalid token")
+                || text.contains("expired")
+                || text.contains("unauthenticated")))
 }
 
 fn acp_nonzero_kind(kind: acp::ToolKind) -> Option<acp::ToolKind> {
@@ -2016,6 +2149,30 @@ fn cached_login_hint(prefix: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unauthorized_classifier_matches_proxy_status_line() {
+        let error = anyhow!(
+            "OpenAI-compatible chat request failed\n  status: 401 Unauthorized\n  response: {{\"error\":\"invalid token\"}}"
+        );
+        assert!(grok_http_unauthorized(&error));
+        assert!(stream_item_is_unauthorized(&Ok(StreamEvent::Error {
+            message: "status: 401 Unauthorized".to_string(),
+            retry_after_secs: None,
+        })));
+        assert!(!grok_http_unauthorized(&anyhow!(
+            "status: 403 Forbidden spending-limit"
+        )));
+    }
+
+    #[test]
+    fn live_oidc_setup_error_is_not_a_hard_failure_message() {
+        let error = anyhow!("Grok Build HTTP runtime requires a live OIDC token");
+        assert!(
+            !grok_http_unauthorized(&error),
+            "missing live token is not 401; complete() must fall back to ACP instead of retrying HTTP"
+        );
+    }
 
     #[test]
     fn acp_transport_leaves_compaction_to_grok_cli() {
