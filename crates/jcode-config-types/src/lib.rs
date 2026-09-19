@@ -396,6 +396,12 @@ pub struct CompactionConfig {
     /// stdin; its trimmed stdout becomes the summary text. Empty output,
     /// non-zero exit, timeout, or spawn failure all fail open to the built-in
     /// summarizer. Takes precedence over provider-native compaction while set.
+    ///
+    /// Preservation contract (what a summarizer must protect — a summary
+    /// that drops these strands the next session): architectural decisions
+    /// and why they were taken, unresolved bugs/errors, implementation
+    /// paths still in flight, and system state (working dir, branch, active
+    /// plan). Merge, don't replace, any `existing_summary` in the request.
     pub summary_command: Option<String>,
     /// Max milliseconds to wait for the summary command before failing open
     /// to the built-in summarizer (default: 120000).
