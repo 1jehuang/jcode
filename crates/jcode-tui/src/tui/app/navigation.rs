@@ -763,6 +763,20 @@ impl App {
         self.scroll_target_lines(target, delta.signum() as i16, lines);
     }
 
+    /// Step one of the `Option<usize>` overlay scroll offsets (help, changelog,
+    /// model status). Returns false when the overlay is closed.
+    fn overlay_scroll_step(scroll: &mut Option<usize>, direction: i16) -> bool {
+        let Some(current) = *scroll else {
+            return false;
+        };
+        *scroll = Some(if direction < 0 {
+            current.saturating_sub(1)
+        } else {
+            current.saturating_add(1)
+        });
+        true
+    }
+
     pub(super) fn apply_mouse_scroll_step(
         &mut self,
         target: MouseScrollTarget,
@@ -780,37 +794,13 @@ impl App {
                 self.side_pane_scroll_by(if direction < 0 { -1 } else { 1 })
             }
             MouseScrollTarget::HelpOverlay => {
-                let Some(current) = self.help_scroll else {
-                    return false;
-                };
-                self.help_scroll = Some(if direction < 0 {
-                    current.saturating_sub(1)
-                } else {
-                    current.saturating_add(1)
-                });
-                true
+                Self::overlay_scroll_step(&mut self.help_scroll, direction)
             }
             MouseScrollTarget::ChangelogOverlay => {
-                let Some(current) = self.changelog_scroll else {
-                    return false;
-                };
-                self.changelog_scroll = Some(if direction < 0 {
-                    current.saturating_sub(1)
-                } else {
-                    current.saturating_add(1)
-                });
-                true
+                Self::overlay_scroll_step(&mut self.changelog_scroll, direction)
             }
             MouseScrollTarget::ModelStatusOverlay => {
-                let Some(current) = self.model_status_scroll else {
-                    return false;
-                };
-                self.model_status_scroll = Some(if direction < 0 {
-                    current.saturating_sub(1)
-                } else {
-                    current.saturating_add(1)
-                });
-                true
+                Self::overlay_scroll_step(&mut self.model_status_scroll, direction)
             }
             MouseScrollTarget::SessionPickerPreview => {
                 let Some(picker_cell) = self.session_picker_overlay.as_ref() else {

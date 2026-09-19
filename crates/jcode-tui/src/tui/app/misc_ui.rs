@@ -465,99 +465,47 @@ impl App {
         }
     }
 
-    pub(super) fn handle_changelog_key(&mut self, code: KeyCode) -> Result<()> {
-        let scroll = self.changelog_scroll.unwrap_or(0);
+    /// Shared key handling for the full-screen scrollable overlays (changelog,
+    /// help, model status). `None` means the overlay is closed; Home/End jump to
+    /// the top/bottom (`usize::MAX` is clamped to the content at draw time).
+    /// Returns true when the key was consumed.
+    fn overlay_scroll_key(scroll: &mut Option<usize>, code: KeyCode) -> bool {
+        const PAGE: usize = 20;
+        let current = scroll.unwrap_or(0);
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.changelog_scroll = None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.changelog_scroll = Some(scroll.saturating_add(1));
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.changelog_scroll = Some(scroll.saturating_sub(1));
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.changelog_scroll = Some(scroll.saturating_add(20));
-            }
-            KeyCode::PageUp => {
-                self.changelog_scroll = Some(scroll.saturating_sub(20));
-            }
-            KeyCode::Home | KeyCode::Char('g') => {
-                self.changelog_scroll = Some(0);
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                self.changelog_scroll = Some(usize::MAX);
-            }
-            _ => {}
+            KeyCode::Esc | KeyCode::Char('q') => *scroll = None,
+            KeyCode::Down | KeyCode::Char('j') => *scroll = Some(current.saturating_add(1)),
+            KeyCode::Up | KeyCode::Char('k') => *scroll = Some(current.saturating_sub(1)),
+            KeyCode::PageDown | KeyCode::Char(' ') => *scroll = Some(current.saturating_add(PAGE)),
+            KeyCode::PageUp => *scroll = Some(current.saturating_sub(PAGE)),
+            KeyCode::Home | KeyCode::Char('g') => *scroll = Some(0),
+            KeyCode::End | KeyCode::Char('G') => *scroll = Some(usize::MAX),
+            _ => return false,
         }
+        true
+    }
+
+    pub(super) fn handle_changelog_key(&mut self, code: KeyCode) -> Result<()> {
+        Self::overlay_scroll_key(&mut self.changelog_scroll, code);
         Ok(())
     }
 
     pub(super) fn handle_help_key(&mut self, code: KeyCode) -> Result<()> {
-        let scroll = self.help_scroll.unwrap_or(0);
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.help_scroll = None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = Some(scroll.saturating_add(1));
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.help_scroll = Some(scroll.saturating_sub(1));
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.help_scroll = Some(scroll.saturating_add(20));
-            }
-            KeyCode::PageUp => {
-                self.help_scroll = Some(scroll.saturating_sub(20));
-            }
-            KeyCode::Home | KeyCode::Char('g') => {
-                self.help_scroll = Some(0);
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                self.help_scroll = Some(usize::MAX);
-            }
-            _ => {}
-        }
+        Self::overlay_scroll_key(&mut self.help_scroll, code);
         Ok(())
     }
 
     pub(super) fn handle_model_status_key(&mut self, code: KeyCode) -> Result<()> {
-        let scroll = self.model_status_scroll.unwrap_or(0);
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.model_status_scroll = None;
+        if Self::overlay_scroll_key(&mut self.model_status_scroll, code) {
+            return Ok(());
+        }
+        if code == KeyCode::Char('c') {
+            let success = super::helpers::copy_to_clipboard(&self.model_status_content);
+            if success {
+                self.set_status_notice("Copied provider test coverage report".to_string());
+            } else {
+                self.set_status_notice("Failed to copy provider test coverage report".to_string());
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.model_status_scroll = Some(scroll.saturating_add(1));
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.model_status_scroll = Some(scroll.saturating_sub(1));
-            }
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                self.model_status_scroll = Some(scroll.saturating_add(20));
-            }
-            KeyCode::PageUp => {
-                self.model_status_scroll = Some(scroll.saturating_sub(20));
-            }
-            KeyCode::Home | KeyCode::Char('g') => {
-                self.model_status_scroll = Some(0);
-            }
-            KeyCode::End | KeyCode::Char('G') => {
-                self.model_status_scroll = Some(usize::MAX);
-            }
-            KeyCode::Char('c') => {
-                let success = super::helpers::copy_to_clipboard(&self.model_status_content);
-                if success {
-                    self.set_status_notice("Copied provider test coverage report".to_string());
-                } else {
-                    self.set_status_notice(
-                        "Failed to copy provider test coverage report".to_string(),
-                    );
-                }
-            }
-            _ => {}
         }
         Ok(())
     }

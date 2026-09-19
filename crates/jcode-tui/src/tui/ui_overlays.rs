@@ -12,6 +12,26 @@ use ratatui::{
 
 use super::selection_highlight::highlight_line_selection;
 
+/// Clamp an overlay scroll offset to its content and build the ` NN% ` title
+/// fragment shown while there is more than a screen of content.
+fn overlay_scroll_info(
+    total_lines: usize,
+    visible_height: usize,
+    scroll: usize,
+) -> (usize, String) {
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let scroll = scroll.min(max_scroll);
+    if total_lines <= visible_height {
+        return (scroll, String::new());
+    }
+    let pct = if max_scroll > 0 {
+        (scroll * 100) / max_scroll
+    } else {
+        100
+    };
+    (scroll, format!(" {pct}% "))
+}
+
 pub(super) fn draw_changelog_overlay(
     frame: &mut Frame,
     area: Rect,
@@ -51,21 +71,8 @@ pub(super) fn draw_changelog_overlay(
         }
     }
 
-    let total_lines = lines.len();
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = scroll.min(max_scroll);
-
-    let scroll_info = if total_lines > visible_height {
-        let pct = if max_scroll > 0 {
-            (scroll * 100) / max_scroll
-        } else {
-            100
-        };
-        format!(" {}% ", pct)
-    } else {
-        String::new()
-    };
+    let (scroll, scroll_info) =
+        overlay_scroll_info(lines.len(), area.height.saturating_sub(2) as usize, scroll);
 
     let title = format!(" Changelog {} ", scroll_info);
     let block = Block::default()
@@ -612,21 +619,8 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
 
     lines.push(Line::from(""));
 
-    let total_lines = lines.len();
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let scroll = scroll.min(max_scroll);
-
-    let scroll_info = if total_lines > visible_height {
-        let pct = if max_scroll > 0 {
-            (scroll * 100) / max_scroll
-        } else {
-            100
-        };
-        format!(" {}% ", pct)
-    } else {
-        String::new()
-    };
+    let (scroll, scroll_info) =
+        overlay_scroll_info(lines.len(), area.height.saturating_sub(2) as usize, scroll);
 
     let title = format!(" Help {} ", scroll_info);
     let block = Block::default()
