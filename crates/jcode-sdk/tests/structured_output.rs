@@ -87,6 +87,7 @@ fn send_turn(writer: &mut dyn Write, session_id: &str, text: &str) {
     );
     push(
         ApiEvent::TextDelta {
+            message_id: None,
             session_id: session_id.to_string(),
             text: text.to_string(),
         },
@@ -259,4 +260,44 @@ fn invalid_schema_fails_before_any_model_turn() {
     assert_eq!(error.code(), "structured_schema_invalid");
     assert!(matches!(error, RunStructuredError::InvalidSchema(_)));
     assert_eq!(*requests.lock().unwrap(), 0);
+}
+
+#[test]
+fn structured_output_uses_final_message_not_process_narration() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::SendMessage { session_id, .. } = &frame.request {
+            for (id, text) in [
+                ("narration", "I will inspect the logs."),
+                ("answer", "{\"summary\":\"done\",\"count\":2}"),
+            ] {
+                push(
+                    ApiEvent::TextDelta {
+                        session_id: session_id.clone(),
+                        message_id: Some(id.into()),
+                        text: text.into(),
+                    },
+                    writer,
+                );
+                push(
+                    ApiEvent::TextDone {
+                        session_id: session_id.clone(),
+                        message_id: Some(id.into()),
+                    },
+                    writer,
+                );
+            }
+            push(
+                ApiEvent::TurnDone {
+                    session_id: session_id.clone(),
+                },
+                writer,
+            );
+        }
+    });
+    let result = client
+        .run_structured::<Summary>("s1", "Summarize", RunStructuredOptions::new(schema()))
+        .unwrap();
+    assert_eq!(result.data.count, 2);
+    assert_eq!(result.text, "{\"summary\":\"done\",\"count\":2}");
+    assert_eq!(result.attempts.len(), 1);
 }

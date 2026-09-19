@@ -775,6 +775,10 @@ pub enum ServerEvent {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
 
+    /// Assistant text message boundary within a provider response.
+    #[serde(rename = "text_done")]
+    TextDone,
+
     /// Streaming reasoning/thinking delta (raw, unformatted model text).
     ///
     /// Unlike [`ServerEvent::TextDelta`], this carries the model's reasoning as

@@ -31,6 +31,7 @@ use tokio::task::JoinHandle;
 fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
     match event {
         StreamEvent::TextDelta(_)
+        | StreamEvent::TextDone
         | StreamEvent::ToolUseStart { .. }
         | StreamEvent::ToolInputDelta(_)
         | StreamEvent::ToolUseEnd

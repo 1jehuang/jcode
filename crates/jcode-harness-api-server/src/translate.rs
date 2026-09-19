@@ -99,6 +99,7 @@ type SessionFileStatusResult = Result<SessionFileStatus, (ErrorCode, String)>;
 // `BridgeState`, or two panels issuing the same numbered request can each
 // mistake the other's reply for their own.
 static NEXT_LEGACY_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Per-connection translation state.
 #[derive(Debug, Default)]
@@ -110,6 +111,12 @@ pub struct BridgeState {
     /// Legacy id of the in-flight `message` request, so `done` maps to
     /// `turn_done`.
     pending_message_id: Option<u64>,
+    /// Current text message and all text in the current provider attempt.
+    /// Completed messages remain retractable until the response commits.
+    text_message_id: Option<String>,
+    // Tuple fields: correlation id, text, whether TextDone was emitted.
+    text_attempt: Vec<(String, String, bool)>,
+    text_response_ended: bool,
     /// A turn can belong to another attachment or a server-initiated wake.
     observed_turn_active: bool,
     activity_version: u64,
@@ -471,7 +478,9 @@ impl BridgeState {
                 vec![
                     Outbound::Legacy(subscribe),
                     Outbound::Legacy(json!({"type": "state", "id": state_id})),
-                    Outbound::Legacy(json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true})),
+                    Outbound::Legacy(
+                        json!({"type": "get_model_catalog", "id": catalog_id, "subscribe_usage_updates": true}),
+                    ),
                 ]
             }
             "send_message" => {
@@ -1029,10 +1038,100 @@ impl BridgeState {
         }))
     }
 
+    fn text_message_id(&mut self) -> String {
+        if let Some(id) = &self.text_message_id {
+            return id.clone();
+        }
+        let id = format!("text-{}", NEXT_TEXT_ID.fetch_add(1, Ordering::Relaxed));
+        self.text_message_id = Some(id.clone());
+        self.text_attempt.push((id.clone(), String::new(), false));
+        id
+    }
+
+    fn finish_text(&mut self) -> Vec<ServerFrame> {
+        let Some(id) = self.text_message_id.take() else {
+            return vec![];
+        };
+        let Some((_, text, done)) = self.text_attempt.iter_mut().find(|(key, _, _)| key == &id)
+        else {
+            return vec![];
+        };
+        if text.is_empty() || *done {
+            return vec![];
+        }
+        *done = true;
+        vec![ServerFrame::event(ApiEvent::TextDone {
+            session_id: self.session_id.clone().unwrap_or_default(),
+            message_id: Some(id),
+        })]
+    }
+
+    fn replace_text(&mut self, replacement: &str) -> Vec<ServerFrame> {
+        // Legacy replacements cover the entire provider response, including
+        // text messages already closed by output_item.done. Distribute the
+        // replacement over those boundaries, retracting truncated messages.
+        if self.text_attempt.is_empty() && !replacement.is_empty() {
+            self.text_message_id();
+        }
+        let count = self.text_attempt.len();
+        let mut remaining = replacement;
+        let mut frames = Vec::new();
+        for (index, (id, text, done)) in self.text_attempt.iter_mut().enumerate() {
+            let mut len = if index + 1 == count {
+                remaining.len()
+            } else {
+                text.len().min(remaining.len())
+            };
+            while !remaining.is_char_boundary(len) {
+                len -= 1;
+            }
+            let next = &remaining[..len];
+            remaining = &remaining[len..];
+            if text != next {
+                *text = next.to_string();
+                frames.push(ServerFrame::event(ApiEvent::TextReplace {
+                    session_id: self.session_id.clone().unwrap_or_default(),
+                    message_id: Some(id.clone()),
+                    text: text.clone(),
+                }));
+            }
+            // Wrapped-tool recovery can restore a suffix after MessageEnd,
+            // including text that was empty (and therefore never framed) at
+            // its original boundary. Complete it without duplicating markers
+            // for previously completed messages corrected in place.
+            if !text.is_empty()
+                && !*done
+                && (self.text_response_ended || self.text_message_id.as_ref() != Some(id))
+            {
+                *done = true;
+                frames.push(ServerFrame::event(ApiEvent::TextDone {
+                    session_id: self.session_id.clone().unwrap_or_default(),
+                    message_id: Some(id.clone()),
+                }));
+            }
+        }
+        if self.text_response_ended {
+            self.text_message_id = None;
+        }
+        frames
+    }
+
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
         let session = |state: &Self| state.session_id.clone().unwrap_or_default();
+        if self.text_response_ended
+            && matches!(
+                kind,
+                "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec"
+            )
+        {
+            // A new response or execution commits the previous provider
+            // attempt. Do not retract it if the next response retries before
+            // producing any text (reasoning/tool output is replay-visible too).
+            self.text_attempt.clear();
+            self.text_response_ended = false;
+        }
         if matches!(
             kind,
             "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec"
@@ -1085,6 +1184,10 @@ impl BridgeState {
                             self.current_provider = None;
                             self.current_effort = None;
                             self.model_catalog_loaded = false;
+                        }
+                        if self.session_id.as_deref() != Some(&session_id) {
+                            self.text_message_id = None;
+                            self.text_attempt.clear();
                         }
                         self.session_id = Some(session_id.clone());
                     }
@@ -1151,10 +1254,45 @@ impl BridgeState {
                     vec![]
                 }
             }
-            "text_delta" => vec![ServerFrame::event(ApiEvent::TextDelta {
-                session_id: session(self),
-                text: event["text"].as_str().unwrap_or("").to_string(),
-            })],
+            "text_delta" => {
+                let text = event["text"].as_str().unwrap_or("").to_string();
+                let message_id = if text.is_empty() {
+                    self.text_message_id.clone()
+                } else {
+                    let id = self.text_message_id();
+                    self.text_attempt.last_mut().unwrap().1.push_str(&text);
+                    Some(id)
+                };
+                vec![ServerFrame::event(ApiEvent::TextDelta {
+                    session_id: session(self),
+                    text,
+                    message_id,
+                })]
+            }
+            "kv_cache_request" => {
+                // Sent unconditionally immediately before complete_split, so
+                // this is an actual provider-request boundary, not a status
+                // heuristic. Late post-processing replacements precede it.
+                let frames = self.finish_text();
+                self.text_attempt.clear();
+                self.text_response_ended = false;
+                frames
+            }
+            "text_done" => self.finish_text(),
+            "message_end" => {
+                let frames = self.finish_text();
+                // Post-processing can still replace wrapped-tool text after
+                // MessageEnd. Retain it until the next response's first delta.
+                self.text_response_ended = true;
+                frames
+            }
+            "text_replace" => self.replace_text(event["text"].as_str().unwrap_or("")),
+            "retry_rollback" => {
+                let frames = self.replace_text("");
+                self.text_message_id = None;
+                self.text_attempt.clear();
+                frames
+            }
             "reasoning_delta" => vec![ServerFrame::event(ApiEvent::ReasoningDelta {
                 session_id: session(self),
                 text: event["text"].as_str().unwrap_or("").to_string(),
@@ -1167,6 +1305,7 @@ impl BridgeState {
                 session_id: session(self),
                 phase: event["phase"].as_str().unwrap_or("connecting").to_string(),
             })],
+            // Argument streaming is not an assistant-message boundary.
             "tool_start" => vec![ServerFrame::event(ApiEvent::ToolStart {
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),
@@ -1177,11 +1316,15 @@ impl BridgeState {
                 call_id: String::new(),
                 delta: event["delta"].as_str().unwrap_or("").to_string(),
             })],
-            "tool_exec" => vec![ServerFrame::event(ApiEvent::ToolExec {
-                session_id: session(self),
-                call_id: event["id"].as_str().unwrap_or("").to_string(),
-                name: event["name"].as_str().unwrap_or("").to_string(),
-            })],
+            "tool_exec" => {
+                let mut frames = self.finish_text();
+                frames.push(ServerFrame::event(ApiEvent::ToolExec {
+                    session_id: session(self),
+                    call_id: event["id"].as_str().unwrap_or("").to_string(),
+                    name: event["name"].as_str().unwrap_or("").to_string(),
+                }));
+                frames
+            }
             "tool_done" => vec![ServerFrame::event(ApiEvent::ToolDone {
                 session_id: session(self),
                 call_id: event["id"].as_str().unwrap_or("").to_string(),
@@ -1193,7 +1336,9 @@ impl BridgeState {
                 let session_id = event["session_id"].as_str().or(self.session_id.as_deref());
                 match (session_id, event.get("snapshot")) {
                     (Some(session_id), Some(snapshot)) if !snapshot.is_null() => {
-                        Self::side_panel_frame(session_id, snapshot).into_iter().collect()
+                        Self::side_panel_frame(session_id, snapshot)
+                            .into_iter()
+                            .collect()
                     }
                     _ => vec![],
                 }
@@ -1229,9 +1374,12 @@ impl BridgeState {
                     // Any other retained soft interrupts were queued into the
                     // turn which just ended. Their ids will not emit `done`.
                     self.pending_soft_interrupt_ids.clear();
-                    vec![ServerFrame::event(ApiEvent::TurnDone {
+                    let mut frames = self.finish_text();
+                    self.text_attempt.clear();
+                    frames.push(ServerFrame::event(ApiEvent::TurnDone {
                         session_id: session(self),
-                    })]
+                    }));
+                    frames
                 } else {
                     vec![]
                 }
@@ -1239,6 +1387,8 @@ impl BridgeState {
             "interrupted" => {
                 self.activity_version += 1;
                 self.observed_turn_active = false;
+                self.text_message_id = None;
+                self.text_attempt.clear();
                 vec![ServerFrame::event(ApiEvent::SessionStatus {
                     session_id: session(self),
                     status: "cancelled".into(),

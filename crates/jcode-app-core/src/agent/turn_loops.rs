@@ -539,6 +539,7 @@ impl Agent {
                         saw_message_end = false;
                         stop_reason = None;
                     }
+                    StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {

@@ -16,9 +16,20 @@
 //! let client = JcodeClient::connect(ConnectOptions::default())?;
 //! let session = client.create_session(None)?;
 //! let turn = client.run(&session.session_id, "what is 2 + 2?", RunOptions::default())?;
-//! println!("{}", turn.text);
+//! println!("{}", turn.final_text);
 //! # Ok::<(), jcode_sdk::Error>(())
 //! ```
+//!
+//! `TurnResult::text` retains the whole turn, including tool narration.
+//! `TurnResult::final_text` selects the last completed assistant message and
+//! `TurnResult::messages` exposes all completed messages. On older bridges
+//! without framing, `final_text` falls back to `text` and `messages` is empty.
+//! Reasoning interleaved between text chunks does not split a message.
+//! Streaming consumers should correlate `TextDelta`, `TextDone`, and
+//! `TextReplace` by their optional message id. An empty replacement retracts
+//! text, including messages completed before a provider retry. Wait for
+//! `TurnDone` before publishing an irreversible final answer. These ids are
+//! connection-local stream correlators, not persisted transcript ids.
 //!
 //! Connect to a remote user's persistent harness through system OpenSSH:
 //! ```no_run
@@ -52,9 +63,9 @@ pub use auth::{
     LoginProvider,
 };
 pub use client::{
-    ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream, GlobalEventsOptions,
-    JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall, Transport, TurnResult,
-    UnixTransport, Usage,
+    AssistantTextMessage, ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream,
+    GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall,
+    Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};

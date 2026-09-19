@@ -438,6 +438,7 @@ fn every_subscriber_sees_every_event() {
             for i in 0..3 {
                 push(
                     ApiEvent::TextDelta {
+                        message_id: None,
                         session_id: "s1".to_string(),
                         text: format!("chunk{i}"),
                     },
@@ -483,6 +484,7 @@ fn a_filtered_subscription_only_sees_its_own_session() {
             reply(frame, ApiEvent::Pong, writer);
             push(
                 ApiEvent::TextDelta {
+                    message_id: None,
                     session_id: "other".to_string(),
                     text: "not mine".to_string(),
                 },
@@ -490,6 +492,7 @@ fn a_filtered_subscription_only_sees_its_own_session() {
             );
             push(
                 ApiEvent::TextDelta {
+                    message_id: None,
                     session_id: "mine".to_string(),
                     text: "mine".to_string(),
                 },
@@ -500,7 +503,9 @@ fn a_filtered_subscription_only_sees_its_own_session() {
     let stream = client.events(Some("mine"));
     client.ping().expect("ping");
     match stream.next_timeout(Duration::from_secs(5)) {
-        Some(ApiEvent::TextDelta { text, session_id }) => {
+        Some(ApiEvent::TextDelta {
+            text, session_id, ..
+        }) => {
             assert_eq!(session_id, "mine");
             assert_eq!(text, "mine", "the other session's delta leaked through");
         }
@@ -530,6 +535,7 @@ fn run_collects_one_turn() {
             );
             push(
                 ApiEvent::TextDelta {
+                    message_id: None,
                     session_id: s.clone(),
                     text: "hello ".to_string(),
                 },
@@ -547,6 +553,7 @@ fn run_collects_one_turn() {
             );
             push(
                 ApiEvent::TextDelta {
+                    message_id: None,
                     session_id: s.clone(),
                     text: "world".to_string(),
                 },
@@ -570,6 +577,8 @@ fn run_collects_one_turn() {
         .run("s1", "hi", Default::default())
         .expect("the turn must complete");
     assert_eq!(turn.text, "hello world");
+    assert_eq!(turn.final_text, "hello world");
+    assert!(turn.messages.is_empty());
     assert_eq!(turn.reasoning, "thinking");
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].name, "bash");
@@ -873,4 +882,62 @@ fn side_panel_events_hydrate_before_attach_and_route_only_to_matching_session() 
             matches!(all.next_timeout(Duration::from_secs(1)).unwrap(), ApiEvent::SidePanelState { session_id, .. } if session_id == expected)
         );
     }
+}
+
+#[test]
+fn run_collects_framed_final_answer_and_retracts_completed_retry_output() {
+    let client = fake_harness(|frame, writer| {
+        if matches!(frame.request, ApiRequest::SendMessage { .. }) {
+            reply(frame, ApiEvent::Ok, writer);
+            for (id, chunks) in [
+                ("narration", vec!["Checking", " logs"]),
+                ("retry", vec!["wrong"]),
+                ("answer", vec!["The cause is ", "the retry loop."]),
+            ] {
+                for text in chunks {
+                    push(
+                        ApiEvent::TextDelta {
+                            session_id: "s1".into(),
+                            message_id: Some(id.into()),
+                            text: text.into(),
+                        },
+                        writer,
+                    );
+                    push(
+                        ApiEvent::ReasoningDelta {
+                            session_id: "s1".into(),
+                            text: "thinking".into(),
+                        },
+                        writer,
+                    );
+                }
+                push(
+                    ApiEvent::TextDone {
+                        session_id: "s1".into(),
+                        message_id: Some(id.into()),
+                    },
+                    writer,
+                );
+            }
+            push(
+                ApiEvent::TextReplace {
+                    session_id: "s1".into(),
+                    message_id: Some("retry".into()),
+                    text: "".into(),
+                },
+                writer,
+            );
+            push(
+                ApiEvent::TurnDone {
+                    session_id: "s1".into(),
+                },
+                writer,
+            );
+        }
+    });
+    let result = client.run("s1", "diagnose", Default::default()).unwrap();
+    assert_eq!(result.text, "Checking logsThe cause is the retry loop.");
+    assert_eq!(result.final_text, "The cause is the retry loop.");
+    assert_eq!(result.messages.len(), 2);
+    assert_eq!(result.messages[0].message_id.as_deref(), Some("narration"));
 }

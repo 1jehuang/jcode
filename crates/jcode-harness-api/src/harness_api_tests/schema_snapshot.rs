@@ -533,3 +533,41 @@ fn side_panel_state_shared_types_roundtrip() {
         assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
     }
 }
+
+#[test]
+fn text_framing_is_additive_and_accepts_unframed_legacy_deltas() {
+    let old = r#"{"v":1,"ev":"text_delta","session_id":"s1","text":"hello"}"#;
+    let frame: ServerFrame = serde_json::from_str(old).unwrap();
+    assert!(matches!(
+        frame.event,
+        ApiEvent::TextDelta {
+            message_id: None,
+            ..
+        }
+    ));
+    assert_eq!(serde_json::to_string(&frame).unwrap(), old);
+    for event in [
+        ApiEvent::TextDelta {
+            session_id: "s1".into(),
+            text: "hi".into(),
+            message_id: Some("m1".into()),
+        },
+        ApiEvent::TextDone {
+            session_id: "s1".into(),
+            message_id: Some("m1".into()),
+        },
+        ApiEvent::TextReplace {
+            session_id: "s1".into(),
+            text: "".into(),
+            message_id: Some("m1".into()),
+        },
+    ] {
+        let frame = ServerFrame::event(event);
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["message_id"], "m1");
+        assert_eq!(
+            serde_json::from_value::<ServerFrame>(wire).unwrap().event,
+            frame.event
+        );
+    }
+}

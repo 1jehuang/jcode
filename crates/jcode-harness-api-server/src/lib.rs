@@ -278,6 +278,7 @@ where
             capabilities: [
                 "sessions",
                 "streaming",
+                "text_framing",
                 "side_panel",
                 "persisted_session_discovery",
                 "runtime_info",

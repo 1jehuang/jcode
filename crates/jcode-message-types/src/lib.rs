@@ -685,6 +685,8 @@ impl std::fmt::Display for ConnectionPhase {
 pub enum StreamEvent {
     /// Text content delta
     TextDelta(String),
+    /// An assistant text message ended within a provider response.
+    TextDone,
     /// Tool use started
     ToolUseStart { id: String, name: String },
     /// Tool input delta (JSON fragment)

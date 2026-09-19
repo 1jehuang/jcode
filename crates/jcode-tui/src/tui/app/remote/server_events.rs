@@ -971,6 +971,7 @@ pub(in crate::tui::app) fn handle_server_event(
             app.status_detail = Some(detail);
             eager_stream_redraw
         }
+        ServerEvent::TextDone => false,
         ServerEvent::MessageEnd { .. } => {
             app.pause_streaming_tps(true);
             app.stream_message_ended = true;

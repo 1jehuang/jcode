@@ -137,6 +137,7 @@ fn run_demo() {
                 "send_message" => {
                     for word in ["Hello ", "from ", "the ", "demo ", "server.\n"] {
                         reply(&ServerFrame::event(ApiEvent::TextDelta {
+                            message_id: None,
                             session_id: "demo-1".into(),
                             text: word.into(),
                         }));

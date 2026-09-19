@@ -220,6 +220,7 @@ fn serve_connection(
                 for index in 0..events_per_attach {
                     push(
                         ApiEvent::TextDelta {
+                            message_id: None,
                             session_id: session_id.clone(),
                             text: format!("{session_id}-{index}"),
                         },
