@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 4;
+export const API_VERSION_MINOR = 5;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -172,6 +172,24 @@ export type ApiRequest =
   | { req: "cancel_soft_interrupts"; session_id: string }
   | { req: "ping" };
 
+/** Full Markdown side-panel state, shared with the native runtime. */
+export type SidePanelPageFormat = "markdown";
+export type SidePanelPageSource = "managed" | "linked_file" | "ephemeral";
+export interface SidePanelPage {
+  id: string;
+  title: string;
+  file_path: string;
+  format: SidePanelPageFormat;
+  source: SidePanelPageSource;
+  content: string;
+  updated_at_ms: number;
+}
+export interface SidePanelSnapshot {
+  focused_page_id: string | null;
+  /** Omitted by the runtime when empty. */
+  pages?: SidePanelPage[];
+}
+
 export type ApiEvent =
   | { ev: "hello_ok"; version: number; server: string; capabilities?: string[] }
   | { ev: "ok" }
@@ -195,6 +213,7 @@ export type ApiEvent =
       output: string;
       error?: string;
     }
+  | { ev: "side_panel_state"; session_id: string; snapshot: SidePanelSnapshot }
   | { ev: "side_pane_images"; session_id: string; images: RenderedImage[] }
   | {
       ev: "token_usage";
@@ -316,6 +335,7 @@ export const KNOWN_EVENT_KINDS = [
   "session_forked",
   "history",
   "side_pane_images",
+  "side_panel_state",
   "pong",
   "text_delta",
   "reasoning_delta",

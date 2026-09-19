@@ -77,7 +77,7 @@ pub use structured::{
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, TextMatch,
-    api_socket_path,
+    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SidePanelPage,
+    SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch, api_socket_path,
 };
 pub use jcode_harness_api::{ModelUsage, compare_model_usage};

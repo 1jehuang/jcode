@@ -1545,6 +1545,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | ToolInputDelta { session_id, .. }
         | ToolExec { session_id, .. }
         | ToolDone { session_id, .. }
+        | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
         | TurnDone { session_id, .. }
         | BackgroundProgress { session_id, .. }

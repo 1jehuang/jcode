@@ -501,3 +501,29 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
         }
     ));
 }
+
+#[test]
+fn side_panel_state_shared_types_roundtrip() {
+    let snapshot = SidePanelSnapshot {
+        focused_page_id: Some("notes".into()),
+        pages: vec![SidePanelPage {
+            id: "notes".into(),
+            title: "Notes".into(),
+            file_path: "/notes.md".into(),
+            content: "# Hello\n```mermaid\ngraph LR; A-->B\n```".into(),
+            source: SidePanelPageSource::LinkedFile,
+            updated_at_ms: 42,
+            ..Default::default()
+        }],
+    };
+    for snapshot in [snapshot, SidePanelSnapshot::default()] {
+        let frame = ServerFrame::event(ApiEvent::SidePanelState {
+            session_id: "s1".into(),
+            snapshot,
+        });
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(wire["ev"], "side_panel_state");
+        assert_eq!(wire["session_id"], "s1");
+        assert_eq!(serde_json::from_value::<ServerFrame>(wire).unwrap(), frame);
+    }
+}

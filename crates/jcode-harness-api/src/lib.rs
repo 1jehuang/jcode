@@ -28,6 +28,9 @@ mod swarm_metadata;
 
 pub use client::{FrameError, HarnessClient, read_frame, write_frame};
 pub use events::*;
+pub use jcode_side_panel_types::{
+    SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot,
+};
 pub use jcode_usage_types::{ModelUsage, compare_model_usage};
 pub use requests::*;
 pub use sockets::{api_socket_path, legacy_socket_path, runtime_dir};
@@ -46,7 +49,7 @@ mod capability_coverage_tests;
 /// Protocol major version. Breaking changes only.
 pub const API_VERSION_MAJOR: u32 = 1;
 /// Protocol minor version. Additive changes.
-pub const API_VERSION_MINOR: u32 = 4;
+pub const API_VERSION_MINOR: u32 = 5;
 
 /// Envelope wrapping every client-to-server frame.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
