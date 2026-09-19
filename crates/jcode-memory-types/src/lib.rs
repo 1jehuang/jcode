@@ -683,6 +683,22 @@ pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
     start.to_path_buf()
 }
 
+/// Upstream remote URL for `root` (`remote.origin.url`), best-effort. Two
+/// clones share history (same root commit) but not provenance: the clone's
+/// origin points at its source, the original's at upstream. Moves preserve
+/// it; re-clones from the same upstream reproduce it. Absent outside git.
+pub fn repo_origin(root: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if url.is_empty() { None } else { Some(url) }
+}
+
 /// Stable repository identity for `root`: `git:<root-commit-hash>` when
 /// determinable, else `path:<canonical-root>`. The root commit survives
 /// renames and moves of the checkout (same .git, same history); the path
@@ -765,6 +781,13 @@ pub struct SourceCitation {
     /// checkout move keeps verifying. Empty means legacy/unknown: skipped.
     #[serde(default)]
     pub repo_id: String,
+    /// Upstream remote at bank time. Clones share the root commit but not
+    /// the origin (a clone's origin points at its source): when the history
+    /// matches but the origin doesn't, the checkout is foreign and the mark
+    /// says so instead of silently presenting the fact as locally backed.
+    /// None means legacy/unknown or no remote: no foreign check.
+    #[serde(default)]
+    pub origin: Option<String>,
     /// Short git HEAD at bank time (`rev-parse --short HEAD`), best-effort.
     /// Advisory only: when the tree moved on, the stale mark names both
     /// revisions so the model knows how far behind the memory is.
@@ -958,11 +981,13 @@ impl SourceCitation {
             context_after: String::new(),
             repo_id: String::new(),
             git_head: None,
+            origin: None,
         };
         let full = probe.confined_path(repo_root)?;
         let text = std::fs::read_to_string(&full).ok()?;
         let repo_id = repo_identity(repo_root);
         let git_head = git_head_for(repo_root);
+        let origin = repo_origin(repo_root);
         let lines: Vec<&str> = text.lines().collect();
         if end_line > lines.len() {
             return None;
@@ -984,6 +1009,7 @@ impl SourceCitation {
             context_after: lines[end_line..to].join("\n"),
             repo_id,
             git_head,
+            origin,
         })
     }
 }
@@ -1011,6 +1037,17 @@ pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> 
     format_entries_for_prompt_with_header(entries, limit, true, true, None)
 }
 
+/// True when the citation verifies under matching history but the checkout
+/// is foreign: same root commit, different upstream remote (a clone, a fork
+/// checkout, a re-pointed remote). The bytes back the fact, but the project
+/// context may not — the mark says so instead of silent Fresh.
+pub fn is_foreign_checkout(citation: &SourceCitation, repo_root: &std::path::Path) -> bool {
+    match (&citation.origin, repo_origin(repo_root)) {
+        (Some(banked), Some(current)) => banked != &current,
+        _ => false,
+    }
+}
+
 /// Advisory stale mark for a cited memory, or `None` when no mark applies.
 /// Fresh, relocated, unverifiable, and uncited memories render unmarked:
 /// staleness never blocks recall, it only informs the model that the source
@@ -1021,6 +1058,17 @@ pub fn citation_stale_mark(
 ) -> Option<String> {
     let citation = entry.citation.as_ref()?;
     let root = repo_root?;
+    if is_foreign_checkout(citation, root)
+        && matches!(
+            citation.verify(root),
+            CitationStatus::Fresh | CitationStatus::Relocated { .. }
+        )
+    {
+        return Some(format!(
+            "  (source verified in a different checkout of this history (origin {}) — re-read the file if the project context matters)",
+            citation.origin.as_deref().unwrap_or("unknown"),
+        ));
+    }
     if citation.verify(root) == CitationStatus::Stale {
         let commit_note = match (&citation.git_head, git_head_for(root)) {
             (Some(old), Some(new)) if old != &new => {
@@ -1369,6 +1417,7 @@ pub mod ranking {
         use crate::{
             CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, citation_stale_mark,
             find_repo_root, format_relevant_prompt, format_relevant_prompt_verified, git_head_for,
+            is_foreign_checkout,
         };
 
         #[test]
@@ -1422,6 +1471,7 @@ pub mod ranking {
                 // covered by dedicated bank tests below.
                 repo_id: String::new(),
                 git_head: None,
+                origin: None,
             }
         }
 
@@ -1783,6 +1833,7 @@ pub mod ranking {
                     context_after: String::new(),
                     repo_id: String::new(),
                     git_head: None,
+                    origin: None,
                 };
                 assert_eq!(bad.verify(dir.path()), CitationStatus::Unverifiable);
                 // Recall-level: malformed citations render unmarked, no panic.
@@ -1832,6 +1883,71 @@ pub mod ranking {
             let moved = outer.path().join("renamed");
             std::fs::rename(&repo, &moved).unwrap();
             assert_eq!(cited.verify(&moved), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn foreign_clone_verifies_fresh_but_marked() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let outer = tempfile::TempDir::new().expect("temp");
+            let repo_a = outer.path().join("a");
+            std::fs::create_dir_all(&repo_a).unwrap();
+            std::fs::write(repo_a.join("s.rs"), "fn a() {}\n").unwrap();
+            let run = |args: &[&str], dir: &std::path::Path| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"], &repo_a).status.success());
+            assert!(run(&["add", "."], &repo_a).status.success());
+            assert!(run(&["commit", "-qm", "one"], &repo_a).status.success());
+            // A pretends to be pushed upstream: origin is the upstream URL.
+            assert!(
+                run(
+                    &["remote", "add", "origin", "https://example.com/up.git"],
+                    &repo_a
+                )
+                .status
+                .success()
+            );
+            let cited = SourceCitation::bank(&repo_a, "s.rs", 0, 1).expect("bank");
+            assert_eq!(cited.origin.as_deref(), Some("https://example.com/up.git"));
+            // Clone B: same history, but its origin points at A, not upstream.
+            let repo_b = outer.path().join("b");
+            assert!(
+                run(
+                    &[
+                        "clone",
+                        "-q",
+                        repo_a.to_str().unwrap(),
+                        repo_b.to_str().unwrap()
+                    ],
+                    outer.path()
+                )
+                .status
+                .success()
+            );
+            assert_eq!(cited.verify(&repo_b), CitationStatus::Fresh);
+            assert!(is_foreign_checkout(&cited, &repo_b));
+            assert!(!is_foreign_checkout(&cited, &repo_a));
+            let entry = MemoryEntry {
+                citation: Some(cited),
+                ..MemoryEntry::new(MemoryCategory::Fact, "cloned fact")
+            };
+            let out = format_relevant_prompt_verified(&[entry], 10, &repo_b).expect("renders");
+            assert!(out.contains("different checkout"), "{out}");
         }
 
         #[test]
