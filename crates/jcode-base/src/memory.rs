@@ -395,19 +395,28 @@ impl MemoryManager {
     /// the sidecar-extraction gate (0.90): ingest dedups stored memories,
     /// extraction dedups extracted content. Defaults preserve behavior.
     pub(crate) fn storage_dedup_threshold() -> f32 {
-        crate::config::config()
+        // Non-finite file values (TOML `nan`) fall back to the default:
+        // f32::clamp preserves NaN, which would silently break every
+        // duplicate comparison below.
+        let v = crate::config::config()
             .agents
-            .memory_storage_dedup_threshold
-            .clamp(0.0001, 1.0)
+            .memory_storage_dedup_threshold;
+        if !v.is_finite() {
+            return 0.85;
+        }
+        v.clamp(0.0001, 1.0)
     }
 
     /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
     /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
     pub(crate) fn rrf_k() -> f32 {
-        crate::config::config()
-            .agents
-            .memory_rrf_k
-            .clamp(1.0, 1000.0)
+        // Same NaN guard as above: clamp preserves NaN, and a NaN k
+        // would poison every fused score.
+        let v = crate::config::config().agents.memory_rrf_k;
+        if !v.is_finite() {
+            return 60.0;
+        }
+        v.clamp(1.0, 1000.0)
     }
 
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {

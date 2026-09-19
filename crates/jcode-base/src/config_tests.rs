@@ -1675,26 +1675,61 @@ fn memory_tuning_env_overrides_file() {
 }
 
 #[test]
-fn memory_tuning_rejects_non_finite_env() {
+fn memory_tuning_rejects_each_non_finite_env_value() {
     let _lock = crate::storage::lock_test_env();
+    // Each invalid value asserted separately: same-key assignments would
+    // otherwise overwrite each other and only the last value gets tested.
     for (key, bad) in [
         ("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", "NaN"),
         ("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", "inf"),
+        ("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", "-inf"),
         ("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", "abc"),
+        ("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", ""),
         ("JCODE_MEMORY_RRF_K", "NaN"),
+        ("JCODE_MEMORY_RRF_K", "inf"),
         ("JCODE_MEMORY_RRF_K", "-inf"),
+        ("JCODE_MEMORY_RRF_K", "abc"),
         ("JCODE_MEMORY_RRF_K", ""),
     ] {
         crate::env::set_var(key, bad);
+        crate::config::Config::invalidate_cache();
+        assert_eq!(
+            crate::memory::MemoryManager::storage_dedup_threshold(),
+            0.85,
+            "threshold must stay default for {key}={bad}"
+        );
+        assert_eq!(
+            crate::memory::MemoryManager::rrf_k(),
+            60.0,
+            "rrf k must stay default for {key}={bad}"
+        );
+        crate::env::remove_var(key);
     }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
+fn memory_tuning_nan_file_values_fall_back_to_defaults() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let previous_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    // TOML accepts `nan`: the clamp alone preserves it, so the helpers
+    // must fall back to defaults explicitly.
+    let mut cfg = crate::config::Config::default();
+    cfg.agents.memory_storage_dedup_threshold = f32::NAN;
+    cfg.agents.memory_rrf_k = f32::NAN;
+    cfg.save().expect("save config");
     crate::config::Config::invalidate_cache();
     assert_eq!(
         crate::memory::MemoryManager::storage_dedup_threshold(),
         0.85
     );
     assert_eq!(crate::memory::MemoryManager::rrf_k(), 60.0);
-    for key in ["JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", "JCODE_MEMORY_RRF_K"] {
-        crate::env::remove_var(key);
+    if let Some(previous) = previous_home {
+        crate::env::set_var("JCODE_HOME", previous);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
     }
     crate::config::Config::invalidate_cache();
 }
