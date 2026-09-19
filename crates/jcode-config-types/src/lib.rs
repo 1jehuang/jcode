@@ -637,7 +637,7 @@ pub struct AgentsConfig {
     /// Legacy benchmark/debug embedding backend. Jev recall never uses it.
     /// Token budget for the opt-in structural repo map (`repomap` tool).
     /// Ranked symbol stubs without bodies, truncated at this many estimated
-    /// tokens. 0 disables the map entirely (the tool is not registered).
+    /// tokens. Default 0 (disabled: the tool is not registered); set nonzero to opt in.
     /// Env override: `JCODE_REPOMAP_TOKEN_BUDGET` (wins over file).
     #[serde(default = "default_repomap_token_budget")]
     pub repomap_token_budget: usize,
@@ -699,7 +699,9 @@ fn default_memory_rerank_min_agree() -> usize {
 }
 
 fn default_repomap_token_budget() -> usize {
-    2000
+    // Default-off: the map is opt-in (see #1230). A nonzero budget (file
+    // or JCODE_REPOMAP_TOKEN_BUDGET) registers the tool.
+    0
 }
 
 impl Default for AgentsConfig {

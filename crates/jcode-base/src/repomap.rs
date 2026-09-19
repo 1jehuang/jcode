@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Token budget default. 0 disables the map entirely (tool unregistered).
-pub const DEFAULT_TOKEN_BUDGET: usize = 2000;
+pub const DEFAULT_REPOMAP_TOKEN_BUDGET: usize = 0;
 /// Damping factor for PageRank power iteration.
 const DAMPING: f64 = 0.85;
 /// Iterations cap; the graph is small and converges far earlier.
@@ -36,6 +36,10 @@ const SKIP_DIRS: &[&str] = &[
 const CHARS_PER_TOKEN: usize = 4;
 /// Max symbols rendered per file block (long files truncate, rank decides).
 const MAX_SYMBOLS_PER_FILE: usize = 50;
+/// Max bytes read per source file. Bounds the text-read path (a symlinked
+/// /dev/zero or multi-GB dump must not exhaust memory); oversized files
+/// contribute no symbols. Generous: real sources fit comfortably.
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 struct Grammar {
     extension: &'static str,
@@ -81,10 +85,6 @@ const GRAMMARS: &[Grammar] = &[
         extension: "ts",
         definitions: &[
             (
-                r"(?m)^\s*export\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
-                "fn",
-            ),
-            (
                 r"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
                 "fn",
             ),
@@ -103,10 +103,6 @@ const GRAMMARS: &[Grammar] = &[
     Grammar {
         extension: "js",
         definitions: &[
-            (
-                r"(?m)^\s*export\s+(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
-                "fn",
-            ),
             (
                 r"(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)",
                 "fn",
@@ -198,21 +194,44 @@ fn extract_symbols(text: &str, grammar: &CompiledGrammar, file: &Path) -> Vec<Sy
     out
 }
 
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Collect listed-extension files under `root`. Never follows symlinks
+/// (file or directory): a repo-controlled link pointing outside the tree
+/// must not pull external source into the map or reach unbounded devices.
+/// Every candidate is canonicalized and required to stay under the
+/// canonicalized root.
 fn walk_files(root: &Path, out: &mut Vec<PathBuf>) {
-    let mut dirs = vec![root.to_path_buf()];
+    let Ok(canonical_root) = root.canonicalize() else {
+        return;
+    };
+    let mut dirs = vec![canonical_root.clone()];
     while let Some(dir) = dirs.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if is_symlink(&path) {
+                continue;
+            }
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical.starts_with(&canonical_root) {
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
-            if path.is_dir() {
+            if canonical.is_dir() {
                 if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_str()) {
-                    dirs.push(path);
+                    dirs.push(canonical);
                 }
-            } else if grammar_for(&path).is_some() {
-                out.push(path);
+            } else if grammar_for(&canonical).is_some() {
+                out.push(canonical);
             }
         }
     }
@@ -225,8 +244,17 @@ fn file_fingerprint(path: &Path) -> Option<(u128, u64)> {
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
-        .as_millis();
+        .as_nanos();
     Some((mtime, meta.len()))
+}
+
+/// Bounded text read: files over MAX_FILE_BYTES are skipped (no symbols).
+fn read_source_capped(path: &Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > MAX_FILE_BYTES {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
 }
 
 fn cache_path(root: &Path) -> PathBuf {
@@ -242,8 +270,21 @@ fn load_cache(root: &Path) -> HashMap<String, CachedFile> {
 
 fn save_cache(root: &Path, cache: &HashMap<String, CachedFile>) {
     let path = cache_path(root);
+    // A mapped repo can symlink `.jcode/cache` (or the file itself) outside
+    // the tree; following it would let the repo truncate and replace an
+    // arbitrary writable file. Refuse symlinked components and destination.
+    let mut cursor = root.to_path_buf();
+    for component in [".jcode", "cache", "repomap.json"] {
+        cursor = cursor.join(component);
+        if is_symlink(&cursor) {
+            return;
+        }
+    }
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
+    }
+    if is_symlink(&path) {
+        return;
     }
     if let Ok(bytes) = serde_json::to_vec(cache) {
         let _ = std::fs::write(&path, bytes);
@@ -266,7 +307,7 @@ fn parse_files(
             .to_string();
         let print_path = PathBuf::from(&rel);
         let fingerprint = file_fingerprint(file);
-        let text = std::fs::read_to_string(file).ok();
+        let text = read_source_capped(file);
         let grammar = grammar_for(file);
         if let (Some((mtime, size)), Some(hit)) = (fingerprint, cache.get(&rel))
             && hit.mtime_ms == mtime
@@ -442,7 +483,7 @@ pub fn render_map(
             block.push_str(&format!("  {} {}:{}\n", sym.kind, sym.name, sym.line));
         }
         let cost = block.len() / CHARS_PER_TOKEN + 1;
-        if used + cost > token_budget && !out.is_empty() {
+        if used + cost > token_budget {
             break;
         }
         used += cost;
@@ -478,7 +519,7 @@ pub fn build_map(root: &Path, seeds: &[&str], token_budget: usize) -> Option<Str
         if symbols.get(rel).map(|s| s.is_empty()).unwrap_or(true) {
             continue;
         }
-        if let Ok(text) = std::fs::read_to_string(file) {
+        if let Some(text) = read_source_capped(file) {
             texts.insert(rel.clone(), text);
         }
     }

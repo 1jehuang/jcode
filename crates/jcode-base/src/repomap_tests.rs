@@ -222,6 +222,80 @@ fn render_respects_personalized_seeds_end_to_end() {
 }
 
 #[test]
+fn symlinked_sources_are_excluded() {
+    #[cfg(unix)]
+    {
+        let outside = write_tree(&[("ext.rs", "fn external() {}\n")]);
+        let dir = write_tree(&[("a.rs", "fn a() {}\n")]);
+        std::os::unix::fs::symlink(outside.path().join("ext.rs"), dir.path().join("link.rs"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("extdir")).unwrap();
+        let map = build_map(dir.path(), &[], 2000).expect("map");
+        assert!(!map.contains("external"), "{map}");
+        assert!(map.contains("fn a"), "{map}");
+    }
+}
+
+#[test]
+fn symlinked_cache_path_is_not_written_through() {
+    #[cfg(unix)]
+    {
+        let outside = tempfile::TempDir::new().expect("temp");
+        let target = outside.path().join("victim.json");
+        std::fs::write(&target, "original").unwrap();
+        let dir = write_tree(&[("a.rs", "fn a() {}\n")]);
+        std::os::unix::fs::symlink(&target, dir.path().join(".jcode")).unwrap();
+        let _ = build_map(dir.path(), &[], 2000);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+}
+
+#[test]
+fn oversized_files_contribute_no_symbols() {
+    let dir = write_tree(&[("big.rs", "fn big() {}\n")]);
+    // Inflate past the cap without changing the symbol set.
+    let mut content = String::from("fn big() {}\n");
+    while content.len() < 3 * 1024 * 1024 {
+        content.push_str("// padding padding padding padding\n");
+    }
+    std::fs::write(dir.path().join("big.rs"), &content).unwrap();
+    let map = build_map(dir.path(), &[], 2000);
+    // Oversized file skipped: no map (only file) or map without its symbols.
+    assert!(map.map(|m| !m.contains("fn big")).unwrap_or(true));
+}
+
+#[test]
+fn same_size_rewrite_is_picked_up() {
+    let dir = write_tree(&[("a.rs", "fn alpha() {}\n")]);
+    let first = build_map(dir.path(), &[], 2000).expect("first");
+    assert!(first.contains("alpha"));
+    // Same byte length, different symbol: nanos+size fingerprint must miss.
+    std::fs::write(dir.path().join("a.rs"), "fn omega() {}\n").unwrap();
+    assert_eq!("fn alpha() {}\n".len(), "fn omega() {}\n".len());
+    let second = build_map(dir.path(), &[], 2000).expect("second");
+    assert!(second.contains("omega"), "{second}");
+    assert!(!second.contains("alpha"), "{second}");
+}
+
+#[test]
+fn first_block_over_budget_yields_no_map() {
+    let dir = write_tree(&[("a.rs", "fn a() {}\n")]);
+    // Smallest block costs ~2 tokens; budget 1 fits nothing, not even first.
+    assert!(build_map(dir.path(), &[], 1).is_none());
+}
+
+#[test]
+fn exported_functions_render_once() {
+    let dir = write_tree(&[(
+        "b.ts",
+        "export function start() {}\nexport async function go() {}\n",
+    )]);
+    let map = build_map(dir.path(), &[], 2000).expect("map");
+    assert_eq!(map.matches("start").count(), 1, "{map}");
+    assert_eq!(map.matches("go").count(), 1, "{map}");
+}
+
+#[test]
 fn empty_tree_yields_no_map() {
     let dir = write_tree(&[("notes.md", "# nothing to parse\n")]);
     assert!(build_map(dir.path(), &[], 2000).is_none());
