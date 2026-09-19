@@ -1431,11 +1431,13 @@ pub(super) fn get_tool_summary_with_budget(
             action.to_string()
         }
         "side_panel" | "panel" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or(if tool.name == "panel" { "spawn" } else { "side_panel" });
+            let action = tool.input.get("action").and_then(|v| v.as_str()).unwrap_or(
+                if tool.name == "panel" {
+                    "spawn"
+                } else {
+                    "side_panel"
+                },
+            );
             let target = tool
                 .input
                 .get("title")

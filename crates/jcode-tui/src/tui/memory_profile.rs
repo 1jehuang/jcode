@@ -332,7 +332,11 @@ fn estimate_side_panel_memory(snapshot: &SidePanelSnapshot) -> SidePanelMemorySt
             page.id.capacity() + page.title.capacity() + page.file_path.capacity();
         stats.metadata_bytes += page_metadata_bytes;
         let payload_bytes = page.content.capacity()
-            + page.pdf_data.as_ref().map(|data| data.capacity()).unwrap_or(0);
+            + page
+                .pdf_data
+                .as_ref()
+                .map(|data| data.capacity())
+                .unwrap_or(0);
         stats.content_bytes += payload_bytes;
         stats.estimate_bytes += page_metadata_bytes + payload_bytes;
         if focused_page_id == Some(page.id.as_str()) {
