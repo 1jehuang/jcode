@@ -494,7 +494,7 @@ impl App {
 
     /// Scroll the pane's edge a few lines, via the same per-line primitive the
     /// wheel uses. The drag's rate is the tick cadence (`REDRAW_COPY_AUTOSCROLL`
-    /// in `redraw_schedule`), so it must not go through `enqueue_mouse_scroll`,
+    /// in `redraw_schedule`), so it must not go through `scroll_wheel`,
     /// which scales a whole wheel notch by flick velocity.
     fn step_copy_selection_scroll(
         &mut self,
@@ -516,7 +516,7 @@ impl App {
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
             return false;
         };
-        self.enqueue_mouse_scroll(target, if upward { -1 } else { 1 });
+        self.scroll_wheel(target, if upward { -1 } else { 1 });
         true
     }
 

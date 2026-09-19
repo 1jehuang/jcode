@@ -64,11 +64,12 @@ fn is_mouse_scroll_kind(kind: MouseEventKind) -> bool {
 }
 
 impl App {
-    /// Lines moved by a deliberate mouse-wheel notch, matching Neovim's
-    /// `mousescroll` default (`ver:3`).
-    const WHEEL_LINES: i16 = 3;
     /// Ceiling on lines for a very fast flick. The terminal reports no physical
     /// force, so the only velocity signal is the gap between notches.
+    ///
+    /// ponytail: this velocity ladder is jcode's own, not Neovim's (Neovim has a
+    /// single fixed `mousescroll`). It exists so deliberate notches stay precise
+    /// while fast flicks cover more ground; retune the thresholds if it feels off.
     const WHEEL_LINES_MAX: i16 = 10;
     /// How long the overscroll status line stays revealed after the last
     /// downward overscroll tick before it rebounds away. Long enough that the
@@ -755,10 +756,10 @@ impl App {
             Some(ms) if ms <= 40 => 2,
             _ => 1,
         };
-        (Self::WHEEL_LINES * multiplier).min(Self::WHEEL_LINES_MAX)
+        (crate::tui::WHEEL_LINES * multiplier).min(Self::WHEEL_LINES_MAX)
     }
 
-    pub(super) fn enqueue_mouse_scroll(&mut self, target: MouseScrollTarget, direction: i16) {
+    pub(super) fn scroll_wheel(&mut self, target: MouseScrollTarget, direction: i16) {
         if direction == 0 {
             return;
         }
@@ -772,7 +773,7 @@ impl App {
     /// Apply an exact row delta supplied by a native terminal integration. The
     /// host has already converted its pixel gesture into rows, so scroll exactly
     /// that many.
-    pub(super) fn enqueue_native_scroll(&mut self, target: MouseScrollTarget, delta: i32) {
+    pub(super) fn scroll_rows(&mut self, target: MouseScrollTarget, delta: i32) {
         if delta == 0 {
             return;
         }
@@ -1245,11 +1246,11 @@ impl App {
         if self.changelog_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::ChangelogOverlay, -1);
+                    self.scroll_wheel(MouseScrollTarget::ChangelogOverlay, -1);
                     finish_mouse_event!(true, "changelog_overlay_scroll_up");
                 }
                 MouseEventKind::ScrollDown => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::ChangelogOverlay, 1);
+                    self.scroll_wheel(MouseScrollTarget::ChangelogOverlay, 1);
                     finish_mouse_event!(true, "changelog_overlay_scroll_down");
                 }
                 _ => {
@@ -1268,11 +1269,11 @@ impl App {
         if self.help_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::HelpOverlay, -1);
+                    self.scroll_wheel(MouseScrollTarget::HelpOverlay, -1);
                     finish_mouse_event!(true, "help_overlay_scroll_up");
                 }
                 MouseEventKind::ScrollDown => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::HelpOverlay, 1);
+                    self.scroll_wheel(MouseScrollTarget::HelpOverlay, 1);
                     finish_mouse_event!(true, "help_overlay_scroll_down");
                 }
                 _ => finish_mouse_event!(false, "help_overlay_non_scroll"),
@@ -1282,11 +1283,11 @@ impl App {
         if self.model_status_scroll.is_some() {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::ModelStatusOverlay, -1);
+                    self.scroll_wheel(MouseScrollTarget::ModelStatusOverlay, -1);
                     finish_mouse_event!(true, "model_status_overlay_scroll_up");
                 }
                 MouseEventKind::ScrollDown => {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::ModelStatusOverlay, 1);
+                    self.scroll_wheel(MouseScrollTarget::ModelStatusOverlay, 1);
                     finish_mouse_event!(true, "model_status_overlay_scroll_down");
                 }
                 _ => finish_mouse_event!(false, "model_status_overlay_non_scroll"),
@@ -1312,7 +1313,7 @@ impl App {
                     )
                 };
                 if over_preview {
-                    self.enqueue_mouse_scroll(MouseScrollTarget::SessionPickerPreview, direction);
+                    self.scroll_wheel(MouseScrollTarget::SessionPickerPreview, direction);
                     finish_mouse_event!(true, "session_picker_preview_scroll");
                 } else if over_list {
                     picker_cell.borrow_mut().step_list_selection(direction);
@@ -1532,10 +1533,10 @@ impl App {
             } else {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, -1);
+                        self.scroll_wheel(MouseScrollTarget::SidePane, -1);
                     }
                     MouseEventKind::ScrollDown => {
-                        self.enqueue_mouse_scroll(MouseScrollTarget::SidePane, 1);
+                        self.scroll_wheel(MouseScrollTarget::SidePane, 1);
                     }
                     MouseEventKind::ScrollLeft if self.side_panel.focused_page().is_some() => {
                         self.pan_diff_pane_x(-1);
@@ -1604,11 +1605,11 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                self.enqueue_mouse_scroll(MouseScrollTarget::Chat, -1);
+                self.scroll_wheel(MouseScrollTarget::Chat, -1);
                 finish_mouse_event!(false, "chat_scroll_up");
             }
             MouseEventKind::ScrollDown => {
-                self.enqueue_mouse_scroll(MouseScrollTarget::Chat, 1);
+                self.scroll_wheel(MouseScrollTarget::Chat, 1);
                 finish_mouse_event!(false, "chat_scroll_down");
             }
             _ => {

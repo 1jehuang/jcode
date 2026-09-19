@@ -194,7 +194,7 @@ impl App {
 
     pub(super) fn apply_handterm_native_scroll(&mut self, command: HostToApp) {
         let HostToApp::Scroll { pane, delta } = command;
-        self.enqueue_native_scroll(
+        self.scroll_rows(
             match pane {
                 PaneKind::Chat => MouseScrollTarget::Chat,
                 PaneKind::SidePanel => MouseScrollTarget::SidePane,

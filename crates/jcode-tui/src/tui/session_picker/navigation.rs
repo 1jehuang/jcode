@@ -110,9 +110,9 @@ impl SessionPicker {
 
     fn mouse_scroll_amount(&mut self) -> u16 {
         // One wheel notch advances the preview by the same number of lines as the
-        // main chat viewport (its `WHEEL_LINES`), so the standalone picker feels
-        // consistent with the in-app overlay.
-        3
+        // main chat viewport, so the standalone picker feels consistent with the
+        // in-app overlay.
+        crate::tui::WHEEL_LINES as u16
     }
 
     pub(super) fn handle_mouse_scroll(&mut self, col: u16, row: u16, kind: MouseEventKind) {

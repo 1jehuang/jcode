@@ -60,6 +60,10 @@ pub(crate) use redraw_schedule::{
     redraw_interval_with_policy,
 };
 mod remote_diff;
+/// Lines moved by a deliberate mouse-wheel notch, matching Neovim's
+/// `mousescroll` default (`ver:3`). Shared so the standalone session picker's
+/// preview scroll stays in step with the in-app overlays.
+pub(crate) const WHEEL_LINES: i16 = 3;
 pub mod screenshot;
 pub(crate) mod session_facts;
 pub mod session_picker;
