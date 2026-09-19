@@ -1,6 +1,34 @@
 use anyhow::Result;
+use serde::Serialize;
+use std::path::Path;
 use std::collections::HashMap;
-use std::sync::{LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, RwLock, Weak};
+
+static FILE_MUTEXES: LazyLock<StdMutex<HashMap<String, Weak<StdMutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn account_file_lock(path: &Path) -> Arc<StdMutex<()>> {
+    let key = path.to_string_lossy().to_string();
+    let mut locks = FILE_MUTEXES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(StdMutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// Save credentials atomically while serializing writers in this process.
+pub fn write_json_secret_locked<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
+    let lock = account_file_lock(path);
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    jcode_storage::write_json_secret(path, value)
+}
 
 /// Runtime (process-local) active-account overrides, keyed by provider
 /// prefix ("claude", "openai", ...). Lets `/account switch <label>` take

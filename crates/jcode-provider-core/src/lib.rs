@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod attempt_tracker;
 pub mod auth_mode;
 pub mod catalog_refresh;
+pub mod cooldown;
 pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
@@ -29,6 +30,13 @@ pub use auth_mode::{
     runtime_env_pinned_mode,
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
+pub use cooldown::{
+    CooldownRecord, DEFAULT_BILLING_COOLDOWN_MS, DEFAULT_RATE_LIMIT_COOLDOWN_MS,
+    MAX_RATE_LIMIT_COOLDOWN_MS, STICK_WAIT_MAX_SECS, clear_account_cooldown, clear_all_cooldowns,
+    get_account_cooldown, is_account_in_cooldown, is_rate_limit_stick_wait,
+    load_durable_cooldowns, prune_expired_cooldowns, save_durable_cooldowns, set_account_cooldown,
+    sync_runtime_to_durable,
+};
 pub use failover::{
     FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
     parse_failover_prompt_message,

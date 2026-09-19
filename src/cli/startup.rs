@@ -224,6 +224,24 @@ pub fn register_external_provider_runtimes() {
         crate::provider::external::ANTIGRAVITY_RUNTIME,
         || std::sync::Arc::new(jcode_provider_antigravity_runtime::AntigravityProvider::new()),
     );
+    crate::provider::external::register_external_provider_fallible(
+        crate::provider::external::COMMAND_CODE_RUNTIME,
+        || {
+            jcode_provider_command_code_runtime::auth::import_snapshot_at_startup();
+            let store_path = jcode_provider_command_code_runtime::auth::auth_store_path().ok()?;
+            let store =
+                jcode_provider_command_code_runtime::auth::CommandCodeStore::load(&store_path);
+            let model = std::env::var("JCODE_COMMAND_CODE_MODEL")
+                .unwrap_or_else(|_| "zai-org/GLM-5.3".to_string());
+            Some(std::sync::Arc::new(
+                jcode_provider_command_code_runtime::integration::compose_provider_from_store(
+                    &store, &model,
+                )
+                .ok()?,
+            )
+                as std::sync::Arc<dyn crate::provider::Provider>)
+        },
+    );
     crate::provider::external::register_external_provider(
         crate::provider::external::CLAUDE_CLI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_claude_cli_runtime::ClaudeProvider::new()),
