@@ -754,9 +754,19 @@ impl Agent {
         for message in messages.iter_mut().take(cutoff) {
             // Tool-returned images ride in the same message as the ToolResult
             // (tool_output_to_content_blocks) as base64, often 100KB-1MB each:
-            // the largest context hog and the first thing to go. Image blocks
-            // carry no tool-pairing ID, so a text placeholder keeps message
-            // structure intact while providers never miss them.
+            // the largest context hog and the first thing to go. Only images
+            // in a message that also carries a ToolResult are tool output;
+            // user-uploaded images arrive in plain user messages and must
+            // survive — clearing those would destroy user-provided vision
+            // context. Image blocks carry no tool-pairing ID, so a text
+            // placeholder keeps message structure intact.
+            let is_tool_message = message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            if !is_tool_message {
+                continue;
+            }
             for block in message.content.iter_mut() {
                 if let ContentBlock::Image { media_type, data } = block {
                     let was = data.len();

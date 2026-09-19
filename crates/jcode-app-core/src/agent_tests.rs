@@ -381,6 +381,57 @@ fn tool_result_clearing_stubs_sibling_images_past_cutoff() {
     crate::config::Config::invalidate_cache();
 }
 
+#[test]
+fn tool_result_clearing_keeps_user_uploaded_images() {
+    use crate::message::{ContentBlock, Message, Role};
+    // Image-only user message past the cutoff: no ToolResult, so this is a
+    // user upload, not tool output. Must survive clearing intact.
+    let upload = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "what does this screenshot show?".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "U".repeat(200_000),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let recent = Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "t-new".to_string(),
+            content: "fresh".to_string(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut cfg = crate::config::Config::default();
+    cfg.compaction.clear_tool_results_older_than = Some(1);
+    cfg.save().expect("save config");
+    crate::config::Config::invalidate_cache();
+    let out = Agent::apply_tool_result_clearing(vec![upload, recent]);
+    assert!(matches!(&out[0].content[1], ContentBlock::Image { .. }));
+    if let ContentBlock::Image { data, .. } = &out[0].content[1] {
+        assert_eq!(data.len(), 200_000);
+    }
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
 fn tool_result_clearing_keeps_small_results() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
