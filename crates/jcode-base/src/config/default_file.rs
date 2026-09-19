@@ -492,6 +492,11 @@ swarm_max_concurrent_agents = 32
 # memory_rerank_votes = 2
 # memory_rerank_min_agree = 2
 #
+# Opt-in structural repo map (repomap tool): ranked files with symbol stubs
+# (kind name:line), no bodies, truncated at this many estimated tokens.
+# 0 disables the map entirely (the tool is not registered). Default 2000.
+# repomap_token_budget = 2000
+#
 # Embedding backend for memory dense-retrieval. "local" (default) uses the
 # bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
 # OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;
