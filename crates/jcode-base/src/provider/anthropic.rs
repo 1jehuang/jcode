@@ -14,7 +14,7 @@
 //! - the static model list.
 
 use anyhow::{Context, Result};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use uuid::Uuid;
 
 pub use jcode_provider_core::CredentialMode as AnthropicCredentialMode;
@@ -23,16 +23,21 @@ use jcode_provider_core::{
     anthropic_stainless_arch as stainless_arch, anthropic_stainless_os as stainless_os,
 };
 
-static CACHE_TTL_1H: AtomicBool = AtomicBool::new(true);
+// 0 follows persisted configuration, 1/2 are explicit process-local overrides.
+static CACHE_TTL_1H: AtomicU8 = AtomicU8::new(0);
 
-/// Enable or disable the 1-hour cache TTL (default: 1-hour)
+/// Override cache TTL for this process. UI preferences should use Config instead.
 pub fn set_cache_ttl_1h(enabled: bool) {
-    CACHE_TTL_1H.store(enabled, Ordering::Relaxed);
+    CACHE_TTL_1H.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
 /// Check if 1-hour cache TTL is enabled
 pub fn is_cache_ttl_1h() -> bool {
-    CACHE_TTL_1H.load(Ordering::Relaxed)
+    match CACHE_TTL_1H.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => crate::config::config().provider.anthropic_cache_ttl_1h,
+    }
 }
 
 /// User-Agent for OAuth requests, matching the official Claude Code CLI.

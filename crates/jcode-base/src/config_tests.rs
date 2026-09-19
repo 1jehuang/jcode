@@ -1628,3 +1628,34 @@ fn swarm_root_effort_env_overrides_and_shared_resolution() {
         restore_env_var(key, value);
     }
 }
+
+#[test]
+fn anthropic_cache_preference_persists_and_preserves_other_settings() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+    let path = Config::path().unwrap();
+    std::fs::write(&path, "[provider]\ndefault_model = 'keep-me'\n").unwrap();
+    assert!(crate::config::config().provider.anthropic_cache_ttl_1h);
+    for enabled in [false, true] {
+        Config::set_anthropic_cache_ttl_1h(enabled).unwrap();
+        Config::invalidate_cache();
+        assert_eq!(Config::load().provider.anthropic_cache_ttl_1h, enabled);
+        assert_eq!(crate::provider::anthropic::is_cache_ttl_1h(), enabled);
+        assert_eq!(
+            crate::config::config().provider.anthropic_cache_ttl_1h,
+            enabled
+        );
+        assert_eq!(
+            Config::load().provider.default_model.as_deref(),
+            Some("keep-me")
+        );
+    }
+    std::fs::write(&path, "[broken").unwrap();
+    assert!(Config::set_anthropic_cache_ttl_1h(false).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken");
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}

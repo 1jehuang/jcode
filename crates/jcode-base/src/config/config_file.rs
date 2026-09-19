@@ -86,6 +86,13 @@ impl Config {
         super::invalidate_config_cache();
     }
 
+    /// Persist the Anthropic cache duration for clients and the shared daemon.
+    pub fn set_anthropic_cache_ttl_1h(enabled: bool) -> anyhow::Result<()> {
+        let mut cfg = Self::load_for_update()?;
+        cfg.provider.anthropic_cache_ttl_1h = enabled;
+        cfg.save()
+    }
+
     /// Update the copilot premium mode in the config file.
     /// Reloads, patches, and saves so it doesn't clobber other fields.
     pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {

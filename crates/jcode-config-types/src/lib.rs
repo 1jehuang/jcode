@@ -1260,6 +1260,8 @@ pub struct ProviderConfig {
     pub openai_reasoning_effort: Option<String>,
     /// Reasoning effort for Anthropic Messages API output_config (none|low|medium|high|xhigh; max aliases to strongest supported)
     pub anthropic_reasoning_effort: Option<String>,
+    /// Request one-hour Anthropic prompt caching instead of five minutes.
+    pub anthropic_cache_ttl_1h: bool,
     /// OpenAI transport mode (auto|websocket|https)
     pub openai_transport: Option<String>,
     /// OpenAI service tier override (priority|flex)
@@ -1314,6 +1316,7 @@ impl Default for ProviderConfig {
             default_provider: None,
             openai_reasoning_effort: Some("low".to_string()),
             anthropic_reasoning_effort: None,
+            anthropic_cache_ttl_1h: true,
             openai_transport: None,
             openai_service_tier: Some("priority".to_string()),
             openai_native_compaction_mode: "auto".to_string(),

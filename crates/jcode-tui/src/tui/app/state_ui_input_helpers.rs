@@ -845,8 +845,9 @@ impl App {
             let suggestions = vec![
                 ("/cache stats".into(), "Show KV cache stats"),
                 ("/cache status".into(), "Alias for /cache stats"),
-                ("/cache 1h".into(), "Use 1 hour cache TTL"),
-                ("/cache 5m".into(), "Use 5 minute cache TTL"),
+                ("/cache extend".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 1h".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 5m".into(), "Save 5 minute Anthropic cache TTL"),
             ];
             return self.rank_suggestions(input, suggestions);
         }

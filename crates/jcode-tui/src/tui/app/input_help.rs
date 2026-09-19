@@ -11,7 +11,7 @@ impl App {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }
             "cache" => {
-                "/cache stats\nShow KV cache stats for this session: cache read/write totals, hit ratios, current baseline, and recent miss attributions.\n\n/cache\nToggle Anthropic cache TTL between 5 minutes and 1 hour.\n\n/cache 1h  or  /cache 5m\nSet Anthropic cache TTL explicitly."
+                "/cache stats\nShow KV cache stats for this session: cache read/write totals, hit ratios, current baseline, and recent miss attributions.\n\n/cache\nToggle the saved Anthropic cache TTL between 5 minutes and 1 hour.\n\n/cache extend  or  /cache 1h\nPermanently select 1-hour Anthropic caching for subsequent requests and future sessions. Cache writes cost 2x base input tokens.\n\n/cache 5m\nSave 5-minute Anthropic caching. Existing cache entries are not extended retroactively. OpenAI retention is provider/model-managed, not changed by this preference."
             }
             "fix" => {
                 "/fix\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."

@@ -1847,32 +1847,31 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 });
                 app.set_status_notice("Cache stats");
             }
-            "1h" | "1hour" | "extended" => {
-                crate::provider::anthropic::set_cache_ttl_1h(true);
-                app.push_display_message(DisplayMessage::system(
-                    "Cache TTL set to 1 hour. Cache writes cost 2x base input tokens.".to_string(),
-                ));
-            }
-            "5m" | "5min" | "default" | "reset" => {
-                crate::provider::anthropic::set_cache_ttl_1h(false);
-                app.push_display_message(DisplayMessage::system(
-                    "Cache TTL set to 5 minutes.".to_string(),
-                ));
-            }
-            "" => {
-                let current = crate::provider::anthropic::is_cache_ttl_1h();
-                let new_state = !current;
-                crate::provider::anthropic::set_cache_ttl_1h(new_state);
-                let msg = if new_state {
-                    "Cache TTL toggled to 1 hour. Cache writes cost 2x base input tokens.\nUse /cache 5m to revert."
-                } else {
-                    "Cache TTL toggled to 5 minutes.\nUse /cache 1h to extend."
+            "extend" | "1h" | "1hour" | "extended" | "5m" | "5min" | "default" | "reset" | "" => {
+                let enabled = match arg {
+                    "5m" | "5min" | "default" | "reset" => false,
+                    "" => !crate::config::config().provider.anthropic_cache_ttl_1h,
+                    _ => true,
                 };
-                app.push_display_message(DisplayMessage::system(msg.to_string()));
+                match crate::config::Config::set_anthropic_cache_ttl_1h(enabled) {
+                    Ok(()) => {
+                        let message = if enabled {
+                            "Saved Anthropic cache TTL: 1 hour, including future sessions. Cache writes cost 2x base input tokens.\nApplies to subsequent requests, not already-written cache entries. Use /cache 5m to revert."
+                        } else {
+                            "Saved Anthropic cache TTL: 5 minutes, including future sessions. Applies to subsequent requests. Use /cache extend for 1 hour."
+                        };
+                        app.push_display_message(DisplayMessage::system(format!(
+                            "{message}\nOpenAI cache retention is provider/model-managed and is not changed by this setting."
+                        )));
+                    }
+                    Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                        "Could not save cache preference: {error}"
+                    ))),
+                }
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /cache (toggle), /cache stats, /cache 1h (1 hour), /cache 5m (default)"
+                    "Usage: /cache (toggle saved preference), /cache stats, /cache extend (1 hour), /cache 5m (5 minutes)"
                         .to_string(),
                 ));
             }
