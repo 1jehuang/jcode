@@ -27,6 +27,10 @@ instruction and are excluded from speed comparisons, not silently discarded.
 - SHA-256: `eae091b252d546cca723a465acfb5e3085bd33eea428642c27513cda5f27c63f`.
 - Built version: `50c4533fb-dirty-8dce190e3d68`. Its Rust changes were subsequently
   committed as `831171a47` without changing the measured Rust source.
+- Immutable artifact: `~/.jcode/builds/versions/50c4533fb-dirty-8dce190e3d68/jcode`.
+  A later confidence audit reconfirmed its SHA-256 above. Other concurrent work
+  has since replaced `target/selfdev/jcode`, so use the immutable artifact when
+  reproducing these particular measurements.
 - Each trial launched that exact binary as its own daemon with private socket
   and runtime directory, then a fresh `jcode run --ndjson` session in an empty
   workspace. It did not use the old shared daemon.
@@ -175,6 +179,11 @@ To finish subscription acceptance:
 - Browser suite: 52 passed, 5 live tests ignored.
 - Real BYOK typed-decision smoke: passed.
 - Backend full suite: 324 passed.
+- Confidence audit independently reran the backend suite: 324 passed, zero
+  failed or skipped. Original coordinated logs reconfirmed 32 shared Jev and 52
+  browser tests passed, with their live tests explicitly ignored, and the build
+  completed with exit zero. These results establish the recorded source/build,
+  not later unrelated edits in the shared working tree.
 - Benchmark offline self-tests: passed.
 - The current local build channel contains the new binary. The shared daemon
   remained on `b23f61316` during validation. Activation was deferred because an
