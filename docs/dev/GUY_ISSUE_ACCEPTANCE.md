@@ -118,3 +118,47 @@ null-argument tool handling.
 
 No push, GitHub issue closure, shared-daemon reload, or production rollout was
 performed as part of acceptance.
+
+## Whole-result rerun and requirement traceability
+
+After all implementation commits and the confidence audit, reran the complete
+mapped checks instead of relying on results predating the follow-up fixes:
+
+- `2258375prf`: protocol, bridge, OpenAI provider and Rust SDK suites passed
+  (265 tests, two pre-existing ignored), then all 18 history tests and the root
+  daemon/bridge socket E2E passed. This also compiled the TUI and CLI consumers.
+- `2291904k6v`: rebuilt the shipped TypeScript distribution, passed all 54 SDK
+  tests, then passed the real-provider public workflow (8,131 ms turn,
+  idle history 2–7 ms, busy history 2–4 ms).
+- `370249icam`: repeated the public workflow on the binary freshly rebuilt by
+  the final integration suite, `v0.85.63-dev (465610a58)`, SHA-256
+  `eb12aa164c80904ac302147ece867c46905c85780760b2636c29d17c6fbc973c`.
+  The real turn passed in 6,730 ms. Fifteen idle histories took 2–8 ms,
+  three message-accepted histories took 3 ms each, and five busy histories took
+  2–4 ms. Two framed messages and four final persisted messages were returned.
+  Busy replies preceded tool and turn completion. Actual tool output and
+  private-instance cleanup passed. A bridge broken-pipe log occurred during
+  client shutdown after the successful turn, not during history requests.
+
+| Requirement / changed public output | Rerun check | Observed result |
+| --- | --- | --- |
+| #1284 available agent uses live history | `handle_get_history_uses_live_snapshot_when_agent_is_available` | Live transcript, rather than stale persisted snapshot, returned. |
+| Retain mutex guard across selection and release before writes | `history_guard_survives_racing_turn_and_is_released_before_write` | Queued competing turn did not replace the selected snapshot. Socket backpressure did not retain the agent guard. |
+| Busy history must not wait for the turn | `handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy` plus real SDK busy probes | Snapshot returned with agent locked. Five actual replies arrived before real tool and turn completion. |
+| Fresh unsaved sessions remain connected | `handle_get_history_busy_fresh_session_returns_empty_without_waiting` plus fifteen real idle probes | Concurrent locked reads returned empty history and metadata without saving. Missing unregistered and corrupt registered sessions still errored. Actual connection stayed open. |
+| Fragmented concurrent replies retain all bytes | `concurrent_history_replies_survive_api_requests_between_fragments` and byte-reader tests | Three 1 MiB histories survived interleaved requests. Split UTF-8 survived cancellation. Accumulated frame limits remained enforced. |
+| Additive API minor version, optional IDs and capability | Rust schema test, TS version/tag parity tests, actual launch assertion | New and legacy shapes accepted. Rust/TS versions and tags agreed. Actual hello advertised `text_framing`. |
+| #1118 consecutive assistant boundaries | `output_item_completion_frames_messages_not_reasoning_or_text_chunks`, bridge tests, root socket E2E | Consecutive messages completed separately. Reasoning and text chunks did not invent boundaries. |
+| Tool argument streaming must not prematurely end text | `text_framing_tools_and_turn_fallback_close_once_without_phantom_messages` | Tool-start did not close text. Execution/completion fallbacks closed once without phantom messages. |
+| Corrections and retry retractions update completed messages | `text_retry_retracts_completed_and_live_messages_and_late_replacements_keep_ids`, Rust/TS collectors, root socket E2E | Discarded text removed, corrections retained IDs, retracted output excluded from final selection. Late recovered suffix completion assertions passed. |
+| New-request retry must preserve earlier response | `new_request_retry_does_not_retract_previous_response` | Earlier response retained. Rollback scoped to current attempt. |
+| SDK messages and final answer separate narration | Rust and TS collector tests plus real SDK | `CHECKING_HISTORY` and `FRAMED_OK` had separate IDs. Final text exactly `FRAMED_OK`. Aggregate text retained both. |
+| Unframed compatibility, missing IDs, interleaved completions and reasoning-only turns | TS framing compatibility and Rust schema tests | Aggregate fallback preserved, ID-less boundaries collected, interleaved IDs correlated, no phantom reasoning-only messages. |
+| Structured output validates final answer only | Rust `structured_output_uses_final_message_not_process_narration` and TS structured framing test | Final framed JSON validated despite preceding narration. |
+| Internal event integrates with CLI/TUI | Root E2E rebuilt CLI/TUI and exercised daemon-to-bridge sockets | Exhaustive consumers compiled and socket workflow passed. No visual TUI behavior change is claimed or visually tested. |
+| Persistence and private isolation | Actual final `getHistory`, initial `listSessions`, and `close` assertions | Final answer persisted, no existing sessions touched, private home removed. |
+
+Parser/SDK edge cases use fixtures to force otherwise rare conditions. They
+complement real-provider acceptance and are not live proof of every provider's
+retry behavior. No mapped check failed in this final combined rerun. Only this
+evidence document changed after these checks.
