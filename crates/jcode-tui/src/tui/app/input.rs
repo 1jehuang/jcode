@@ -260,10 +260,18 @@ fn read_clipboard_text() -> Option<String> {
         return Some(text);
     }
 
-    let Ok(mut clipboard) = arboard::Clipboard::new() else {
-        return None;
-    };
+    read_clipboard_text_arboard()
+}
+
+#[cfg(not(target_os = "android"))]
+fn read_clipboard_text_arboard() -> Option<String> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
     clipboard.get_text().ok()
+}
+
+#[cfg(target_os = "android")]
+fn read_clipboard_text_arboard() -> Option<String> {
+    None
 }
 
 fn read_wayland_clipboard_text() -> Option<String> {

@@ -146,6 +146,11 @@ fn copy_image_xclip(path: &Path) -> bool {
 }
 
 fn copy_image_arboard(png: &[u8]) -> bool {
+    copy_image_arboard_impl(png)
+}
+
+#[cfg(not(target_os = "android"))]
+fn copy_image_arboard_impl(png: &[u8]) -> bool {
     let Ok(decoded) = image::load_from_memory(png) else {
         return false;
     };
@@ -159,4 +164,9 @@ fn copy_image_arboard(png: &[u8]) -> bool {
     arboard::Clipboard::new()
         .and_then(|mut cb| cb.set_image(img))
         .is_ok()
+}
+
+#[cfg(target_os = "android")]
+fn copy_image_arboard_impl(_png: &[u8]) -> bool {
+    false
 }

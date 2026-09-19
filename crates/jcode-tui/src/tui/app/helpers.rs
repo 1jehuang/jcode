@@ -378,6 +378,18 @@ pub(crate) fn stop_capturing_clipboard_for_tests() {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn set_clipboard_text_arboard(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
+}
+
+#[cfg(target_os = "android")]
+fn set_clipboard_text_arboard(_text: &str) -> bool {
+    false
+}
+
 /// Copy text to clipboard. On Windows and macOS, the native clipboard API
 /// (arboard) is authoritative, with OSC 52 as a remote-session fallback.
 /// Elsewhere, try wl-copy (Wayland), then xclip/xsel (X11, which keep owning
@@ -416,10 +428,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         // Win32 clipboard directly and is authoritative there.
         #[cfg(windows)]
         {
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
+            if set_clipboard_text_arboard(text) {
                 return true;
             }
             return copy_to_clipboard_osc52(text);
@@ -432,10 +441,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         // for local sessions; OSC 52 remains as the final remote-session fallback.
         #[cfg(target_os = "macos")]
         {
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
+            if set_clipboard_text_arboard(text) {
                 return true;
             }
             if let Ok(mut child) = std::process::Command::new("pbcopy")
@@ -490,10 +496,7 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
             ) {
                 return true;
             }
-            if arboard::Clipboard::new()
-                .and_then(|mut cb| cb.set_text(text.to_string()))
-                .is_ok()
-            {
+            if set_clipboard_text_arboard(text) {
                 return true;
             }
             copy_to_clipboard_osc52(text)
@@ -838,6 +841,40 @@ pub(super) fn spawn_in_new_terminal(
 #[path = "helpers_tests.rs"]
 mod helpers_tests;
 
+#[cfg(not(target_os = "android"))]
+fn clipboard_image_arboard() -> Option<(String, String)> {
+    use base64::Engine;
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let img = clipboard.get_image().ok()?;
+    let png_data = encode_rgba_as_png(img.width, img.height, &img.bytes)?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
+    Some(("image/png".to_string(), b64))
+}
+
+#[cfg(target_os = "android")]
+fn clipboard_image_arboard() -> Option<(String, String)> {
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn set_clipboard_image_arboard(width: u32, height: u32, rgba: Vec<u8>) -> bool {
+    use std::borrow::Cow;
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard.set_image(arboard::ImageData {
+                width: width as usize,
+                height: height as usize,
+                bytes: Cow::Owned(rgba),
+            })
+        })
+        .is_ok()
+}
+
+#[cfg(target_os = "android")]
+fn set_clipboard_image_arboard(_width: u32, _height: u32, _rgba: Vec<u8>) -> bool {
+    false
+}
+
 /// Try to get an image from the system clipboard.
 ///
 /// Returns `Some((media_type, base64_data))` if an image is available.
@@ -943,12 +980,8 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
     }
 
     // Fallback: arboard (works on X11/XWayland and macOS via NSPasteboard)
-    if let Ok(mut clipboard) = arboard::Clipboard::new()
-        && let Ok(img) = clipboard.get_image()
-        && let Some(png_data) = encode_rgba_as_png(img.width, img.height, &img.bytes)
-    {
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_data);
-        return Some(("image/png".to_string(), b64));
+    if let Some(image) = clipboard_image_arboard() {
+        return Some(image);
     }
 
     None
@@ -956,7 +989,6 @@ pub(super) fn clipboard_image() -> Option<(String, String)> {
 
 pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bool {
     use base64::Engine;
-    use std::borrow::Cow;
     use std::io::Write;
     use std::process::Stdio;
 
@@ -994,15 +1026,7 @@ pub(super) fn copy_image_to_clipboard(media_type: &str, base64_data: &str) -> bo
     };
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
-    arboard::Clipboard::new()
-        .and_then(|mut clipboard| {
-            clipboard.set_image(arboard::ImageData {
-                width: width as usize,
-                height: height as usize,
-                bytes: Cow::Owned(rgba.into_raw()),
-            })
-        })
-        .is_ok()
+    set_clipboard_image_arboard(width, height, rgba.into_raw())
 }
 
 /// Extract an image URL from text that looks like an HTML img tag or a bare image URL.
@@ -1080,6 +1104,7 @@ pub(super) fn download_image_url(url: &str) -> Option<(String, String)> {
 }
 
 /// Encode raw RGBA pixel data as PNG bytes.
+#[cfg(not(target_os = "android"))]
 pub(super) fn encode_rgba_as_png(width: usize, height: usize, rgba: &[u8]) -> Option<Vec<u8>> {
     use image::{ImageBuffer, RgbaImage};
     use std::io::Cursor;
