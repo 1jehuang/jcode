@@ -1129,6 +1129,16 @@ fn push_cache_baseline(lines: &mut Vec<String>, label: &str, baseline: Option<&K
         lines.push(format!("- {}.provider: {}", label, baseline.provider));
         lines.push(format!("- {}.model: {}", label, baseline.model));
         lines.push(format!(
+            "- {}.cache_ttl_secs: {:?}",
+            label, baseline.cache_ttl_secs
+        ));
+        lines.push(format!(
+            "- {}.cache_ttl_is_estimate: {}",
+            label,
+            crate::provider::cache_ttl_is_estimate(&baseline.provider)
+        ));
+
+        lines.push(format!(
             "- {}.upstream_provider: {}",
             label,
             opt_string(baseline.upstream_provider.as_deref())
@@ -1345,7 +1355,10 @@ fn format_cache_stats(app: &App) -> String {
     lines.push(String::new());
 
     lines.push("Current route / settings".to_string());
-    lines.push(format!("- cache_ttl_setting: {}", ttl));
+    lines.push(format!(
+        "- anthropic_cache_ttl_setting: {} (subsequent requests)",
+        ttl
+    ));
     lines.push(format!("- is_remote: {}", app.is_remote));
     lines.push(format!("- is_replay: {}", app.is_replay));
     lines.push(format!("- current_provider: {}", current_provider));
