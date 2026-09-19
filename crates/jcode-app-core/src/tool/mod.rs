@@ -34,8 +34,12 @@ mod open;
 mod panel;
 mod patch;
 mod read;
+<<<<<<< HEAD
 mod replace;
 pub(crate) mod sdk;
+=======
+mod repomap;
+>>>>>>> f3def83bc (feat: opt-in structural repo map provider)
 pub mod selfdev;
 pub(crate) mod serde_coerce;
 mod session_search;
@@ -444,6 +448,11 @@ impl Registry {
                 session_search::SessionSearchTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "memory", memory::MemoryTool::new);
+            // Repomap is opt-in: unregistered at budget 0 so models never
+            // see a dead tool. (#1230)
+            if jcode_base::repomap::token_budget_from_config() > 0 {
+                Self::insert_tool_timed(&mut m, &mut timings, "repomap", repomap::RepomapTool::new);
+            }
             // Initiative is temporarily unavailable. Keep its implementation and
             // saved data intact so it can be restored without a migration.
             Self::insert_tool_timed(&mut m, &mut timings, "gmail", gmail::GmailTool::new);

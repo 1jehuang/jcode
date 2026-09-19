@@ -488,6 +488,11 @@ swarm_max_concurrent_agents = 32
 # memory_model = "gpt-5.6-luna"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
+#
+# Opt-in structural repo map (repomap tool): ranked files with symbol stubs
+# (kind name:line), no bodies, truncated at this many estimated tokens.
+# 0 disables the map entirely (the tool is not registered). Default 0.
+# repomap_token_budget = 0
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.

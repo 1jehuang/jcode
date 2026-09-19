@@ -635,6 +635,12 @@ pub struct AgentsConfig {
     #[serde(default = "default_memory_rerank_min_agree")]
     pub memory_rerank_min_agree: usize,
     /// Legacy benchmark/debug embedding backend. Jev recall never uses it.
+    /// Token budget for the opt-in structural repo map (`repomap` tool).
+    /// Ranked symbol stubs without bodies, truncated at this many estimated
+    /// tokens. 0 disables the map entirely (the tool is not registered).
+    /// Env override: `JCODE_REPOMAP_TOKEN_BUDGET` (wins over file).
+    #[serde(default = "default_repomap_token_budget")]
+    pub repomap_token_budget: usize,
     #[serde(default = "default_memory_embedding_backend")]
     pub memory_embedding_backend: String,
     /// OpenAI embedding model name when `memory_embedding_backend = "openai"`.
@@ -692,6 +698,10 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
+fn default_repomap_token_budget() -> usize {
+    2000
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -709,6 +719,7 @@ impl Default for AgentsConfig {
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),
             memory_rerank_min_agree: default_memory_rerank_min_agree(),
+            repomap_token_budget: default_repomap_token_budget(),
             memory_embedding_backend: default_memory_embedding_backend(),
             memory_embedding_model: None,
             memory_embedding_base_url: None,
