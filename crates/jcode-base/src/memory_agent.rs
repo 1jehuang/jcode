@@ -1027,7 +1027,10 @@ impl MemoryAgent {
             }
         };
 
-        // Similarity threshold for duplicate detection
+        // Sidecar-extraction dedup gate. Intentionally distinct from the
+        // storage/ingest gate (`memory_storage_dedup_threshold`, default
+        // 0.85): this decides "same content extracted twice", ingest decides
+        // "same memory already stored". Keep the two defaults apart.
         const DUPLICATE_THRESHOLD: f32 = 0.90;
 
         // Run extraction in background - don't block the main flow

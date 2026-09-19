@@ -389,9 +389,26 @@ impl MemoryManager {
         storage::write_json(&path, store)
     }
 
-    /// Similarity threshold for storage-layer dedup.
-    /// Memories above this threshold are considered duplicates and reinforced instead.
-    const STORAGE_DEDUP_THRESHOLD: f32 = 0.85;
+    /// Storage-dedup threshold from config, clamped to (0.0, 1.0].
+    /// Config knob `memory_storage_dedup_threshold` (default 0.85); env
+    /// `JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD` wins over file. Distinct from
+    /// the sidecar-extraction gate (0.90): ingest dedups stored memories,
+    /// extraction dedups extracted content. Defaults preserve behavior.
+    pub(crate) fn storage_dedup_threshold() -> f32 {
+        crate::config::config()
+            .agents
+            .memory_storage_dedup_threshold
+            .clamp(0.0001, 1.0)
+    }
+
+    /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
+    /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
+    pub(crate) fn rrf_k() -> f32 {
+        crate::config::config()
+            .agents
+            .memory_rrf_k
+            .clamp(1.0, 1000.0)
+    }
 
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {
         let mut entry = entry;
@@ -403,7 +420,7 @@ impl MemoryManager {
 
         if let Some(ref emb) = entry.embedding {
             if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
                 existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
@@ -413,8 +430,11 @@ impl MemoryManager {
 
             // Cross-store dedup: also check global graph
             if let Ok(mut global_graph) = self.load_global_graph()
-                && let Some(existing_id) =
-                    Self::find_duplicate_in_graph(&global_graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                && let Some(existing_id) = Self::find_duplicate_in_graph(
+                    &global_graph,
+                    emb,
+                    Self::storage_dedup_threshold(),
+                )
                 && let Some(existing) = global_graph.get_memory_mut(&existing_id)
             {
                 existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
@@ -438,7 +458,7 @@ impl MemoryManager {
 
         if let Some(ref emb) = entry.embedding {
             if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
                 existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
@@ -451,7 +471,7 @@ impl MemoryManager {
                 && let Some(existing_id) = Self::find_duplicate_in_graph(
                     &project_graph,
                     emb,
-                    Self::STORAGE_DEDUP_THRESHOLD,
+                    Self::storage_dedup_threshold(),
                 )
                 && let Some(existing) = project_graph.get_memory_mut(&existing_id)
             {
@@ -709,13 +729,13 @@ impl MemoryManager {
         let sparse = bm25_rank(&entries, query_text, pool);
 
         // RRF fusion.
-        const RRF_K: f32 = 60.0;
+        let rrf_k = Self::rrf_k();
         let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
         for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
         for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
 
         let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();
