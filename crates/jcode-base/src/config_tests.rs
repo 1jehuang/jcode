@@ -1646,6 +1646,11 @@ fn memory_tuning_defaults_preserve_behavior() {
 #[test]
 fn memory_tuning_env_overrides_file() {
     let _lock = crate::storage::lock_test_env();
+    // Isolate from inherited dev/CI overrides: file values must read clean.
+    let prev_threshold = std::env::var_os("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD");
+    let prev_k = std::env::var_os("JCODE_MEMORY_RRF_K");
+    crate::env::remove_var("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD");
+    crate::env::remove_var("JCODE_MEMORY_RRF_K");
     let temp = tempfile::TempDir::new().expect("temp dir");
     let previous_home = std::env::var_os("JCODE_HOME");
     crate::env::set_var("JCODE_HOME", temp.path());
@@ -1666,6 +1671,14 @@ fn memory_tuning_env_overrides_file() {
         crate::env::remove_var(key);
     }
     crate::config::Config::invalidate_cache();
+    match prev_threshold {
+        Some(v) => crate::env::set_var("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD", v),
+        None => crate::env::remove_var("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD"),
+    }
+    match prev_k {
+        Some(v) => crate::env::set_var("JCODE_MEMORY_RRF_K", v),
+        None => crate::env::remove_var("JCODE_MEMORY_RRF_K"),
+    }
     if let Some(previous) = previous_home {
         crate::env::set_var("JCODE_HOME", previous);
     } else {
