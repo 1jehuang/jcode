@@ -861,15 +861,15 @@ fn side_panel_events_hydrate_before_attach_and_route_only_to_matching_session() 
     let all = client.events(None);
     client.attach_session("s1").unwrap();
     for (stream, expected) in [(&ours, "s1"), (&other, "other")] {
-        let event = stream.recv_timeout(Duration::from_secs(1)).unwrap();
+        let event = stream.next_timeout(Duration::from_secs(1)).unwrap();
         assert!(
             matches!(event, ApiEvent::SidePanelState { session_id, snapshot } if session_id == expected && snapshot.pages[0].content == "# Notes")
         );
-        assert!(stream.recv_timeout(Duration::from_millis(20)).is_err());
+        assert!(stream.next_timeout(Duration::from_millis(20)).is_none());
     }
     for expected in ["other", "s1"] {
         assert!(
-            matches!(all.recv_timeout(Duration::from_secs(1)).unwrap(), ApiEvent::SidePanelState { session_id, .. } if session_id == expected)
+            matches!(all.next_timeout(Duration::from_secs(1)).unwrap(), ApiEvent::SidePanelState { session_id, .. } if session_id == expected)
         );
     }
 }
