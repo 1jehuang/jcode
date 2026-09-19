@@ -614,6 +614,16 @@ swarm_max_concurrent_agents = 32
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Transform hook before each provider request. Receives the full request
+# (messages, tools, system_static, system_dynamic) as JSON on stdin; stdout
+# may carry a rewritten request in the same shape. Exit 0 applies stdout
+# (empty stdout = unchanged); any other outcome fails open with the
+# original request.
+# pre_request = ""
+#
+# Max milliseconds to wait for pre_request before failing open (default: 5000).
+# pre_request_timeout_ms = 5000
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase
