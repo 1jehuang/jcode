@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-cd "$repo_root"
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 # `selfdev test` installs a shell-level `cargo` shim so raw `cargo test/check`
 # commands receive this wrapper's memory, linker, feature, and toolchain policy.
 # Exporting this recursion guard makes the final `cargo` invocation below bypass
 # that shim and resolve the real Cargo binary.
 export JCODE_IN_DEV_CARGO=1
+
+# The exported BashTool shim survives `cd` and child shells. Do not redirect
+# Cargo back here when the caller has moved to a different checkout. Compare
+# physical paths so entering this checkout through a symlink still works.
+case "$(pwd -P)" in
+  "$repo_root"|"$repo_root"/*) cd "$repo_root" ;;
+  *) exec cargo "$@" ;;
+esac
 
 # shellcheck source=scripts/remote_config.sh
 source "$repo_root/scripts/remote_config.sh"

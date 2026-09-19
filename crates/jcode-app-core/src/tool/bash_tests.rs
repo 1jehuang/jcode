@@ -267,6 +267,13 @@ async fn test_foreground_timeout_promotes_and_command_keeps_running() {
         .expect("task_id should be present")
         .to_string();
 
+    // Promotion must retain an output artifact before returning, even though
+    // this in-process path only fills it once the command finishes.
+    assert!(
+        crate::background::global().output(&task_id).await.is_some(),
+        "output artifact should exist immediately after promotion"
+    );
+
     // Wait for the promoted command to finish on its own.
     let mut final_status = None;
     for _ in 0..40 {

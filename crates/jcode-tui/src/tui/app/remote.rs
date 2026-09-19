@@ -394,7 +394,7 @@ async fn apply_terminal_event(
     };
     match event {
         Some(Ok(Event::FocusGained)) => {
-            crate::tui::reapply_configured_terminal_modes();
+            crate::tui::reapply_configured_terminal_modes_after_focus();
             input_attribution.event = Some("focus_gained".to_string());
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
@@ -779,7 +779,7 @@ fn handle_terminal_event_while_disconnected(
 
     match event {
         Some(Ok(Event::FocusGained)) => {
-            crate::tui::reapply_configured_terminal_modes();
+            crate::tui::reapply_configured_terminal_modes_after_focus();
             needs_redraw |= app.set_client_focused(true);
             app.note_client_focus(true);
         }

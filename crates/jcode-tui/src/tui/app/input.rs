@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod drop_tests;
 /// Streaming reasoning region, split out to keep this file under the
 /// code-size budget. See the module docs for the byte-offset invariant.
 mod reasoning_region;
@@ -729,9 +731,13 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     }
 }
 
-fn format_dropped_path(path: &std::path::Path, quote_whitespace: bool) -> String {
+fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String {
     let value = path.to_string_lossy();
-    if quote_whitespace && value.chars().any(char::is_whitespace) {
+    if quote_for_batch
+        && value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
+    {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.into_owned()
@@ -751,10 +757,31 @@ fn dropped_image_files(text: &str) -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 /// Terminal emulators normally send file drops as bracketed paste, but some send
-/// the path as ordinary key events. Promote a complete image-path-only composer
-/// value before command/skill routing so an absolute `/...` path is never treated
-/// as a slash command.
+/// the path as ordinary key events. Prepare a complete path-only composer before
+/// command/skill routing: attach images, or resolve quoting for ordinary files.
 pub(super) fn promote_dropped_images(app: &mut App) -> bool {
+    if attach_dropped_images(app) {
+        return true;
+    }
+    let Some(paths) = parse_dropped_paths(&app.input) else {
+        return false;
+    };
+    let normalized = paths
+        .iter()
+        .map(|path| format_dropped_path(path, paths.len() > 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized == app.input {
+        return false;
+    }
+    app.remember_input_undo_state();
+    app.input = normalized;
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    true
+}
+
+fn attach_dropped_images(app: &mut App) -> bool {
     let Some(images) = dropped_image_files(&app.input) else {
         return false;
     };
@@ -1186,7 +1213,10 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text(app, text);
-    promote_dropped_images(app);
+    // A key stream may still be receiving the rest of a multi-file drop. Do not
+    // strip quoting from a verified non-image prefix until submission, otherwise
+    // later paths make its now-unquoted spaces ambiguous.
+    attach_dropped_images(app);
     true
 }
 
@@ -2884,6 +2914,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    promote_dropped_images(app);
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
