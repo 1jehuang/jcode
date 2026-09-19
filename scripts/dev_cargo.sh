@@ -1045,14 +1045,19 @@ acquire_cargo_gate() {
   gate_dir="${JCODE_CARGO_GATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}}"
   mkdir -p "$gate_dir"
   gate_path="${JCODE_CARGO_GATE_PATH:-$gate_dir/jcode-cargo-build.lock}"
-  exec {cargo_gate_fd}>"$gate_path"
-  if ! flock -n "$cargo_gate_fd"; then
+  # NOTE: `exec {var}>file` requires bash 4.1+, but on macOS this script runs
+  # under bash 3.2 (/bin/bash 3.2.57) because /usr/bin precedes Homebrew on PATH.
+  # There the brace form fails with "exec: {cargo_gate_fd}: not found" and, under
+  # `set -e`, aborts the entire build before Cargo runs. A fixed high descriptor
+  # gives the same lock lifetime on bash 3.2 and 5.x alike.
+  exec 199>"$gate_path"
+  if ! flock -n 199; then
     log "waiting for the host-wide Cargo gate ($gate_path)"
     wait_started_ns=$(date +%s%N)
     waited_seconds=0
     # Avoid one silent, unbounded flock call. Periodic notes make it clear that
     # the process is alive and blocked behind another compiler rather than hung.
-    while ! flock -w 30 "$cargo_gate_fd"; do
+    while ! flock -w 30 199; do
       waited_seconds=$((waited_seconds + 30))
       log "still waiting for the host-wide Cargo gate (${waited_seconds}s elapsed)"
     done
