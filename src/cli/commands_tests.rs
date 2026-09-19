@@ -291,6 +291,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             model: "gpt-5.4".to_string(),
@@ -299,6 +300,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: true,
             detail: String::new(),
             cheapness: None,
+            usage: None,
         },
         ModelRoute {
             model: "openrouter models".to_string(),
@@ -307,6 +309,7 @@ fn collect_cli_model_names_prefers_available_routes_and_dedupes() {
             available: false,
             detail: "OPENROUTER_API_KEY not set".to_string(),
             cheapness: None,
+            usage: None,
         },
     ];
 
@@ -326,6 +329,7 @@ fn test_route(model: &str, provider: &str, api_method: &str) -> ModelRoute {
         available: true,
         detail: String::new(),
         cheapness: None,
+        usage: None,
     }
 }
 
@@ -1321,6 +1325,7 @@ fn collect_cli_model_names_falls_back_when_no_routes_are_available() {
         available: false,
         detail: "no credentials".to_string(),
         cheapness: None,
+        usage: None,
     }];
 
     let models = collect_cli_model_names(&routes, vec!["gpt-5.4".to_string()]);
@@ -1365,9 +1370,11 @@ fn version_command_plain_output_includes_core_fields() {
         build_time: "2026-03-18 18:00:00 +0000".to_string(),
         git_date: "2026-03-18 17:59:00 +0000".to_string(),
         release_build: false,
+        build_channel: "development".to_string(),
+        external_provider_protocol_version: "0.1".to_string(),
     };
     let text = format!(
-        "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\n",
+        "version\t{}\nsemver\t{}\nbase_semver\t{}\nupdate_semver\t{}\ngit_hash\t{}\ngit_tag\t{}\nbuild_time\t{}\ngit_date\t{}\nrelease_build\t{}\nbuild_channel\t{}\nexternal_provider_protocol_version\t{}\n",
         report.version,
         report.semver,
         report.base_semver,
@@ -1376,13 +1383,17 @@ fn version_command_plain_output_includes_core_fields() {
         report.git_tag,
         report.build_time,
         report.git_date,
-        report.release_build
+        report.release_build,
+        report.build_channel,
+        report.external_provider_protocol_version
     );
 
     assert!(text.contains("version\tv1.2.3 (abc1234)"));
     assert!(text.contains("semver\t1.2.3"));
     assert!(text.contains("git_hash\tabc1234"));
     assert!(text.contains("release_build\tfalse"));
+    assert!(text.contains("build_channel\tdevelopment"));
+    assert!(text.contains("external_provider_protocol_version\t0.1"));
 }
 
 #[tokio::test]
