@@ -6,6 +6,7 @@ mod batch;
 mod bg;
 mod browser;
 mod communicate;
+mod compile_remote;
 #[cfg(target_os = "macos")]
 mod computer;
 mod config_edit_notice;
@@ -380,6 +381,12 @@ impl Registry {
             );
             Self::insert_tool_timed(&mut m, &mut timings, "ls", ls::LsTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "bash", bash::BashTool::new);
+            Self::insert_tool_timed(
+                &mut m,
+                &mut timings,
+                "compile_remote",
+                compile_remote::CompileRemoteTool::new,
+            );
             Self::insert_tool_timed(&mut m, &mut timings, "browser", browser::BrowserTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "open", open::OpenTool::new);
             #[cfg(target_os = "macos")]
@@ -529,6 +536,9 @@ impl Registry {
         &self,
         allowed_tools: Option<&HashSet<String>>,
     ) -> Vec<ToolDefinition> {
+        if allowed_tools.is_none_or(|allowed| allowed.contains("compile_remote")) {
+            self.remote_compile_definition().await;
+        }
         let tools = self.tools.read().await;
         let mut defs: Vec<ToolDefinition> = tools
             .iter()
@@ -548,6 +558,15 @@ impl Registry {
         // Sort by name for deterministic ordering - critical for prompt cache hits
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
+    }
+
+    /// Subscription guidance is the one built-in definition that can change
+    /// after sign-in, sign-out, or entitlement refresh. Do not hold the registry
+    /// lock during the bounded account request.
+    pub(crate) async fn remote_compile_definition(&self) -> Option<ToolDefinition> {
+        let tool = self.tools.read().await.get("compile_remote").cloned()?;
+        compile_remote::refresh_access().await;
+        Some(tool.to_definition())
     }
 
     pub async fn tool_names(&self) -> Vec<String> {

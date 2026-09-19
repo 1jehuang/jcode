@@ -420,6 +420,20 @@ impl Agent {
             self.registry.register_selfdev_tools().await;
         }
 
+        // Account sign-in/out and verified entitlement changes must reach the
+        // model even when the tool list is frozen (including deferred MCP).
+        // Only update this definition when its guidance actually changes.
+        if self.locked_tools.as_ref().is_some_and(|tools| {
+            tools.iter().any(|tool| tool.name == "compile_remote")
+        }) && let Some(fresh) = self.registry.remote_compile_definition().await
+            && let Some(locked) = self.locked_tools.as_mut()
+            && let Some(previous) = locked.iter_mut().find(|tool| tool.name == "compile_remote")
+            && (previous.description != fresh.description || previous.input_schema != fresh.input_schema)
+        {
+            *previous = fresh;
+            self.cache_tracker.reset();
+        }
+
         // Return locked tools if available (prevents cache invalidation from
         // tools arriving asynchronously after the first API request).
         //
