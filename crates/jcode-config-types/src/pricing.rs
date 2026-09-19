@@ -131,7 +131,15 @@ pub struct PricingConfigFile {
     /// Base currency for `fx_rates` (defaults to USD).
     pub fx_base: Option<String>,
     /// `1 fx_base = N <code>`. v1 has no automatic fetch; hand-written wins.
+    ///
+    /// Skipped when empty (the lesson of `9da6f9831`): a default-valued field
+    /// must not be baked into the user's file on a save.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub fx_rates: BTreeMap<String, f64>,
+    /// Skipped when empty for the same reason: `Config::save()` serializes the
+    /// whole struct, so without this an unconfigured `[pricing]` that only sets
+    /// `fx_base` would still grow an empty `providers` table.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderPricingFile>,
 }
 
