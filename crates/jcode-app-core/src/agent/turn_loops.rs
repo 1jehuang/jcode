@@ -179,6 +179,14 @@ impl Agent {
                 &split_prompt.dynamic_part,
             )
             .await;
+            // Exit-2 abort: the hook deliberately vetoed the provider call
+            // (prompt-injection tripwire, policy gate). End the turn with the
+            // hook's reason surfaced — no retry, the abort was deliberate.
+            if let Some(reason) = outgoing.aborted {
+                return Err(anyhow::anyhow!(
+                    "pre_request hook aborted the turn: {reason}"
+                ));
+            }
             if outgoing.rewritten {
                 logging::info(&format!(
                     "pre_request hook rewrote the provider-bound request ({} messages)",

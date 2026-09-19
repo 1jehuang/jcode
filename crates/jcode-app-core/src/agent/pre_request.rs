@@ -14,6 +14,9 @@ pub(super) struct OutgoingRequest<'a> {
     /// cache re-accounting: the tracker's snapshot must follow what the
     /// provider actually received, not what the session holds.
     pub rewritten: bool,
+    /// Set when a hook exited 2: the provider call must be skipped and the
+    /// turn ended with this reason. Checked by both turn loops.
+    pub aborted: Option<String>,
 }
 
 /// Last-chance rewrite of the provider-bound request via the `pre_request`
@@ -42,6 +45,7 @@ pub(super) async fn apply_pre_request_transform<'a>(
         system_static: Cow::Borrowed(system_static),
         system_dynamic: Cow::Borrowed(system_dynamic),
         rewritten: false,
+        aborted: None,
     };
     if !crate::hooks::hook_configured("pre_request") {
         return passthrough();
@@ -57,6 +61,16 @@ pub(super) async fn apply_pre_request_transform<'a>(
     });
     let request_str = request_json.to_string();
     let out = crate::hooks::run_pre_request_transform(session_id, working_dir, &request_str).await;
+    if let Some(reason) = out.aborted {
+        return OutgoingRequest {
+            messages: Cow::Borrowed(messages),
+            tools: Cow::Borrowed(tools),
+            system_static: Cow::Borrowed(system_static),
+            system_dynamic: Cow::Borrowed(system_dynamic),
+            rewritten: false,
+            aborted: Some(reason),
+        };
+    }
     if !out.changed {
         return passthrough();
     }
@@ -112,6 +126,7 @@ pub(super) async fn apply_pre_request_transform<'a>(
         system_static: Cow::Borrowed(system_static),
         system_dynamic: Cow::Owned(new_dynamic),
         rewritten,
+        aborted: None,
     }
 }
 

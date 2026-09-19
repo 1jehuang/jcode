@@ -423,6 +423,9 @@ pub struct TransformedRequest {
     /// True when stdout carried a usable rewrite. False means "send the
     /// original request" (no hook, empty stdout, or any fail-open path).
     pub changed: bool,
+    /// Set when a chained command exited 2: the turn must not reach the
+    /// provider. Carries the hook's stderr tail as the abort reason.
+    pub aborted: Option<String>,
 }
 
 /// Run the `pre_request` transform hook before a provider call, if configured.
@@ -436,8 +439,14 @@ pub struct TransformedRequest {
 ///   `system_static` is read-only context for the hook: a returned value is
 ///   ignored, because the static prefix anchors the provider cache prefix.
 /// - exit 0 with empty stdout: request unchanged.
-/// - anything else (non-zero exit, invalid JSON, oversize stdout, timeout,
-///   spawn failure): fail open with the original request.
+/// - exit 2: ABORT. The provider call is skipped and the turn ends with the
+///   hook's stderr tail as the reason (no retry: the abort was deliberate).
+///   Differs from Claude Code's exit-2, which blocks one tool but continues
+///   the turn: aborting the provider call leaves nothing to produce the
+///   reply, so ending the turn with the reason surfaced is the honest
+///   mapping. Remaining chained commands are skipped.
+/// - anything else (other non-zero exit, invalid JSON, oversize stdout,
+///   timeout, spawn failure): fail open with the original request.
 ///
 /// Like every other hook, the transform runs with `JCODE_HOOKS_DISABLED=1`,
 /// so a transform that itself invokes jcode cannot recurse.
@@ -452,6 +461,7 @@ pub async fn run_pre_request_transform(
         system_static: String::new(),
         system_dynamic: None,
         changed: false,
+        aborted: None,
     };
     let command_lines = hook_commands("pre_request");
     if command_lines.is_empty() {
@@ -474,14 +484,22 @@ pub async fn run_pre_request_transform(
         // None keeps the input: empty stdout means "unchanged", and any
         // fail-open outcome preserves the previous command's output. A
         // result that merges to identical bytes (echo, garbage) is also
-        // unchanged: only real differences flip the flag.
-        if let Some(rewritten) = run_pre_request_command(&command_line, &event, &current_json).await
-        {
-            let merged = merge_request_json(&current_json, &rewritten, &command_line);
-            if merged != current_json {
-                current_json = merged;
-                changed = true;
+        // unchanged: only real differences flip the flag. Err aborts the
+        // whole chain: the request is dead, later commands never run.
+        match run_pre_request_command(&command_line, &event, &current_json).await {
+            Some(Err(reason)) => {
+                let mut aborted = unchanged();
+                aborted.aborted = Some(reason);
+                return aborted;
             }
+            Some(Ok(rewritten)) => {
+                let merged = merge_request_json(&current_json, &rewritten, &command_line);
+                if merged != current_json {
+                    current_json = merged;
+                    changed = true;
+                }
+            }
+            None => {}
         }
     }
     if !changed {
@@ -489,6 +507,7 @@ pub async fn run_pre_request_transform(
     }
     match serde_json::from_str::<serde_json::Value>(&current_json) {
         Ok(value) => TransformedRequest {
+            aborted: None,
             messages: value
                 .get("messages")
                 .cloned()
@@ -517,13 +536,15 @@ pub async fn run_pre_request_transform(
     }
 }
 
-/// Run one pre_request command. Returns the rewritten request JSON when the
-/// command exits 0 with non-empty stdout, or None to keep the input.
+/// Run one pre_request command. Returns None to keep the input (empty
+/// stdout, any fail-open path), Some(Ok) with the rewritten request JSON on
+/// exit 0 with non-empty stdout, or Some(Err) with the stderr tail when the
+/// command exits 2 to abort the turn.
 async fn run_pre_request_command(
     command_line: &str,
     event: &HookEvent,
     request_json: &str,
-) -> Option<String> {
+) -> Option<Result<String, String>> {
     let std_cmd = match build_hook_process(command_line, event) {
         Ok(cmd) => cmd,
         Err(error) => {
@@ -665,6 +686,16 @@ async fn run_pre_request_command(
             }
         };
         if !status.success() {
+            // Exit 2 aborts the turn with the stderr tail as the reason;
+            // remaining chained commands are skipped by the caller. Cap the
+            // reason: the tail buffer is already bounded.
+            if status.code() == Some(2) {
+                let reason = stderr_tail.trim().to_string();
+                crate::logging::warn(&format!(
+                    "Hook 'pre_request' command '{command_line}' aborted the turn"
+                ));
+                return Some(Err(reason));
+            }
             let stderr_note = if stderr_tail.trim().is_empty() {
                 String::new()
             } else {
@@ -689,7 +720,7 @@ async fn run_pre_request_command(
     if stdout.trim().is_empty() {
         return None;
     }
-    Some(stdout.into_owned())
+    Some(Ok(stdout.into_owned()))
 }
 
 #[cfg(test)]
@@ -925,6 +956,61 @@ mod tests {
             let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
             assert!(!out.changed, "fail open for {}", script.display());
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_exit_two_aborts_with_stderr_reason() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let veto = write_executable_script(
+            temp.path(),
+            "veto.sh",
+            "#!/bin/sh\necho 'prompt injection in history' >&2\nexit 2\n",
+        );
+        let _env = transform_test_config(&veto.to_string_lossy(), 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(!out.changed);
+        let reason = out.aborted.expect("exit 2 must abort");
+        assert!(reason.contains("prompt injection"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_abort_skips_later_commands() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let veto = write_executable_script(temp.path(), "veto.sh", "#!/bin/sh\nexit 2\n");
+        let marker = temp.path().join("later-ran.txt");
+        let later = write_executable_script(
+            temp.path(),
+            "later.sh",
+            &format!(
+                "#!/bin/sh\nprintf ran > {}\n",
+                crate::terminal_launch::sh_escape(&marker.to_string_lossy())
+            ),
+        );
+        let commands = serde_json::to_string(&vec![
+            veto.to_string_lossy().into_owned(),
+            later.to_string_lossy().into_owned(),
+        ])
+        .expect("serialize hook command array");
+        let _env = transform_test_config(&commands, 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(out.aborted.is_some());
+        assert!(!marker.exists(), "commands after an abort must not run");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_request_exit_one_still_fails_open() {
+        let _guard = crate::storage::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let failer = write_executable_script(temp.path(), "fail.sh", "#!/bin/sh\nexit 1\n");
+        let _env = transform_test_config(&failer.to_string_lossy(), 5000);
+        let out = run_pre_request_transform("ses_t", None, &sample_request_json()).await;
+        assert!(!out.changed);
+        assert!(out.aborted.is_none(), "only exit 2 aborts");
     }
 
     #[cfg(unix)]

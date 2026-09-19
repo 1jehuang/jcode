@@ -248,6 +248,14 @@ impl Agent {
                     return Ok(());
                 }
             };
+            // Exit-2 abort: same veto as the blocking loop. Ends the turn
+            // with the hook's reason; the streaming fn returns Result, so
+            // Err surfaces identically.
+            if let Some(reason) = outgoing.aborted {
+                return Err(anyhow::anyhow!(
+                    "pre_request hook aborted the turn: {reason}"
+                ));
+            }
             if outgoing.rewritten {
                 logging::info(&format!(
                     "pre_request hook rewrote the provider-bound request ({} messages)",
