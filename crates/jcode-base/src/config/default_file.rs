@@ -492,6 +492,21 @@ swarm_max_concurrent_agents = 32
 # memory_rerank_votes = 2
 # memory_rerank_min_agree = 2
 #
+# Cosine-similarity threshold for storage-layer ingest dedup (default 0.85,
+# clamped to (0,1]). Memories scoring above it are reinforced as duplicates
+# instead of stored. Distinct from the sidecar-extraction gate (0.90):
+# ingest dedups stored memories, extraction dedups extracted content.
+# Env: JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD (wins over file).
+# memory_storage_dedup_threshold = 0.85
+#
+# RRF k for hybrid (BM25 + dense) recall fusion (default 60.0, clamped to
+# [1,1000]). Higher k flattens rank gaps, lower k rewards top ranks.
+# 60 is the Cormack-2009 industry default tuned for thousand-item corpora;
+# memory stores are tens to hundreds of entries, where 10-30 gives sharper
+# top-rank separation. Default stays 60 for least surprise.
+# Env: JCODE_MEMORY_RRF_K (wins over file).
+# memory_rrf_k = 60.0
+#
 # Embedding backend for memory dense-retrieval. "local" (default) uses the
 # bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
 # OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;

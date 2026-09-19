@@ -13,6 +13,57 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn same_polarity_matches_negation_counts() {
+    // Identical and paraphrased facts agree.
+    assert!(MemoryManager::same_polarity(
+        "the server is encrypted",
+        "server uses encryption"
+    ));
+    assert!(MemoryManager::same_polarity("nothing here", "nothing here"));
+    // The aboutness trap: near-identical embeddings, opposite meaning.
+    assert!(!MemoryManager::same_polarity(
+        "the server is encrypted",
+        "the server is not encrypted"
+    ));
+    assert!(!MemoryManager::same_polarity(
+        "deploys run automatically",
+        "deploys never run automatically"
+    ));
+    assert!(!MemoryManager::same_polarity(
+        "cache without ttl",
+        "cache with ttl"
+    ));
+    // Antonym contradictions with no negation marker: same topic (~0.9
+    // cosine), opposite meaning. Must not merge.
+    assert!(!MemoryManager::same_polarity(
+        "the feature is enabled",
+        "the feature is disabled"
+    ));
+    assert!(!MemoryManager::same_polarity(
+        "notifications on",
+        "notifications off"
+    ));
+    assert!(!MemoryManager::same_polarity("server up", "server down"));
+    // Same antonym on both sides is agreement, not contradiction.
+    assert!(MemoryManager::same_polarity(
+        "feature enabled for admins",
+        "feature enabled for all"
+    ));
+    // Whole words only: "button" is not "on".
+    assert!(MemoryManager::same_polarity(
+        "button on click",
+        "button on hover"
+    ));
+    // Known conservative false positive, locked in: "based on" vs "based off"
+    // is dialect, not contradiction — but storing a duplicate is the safe
+    // direction, so the veto stands.
+    assert!(!MemoryManager::same_polarity(
+        "based on feedback",
+        "based off feedback"
+    ));
+}
+
 fn with_temp_home<F, T>(f: F) -> T
 where
     F: FnOnce(&Path) -> T,

@@ -427,6 +427,16 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD") {
+            if let Some(parsed) = parse_env_f32_finite(&v) {
+                self.agents.memory_storage_dedup_threshold = parsed;
+            }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RRF_K") {
+            if let Some(parsed) = parse_env_f32_finite(&v) {
+                self.agents.memory_rrf_k = parsed;
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_SIDECAR_ENABLED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.agents.memory_sidecar_enabled = parsed;
@@ -862,6 +872,18 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+/// Parses a finite f32 env value. Rejects NaN, infinities, and empty
+/// strings (leaves the configured value untouched). Range clamping happens
+/// at use, next to the defaults it preserves.
+fn parse_env_f32_finite(raw: &str) -> Option<f32> {
+    let parsed: f32 = raw.trim().parse().ok()?;
+    if parsed.is_finite() {
+        Some(parsed)
+    } else {
+        None
     }
 }
 

@@ -389,9 +389,93 @@ impl MemoryManager {
         storage::write_json(&path, store)
     }
 
-    /// Similarity threshold for storage-layer dedup.
-    /// Memories above this threshold are considered duplicates and reinforced instead.
-    const STORAGE_DEDUP_THRESHOLD: f32 = 0.85;
+    /// Storage-dedup threshold from config, clamped to (0.0, 1.0].
+    /// Config knob `memory_storage_dedup_threshold` (default 0.85); env
+    /// `JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD` wins over file. Distinct from
+    /// the sidecar-extraction gate (0.90): ingest dedups stored memories,
+    /// extraction dedups extracted content. Defaults preserve behavior.
+    pub(crate) fn storage_dedup_threshold() -> f32 {
+        // Non-finite file values (TOML `nan`) fall back to the default:
+        // f32::clamp preserves NaN, which would silently break every
+        // duplicate comparison below.
+        let v = crate::config::config()
+            .agents
+            .memory_storage_dedup_threshold;
+        if !v.is_finite() {
+            return 0.85;
+        }
+        v.clamp(0.0001, 1.0)
+    }
+
+    /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
+    /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
+    ///
+    /// 60 is the Cormack et al. 2009 default every engine ships
+    /// (Elasticsearch, Milvus, Qdrant, Chroma) — tuned for thousand-item
+    /// corpora. Memory stores are tens to hundreds of entries, where k=60
+    /// damps rank gaps hard; operators wanting sharper top-rank separation
+    /// at small scale typically run 10-30. Tunable instead of hardcoded
+    /// for exactly this reason; the default stays 60 for least surprise.
+    /// Aboutness-trap guard: cosine similarity in the 0.85-0.94 band answers
+    /// whether two texts are *about* the same topic, not whether they agree
+    /// ("the server is encrypted" vs "the server is not encrypted" scores
+    /// ~0.93). Reinforcing on a contradiction would strengthen the old fact
+    /// and silently drop the correction, so a negation-polarity mismatch
+    /// vetoes the merge. Conservative by construction: the worst case stores
+    /// a duplicate instead of destroying a correction.
+    pub(crate) fn same_polarity(a: &str, b: &str) -> bool {
+        fn negations(text: &str) -> usize {
+            let lower = text.to_lowercase();
+            [
+                "not", "n't", "never", "no ", "none", "neither", "nor ", "without", "against",
+            ]
+            .iter()
+            .map(|m| lower.matches(m).count())
+            .sum()
+        }
+        if negations(a) != negations(b) {
+            return false;
+        }
+        // Antonym split across the pair with no negation marker: "enabled"
+        // vs "disabled" scores ~0.9 cosine (same topic) but contradicts.
+        // Whole-word match only ("on"/"off" must not fire inside "button").
+        // Conservative: a veto stores a duplicate, never destroys a fact.
+        const ANTONYMS: &[(&str, &str)] = &[
+            ("enable", "disable"),
+            ("enabled", "disabled"),
+            ("allow", "deny"),
+            ("add", "remove"),
+            ("start", "stop"),
+            ("open", "close"),
+            ("lock", "unlock"),
+            ("show", "hide"),
+            ("true", "false"),
+            ("on", "off"),
+            ("increase", "decrease"),
+            ("up", "down"),
+        ];
+        fn words(text: &str) -> std::collections::HashSet<String> {
+            text.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+        let (wa, wb) = (words(a), words(b));
+        !ANTONYMS.iter().any(|(x, y)| {
+            (wa.contains(*x) && wb.contains(*y)) || (wa.contains(*y) && wb.contains(*x))
+        })
+    }
+
+    pub(crate) fn rrf_k() -> f32 {
+        // Same NaN guard as above: clamp preserves NaN, and a NaN k
+        // would poison every fused score.
+        let v = crate::config::config().agents.memory_rrf_k;
+        if !v.is_finite() {
+            return 60.0;
+        }
+        v.clamp(1.0, 1000.0)
+    }
 
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {
         let mut entry = entry;
@@ -403,23 +487,33 @@ impl MemoryManager {
 
         if let Some(ref emb) = entry.embedding {
             if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_project_graph(&graph)?;
-                return Ok(existing_id);
+                // Contradiction, not a duplicate (aboutness trap): store
+                // separately so the correction survives instead of
+                // reinforcing the old fact.
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
+                    self.save_project_graph(&graph)?;
+                    return Ok(existing_id);
+                }
             }
 
             // Cross-store dedup: also check global graph
             if let Ok(mut global_graph) = self.load_global_graph()
-                && let Some(existing_id) =
-                    Self::find_duplicate_in_graph(&global_graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                && let Some(existing_id) = Self::find_duplicate_in_graph(
+                    &global_graph,
+                    emb,
+                    Self::storage_dedup_threshold(),
+                )
                 && let Some(existing) = global_graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_global_graph(&global_graph)?;
-                return Ok(existing_id);
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
+                    self.save_global_graph(&global_graph)?;
+                    return Ok(existing_id);
+                }
             }
         }
 
@@ -438,12 +532,17 @@ impl MemoryManager {
 
         if let Some(ref emb) = entry.embedding {
             if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
+                Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_global_graph(&graph)?;
-                return Ok(existing_id);
+                // Contradiction, not a duplicate (aboutness trap): store
+                // separately so the correction survives instead of
+                // reinforcing the old fact.
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
+                    self.save_global_graph(&graph)?;
+                    return Ok(existing_id);
+                }
             }
 
             // Cross-store dedup: also check project graph
@@ -451,13 +550,15 @@ impl MemoryManager {
                 && let Some(existing_id) = Self::find_duplicate_in_graph(
                     &project_graph,
                     emb,
-                    Self::STORAGE_DEDUP_THRESHOLD,
+                    Self::storage_dedup_threshold(),
                 )
                 && let Some(existing) = project_graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_project_graph(&project_graph)?;
-                return Ok(existing_id);
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
+                    self.save_project_graph(&project_graph)?;
+                    return Ok(existing_id);
+                }
             }
         }
 
@@ -709,13 +810,13 @@ impl MemoryManager {
         let sparse = bm25_rank(&entries, query_text, pool);
 
         // RRF fusion.
-        const RRF_K: f32 = 60.0;
+        let rrf_k = Self::rrf_k();
         let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
         for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
         for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
 
         let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();

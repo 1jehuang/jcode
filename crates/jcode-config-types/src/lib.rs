@@ -613,6 +613,22 @@ pub struct AgentsConfig {
     /// memory. Clamped to 1..=votes. Higher = stricter precision, lower recall.
     #[serde(default = "default_memory_rerank_min_agree")]
     pub memory_rerank_min_agree: usize,
+    /// Cosine-similarity threshold for storage-layer ingest dedup. Memories
+    /// scoring above this are reinforced as duplicates instead of stored.
+    /// This is the ingest/storage gate, intentionally distinct from the
+    /// sidecar-extraction gate (0.90 in memory_agent.rs): ingest decides
+    /// "same memory already stored", extraction decides "same content
+    /// extracted twice". Keep them separate; defaults preserve current
+    /// behavior. Clamped to (0.0, 1.0] at use. Env override:
+    /// `JCODE_MEMORY_STORAGE_DEDUP_THRESHOLD` (wins over file).
+    #[serde(default = "default_memory_storage_dedup_threshold")]
+    pub memory_storage_dedup_threshold: f32,
+    /// RRF k for hybrid (BM25 + dense) fusion in recall. Higher k compresses
+    /// rank gaps (flatter fusion), lower k rewards top ranks more steeply.
+    /// Clamped to [1.0, 1000.0] at use. Env override: `JCODE_MEMORY_RRF_K`
+    /// (wins over file).
+    #[serde(default = "default_memory_rrf_k")]
+    pub memory_rrf_k: f32,
     /// Which embedding backend memory dense-retrieval uses: `"local"` (bundled
     /// all-MiniLM-L6-v2 ONNX, default, no network) or `"openai"` (remote
     /// OpenAI/openai-compatible `/v1/embeddings`, opt-in, requires an
@@ -667,6 +683,14 @@ fn default_memory_rerank_min_agree() -> usize {
     2
 }
 
+fn default_memory_storage_dedup_threshold() -> f32 {
+    0.85
+}
+
+fn default_memory_rrf_k() -> f32 {
+    60.0
+}
+
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
@@ -682,6 +706,8 @@ impl Default for AgentsConfig {
             memory_rerank_cadence: default_memory_rerank_cadence(),
             memory_rerank_votes: default_memory_rerank_votes(),
             memory_rerank_min_agree: default_memory_rerank_min_agree(),
+            memory_storage_dedup_threshold: default_memory_storage_dedup_threshold(),
+            memory_rrf_k: default_memory_rrf_k(),
             memory_embedding_backend: default_memory_embedding_backend(),
             memory_embedding_model: None,
             memory_embedding_base_url: None,
