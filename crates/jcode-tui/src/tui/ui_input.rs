@@ -19,10 +19,18 @@ fn shell_mode_color() -> Color {
     rgb(110, 214, 151)
 }
 
+fn file_chip_style() -> Style {
+    Style::default()
+        .fg(rgb(20, 60, 80))
+        .bg(rgb(90, 210, 210))
+        .add_modifier(Modifier::BOLD)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ComposerMode {
     Chat,
     SlashCommand,
+    FileMention,
     ShellLocal,
     ShellRemote,
 }
@@ -42,9 +50,19 @@ fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
         }
     } else if input.trim_start().starts_with('/') {
         ComposerMode::SlashCommand
+    } else if has_active_at_mention(input) {
+        ComposerMode::FileMention
     } else {
         ComposerMode::Chat
     }
+}
+
+/// Convenience predicate for callers that only need to branch on FileMention.
+pub(crate) fn is_at_file_mode(input: &str, is_remote_mode: bool) -> bool {
+    matches!(
+        composer_mode(input, is_remote_mode),
+        ComposerMode::FileMention
+    )
 }
 
 fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
@@ -55,8 +73,119 @@ fn shell_mode_hint(mode: ComposerMode) -> Option<&'static str> {
     }
 }
 
+// ── @file syntax parsing ──────────────────────────────────────────
+
+/// Check whether the input contains an active @ mention.
+///
+/// @file mention parsing rules:
+///   1. Find `@` from right to left
+///   2. Left of `@` must be: SOL, whitespace, or `(` `[` `{`
+///   3. No whitespace immediately after `@`
+pub(crate) fn has_active_at_mention(input: &str) -> bool {
+    extract_at_query(input).is_some()
+}
+
+/// Extract @ query content. Returns `(at_sign_byte_offset, query_string)`.
+///
+/// Examples:
+///   "help me look at @main.rs"     → Some((12, "main.rs"))
+///   "help me look at @"           → Some((12, ""))
+///   "help me look at @ main.rs"   → None  (whitespace after @)
+///   "test@main.rs"                → None  (@ not at boundary)
+///
+/// The mention is only *active* while the query token runs to the end of the
+/// input: once the user types a space (e.g. "@main then continue"), the old
+/// mention must no longer drive suggestions or intercept Enter, otherwise
+/// accepting a suggestion would rewrite text the user already moved past.
+pub(crate) fn extract_at_query(input: &str) -> Option<(usize, String)> {
+    let last_at = input.rmatch_indices('@').find(|(idx, _)| {
+        // No whitespace immediately after @.
+        // Note: idx+1 may equal input.len() — the slice is empty and
+        // starts_with() returns false, which is correct.
+        if input[*idx + 1..].starts_with(|c: char| c.is_whitespace()) {
+            return false;
+        }
+        // Left of @ must be SOL, whitespace, or opening bracket
+        if *idx > 0 {
+            let prev = input[..*idx].chars().last().unwrap();
+            prev.is_whitespace() || matches!(prev, '(' | '[' | '{')
+        } else {
+            true
+        }
+    })?;
+    let (pos, _) = last_at;
+
+    let after_at = &input[pos + 1..];
+    if after_at.is_empty() {
+        return Some((pos, String::new()));
+    }
+
+    // The token must extend to the end of the input: any whitespace after the
+    // @ (not just inside the collected query) means the user has finished the
+    // mention and moved on.
+    if after_at.contains(|c: char| c.is_whitespace()) {
+        return None;
+    }
+
+    Some((pos, after_at.to_string()))
+}
+
+/// Accept a completion: replace the `@query` with the selected path and drop
+/// the `@` sign. Used when the user accepts a file-mention suggestion.
+pub(crate) fn accept_completion(input: &str, new_path: &str) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query(input)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}{}{}", before, new_path, rest);
+    Some((new_input, before.len() + new_path.len()))
+}
+
+/// Tab-complete the `@query` with the selected path while keeping the `@` sign,
+/// so the user can keep cycling suggestions. Used while the mention popover is
+/// still open.
+pub(crate) fn tab_complete(input: &str, new_path: &str) -> Option<(String, usize)> {
+    let (at_pos, _query) = extract_at_query(input)?;
+    let before = &input[..at_pos];
+    let after = &input[at_pos + 1..];
+    let skip = after.chars().take_while(|c| !c.is_whitespace()).count();
+    let rest: String = after.chars().skip(skip).collect();
+    let new_input = format!("{}@{}{}", before, new_path, rest);
+    Some((new_input, before.len() + 1 + new_path.len()))
+}
+
 fn normalize_repaint_sensitive_notice_text(text: &str) -> String {
     text.replace("⚠️", "⚠")
+}
+
+/// Resolve the row Enter would actually accept, for highlight purposes.
+///
+/// In file-mention mode the selection may rest on a section-header sentinel
+/// (empty cmd), e.g. right after the popover opens. The accept path skips
+/// headers downward, so the renderer must highlight the row it accepts;
+/// otherwise nothing is highlighted while Enter silently accepts a file.
+fn effective_selected_row(
+    selected: usize,
+    suggestions: &[(String, &'static str)],
+    is_file_mention: bool,
+) -> usize {
+    let len = suggestions.len();
+    if len == 0 {
+        return 0;
+    }
+    let mut idx = selected.min(len - 1);
+    if !is_file_mention {
+        return idx;
+    }
+    let initial = idx;
+    while suggestions[idx].0.is_empty() {
+        idx = (idx + 1) % len;
+        if idx == initial {
+            break; // all-header list: nothing to highlight differently
+        }
+    }
+    idx
 }
 
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
@@ -121,7 +250,10 @@ fn command_suggestions_overlay_rect(
 fn command_suggestions_active(app: &dyn TuiState, suggestions: &[(String, &'static str)]) -> bool {
     let mode = composer_mode(app.input(), app.is_remote_mode());
     !suggestions.is_empty()
-        && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
+        && matches!(
+            mode,
+            ComposerMode::SlashCommand | ComposerMode::Chat | ComposerMode::FileMention
+        )
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing())
 }
 
@@ -257,10 +389,15 @@ fn command_suggestion_lines(
     app: &dyn TuiState,
     suggestions: &[(String, &'static str)],
 ) -> Vec<Line<'static>> {
-    // Highlight the characters of each command that the typed query matched.
-    // We only highlight the command token itself (the part before the first
-    // space), matched against the corresponding leading token of the input.
-    let needle = command_suggestion_needle(app.input());
+    let mode = composer_mode(app.input(), app.is_remote_mode());
+    let is_file_mention = mode == ComposerMode::FileMention;
+
+    // For file mentions, extract the @ query for highlighting.
+    let needle = if is_file_mention {
+        extract_at_query(app.input()).map(|(_, q)| q)
+    } else {
+        command_suggestion_needle(app.input())
+    };
     let highlight = |cmd: &str, base: Style| -> Vec<Span<'static>> {
         highlight_command_spans(cmd, needle.as_deref(), base)
     };
@@ -273,9 +410,13 @@ fn command_suggestion_lines(
         spans.push(Span::styled(format!("  {}", desc), base));
         lines.push(Line::from(spans));
     } else if !suggestions.is_empty() {
-        let selected = app
-            .command_suggestion_selected()
-            .min(suggestions.len().saturating_sub(1));
+        // In file-mention mode the selection may rest on a section-header
+        // sentinel; highlight the row Enter would actually accept.
+        let selected = effective_selected_row(
+            app.command_suggestion_selected(),
+            suggestions,
+            is_file_mention,
+        );
         let window_start = command_suggestion_window_start(selected, suggestions.len());
         let limited: Vec<_> = suggestions
             .iter()
@@ -288,18 +429,41 @@ fn command_suggestion_lines(
 
         for (i, (cmd, desc)) in limited.iter().enumerate() {
             let is_selected = i == selected_visible;
+            let is_section_header = is_file_mention && cmd.is_empty();
+
+            // Section headers render as dimmed, non-selectable lines.
+            if is_section_header {
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}", desc),
+                    Style::default()
+                        .fg(dim_color())
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                continue;
+            }
+
+            let is_dir = is_file_mention && cmd.ends_with('/');
+
             let description_style = if is_selected {
                 Style::default().fg(rgb(255, 213, 128))
             } else {
                 Style::default().fg(dim_color())
             };
+            // File mention mode: directories blue, files teal.
             let command_style = if is_selected {
                 Style::default().fg(rgb(255, 213, 128))
+            } else if is_dir {
+                Style::default().fg(rgb(120, 180, 220))
             } else {
                 Style::default().fg(rgb(128, 203, 196))
             };
             let mut spans = highlight(cmd, command_style);
-            spans.push(Span::styled(format!("  {}", desc), description_style));
+            if is_dir && !is_selected {
+                // Directory visual: just use blue styling, trailing / is enough.
+            }
+            if !desc.is_empty() {
+                spans.push(Span::styled(format!("  {}", desc), description_style));
+            }
             if i == 0 && window_start > 0 {
                 spans.push(Span::styled(
                     format!("  ↑{}", window_start),
@@ -392,7 +556,7 @@ pub(crate) fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
-    // Command suggestions render as an overlay (see
+    // Command suggestions and file mentions render as an overlay (see
     // `draw_command_suggestions_overlay`) and intentionally reserve no layout
     // height: opening the palette must not move the transcript or footer.
     if command_suggestions_active(app, &app.command_suggestions()) {
@@ -1698,6 +1862,72 @@ mod tests {
     }
 
     #[test]
+    fn composer_mode_detects_at_file_mention() {
+        assert_eq!(composer_mode("@", false), ComposerMode::FileMention);
+        assert_eq!(composer_mode("@main.rs", false), ComposerMode::FileMention);
+        // @ after space should not trigger
+        assert_eq!(composer_mode(" @ ", false), ComposerMode::Chat);
+        // mid-word @ should not trigger
+        assert_eq!(composer_mode("test@main", false), ComposerMode::Chat);
+        // / takes priority over @
+        assert_eq!(
+            composer_mode("/help @main", false),
+            ComposerMode::SlashCommand
+        );
+        // Remote mode still allows @file
+        assert_eq!(composer_mode("@main", true), ComposerMode::FileMention);
+    }
+
+    #[test]
+    fn extract_at_query_basic() {
+        assert_eq!(
+            extract_at_query("help @main.rs"),
+            Some((5, "main.rs".to_string()))
+        );
+        assert_eq!(extract_at_query("@"), Some((0, "".to_string())));
+    }
+
+    #[test]
+    fn extract_at_query_ends_after_whitespace() {
+        // Once the user types past the @ token, the mention is no longer
+        // active: it must not drive suggestions or intercept Enter.
+        assert_eq!(extract_at_query("x @main.rs y"), None);
+        assert_eq!(extract_at_query("@main then continue"), None);
+        assert_eq!(extract_at_query("help @main.rs "), None); // trailing space
+        assert_eq!(extract_at_query("see @a, @b ok"), None);
+    }
+
+    #[test]
+    fn extract_at_query_no_trigger() {
+        assert_eq!(extract_at_query("@ "), None);
+        assert_eq!(extract_at_query("test@main"), None);
+        assert_eq!(extract_at_query(""), None);
+    }
+
+    #[test]
+    fn accept_completion_drops_at_sign() {
+        let result = accept_completion("see @main.rs", "src/main.rs");
+        assert_eq!(
+            result,
+            Some(("see src/main.rs".to_string(), 4 + "src/main.rs".len()))
+        );
+        // Inactive mention (user typed past the token): nothing to accept.
+        assert_eq!(
+            accept_completion("see @main.rs please", "src/main.rs"),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_complete_preserves_prefix() {
+        let result = tab_complete("see @mai", "main.rs");
+        assert_eq!(
+            result,
+            Some(("see @main.rs".to_string(), 5 + "main.rs".len()))
+        );
+    }
+
+    #[test]
     fn shell_mode_hint_reflects_execution_target() {
         assert_eq!(
             shell_mode_hint(ComposerMode::ShellLocal),
@@ -1725,6 +1955,42 @@ mod tests {
             normalize_repaint_sensitive_notice_text("all clear"),
             "all clear"
         );
+    }
+
+    /// File-mention mode: the selection resting on a section-header sentinel
+    /// (empty cmd) must resolve to the row Enter would accept, mirroring the
+    /// accept path's header skip. Otherwise the popover shows no highlighted
+    /// row while Enter silently accepts a file.
+    #[test]
+    fn effective_selected_row_skips_headers_in_file_mention_mode() {
+        let rows: Vec<(String, &'static str)> = vec![
+            (String::new(), "── Recent ──"),
+            ("src/main.rs".to_string(), "recent"),
+            ("src/lib.rs".to_string(), ""),
+        ];
+        // Selection on the header resolves to the next real file.
+        assert_eq!(effective_selected_row(0, &rows, true), 1);
+        // A real row stays untouched.
+        assert_eq!(effective_selected_row(1, &rows, true), 1);
+        assert_eq!(effective_selected_row(2, &rows, true), 2);
+        // Out-of-range selection clamps to the last row (a real file), which
+        // then needs no skip.
+        assert_eq!(effective_selected_row(9, &rows, true), 2);
+
+        // Header at the end wraps to the first real row.
+        let tail_header = vec![("a.rs".to_string(), ""), (String::new(), "── Files ──")];
+        assert_eq!(effective_selected_row(1, &tail_header, true), 0);
+
+        // All-header list: terminates without panicking, index unchanged.
+        let all_headers = vec![(String::new(), "a"), (String::new(), "b")];
+        assert_eq!(effective_selected_row(1, &all_headers, true), 1);
+
+        // Empty list is safe.
+        assert_eq!(effective_selected_row(3, &[], true), 0);
+
+        // Slash-command mode never skips (headers only exist in the
+        // file-mention popover).
+        assert_eq!(effective_selected_row(0, &rows, false), 0);
     }
 }
 
@@ -2624,7 +2890,7 @@ pub(super) fn draw_input(
     let cursor_pos = app.cursor_pos();
 
     let mode = composer_mode(input_text, app.is_remote_mode());
-    // Command suggestions render later as an overlay pass
+    // Command suggestions and file mentions render later as an overlay pass
     // (`draw_command_suggestions_overlay`), never inline: they must not shift
     // the input rows or anything below them.
     let has_suggestions = command_suggestions_active(app, &app.command_suggestions());
@@ -2648,6 +2914,59 @@ pub(super) fn draw_input(
         caret_color,
         prompt_len,
     );
+
+    // Highlight confirmed @file paths with a distinct chip style
+    // (background color + bold) to visually separate them from plain text.
+    let all_lines: Vec<Line> = {
+        let chips = app.file_chips();
+        if chips.is_empty() {
+            all_lines
+        } else {
+            let chip_style = file_chip_style();
+            all_lines
+                .into_iter()
+                .map(|line| {
+                    let mut new_spans = Vec::new();
+                    for span in line.spans {
+                        let text = span.content.to_string();
+                        let mut start = 0usize;
+                        while start < text.len() {
+                            let mut earliest: Option<(usize, usize)> = None;
+                            for chip in chips {
+                                let cs = chip.to_string_lossy();
+                                if let Some(pos) = text[start..].find(cs.as_ref()) {
+                                    let abs = start + pos;
+                                    let end = abs + cs.len();
+                                    match earliest {
+                                        Some((e, _)) if abs < e => earliest = Some((abs, end)),
+                                        None => earliest = Some((abs, end)),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            if let Some((e_start, e_end)) = earliest {
+                                if e_start > start {
+                                    new_spans.push(Span::styled(
+                                        text[start..e_start].to_string(),
+                                        span.style,
+                                    ));
+                                }
+                                new_spans.push(Span::styled(
+                                    text[e_start..e_end].to_string(),
+                                    chip_style,
+                                ));
+                                start = e_end;
+                            } else {
+                                new_spans.push(Span::styled(text[start..].to_string(), span.style));
+                                break;
+                            }
+                        }
+                    }
+                    Line::from(new_spans)
+                })
+                .collect()
+        }
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     let mut hint_shown = false;

@@ -1613,6 +1613,55 @@ pub struct LaunchHotkeysConfig {
     pub imported: bool,
 }
 
+/// Default base refresh TTL for the `@file` mention index, in seconds.
+pub const DEFAULT_FILE_MENTION_REFRESH_TTL_SECS: u64 = 30;
+/// Default maximum number of suggestions shown in the `@file` popover.
+pub const DEFAULT_FILE_MENTION_MAX_RESULTS: usize = 15;
+/// Default cap on indexed files per workspace.
+pub const DEFAULT_FILE_MENTION_MAX_FILES: usize = 5_000;
+
+fn default_file_mention_refresh_ttl_secs() -> u64 {
+    DEFAULT_FILE_MENTION_REFRESH_TTL_SECS
+}
+
+fn default_file_mention_max_results() -> usize {
+    DEFAULT_FILE_MENTION_MAX_RESULTS
+}
+
+fn default_file_mention_max_files() -> usize {
+    DEFAULT_FILE_MENTION_MAX_FILES
+}
+
+/// Configuration for the `@file` mention picker (at-file completions).
+///
+/// Controls index refresh cadence and result-set sizing. All values are
+/// optional tuning knobs; every field falls back to the built-in default when
+/// unset, and zero values are treated as "use the default" by the consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileMentionConfig {
+    /// Base index refresh TTL in seconds. Large workspaces use a multiple of
+    /// this value so expensive rebuilds happen less often.
+    #[serde(default = "default_file_mention_refresh_ttl_secs")]
+    pub refresh_ttl_secs: u64,
+    /// Maximum suggestions returned per query (popover list size).
+    #[serde(default = "default_file_mention_max_results")]
+    pub max_results: usize,
+    /// Maximum files collected into the per-workspace index (safety cap).
+    #[serde(default = "default_file_mention_max_files")]
+    pub max_files: usize,
+}
+
+impl Default for FileMentionConfig {
+    fn default() -> Self {
+        Self {
+            refresh_ttl_secs: DEFAULT_FILE_MENTION_REFRESH_TTL_SECS,
+            max_results: DEFAULT_FILE_MENTION_MAX_RESULTS,
+            max_files: DEFAULT_FILE_MENTION_MAX_FILES,
+        }
+    }
+}
+
 #[cfg(test)]
 mod reasoning_display_defaults_tests {
     use super::*;
