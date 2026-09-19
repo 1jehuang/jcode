@@ -1292,8 +1292,101 @@ impl FileMentionCache {
     /// Main entry-point: return candidate files for `query`.
     ///
     /// Must return in < 5 ms on the synchronous UI thread.
+    /// Filesystem completion for `@~` (from `$HOME`) and `@/` (from `/`) queries.
+    ///
+    /// `query` is the `@` token without the leading `@`. Everything up to the
+    /// final component names a directory to list; the final component (when
+    /// the query has no trailing `/`) is a prefix filter over entry names.
+    /// Returned paths are display strings (`~/...` or absolute) suitable for
+    /// chips; `~` is expanded later, at prompt-build time.
+    fn filesystem_candidates(query: &str, limits: &SearchLimits) -> Vec<FileMatch> {
+        let (prefix, base_dir, rest) = if let Some(rest) = query.strip_prefix('~') {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Vec::new();
+            };
+            (
+                "~/",
+                std::path::PathBuf::from(home),
+                rest.strip_prefix('/').unwrap_or(rest),
+            )
+        } else {
+            (
+                "/",
+                std::path::PathBuf::from("/"),
+                query.strip_prefix('/').unwrap_or(""),
+            )
+        };
+        let (sub, partial) = match rest.rfind('/') {
+            Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+            None => ("", rest),
+        };
+        let mut dir = base_dir;
+        for segment in sub.split('/').filter(|segment| !segment.is_empty()) {
+            dir.push(segment);
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut matches: Vec<FileMatch> = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            let os_name = entry.file_name();
+            let file_name = os_name.to_string_lossy();
+            let name: &str = file_name.as_ref();
+            let is_directory = file_type.is_dir();
+            if is_directory && SKIP_DIRS.contains(&name) {
+                continue;
+            }
+            if !partial.is_empty() && !name.starts_with(partial) {
+                continue;
+            }
+            if name.starts_with('.') && !partial.starts_with('.') {
+                continue;
+            }
+            if matches.len() >= limits.max_results {
+                break;
+            }
+            let display = if sub.is_empty() {
+                format!("{prefix}{name}")
+            } else {
+                format!("{prefix}{sub}/{name}")
+            };
+            let is_likely_binary = if is_directory {
+                false
+            } else {
+                match std::path::Path::new(name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                {
+                    Some(ext) => !TEXT_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+                    None => false,
+                }
+            };
+            matches.push(FileMatch {
+                score: 0.0,
+                path: display.into(),
+                is_directory,
+                is_recent: false,
+                is_likely_binary,
+            });
+        }
+        matches.sort_by(|a, b| a.path.cmp(&b.path));
+        matches
+    }
+
     pub fn candidates(&mut self, query: &str) -> Vec<FileMatch> {
         let limits = SearchLimits::from_config();
+        if query.starts_with('~') || query.starts_with('/') {
+            return Self::filesystem_candidates(query, &limits);
+        }
 
         // 1. Check search history.
         match self.history.lookup(query) {
@@ -1626,6 +1719,28 @@ fn collect_dir_files(
 /// Paths are resolved against the current directory. Directories are
 /// recursively walked (up to 50 files per directory, respecting SKIP_DIRS).
 /// The same binary detection, size truncation, and budget management applies.
+/// Expand a leading `~` in a chip path to `$HOME`, leaving other paths as-is.
+///
+/// Chips store display strings (e.g. `~/notes/todo.txt`), so that
+/// `prune_orphan_chips` can keep matching them against the input. The tilde is
+/// resolved here, just before the path is used to read file contents.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if s == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 pub(super) fn build_prompt_with_files(input: &str, file_chips: &[PathBuf], cwd: &Path) -> String {
     if file_chips.is_empty() {
         return input.to_string();
@@ -1639,7 +1754,7 @@ pub(super) fn build_prompt_with_files(input: &str, file_chips: &[PathBuf], cwd: 
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for chip in file_chips {
-        let abs = cwd.join(chip);
+        let abs = cwd.join(expand_tilde(chip));
         if abs.is_dir() {
             // Recursively collect files, respecting skip dirs.
             collect_dir_files(
@@ -1785,6 +1900,232 @@ fn read_prefix_lines(path: &Path, max_lines: usize) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::path::Path;
+
+    /// Serializes tests that mutate `HOME`: the default test runner executes
+    /// tests in parallel threads, and an unset or foreign `HOME` mid-test makes
+    /// `~`-query assertions read another test's fixtures.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn set_home(dir: Option<&Path>) -> Option<std::ffi::OsString> {
+        let saved = std::env::var_os("HOME");
+        match dir {
+            Some(p) => crate::env::set_var("HOME", p.as_os_str()),
+            None => crate::env::remove_var("HOME"),
+        }
+        saved
+    }
+
+    fn restore_home(saved: Option<std::ffi::OsString>) {
+        match saved {
+            Some(v) => crate::env::set_var("HOME", v),
+            None => crate::env::remove_var("HOME"),
+        }
+    }
+
+    fn limits(n: usize) -> SearchLimits {
+        SearchLimits { max_results: n }
+    }
+
+    fn sorted_paths(matches: &[FileMatch]) -> Vec<String> {
+        let mut v: Vec<String> = matches.iter().map(|m| m.path.to_string()).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn filesystem_candidates_home_root_lists_entries() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::write(home.path().join("alpha.txt"), "a").unwrap();
+        std::fs::write(home.path().join("beta.md"), "b").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/alpha.txt", "~/beta.md"]);
+        assert!(m.iter().all(|f| !f.is_recent && f.score == 0.0));
+    }
+
+    #[test]
+    fn filesystem_candidates_home_root_no_home_returns_empty() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let saved = set_home(None);
+        let m = FileMentionCache::filesystem_candidates("~", &limits(10));
+        restore_home(saved);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn filesystem_candidates_home_partial_prefix_filters() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::write(home.path().join("alpha.txt"), "a").unwrap();
+        std::fs::write(home.path().join("beta.md"), "b").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~/al", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/alpha.txt"]);
+    }
+
+    #[test]
+    fn filesystem_candidates_home_subdir_and_partial() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::create_dir(home.path().join("proj")).unwrap();
+        std::fs::write(home.path().join("proj/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(home.path().join("proj/util.rs"), "pub fn f() {}").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~/proj/ma", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/proj/main.rs"]);
+        assert!(!m[0].is_directory && !m[0].is_likely_binary);
+    }
+
+    #[test]
+    fn filesystem_candidates_absolute_root_lists_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = format!("{}/", dir.path().to_string_lossy());
+        std::fs::write(dir.path().join("zeta.txt"), "z").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let m = FileMentionCache::filesystem_candidates(&abs, &limits(10));
+        assert_eq!(
+            sorted_paths(&m),
+            vec![
+                format!("{}/sub", dir.path().to_string_lossy()),
+                format!("{}/zeta.txt", dir.path().to_string_lossy())
+            ]
+        );
+    }
+
+    #[test]
+    fn filesystem_candidates_absolute_partial_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().to_string_lossy().to_string();
+        std::fs::write(dir.path().join("zeta.txt"), "z").unwrap();
+        std::fs::write(dir.path().join("keep.md"), "k").unwrap();
+        let m = FileMentionCache::filesystem_candidates(&format!("{abs}/ke"), &limits(10));
+        assert_eq!(sorted_paths(&m), vec![format!("{abs}/keep.md")]);
+    }
+
+    #[test]
+    fn filesystem_candidates_skips_symlinks_and_skip_dirs() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::create_dir(home.path().join("node_modules")).unwrap();
+        let real = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real.path(), home.path().join("link")).unwrap();
+        std::fs::write(home.path().join("plain.txt"), "p").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/plain.txt"]);
+    }
+
+    #[test]
+    fn filesystem_candidates_dotfiles_hidden_unless_partial_dot() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::write(home.path().join(".secret"), "s").unwrap();
+        std::fs::write(home.path().join("visible.txt"), "v").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/visible.txt"]);
+
+        let saved = set_home(Some(home.path()));
+        let m = FileMentionCache::filesystem_candidates("~/.", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/.secret"]);
+    }
+
+    #[test]
+    fn filesystem_candidates_truncates_at_max_results() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        for i in 0..5 {
+            std::fs::write(home.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let m = FileMentionCache::filesystem_candidates("~", &limits(3));
+        restore_home(saved);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn filesystem_candidates_binary_by_extension() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::write(home.path().join("data.bin"), "b").unwrap();
+        std::fs::write(home.path().join("read.md"), "r").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~", &limits(10));
+        restore_home(saved);
+        let bin = m.iter().find(|f| f.path.ends_with("data.bin")).unwrap();
+        let txt = m.iter().find(|f| f.path.ends_with("read.md")).unwrap();
+        assert!(bin.is_likely_binary);
+        assert!(!txt.is_likely_binary);
+    }
+
+    #[test]
+    fn filesystem_candidates_missing_dir_returns_empty() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        let m = FileMentionCache::filesystem_candidates("~/nope", &limits(10));
+        restore_home(saved);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn filesystem_candidates_no_match_returns_empty() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::write(home.path().join("alpha.txt"), "a").unwrap();
+        let m = FileMentionCache::filesystem_candidates("~/zz", &limits(10));
+        restore_home(saved);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn filesystem_candidates_marks_directories() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        std::fs::create_dir(home.path().join("pkg")).unwrap();
+        let m = FileMentionCache::filesystem_candidates("~/p", &limits(10));
+        restore_home(saved);
+        assert_eq!(sorted_paths(&m), vec!["~/pkg"]);
+        assert!(m[0].is_directory);
+        assert!(!m[0].is_likely_binary);
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_and_leaves_others() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let saved = set_home(Some(home.path()));
+        assert_eq!(expand_tilde(Path::new("~/a.txt")), home.path().join("a.txt"));
+        assert_eq!(expand_tilde(Path::new("~")), home.path().to_path_buf());
+        restore_home(saved);
+        assert_eq!(expand_tilde(Path::new("/abs/a.txt")), PathBuf::from("/abs/a.txt"));
+        assert_eq!(expand_tilde(Path::new("rel/a.txt")), PathBuf::from("rel/a.txt"));
+        assert_eq!(expand_tilde(Path::new("not~tilde")), PathBuf::from("not~tilde"));
+    }
+
+    #[test]
+    fn expand_tilde_without_home_leaves_path_unchanged() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let saved = set_home(None);
+        assert_eq!(
+            expand_tilde(Path::new("~/a.txt")),
+            PathBuf::from("~/a.txt")
+        );
+        assert_eq!(expand_tilde(Path::new("~")), PathBuf::from("~"));
+        restore_home(saved);
+    }
     use std::time::Instant;
 
     fn file_entry(path: &str) -> FileEntry {
@@ -1881,6 +2222,10 @@ mod tests {
     /// another (identical relative paths like `src/main.rs` are common).
     #[test]
     fn frecency_state_file_is_keyed_by_cwd() {
+        // `state_file` builds a path under the *real* home when the state
+        // dir helper is unavailable; a parallel `~` test mutating `HOME`
+        // would change the resolved path mid-assertion.
+        let _guard = HOME_LOCK.lock().unwrap();
         let a = Frecency::state_file(Path::new("/repo/alpha"))
             .expect("state file must resolve outside cfg(test) helper dirs");
         let b = Frecency::state_file(Path::new("/repo/beta"))

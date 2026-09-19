@@ -342,6 +342,8 @@ max_files = 5000
 
 Zero or missing values fall back to the built-in defaults shown above.
 
+Outside-workspace files are reachable too. Type `@~` to browse your home directory (`@~/Doc…` expands `$HOME`) or `@/` for an absolute path from the filesystem root. These queries skip the frecency index entirely: they read the parent directory live, so they never pollute your ranking history. Selected files attach as chips exactly like workspace files, with the `~` expanded to the real path when the prompt is sent.
+
 Jcode can render at over a thousand fps. Your monitor will not have the refresh rate to show you, but this means you will not have silly flicker problems. 
 
 The custom scrollback implementation of jcode allows it to do much more than a native scrollback. However, it is a terminal-level limitation that I cannot have smooth, partial line scrolling with a custom scrollback. To fix this, I made my own terminal. Handterm https://github.com/1jehuang/handterm implements a native scroll api, and also happens to be very efficient. This is a work in progress. Scrolling is still well implemented for normal terminals.

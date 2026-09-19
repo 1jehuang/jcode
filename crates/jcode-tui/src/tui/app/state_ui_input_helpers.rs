@@ -1765,6 +1765,12 @@ impl App {
             .filter(|(s, _)| !s.is_empty() && !s.starts_with('⏳'))
             .map(|(s, _)| s.trim_end_matches('/'))
             .collect();
+        // A popover with only sentinel rows (headers, hint) has nothing to
+        // complete: cycling would divide by zero and completing would insert
+        // junk. Treat it like "no suggestions".
+        if paths.is_empty() {
+            return false;
+        }
 
         // Step 1: longest common prefix (if it's longer than the current query).
         if let Some(common) = common_prefix(&paths)
