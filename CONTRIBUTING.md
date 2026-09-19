@@ -1,6 +1,6 @@
 # Contributing to Jcode
 
-Thanks for contributing.
+Thank you for contributing.
 
 ## Issues vs pull requests
 
