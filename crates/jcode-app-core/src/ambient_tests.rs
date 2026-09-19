@@ -1,6 +1,30 @@
 use super::*;
 use chrono::Duration;
 
+/// Restores an env var on drop. Mirrors the helper in runner_tests.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::env::set_var(self.key, prev);
+        } else {
+            crate::env::remove_var(self.key);
+        }
+    }
+}
+
 #[test]
 fn test_ambient_status_default() {
     let status = AmbientStatus::default();
@@ -24,35 +48,41 @@ fn test_scheduled_queue_push_and_pop() {
     let past = Utc::now() - Duration::minutes(5);
     let future = Utc::now() + Duration::hours(1);
 
-    queue.push(ScheduledItem {
-        id: "s1".into(),
-        scheduled_for: past,
-        context: "past item".into(),
-        priority: Priority::Low,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "s1".into(),
+            scheduled_for: past,
+            context: "past item".into(),
+            priority: Priority::Low,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
-    queue.push(ScheduledItem {
-        id: "s2".into(),
-        scheduled_for: future,
-        context: "future item".into(),
-        priority: Priority::High,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "s2".into(),
+            scheduled_for: future,
+            context: "future item".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
     assert_eq!(queue.len(), 2);
 
@@ -73,34 +103,40 @@ fn test_scheduled_queue_remove_by_id_persists_remaining_items() {
     let mut queue = ScheduledQueue::load(path.clone());
     let future = Utc::now() + Duration::hours(1);
 
-    queue.push(ScheduledItem {
-        id: "keep".into(),
-        scheduled_for: future,
-        context: "keep item".into(),
-        priority: Priority::Normal,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
-    queue.push(ScheduledItem {
-        id: "cancel".into(),
-        scheduled_for: future,
-        context: "cancel item".into(),
-        priority: Priority::High,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "keep".into(),
+            scheduled_for: future,
+            context: "keep item".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
+    queue
+        .push(ScheduledItem {
+            id: "cancel".into(),
+            scheduled_for: future,
+            context: "cancel item".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
     let removed = queue.remove_by_id("cancel").unwrap().unwrap();
     assert_eq!(removed.id, "cancel");
@@ -120,35 +156,41 @@ fn test_pop_ready_sorts_by_priority_then_time() {
     let past1 = Utc::now() - Duration::minutes(10);
     let past2 = Utc::now() - Duration::minutes(5);
 
-    queue.push(ScheduledItem {
-        id: "low_early".into(),
-        scheduled_for: past1,
-        context: "low early".into(),
-        priority: Priority::Low,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "low_early".into(),
+            scheduled_for: past1,
+            context: "low early".into(),
+            priority: Priority::Low,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
-    queue.push(ScheduledItem {
-        id: "high_late".into(),
-        scheduled_for: past2,
-        context: "high late".into(),
-        priority: Priority::High,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "test".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "high_late".into(),
+            scheduled_for: past2,
+            context: "high late".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
     let ready = queue.pop_ready();
     assert_eq!(ready.len(), 2);
@@ -165,54 +207,63 @@ fn test_take_ready_direct_items_only_removes_direct_targets() {
     let mut queue = ScheduledQueue::load(path);
     let past = Utc::now() - Duration::minutes(5);
 
-    queue.push(ScheduledItem {
-        id: "session_due".into(),
-        scheduled_for: past,
-        context: "scheduled session task".into(),
-        priority: Priority::Normal,
-        target: ScheduleTarget::Session {
-            session_id: "session_123".into(),
-        },
-        created_by_session: "session_123".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "session_due".into(),
+            scheduled_for: past,
+            context: "scheduled session task".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Session {
+                session_id: "session_123".into(),
+            },
+            created_by_session: "session_123".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
-    queue.push(ScheduledItem {
-        id: "spawn_due".into(),
-        scheduled_for: past,
-        context: "spawned session task".into(),
-        priority: Priority::High,
-        target: ScheduleTarget::Spawn {
-            parent_session_id: "session_123".into(),
-        },
-        created_by_session: "session_123".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "spawn_due".into(),
+            scheduled_for: past,
+            context: "spawned session task".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "session_123".into(),
+            },
+            created_by_session: "session_123".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
-    queue.push(ScheduledItem {
-        id: "ambient_due".into(),
-        scheduled_for: past,
-        context: "scheduled ambient task".into(),
-        priority: Priority::High,
-        target: ScheduleTarget::Ambient,
-        created_by_session: "ambient".into(),
-        created_at: Utc::now(),
-        working_dir: None,
-        task_description: None,
-        relevant_files: Vec::new(),
-        git_branch: None,
-        additional_context: None,
-    });
+    queue
+        .push(ScheduledItem {
+            id: "ambient_due".into(),
+            scheduled_for: past,
+            context: "scheduled ambient task".into(),
+            priority: Priority::High,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "ambient".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
 
     let ready_direct = queue.take_ready_direct_items();
     assert_eq!(ready_direct.len(), 2);
@@ -268,6 +319,7 @@ fn test_ambient_state_record_cycle_with_schedule() {
             relevant_files: Vec::new(),
             git_branch: None,
             additional_context: None,
+            repeat: None,
         }),
         started_at: Utc::now() - Duration::seconds(10),
         ended_at: Utc::now(),
@@ -371,6 +423,7 @@ fn test_build_ambient_system_prompt_with_data() {
         relevant_files: vec!["src/main.rs".into()],
         git_branch: Some("main".into()),
         additional_context: Some("Background: Tests were flaky yesterday".into()),
+        repeat: None,
     }];
 
     let health = MemoryGraphHealth {
@@ -436,12 +489,143 @@ fn test_scheduled_queue_items_accessor() {
     let path = tmp.path().to_path_buf();
     let mut queue = ScheduledQueue::load(path);
 
-    queue.push(ScheduledItem {
-        id: "s1".into(),
-        scheduled_for: Utc::now(),
-        context: "test item".into(),
+    queue
+        .push(ScheduledItem {
+            id: "s1".into(),
+            scheduled_for: Utc::now(),
+            context: "test item".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            created_at: Utc::now(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+            repeat: None,
+        })
+        .expect("queue persists in tests");
+
+    let items = queue.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "s1");
+}
+
+// ---------------------------------------------------------------------------
+// Recurrence
+// ---------------------------------------------------------------------------
+
+/// Guards a directory's writability across a test: read-only for the body,
+/// restored on drop so the temp dir cleans up.
+#[cfg(unix)]
+struct ReadOnlyDir {
+    path: std::path::PathBuf,
+}
+impl ReadOnlyDir {
+    fn lock(dir: &std::path::Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).expect("lock dir");
+        Self {
+            path: dir.to_path_buf(),
+        }
+    }
+}
+impl Drop for ReadOnlyDir {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn test_stale_snapshot_cancel_cannot_resurrect_series() {
+    // Two loads of the same file: A pops (advancing the chain), then B —
+    // holding the pre-pop snapshot — cancels the series. The cancel must
+    // win; B's stale write must not restore the popped occurrence.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut a = ScheduledQueue::load(path.clone());
+    a.push(recurring_item("first", Some(3)))
+        .expect("queue persists in tests");
+    let mut b = ScheduledQueue::load(path.clone());
+    let popped = a.pop_ready();
+    assert_eq!(popped.len(), 1);
+    let removed = b
+        .remove_by_recurrence("recur_test")
+        .expect("cancel retries");
+    assert_eq!(removed, 1, "cancel sees the requeued occurrence");
+    let disk = ScheduledQueue::load(path);
+    assert!(
+        disk.items().iter().all(|item| item
+            .repeat
+            .as_ref()
+            .is_none_or(|repeat| repeat.recurrence_id != "recur_test")),
+        "no series item survives on disk"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_failed_dequeue_save_delivers_nothing() {
+    // Save failures must not deliver: the popped items stay queued and the
+    // runner retries on a later poll instead of redelivering after restart.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path);
+    queue
+        .push(recurring_item("first", Some(3)))
+        .expect("queue persists in tests");
+    let _lock = ReadOnlyDir::lock(tmp.path());
+    let ready = queue.pop_ready();
+    assert!(
+        ready.is_empty(),
+        "nothing delivered without a durable dequeue"
+    );
+    assert_eq!(queue.len(), 1, "the popped item stays queued via reload");
+    assert_eq!(queue.items()[0].id, "first");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_push_reports_unpersistable_work() {
+    // Scheduling must not return success for work that is in neither
+    // memory nor durable storage.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let mut queue = ScheduledQueue::load(path);
+    let _lock = ReadOnlyDir::lock(tmp.path());
+    let result = queue.push(recurring_item("lost", Some(2)));
+    assert!(result.is_err(), "unpersistable push must error, not vanish");
+}
+
+#[test]
+fn test_legacy_bare_array_loads_as_v0() {
+    // Pre-version queue files (a bare JSON array) load with version 0 and
+    // upgrade to the envelope on the next save.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("queue.json");
+    let legacy = serde_json::to_string(&vec![recurring_item("old", Some(2))]).unwrap();
+    std::fs::write(&path, legacy).unwrap();
+    let mut queue = ScheduledQueue::load(path.clone());
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "old");
+    queue
+        .push(recurring_item("new", None))
+        .expect("queue persists in tests");
+    let disk = ScheduledQueue::load(path);
+    assert_eq!(disk.len(), 2);
+}
+
+fn recurring_item(id: &str, remaining: Option<u32>) -> ScheduledItem {
+    ScheduledItem {
+        id: id.into(),
+        scheduled_for: Utc::now() - Duration::minutes(5),
+        context: "garden".into(),
         priority: Priority::Normal,
-        target: ScheduleTarget::Ambient,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        },
         created_by_session: "test".into(),
         created_at: Utc::now(),
         working_dir: None,
@@ -449,9 +633,282 @@ fn test_scheduled_queue_items_accessor() {
         relevant_files: Vec::new(),
         git_branch: None,
         additional_context: None,
-    });
+        repeat: Some(RepeatState {
+            every_minutes: 60,
+            remaining,
+            recurrence_id: "recur_test".into(),
+            skipped: 0,
+        }),
+    }
+}
 
-    let items = queue.items();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, "s1");
+#[test]
+fn test_recurring_pop_requeues_next_occurrence() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue
+        .push(recurring_item("first", Some(3)))
+        .expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, "first");
+
+    // Chain survives the pop: next occurrence already queued.
+    assert_eq!(queue.len(), 1);
+    let next = &queue.items()[0];
+    assert_ne!(next.id, "first");
+    let repeat = next.repeat.as_ref().expect("next keeps series");
+    assert_eq!(repeat.recurrence_id, "recur_test");
+    assert_eq!(repeat.remaining, Some(2));
+    let gap = next.scheduled_for - Utc::now();
+    assert!(
+        gap >= Duration::minutes(55),
+        "next due about one interval out, got {:?}",
+        gap
+    );
+}
+
+#[test]
+fn test_recurring_late_wake_folds_missed_intervals_into_one() {
+    // BufferOne: 10 missed hourly intervals produce exactly one catch-up
+    // fire, and the folded count is observable (not silently dropped like
+    // cron, not replayed like BufferAll).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("late", None);
+    item.scheduled_for = Utc::now() - Duration::minutes(600);
+    queue.push(item).expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    // Exactly one catch-up queued, not ten.
+    assert_eq!(queue.len(), 1);
+    let next = &queue.items()[0];
+    let repeat = next.repeat.as_ref().expect("series survives");
+    assert_eq!(repeat.skipped, 10, "10 folded intervals counted");
+    assert_eq!(repeat.remaining, None, "forever series unaffected");
+    let gap = next.scheduled_for - Utc::now();
+    assert!(
+        gap >= Duration::minutes(55) && gap <= Duration::minutes(65),
+        "catch-up anchors at now + one interval, got {:?}",
+        gap
+    );
+}
+
+#[test]
+fn test_recurring_skipped_accumulates_across_wakes() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    let mut item = recurring_item("late-again", None);
+    item.scheduled_for = Utc::now() - Duration::minutes(120);
+    item.repeat.as_mut().expect("repeat").skipped = 5;
+    queue.push(item).expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    let next = &queue.items()[0];
+    assert_eq!(next.repeat.as_ref().expect("repeat").skipped, 7);
+}
+
+#[test]
+fn test_recurrence_exhausts_at_last_iteration() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue
+        .push(recurring_item("last", Some(1)))
+        .expect("queue persists in tests");
+
+    let ready = queue.pop_ready();
+    assert_eq!(ready.len(), 1);
+    assert!(
+        queue.is_empty(),
+        "remaining=1 means this pop was the final run"
+    );
+}
+
+#[test]
+fn test_recurrence_without_limit_repeats_forever() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue
+        .push(recurring_item("forever", None))
+        .expect("queue persists in tests");
+
+    for _ in 0..3 {
+        let ready = queue.pop_ready();
+        assert_eq!(ready.len(), 1);
+        // Force each requeued occurrence due again.
+        for item in queue.items_mut() {
+            item.scheduled_for = Utc::now() - Duration::minutes(5);
+        }
+    }
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].repeat.as_ref().unwrap().remaining, None);
+}
+
+#[test]
+fn test_recurring_direct_items_requeue_on_take_ready_direct() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue
+        .push(recurring_item("direct", Some(2)))
+        .expect("queue persists in tests");
+
+    let ready = queue.take_ready_direct_items();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(queue.len(), 1, "direct path requeues too");
+    assert_eq!(queue.items()[0].repeat.as_ref().unwrap().remaining, Some(1));
+}
+
+#[test]
+fn test_cancel_recurrence_removes_whole_series() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut queue = ScheduledQueue::load(tmp.path().to_path_buf());
+    queue
+        .push(recurring_item("a", Some(5)))
+        .expect("queue persists in tests");
+    queue
+        .push(recurring_item("b", None))
+        .expect("queue persists in tests");
+    // One-shot bystander from another series must survive.
+    let mut solo = recurring_item("solo", Some(2));
+    solo.id = "solo".into();
+    solo.repeat.as_mut().unwrap().recurrence_id = "recur_other".into();
+    queue.push(solo).expect("queue persists in tests");
+
+    let removed = queue.remove_by_recurrence("recur_test").unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.items()[0].id, "solo");
+    assert_eq!(queue.remove_by_recurrence("recur_missing").unwrap(), 0);
+}
+
+#[test]
+fn test_schedule_rejects_repeat_for_ambient_target() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: None,
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Ambient,
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("ambient+repeat must be rejected");
+    assert!(err.to_string().contains("direct target"), "got: {err}");
+}
+
+#[test]
+fn test_schedule_rejects_zero_interval() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 0,
+                max_iterations: None,
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("zero interval must be rejected");
+    assert!(err.to_string().contains(">= 1"), "got: {err}");
+}
+
+#[test]
+fn test_schedule_rejects_zero_max_iterations() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    let err = manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: Some(0),
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect_err("zero max_iterations must be rejected");
+    assert!(err.to_string().contains(">= 1"), "got: {err}");
+}
+
+#[test]
+fn test_schedule_stamps_series_and_manager_cancels_it() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    let mut manager = AmbientManager::new().expect("manager");
+    manager
+        .schedule(ScheduleRequest {
+            wake_in_minutes: Some(60),
+            wake_at: None,
+            repeat: Some(RepeatSpec {
+                every_minutes: 60,
+                max_iterations: Some(4),
+            }),
+            context: "garden".into(),
+            priority: Priority::Normal,
+            target: ScheduleTarget::Spawn {
+                parent_session_id: "parent".into(),
+            },
+            created_by_session: "test".into(),
+            working_dir: None,
+            task_description: None,
+            relevant_files: Vec::new(),
+            git_branch: None,
+            additional_context: None,
+        })
+        .expect("schedule");
+    let repeat = manager.queue().items()[0]
+        .repeat
+        .clone()
+        .expect("series stamped");
+    assert_eq!(repeat.remaining, Some(4));
+    assert!(repeat.recurrence_id.starts_with("recur_"));
+    assert_eq!(manager.cancel_recurrence(&repeat.recurrence_id).unwrap(), 1);
+    assert!(manager.queue().is_empty());
 }
