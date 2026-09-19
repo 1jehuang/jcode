@@ -683,9 +683,31 @@ pub fn find_repo_root(start: &std::path::Path) -> std::path::PathBuf {
     start.to_path_buf()
 }
 
+/// Best-effort short git HEAD for `root` (`rev-parse --short HEAD`).
+/// `None` outside a repo, without git, or on any failure: revision is
+/// advisory metadata, never a banking requirement.
+pub fn git_head_for(root: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if head.is_empty() { None } else { Some(head) }
+}
+
 /// Provenance citation for a memory: the exact source span the fact was
 /// drawn from. A tripwire, not a judge: it answers whether the cited lines
 /// changed, never whether the meaning changed.
+///
+/// Design follows the evidence-object pattern (source id + revision +
+/// passage + locator; cf. VeriCite 2025 deterministic quote-matching):
+/// the citation binds path, bytes, originating repository, and revision,
+/// and verification is deterministic — no model call, no fuzzy matching.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SourceCitation {
     /// Repo-relative path (e.g. `src/agent/turn_loops.rs`). Absolute paths
@@ -712,6 +734,17 @@ pub struct SourceCitation {
     /// `\n`). Relocation context only.
     #[serde(default)]
     pub context_after: String,
+    /// Canonicalized repo root the citation was banked against. Verified on
+    /// read: a global (cross-repo) memory resolved under a different root
+    /// reads as Unverifiable instead of checking an unrelated file with the
+    /// same relative path. Empty means legacy/unknown: the check is skipped.
+    #[serde(default)]
+    pub repo_id: String,
+    /// Short git HEAD at bank time (`rev-parse --short HEAD`), best-effort.
+    /// Advisory only: when the tree moved on, the stale mark names both
+    /// revisions so the model knows how far behind the memory is.
+    #[serde(default)]
+    pub git_head: Option<String>,
 }
 
 /// Lines of file context stored each side of a cited span for relocation.
@@ -800,6 +833,19 @@ impl SourceCitation {
             Some(path) => path,
             None => return CitationStatus::Unverifiable,
         };
+        // A global memory banked in another repo must not verify against an
+        // unrelated file that happens to share the relative path. Empty
+        // repo_id means legacy/unknown: skip the check.
+        if !self.repo_id.is_empty() {
+            let current = repo_root
+                .canonicalize()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if current != self.repo_id {
+                return CitationStatus::Unverifiable;
+            }
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(_) => return CitationStatus::Unverifiable,
@@ -883,9 +929,17 @@ impl SourceCitation {
             span_text: String::new(),
             context_before: String::new(),
             context_after: String::new(),
+            repo_id: String::new(),
+            git_head: None,
         };
         let full = probe.confined_path(repo_root)?;
         let text = std::fs::read_to_string(&full).ok()?;
+        let repo_id = repo_root
+            .canonicalize()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let git_head = git_head_for(repo_root);
         let lines: Vec<&str> = text.lines().collect();
         if end_line > lines.len() {
             return None;
@@ -905,6 +959,8 @@ impl SourceCitation {
             span_text: span.join("\n"),
             context_before: lines[from..start_line].join("\n"),
             context_after: lines[end_line..to].join("\n"),
+            repo_id,
+            git_head,
         })
     }
 }
@@ -943,9 +999,15 @@ pub fn citation_stale_mark(
     let citation = entry.citation.as_ref()?;
     let root = repo_root?;
     if citation.verify(root) == CitationStatus::Stale {
+        let commit_note = match (&citation.git_head, git_head_for(root)) {
+            (Some(old), Some(new)) if old != &new => {
+                format!(" (recorded at {old}, tree now at {new})")
+            }
+            _ => String::new(),
+        };
         Some(format!(
-            "  (source changed since this was recorded: {} — verify before relying on it)",
-            citation.path
+            "  (source changed since this was recorded: {} — re-read the file before relying on it{})",
+            citation.path, commit_note
         ))
     } else {
         None
@@ -1282,8 +1344,8 @@ pub mod ranking {
     mod tests {
         use super::*;
         use crate::{
-            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, find_repo_root,
-            format_relevant_prompt, format_relevant_prompt_verified,
+            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, citation_stale_mark,
+            find_repo_root, format_relevant_prompt, format_relevant_prompt_verified, git_head_for,
         };
 
         #[test]
@@ -1333,6 +1395,10 @@ pub mod ranking {
                 span_text: span.join("\n"),
                 context_before: lines[from..start].join("\n"),
                 context_after: lines[end..to].join("\n"),
+                // Tests opt out of repo binding (legacy path); binding is
+                // covered by dedicated bank tests below.
+                repo_id: String::new(),
+                git_head: None,
             }
         }
 
@@ -1602,6 +1668,77 @@ pub mod ranking {
                     .verify(dir.path()),
                 CitationStatus::Fresh
             );
+        }
+
+        #[test]
+        fn repo_binding_rejects_foreign_root() {
+            let dir_a = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let dir_b = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let cited = SourceCitation::bank(dir_a.path(), "s.rs", 0, 1).expect("bank");
+            assert!(!cited.repo_id.is_empty());
+            assert_eq!(cited.verify(dir_a.path()), CitationStatus::Fresh);
+            // Identical bytes, different repo: must not verify.
+            assert_eq!(cited.verify(dir_b.path()), CitationStatus::Unverifiable);
+        }
+
+        #[test]
+        fn legacy_citation_without_repo_id_verifies_normally() {
+            let dir = write_tree(&[("s.rs", "fn same() {}\n")]);
+            let mut cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            cited.repo_id.clear();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+        }
+
+        #[test]
+        fn old_json_without_identity_fields_loads() {
+            let raw = r#"{"path":"s.rs","start_line":0,"end_line":1,"span_hash":"ab","span_text":"x","context_before":"","context_after":""}"#;
+            let cited: SourceCitation = serde_json::from_str(raw).expect("legacy loads");
+            assert!(cited.repo_id.is_empty());
+            assert!(cited.git_head.is_none());
+        }
+
+        #[test]
+        fn git_head_recorded_and_drift_named_in_mark() {
+            if std::process::Command::new("git")
+                .arg("--version")
+                .output()
+                .is_err()
+            {
+                return;
+            }
+            let dir = write_tree(&[("s.rs", "fn v1() {}\n")]);
+            let run = |args: &[&str]| {
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .output()
+                    .expect("git")
+            };
+            assert!(run(&["init", "-q"]).status.success());
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "one"]).status.success());
+            let cited = SourceCitation::bank(dir.path(), "s.rs", 0, 1).expect("bank");
+            let head_one = cited.git_head.clone().expect("head recorded");
+            // Edit the span and commit again: stale with both revisions named.
+            std::fs::write(dir.path().join("s.rs"), "fn v2() {}\n").unwrap();
+            assert!(run(&["add", "."]).status.success());
+            assert!(run(&["commit", "-qm", "two"]).status.success());
+            let head_two = git_head_for(dir.path()).expect("head now");
+            assert_ne!(head_one, head_two);
+            let entry = MemoryEntry {
+                citation: Some(cited),
+                ..MemoryEntry::new(MemoryCategory::Fact, "v thing")
+            };
+            let mark =
+                citation_stale_mark(&entry, Some(dir.path())).expect("stale mark with drift");
+            assert!(mark.contains(&head_one), "{mark}");
+            assert!(mark.contains(&head_two), "{mark}");
+            assert!(mark.contains("re-read"), "{mark}");
         }
 
         #[test]
