@@ -383,6 +383,9 @@ impl Provider for CursorCliProvider {
     }
 
     fn supports_compaction(&self) -> bool {
+        // complete_simple uses build_cli_prompt, which truncates long prompts.
+        // Do not mark history summarized when the summary request can silently
+        // omit its oldest messages. Enable only with a non-truncating path.
         false
     }
 

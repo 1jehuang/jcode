@@ -824,6 +824,21 @@ impl Config {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
             }
         }
+
+        // Explicit environment overrides win, but never export config values:
+        // self-written env would mask subsequent config edits/removals.
+        if let Ok(v) = std::env::var("JCODE_GEMINI_FORCE_OAUTH") {
+            self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
+        }
+
+        if let Ok(v) = std::env::var("GOOGLE_CLOUD_PROJECT")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT_ID"))
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.gemini_project = Some(v.to_string());
+            }
+        }
     }
 }
 

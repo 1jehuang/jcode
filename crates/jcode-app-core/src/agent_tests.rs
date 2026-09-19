@@ -26,6 +26,120 @@ struct NativeAutoCompactionProvider;
 
 struct NativeCompactionStreamProvider;
 
+#[derive(Clone, Default)]
+struct SignatureSessionProvider {
+    requests: Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+}
+
+#[async_trait]
+impl Provider for SignatureSessionProvider {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let first = {
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(messages.to_vec());
+            requests.len() == 1
+        };
+        let mut events = vec![StreamEvent::SessionId("provider-resume-handle".into())];
+        if first {
+            events.extend([
+                StreamEvent::ToolUseStart {
+                    id: "signed-call".into(),
+                    name: "provider_owned_probe".into(),
+                },
+                StreamEvent::ToolInputDelta("{}".into()),
+                StreamEvent::ToolUseEnd,
+                StreamEvent::ToolUseSignature("test-thought-signature".into()),
+                StreamEvent::ToolResult {
+                    tool_use_id: "signed-call".into(),
+                    content: "done".into(),
+                    is_error: false,
+                },
+            ]);
+        }
+        events.extend([
+            StreamEvent::TextDelta("completed".into()),
+            StreamEvent::MessageEnd {
+                stop_reason: Some("end_turn".into()),
+            },
+        ]);
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn name(&self) -> &str {
+        "signature-session-test"
+    }
+    fn handles_tools_internally(&self) -> bool {
+        true
+    }
+    fn supports_compaction(&self) -> bool {
+        false
+    }
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(self.clone())
+    }
+}
+
+#[tokio::test]
+async fn mpsc_preserves_signatures_and_never_rebinds_to_provider_session_id() {
+    let _lock = crate::storage::lock_test_env();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            if let Some(home) = &self.0 {
+                crate::env::set_var("JCODE_HOME", home);
+            } else {
+                crate::env::remove_var("JCODE_HOME");
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    crate::config::Config::invalidate_cache();
+    let provider = Arc::new(SignatureSessionProvider::default());
+    let mut agent = Agent::new(provider.clone(), Registry::empty());
+    let jcode_id = agent.session_id().to_string();
+    for prompt in ["first turn", "second turn"] {
+        agent.add_message(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: prompt.into(),
+                cache_control: None,
+            }],
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.run_turn_streaming_mpsc(tx).await.unwrap();
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::SessionId { session_id } = event {
+                assert_eq!(
+                    session_id, jcode_id,
+                    "provider handle must not replace jcode identity"
+                );
+            }
+        }
+    }
+    assert_eq!(agent.session_id(), jcode_id);
+    let saved = Session::load(&jcode_id).unwrap();
+    assert_eq!(
+        saved.provider_session_id.as_deref(),
+        Some("provider-resume-handle")
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].iter().flat_map(|message| &message.content).any(|block| matches!(
+        block, ContentBlock::ToolUse { thought_signature: Some(signature), .. } if signature == "test-thought-signature"
+    )), "second request must replay the persisted signature");
+    let saved_json = serde_json::to_value(&saved).unwrap();
+    assert!(saved_json.to_string().contains("test-thought-signature"));
+}
+
 #[derive(Clone)]
 struct ExplicitPinProvider {
     model: Arc<std::sync::Mutex<String>>,

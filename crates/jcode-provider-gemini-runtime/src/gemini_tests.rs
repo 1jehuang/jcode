@@ -601,6 +601,7 @@ fn auth_mode_prefers_api_key_when_present() {
     let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
     let _force = EnvVarGuard::unset("JCODE_GEMINI_FORCE_OAUTH");
     let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
+    jcode_base::config::Config::invalidate_cache();
 
     match GeminiProvider::auth_mode() {
         GeminiAuthMode::ApiKey(key) => assert_eq!(key, "test-developer-key"),
@@ -616,6 +617,7 @@ fn auth_mode_force_oauth_overrides_api_key() {
     let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
     let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
     let _force = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "1");
+    jcode_base::config::Config::invalidate_cache();
 
     assert!(matches!(GeminiProvider::auth_mode(), GeminiAuthMode::Oauth));
 }
@@ -628,6 +630,7 @@ fn auth_mode_defaults_to_oauth_without_api_key() {
     let _key = EnvVarGuard::unset("GEMINI_API_KEY");
     let _google = EnvVarGuard::unset("GOOGLE_API_KEY");
     let _force = EnvVarGuard::unset("JCODE_GEMINI_FORCE_OAUTH");
+    jcode_base::config::Config::invalidate_cache();
 
     assert!(matches!(GeminiProvider::auth_mode(), GeminiAuthMode::Oauth));
 }
@@ -860,14 +863,17 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
 
-    assert_eq!(
-        parameters["anyOf"][0]["required"],
-        json!(["action"]),
-        "the undefined `label` requirement must be pruned from the branch"
+    // Code Assist rejects a root `anyOf` beside `type`/`properties`
+    // ("specified other fields alongside any_of"), so the GEMINI dialect now
+    // flattens root combiners into the union object. The branch-only `label`
+    // requirement must not leak into the root `required`.
+    assert!(
+        parameters.get("anyOf").is_none(),
+        "root anyOf must be flattened for Code Assist"
     );
-    // Requirements that are actually defined are preserved.
     assert_eq!(parameters["required"], json!(["action"]));
     assert_eq!(parameters["properties"]["label"]["type"], json!("string"));
+    assert_eq!(parameters["properties"]["action"]["type"], json!("string"));
 }
 
 #[test]
@@ -906,4 +912,251 @@ fn build_tools_keeps_required_when_the_object_declares_no_properties() {
     let built = build_tools(&defs).expect("gemini tools");
     let parameters = &built[0].function_declarations[0].parameters;
     assert_eq!(parameters["required"], json!(["anything"]));
+}
+
+#[test]
+fn gemini_uses_jcode_compaction_so_long_sessions_have_a_safety_net() {
+    // Regression guard: `supports_compaction()` gates the ENTIRE compaction
+    // block in `Agent::messages_for_provider`, including the emergency
+    // hard-compact and payload truncation at the 95% critical threshold.
+    // Gemini has no native server-side compaction, so returning `false` here
+    // left long sessions to grow until the provider rejected the prompt.
+    let provider = GeminiProvider::new();
+    assert!(
+        provider.supports_compaction(),
+        "Gemini must opt into jcode compaction; it has no native fallback"
+    );
+    assert!(
+        provider.uses_jcode_compaction(),
+        "uses_jcode_compaction() inherits supports_compaction(); both must be true \
+         or the proactive/semantic modes and emergency recovery never run"
+    );
+}
+
+#[test]
+fn http_retry_policy_honors_server_delay_and_stops_at_the_attempt_limit() {
+    use reqwest::StatusCode;
+    assert_eq!(
+        gemini_http_retry_delay(
+            "generateContent",
+            StatusCode::TOO_MANY_REQUESTS,
+            "quota will reset after 0s",
+            0,
+            Some(Duration::from_secs(60)),
+        ),
+        Some(Duration::from_secs(60))
+    );
+    assert!(
+        gemini_http_retry_delay(
+            "generateContent",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No capacity available",
+            MAX_HTTP_RETRIES,
+            None,
+        )
+        .is_none()
+    );
+    for code in [400, 401, 403, 404, 501, 505] {
+        assert!(
+            gemini_http_retry_delay(
+                "generateContent",
+                StatusCode::from_u16(code).unwrap(),
+                "",
+                0,
+                None,
+            )
+            .is_none()
+        );
+    }
+    for code in [429, 500, 502, 503, 504] {
+        assert!(
+            gemini_http_retry_delay(
+                "generateContent",
+                StatusCode::from_u16(code).unwrap(),
+                "temporary failure",
+                0,
+                None,
+            )
+            .is_some()
+        );
+    }
+}
+
+#[test]
+fn http_retry_policy_does_not_replay_onboarding_or_persistent_quota_errors() {
+    use reqwest::StatusCode;
+    for body in [
+        "daily quota exceeded",
+        "GenerateRequestsPerDay",
+        "billing disabled",
+        "INSUFFICIENT_QUOTA",
+        "QUOTA_EXHAUSTED",
+    ] {
+        assert!(
+            gemini_http_retry_delay(
+                "generateContent",
+                StatusCode::TOO_MANY_REQUESTS,
+                body,
+                0,
+                Some(Duration::ZERO),
+            )
+            .is_none(),
+            "must not retry {body}"
+        );
+    }
+    assert!(
+        gemini_http_retry_delay(
+            "onboardUser",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend unavailable",
+            0,
+            None,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn runtime_state_key_changes_when_configured_project_or_auth_route_changes() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+    let _project = EnvVarGuard::unset("GOOGLE_CLOUD_PROJECT");
+    let _alias = EnvVarGuard::unset("GOOGLE_CLOUD_PROJECT_ID");
+    let _force = EnvVarGuard::unset("JCODE_GEMINI_FORCE_OAUTH");
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
+    let mut cfg = jcode_base::config::Config::default();
+    cfg.provider.gemini_force_oauth = true;
+    cfg.provider.gemini_project = Some("project-a".into());
+    cfg.save().unwrap();
+    let before = GeminiProvider::state_key();
+    assert!(!before.api_key);
+    assert_eq!(before.project.as_deref(), Some("project-a"));
+    cfg.provider.gemini_project = Some("project-b".into());
+    cfg.save().unwrap();
+    assert_ne!(before, GeminiProvider::state_key());
+    cfg.provider.gemini_force_oauth = false;
+    cfg.save().unwrap();
+    let after = GeminiProvider::state_key();
+    assert!(after.api_key);
+    assert_eq!(after.project, None);
+}
+
+#[test]
+fn post_json_retries_transient_http_responses_against_local_server() {
+    use std::io::{BufRead, Read, Write};
+    let _guard = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let _endpoint = EnvVarGuard::set_value("CODE_ASSIST_ENDPOINT", &endpoint);
+    gemini_auth::save_tokens(&gemini_auth::GeminiTokens {
+        access_token: "synthetic-local-test-token".into(),
+        refresh_token: "synthetic-local-test-refresh".into(),
+        expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        email: None,
+    })
+    .unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut requests = 0;
+        for status in ["429 Too Many Requests", "503 Service Unavailable", "200 OK"] {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "local request timed out"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => panic!("accept: {err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap(),
+                json!({"probe": true})
+            );
+            requests += 1;
+            let body = if requests == 3 {
+                r#"{"ok":true}"#
+            } else {
+                r#"{"error":{"message":"temporary failure"}}"#
+            };
+            write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+        requests
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut provider = GeminiProvider::new();
+        provider.client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let response: Value = provider
+            .post_json("generateContent", &json!({"probe": true}))
+            .await
+            .unwrap();
+        assert_eq!(response, json!({"ok": true}));
+    });
+    assert_eq!(server.join().unwrap(), 3);
+}
+
+#[test]
+fn ensure_state_replaces_oauth_cache_when_switching_to_api_key() {
+    let _lock = jcode_base::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("JCODE_HOME", home.path());
+    let _key = EnvVarGuard::set_value("GEMINI_API_KEY", "test-developer-key");
+    let _force = EnvVarGuard::set_value("JCODE_GEMINI_FORCE_OAUTH", "false");
+    jcode_base::config::Config::invalidate_cache();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let provider = GeminiProvider::new();
+        *provider.state.lock().await = Some(CachedGeminiState {
+            key: GeminiStateKey {
+                api_key: false,
+                project: Some("old-project".into()),
+            },
+            state: GeminiRuntimeState {
+                project_id: "old-project".into(),
+                session_id: "old-session".into(),
+            },
+        });
+        let state = provider.ensure_state().await.unwrap();
+        assert!(state.project_id.is_empty());
+        assert_ne!(state.session_id, "old-session");
+        assert_eq!(
+            provider.ensure_state().await.unwrap().session_id,
+            state.session_id
+        );
+    });
 }
