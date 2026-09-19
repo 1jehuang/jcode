@@ -57,13 +57,18 @@ latency, cost, or total process memory versus the old system. No controlled
 old-versus-new benchmark was performed. Full-scope remote candidate scanning
 also sends more memory content to the provider than an embedding shortlist.
 
-## Operational boundaries still open
+## Activation and remaining operational boundaries
 
-- The validated binary was published to the local current channel. The shared
-  daemon was **not activated**: `selfdev reload` resolved an obsolete compile-time
-  checkout and could not find its binary. Fresh private-process verification
-  therefore matters: the successful checks above did not accidentally test the
-  old shared daemon. No forced shared-daemon restart was performed.
+- The validated binary is **active on the shared daemon**. The initial
+  `selfdev reload` attempt resolved an obsolete compile-time checkout, so the
+  supported public fallback was used:
+  `jcode server promote 37eaf331c` followed by `jcode server reload` (no force).
+  After graceful handoff, both `selfdev status` and `server:info` reported
+  `v0.85.40-dev (37eaf331c)`, and the shared-server symlink resolved to that
+  immutable binary. This session continued across the handoff. The reloaded
+  shared daemon reported zero embedding loads, calls, and artifact bytes too.
+  The initiating background command was marked interrupted by server replacement;
+  the independent post-reload identity checks establish successful activation.
 - The subscription gateway is committed in the companion backend, but remains
   **undeployed**. Local Worker integration checks are not a successful live
   authenticated subscriber request. Deployment, upstream secret provisioning,
@@ -71,5 +76,5 @@ also sends more memory content to the provider than an embedding shortlist.
 - OpenRouter was live-tested. TypeSafe and AI/ML API adapters have contract and
   transport coverage, not live credential acceptance in this work.
 
-These are explicit remaining activation/rollout boundaries, not passing tests
-or claims that all users are already running the replacement.
+The local replacement is active. The remaining provider/production rollout
+boundaries are not passing tests or claims that all users already have access.
