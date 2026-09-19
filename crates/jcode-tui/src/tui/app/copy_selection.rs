@@ -473,13 +473,7 @@ impl App {
         }
         // Scroll `speed` lines (faster the closer the drag sits to the edge),
         // then extend the selection to the freshly revealed edge line.
-        let mut moved = false;
-        for _ in 0..speed {
-            if !self.step_copy_selection_scroll(pane, upward) {
-                break;
-            }
-            moved = true;
-        }
+        let moved = self.step_copy_selection_scroll(pane, upward, speed as i16);
         if moved && let Some(point) = crate::tui::ui::copy_pane_autoscroll_edge_point(pane, upward)
         {
             self.update_selection_with_point(point, true);
@@ -498,19 +492,20 @@ impl App {
         }
     }
 
-    /// Advance the drag edge autoscroll by exactly one line, via the same
-    /// per-line primitive the wheel uses. The drag's rate is the tick cadence
-    /// (`REDRAW_COPY_AUTOSCROLL` in `redraw_schedule`), so it must not go through
-    /// `enqueue_mouse_scroll`, which moves a whole wheel notch (three lines).
+    /// Scroll the pane's edge a few lines, via the same per-line primitive the
+    /// wheel uses. The drag's rate is the tick cadence (`REDRAW_COPY_AUTOSCROLL`
+    /// in `redraw_schedule`), so it must not go through `enqueue_mouse_scroll`,
+    /// which scales a whole wheel notch by flick velocity.
     fn step_copy_selection_scroll(
         &mut self,
         pane: crate::tui::CopySelectionPane,
         upward: bool,
+        lines: i16,
     ) -> bool {
         let Some(target) = Self::copy_selection_scroll_target(pane) else {
             return false;
         };
-        self.apply_mouse_scroll_step(target, if upward { -1 } else { 1 })
+        self.scroll_target_lines(target, if upward { -1 } else { 1 }, lines)
     }
 
     fn scroll_copy_selection_pane(
@@ -598,7 +593,7 @@ impl App {
                         Some((armed_pane, armed_up, _)) if armed_pane == pane && armed_up == upward
                     );
                     if !same_direction {
-                        self.step_copy_selection_scroll(pane, upward);
+                        self.step_copy_selection_scroll(pane, upward, 1);
                     }
                     self.copy_selection_edge_autoscroll = Some((pane, upward, speed));
                     return Some(false);

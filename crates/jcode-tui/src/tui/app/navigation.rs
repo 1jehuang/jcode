@@ -729,7 +729,7 @@ impl App {
 
     /// Scroll `target` by `lines` in `direction` (-1 up, +1 down), stopping
     /// early at the pane edge. Returns whether anything moved.
-    fn scroll_target_lines(
+    pub(super) fn scroll_target_lines(
         &mut self,
         target: MouseScrollTarget,
         direction: i16,
@@ -794,11 +794,7 @@ impl App {
         true
     }
 
-    pub(super) fn apply_mouse_scroll_step(
-        &mut self,
-        target: MouseScrollTarget,
-        direction: i16,
-    ) -> bool {
+    fn apply_mouse_scroll_step(&mut self, target: MouseScrollTarget, direction: i16) -> bool {
         match target {
             MouseScrollTarget::Chat => {
                 if direction < 0 {
