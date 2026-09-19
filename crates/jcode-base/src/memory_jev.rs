@@ -99,13 +99,13 @@ pub fn build_batch(query: &str, entries: &[MemoryEntry]) -> Result<(Value, Map<S
     let mut questions = Map::new();
     for (index, entry) in entries.iter().enumerate() {
         let reference = format!("candidate_{index}");
-        let mut data = serde_json::to_value(entry)?;
-        // These internal indexing fields are not injected memory evidence.
-        if let Some(object) = data.as_object_mut() {
-            object.remove("embedding");
-            object.remove("embedding_model");
-            object.remove("search_text");
-        }
+        // Only disclose relevance evidence. Provenance, internal IDs, access
+        // history, and embeddings stay local with the full original entry.
+        let data = json!({
+            "content": entry.content,
+            "category": entry.category,
+            "tags": entry.tags,
+        });
         candidates.insert(reference.clone(), data);
         questions.insert(reference.clone(), json!({
             "type": "noul",
