@@ -1203,7 +1203,9 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     let mut restored_session = crate::session::Session::create_with_id(
         "session_restore_resets_runtime_state".to_string(),
         None,
-        None,
+        // A title forces save() past the untouched-session gate; otherwise no
+        // session file exists for restore to load.
+        Some("restore test".to_string()),
     );
     restored_session.save().expect("save restored session");
 
@@ -1233,6 +1235,136 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
     assert!(agent.locked_tools.is_none());
 }
 
+struct TempJcodeHome {
+    _temp: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl TempJcodeHome {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().expect("temp JCODE_HOME");
+        let prev = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        Self { _temp: temp, prev }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self._temp.path()
+    }
+}
+
+impl Drop for TempJcodeHome {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
+/// The on-disk bucket `memory/projects/<hash>.json` is a pure function of the
+/// session's anchored project dir. Mirror the hashing `project_memory_path`
+/// uses so the test can name the exact bucket a dir resolves to.
+fn project_memory_bucket(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    dir.to_path_buf().hash(&mut hasher);
+    crate::storage::jcode_dir()
+        .expect("jcode dir")
+        .join("memory")
+        .join("projects")
+        .join(format!("{:016x}.json", hasher.finish()))
+}
+
+/// Regression: a remote client resuming a session from a different cwd must not
+/// rewrite the session's anchored project dir. Before the fix,
+/// `restore_session_with_working_dir` overwrote `session.working_dir` with the
+/// client cwd, so `extract_session_memories` (and every other project-scoped
+/// consumer keyed off `working_dir`) silently re-bucketed to the client's
+/// project.
+#[tokio::test]
+async fn restore_session_with_client_cwd_keeps_anchored_project_dir() {
+    let _guard = crate::storage::lock_test_env();
+    let home = TempJcodeHome::new();
+    let project_dir = home.path().join("anchored-project");
+    let client_dir = home.path().join("other-project");
+    std::fs::create_dir_all(&project_dir).expect("project dir");
+    std::fs::create_dir_all(&client_dir).expect("client dir");
+    let project_str = project_dir.display().to_string();
+    let client_str = client_dir.display().to_string();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut restored_session = crate::session::Session::create_with_id(
+        "session_resume_keeps_project_anchor".to_string(),
+        None,
+        // A title forces save() past the untouched-session gate; otherwise no
+        // session file exists for restore to load.
+        Some("anchor test".to_string()),
+    );
+    restored_session.working_dir = Some(project_str.clone());
+    restored_session.save().expect("save restored session");
+
+    agent
+        .restore_session_with_working_dir(&restored_session.id, Some(&client_str))
+        .expect("restore session should succeed");
+
+    assert_eq!(
+        agent.working_dir(),
+        Some(project_str.as_str()),
+        "a remote client cwd must not rewrite the anchored project dir"
+    );
+
+    // The project-scoped memory bucket resolves from session.working_dir, so
+    // it still points at the original project's store, not the client's.
+    let anchored_bucket = project_memory_bucket(agent.working_dir().unwrap().as_ref());
+    assert_eq!(anchored_bucket, project_memory_bucket(&project_dir));
+    assert_ne!(anchored_bucket, project_memory_bucket(&client_dir));
+
+    // The resumed session is persisted again during restore; the on-disk
+    // anchor must survive that save.
+    let persisted = crate::session::Session::load(&restored_session.id).expect("reload session");
+    assert_eq!(persisted.working_dir.as_deref(), Some(project_str.as_str()));
+}
+
+/// A session that never recorded a working directory (older session files)
+/// adopts the resuming client's cwd as its anchor.
+#[tokio::test]
+async fn restore_session_with_client_cwd_anchors_unbound_session() {
+    let _guard = crate::storage::lock_test_env();
+    let home = TempJcodeHome::new();
+    let client_dir = home.path().join("client-project");
+    std::fs::create_dir_all(&client_dir).expect("client dir");
+    let client_str = client_dir.display().to_string();
+
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+
+    let mut restored_session = crate::session::Session::create_with_id(
+        "session_resume_anchors_unbound".to_string(),
+        None,
+        // A title forces save() past the untouched-session gate; otherwise no
+        // session file exists for restore to load.
+        Some("anchor test".to_string()),
+    );
+    restored_session.working_dir = None;
+    restored_session.save().expect("save restored session");
+
+    agent
+        .restore_session_with_working_dir(&restored_session.id, Some(&client_str))
+        .expect("restore session should succeed");
+
+    assert_eq!(
+        agent.working_dir(),
+        Some(client_str.as_str()),
+        "an unbound session adopts the client cwd as its project anchor"
+    );
+}
+
 #[tokio::test]
 async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let _guard = crate::storage::lock_test_env();
@@ -1240,6 +1372,9 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::new(provider_dyn.clone()).await;
     let mut agent = Agent::new(provider_dyn, registry);
+    // A title forces save() past the untouched-session gate; otherwise no
+    // session file exists for the reload below.
+    agent.session.title = Some("provider pin test".to_string());
 
     agent
         .set_model("z-ai/glm-5.2@Novita")
@@ -1277,7 +1412,9 @@ async fn restore_session_rehydrates_injected_memory_ids() {
     let mut restored_session = crate::session::Session::create_with_id(
         "session_restore_memory_dedup".to_string(),
         None,
-        None,
+        // A title forces save() past the untouched-session gate; otherwise no
+        // session file exists for restore to load.
+        Some("memory dedup test".to_string()),
     );
     restored_session.record_memory_injection(
         "🧠 auto-recalled 1 memory".to_string(),
@@ -1436,6 +1573,9 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
+    // A title forces save() past the untouched-session gate; otherwise no
+    // session file exists for restore to load.
+    agent.session.title = Some("interrupt restore test".to_string());
     agent.session.save().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),

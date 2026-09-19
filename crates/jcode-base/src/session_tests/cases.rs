@@ -329,6 +329,39 @@ fn initial_session_context_preserves_explicitly_bound_cwd_when_inserted() -> Res
     Ok(())
 }
 
+/// `anchor_working_dir_if_unset` is the single entry point for reported dirs:
+/// it pins an unanchored session exactly once and drops every later report.
+#[test]
+fn anchor_working_dir_if_unset_only_pins_when_unset() {
+    let mut session = Session::create_with_id(
+        "session_anchor_if_unset_test".to_string(),
+        None,
+        Some("anchor if unset".to_string()),
+    );
+
+    // Blank reports never anchor.
+    session.working_dir = None;
+    assert!(!session.anchor_working_dir_if_unset("   "));
+    assert_eq!(session.working_dir, None);
+
+    // An unset session adopts the first real report and reports adoption.
+    session.working_dir = None;
+    assert!(session.anchor_working_dir_if_unset("/tmp/project"));
+    assert_eq!(session.working_dir.as_deref(), Some("/tmp/project"));
+
+    // Once anchored, reports can never rewrite or clear the anchor — equal or
+    // divergent, they are dropped (and return false so callers skip refreshes).
+    assert!(!session.anchor_working_dir_if_unset("/tmp/project"));
+    assert!(!session.anchor_working_dir_if_unset("/tmp/other"));
+    assert!(!session.anchor_working_dir_if_unset("  /tmp/other  "));
+    assert_eq!(session.working_dir.as_deref(), Some("/tmp/project"));
+
+    // Whitespace-only and empty-string anchors count as unset.
+    session.working_dir = Some("  ".to_string());
+    assert!(session.anchor_working_dir_if_unset("/tmp/real"));
+    assert_eq!(session.working_dir.as_deref(), Some("/tmp/real"));
+}
+
 #[test]
 #[allow(clippy::redundant_closure_call)]
 fn initial_session_context_can_refresh_before_real_conversation() -> Result<()> {

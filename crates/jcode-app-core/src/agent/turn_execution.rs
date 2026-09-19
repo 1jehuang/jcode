@@ -217,6 +217,8 @@ impl Agent {
         new_session.is_canary = preserve_canary;
         new_session.testing_build = preserve_testing_build;
         new_session.is_debug = preserve_debug;
+        // The fresh session keeps the same project anchor: /clear starts a new
+        // session, not a new project, so the anchor carries over verbatim.
         new_session.working_dir = preserve_working_dir;
         new_session.ensure_initial_session_context_message();
 
@@ -721,7 +723,12 @@ impl Agent {
         let load_start = Instant::now();
         let mut session = Session::load(session_id)?;
         if let Some(working_dir) = working_dir {
-            session.working_dir = Some(working_dir.to_string());
+            // The reported dir is the client's viewpoint: it may anchor a
+            // session that never recorded a project directory (older session
+            // files), but it can never rewrite an existing anchor — every
+            // project-scoped mechanism (memory buckets, goals, MCP config)
+            // must keep resolving against the session's original dir.
+            session.anchor_working_dir_if_unset(working_dir);
             session.refresh_initial_session_context_message();
         }
         let load_ms = load_start.elapsed().as_millis();

@@ -344,7 +344,14 @@ impl Agent {
         Ok(())
     }
 
-    /// Set the working directory for this session
+    /// Set the working directory for this session.
+    ///
+    /// Test-only seam: `session.working_dir` is the session's permanent
+    /// project anchor — production code binds it at creation and never
+    /// rewrites it (client reports only anchor an unset session via
+    /// `anchor_working_dir_if_unset`). Tests use this to simulate a session
+    /// that was anchored to a specific project directory.
+    #[cfg(test)]
     pub fn set_working_dir(&mut self, dir: &str) {
         if self.session.working_dir.as_deref() == Some(dir) {
             return;

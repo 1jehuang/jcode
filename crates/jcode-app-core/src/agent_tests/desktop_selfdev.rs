@@ -133,7 +133,9 @@ async fn desktop_selfdev_is_automatic_separate_and_restored() {
     );
 
     // A working-directory change must invalidate the previously locked surface.
-    restored.set_working_dir_for_pending_context(Some(home.path().display().to_string()));
+    let new_dir = home.path().display().to_string();
+    restored.set_working_dir(&new_dir);
+    restored.unlock_tools();
     assert!(!restored.is_desktop_selfdev());
     let ordinary = restored.tool_definitions().await;
     assert!(

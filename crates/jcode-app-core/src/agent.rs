@@ -972,11 +972,22 @@ impl Agent {
             .is_some()
     }
 
-    pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
-        if working_dir.is_some() {
-            self.session.working_dir = working_dir;
-            self.unlock_tools();
+    /// Handle a working directory reported by an attached client.
+    ///
+    /// Remote and multi-client attaches report the directory the client
+    /// launched from. That report is a client viewpoint, not a project rebind:
+    /// the session's anchored `working_dir` is the project identity that memory
+    /// buckets, goals, AGENTS.md/env snapshots, and stats key off, so clients
+    /// must never rewrite it. The report is adopted only when the session has
+    /// no project directory yet (legacy session files, provisional agents);
+    /// any other report is dropped.
+    pub(crate) fn anchor_working_dir_if_unset(&mut self, reported: &str) {
+        if self.session.anchor_working_dir_if_unset(reported) {
+            // The session had no anchored project dir; adopt the report and
+            // refresh everything derived from it.
+            self.refresh_agents_md_snapshot();
             self.session.refresh_initial_session_context_message();
+            self.log_env_snapshot("working_dir_anchor");
         }
     }
 

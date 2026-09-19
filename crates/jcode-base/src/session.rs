@@ -154,6 +154,13 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub testing_build: Option<String>,
     /// Working directory (for self-dev detection)
+    ///
+    /// This is the session's anchored project directory, bound once when the
+    /// session is created and permanent afterwards: every project-scoped
+    /// mechanism (memory buckets, goals, AGENTS.md and env snapshots, session
+    /// stats/display) keys off it. Clients may legitimately attach from a
+    /// different directory, but their reported cwd is only a viewpoint and can
+    /// never rewrite the anchor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     /// Memorable short name (e.g., "fox", "oak")
@@ -975,6 +982,39 @@ impl Session {
         }
 
         false
+    }
+
+    /// Anchor the session's project directory from a reported path.
+    ///
+    /// `working_dir` is set once at session start and is never rewritten:
+    /// subscribing/resuming clients report the directory they launched from,
+    /// but that report is only a client viewpoint, not a project rebind. Once
+    /// anchored, every project-scoped mechanism (memory buckets, goals,
+    /// AGENTS.md snapshots, stats) keeps resolving against the original
+    /// directory even when a remote client runs elsewhere.
+    ///
+    /// The report is adopted only by a session with no project directory yet
+    /// (older persisted sessions that predate the field, or provisional agents
+    /// awaiting their first client). Any other report is dropped. Returns true
+    /// when the report anchored the session so the caller can refresh derived
+    /// state (AGENTS.md snapshot, initial context, env snapshot).
+    pub fn anchor_working_dir_if_unset(&mut self, reported: &str) -> bool {
+        let reported = reported.trim();
+        if reported.is_empty() {
+            return false;
+        }
+        match self
+            .working_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+        {
+            None => {
+                self.working_dir = Some(reported.to_string());
+                true
+            }
+            Some(_) => false,
+        }
     }
 
     /// Get the display name for this session (short memorable name if available)
