@@ -1576,11 +1576,11 @@ pub enum MemorySubcommand {
     ClearTest,
 }
 
-pub fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
-    run_memory_command_for_dir(cmd, std::env::current_dir().ok())
+pub async fn run_memory_command(cmd: MemorySubcommand) -> Result<()> {
+    run_memory_command_for_dir(cmd, std::env::current_dir().ok()).await
 }
 
-fn run_memory_command_for_dir(
+async fn run_memory_command_for_dir(
     cmd: MemorySubcommand,
     project_dir: Option<std::path::PathBuf>,
 ) -> Result<()> {
@@ -1642,13 +1642,15 @@ fn run_memory_command_for_dir(
 
         MemorySubcommand::Search { query, semantic } => {
             if semantic {
-                match manager.find_similar(&query, 0.3, 20) {
+                match crate::memory_jev::recall(&manager, &query, 20, memory::MemoryScope::All)
+                    .await
+                {
                     Ok(results) => {
                         if results.is_empty() {
                             println!("No memories found matching '{}'", query);
                         } else {
                             println!(
-                                "Found {} memories matching '{}' (semantic):\n",
+                                "Found {} memories matching '{}' (Jev relevance):\n",
                                 results.len(),
                                 query
                             );
@@ -1659,7 +1661,7 @@ fn run_memory_command_for_dir(
                                     format!(" [{}]", entry.tags.join(", "))
                                 };
                                 println!(
-                                    "- [{}] {}{}\n  id: {} (score: {:.0}%)",
+                                    "- [{}] {}{}\n  id: {} (relevance: {:.0}%)",
                                     entry.category,
                                     entry.content,
                                     tags_str,
@@ -1671,7 +1673,9 @@ fn run_memory_command_for_dir(
                         }
                     }
                     Err(e) => {
-                        eprintln!("Search failed: {}", e);
+                        // A credential or transport failure is not an empty
+                        // result and must give scripts a nonzero exit status.
+                        return Err(e.context("Jev memory search failed"));
                     }
                 }
             } else {

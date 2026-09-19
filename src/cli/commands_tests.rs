@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-#[test]
-fn memory_cli_project_import_uses_explicit_directory_and_persists() {
+#[tokio::test]
+async fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     let _guard = crate::storage::lock_test_env();
     let _saved = SavedEnv::capture(&["JCODE_HOME"]);
     let temp = tempfile::tempdir().expect("temp dir");
@@ -39,6 +39,7 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
         },
         Some(project.clone()),
     )
+    .await
     .expect("import project memory");
 
     let reloaded = crate::memory::MemoryManager::new()
@@ -53,8 +54,8 @@ fn memory_cli_project_import_uses_explicit_directory_and_persists() {
     );
 }
 
-#[test]
-fn memory_cli_project_import_fails_without_durable_project_store() {
+#[tokio::test]
+async fn memory_cli_project_import_fails_without_durable_project_store() {
     let temp = tempfile::tempdir().expect("temp dir");
     let input = temp.path().join("memories.json");
     std::fs::write(&input, "[]").expect("write import");
@@ -67,9 +68,63 @@ fn memory_cli_project_import_fails_without_durable_project_store() {
         },
         None,
     )
+    .await
     .expect_err("project import must require a durable store");
 
     assert!(error.to_string().contains("without a project directory"));
+}
+
+#[tokio::test]
+async fn memory_cli_semantic_requires_jev_but_keyword_search_remains_local() {
+    let _guard = crate::storage::lock_test_env();
+    let keys = [
+        "JCODE_HOME",
+        "JCODE_API_KEY",
+        "OPENROUTER_API_KEY",
+        "TYPESAFE_API_KEY",
+        "AIMLAPI_API_KEY",
+        "JCODE_MEMORY_JEV_PROVIDER",
+    ];
+    let _saved = SavedEnv::capture(&keys);
+    let temp = tempfile::tempdir().expect("temp dir");
+    crate::env::set_var("JCODE_HOME", temp.path().join("home"));
+    for key in &keys[1..] {
+        crate::env::remove_var(key);
+    }
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let manager = crate::memory::MemoryManager::new().with_project_dir(&project);
+    manager
+        .remember_project(crate::memory::MemoryEntry::new(
+            crate::memory::MemoryCategory::Fact,
+            "cli-jev-probe without embedding",
+        ))
+        .unwrap();
+    assert!(
+        manager
+            .list_all()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.embedding.is_none())
+    );
+
+    let command = |semantic| MemorySubcommand::Search {
+        query: "cli-jev-probe".into(),
+        semantic,
+    };
+    run_memory_command_for_dir(command(false), Some(project.clone()))
+        .await
+        .expect("local keyword search must remain available without credentials");
+    let error = run_memory_command_for_dir(command(true), Some(project))
+        .await
+        .expect_err("--semantic must report missing Jev access, not silently use embeddings");
+    assert!(error.to_string().contains("Jev memory search failed"));
+    assert!(!format!("{error:#}").contains("cli-jev-probe"));
+
+    // Scope still comes from the explicit directory, never the process cwd.
+    run_memory_command_for_dir(command(true), Some(temp.path().join("empty-project")))
+        .await
+        .expect("an empty project must not leak another project's candidates");
 }
 
 struct SavedEnv {

@@ -745,13 +745,13 @@ fn memory_widget_renders_current_cycle_activity() {
         .to_lowercase();
 
     assert!(text.contains("7 memories"));
-    assert!(text.contains("find matches"));
-    assert!(text.contains("check relevance"));
+    assert!(text.contains("load memories"));
+    assert!(text.contains("jev relevance"));
     assert!(text.contains("1/3"));
     assert!(text.contains("inject context"));
     assert!(text.contains("update memory"));
     assert!(text.contains("now:"));
-    assert!(text.contains("checking 3 candidate"));
+    assert!(text.contains("jev relevance: 3"));
     assert!(!text.contains("model:"));
     assert!(!text.contains("gpt-5.3"));
     assert!(!text.contains("4 project"));
@@ -874,7 +874,7 @@ fn memory_widget_never_renders_uppercase_state_badges() {
 
     assert!(text.contains("128 memories"), "{text}");
     for badge in [
-        "IDLE", "SEARCH", "VERIFY", "READY", "INJECT", "SAVE", "UPDATE", "TOOL", "DONE", "FAILED",
+        "IDLE", "SEARCH", "JEV", "READY", "INJECT", "SAVE", "UPDATE", "TOOL", "DONE", "FAILED",
         "DISABLED",
     ] {
         assert!(!text.contains(badge), "unexpected badge {badge}: {text}");
@@ -1020,11 +1020,11 @@ fn memory_widget_shows_option_a_steps_without_pipeline_object() {
         .join("\n")
         .to_lowercase();
 
-    assert!(text.contains("find matches"), "{text}");
-    assert!(text.contains("check relevance"), "{text}");
+    assert!(text.contains("load memories"), "{text}");
+    assert!(text.contains("jev relevance"), "{text}");
     assert!(text.contains("inject context"), "{text}");
     assert!(text.contains("update memory"), "{text}");
-    assert!(text.contains("checking 3 candidate"), "{text}");
+    assert!(text.contains("jev relevance: 3"), "{text}");
 }
 
 #[test]

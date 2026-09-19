@@ -776,26 +776,8 @@ impl AmbientRunnerHandle {
                     // Send notifications (fire-and-forget)
                     self.inner.notifier.dispatch_cycle_summary(&transcript);
 
-                    // Post-cycle memory consolidation (fire-and-forget)
-                    tokio::spawn(async move {
-                        let manager = MemoryManager::new();
-                        match manager.backfill_embeddings() {
-                            Ok((backfilled, _failed)) => {
-                                if backfilled > 0 {
-                                    logging::info(&format!(
-                                        "Ambient: backfilled {} embeddings",
-                                        backfilled
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                logging::error(&format!(
-                                    "Ambient: embedding backfill failed: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    });
+                    // Stored memories are recalled directly by Jev, so ambient
+                    // cycles must not initialize or backfill an embedding model.
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));

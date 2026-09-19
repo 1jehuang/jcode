@@ -553,7 +553,10 @@ impl App {
                     ("/agents swarm".into(), "Configure swarm/subagent model"),
                     ("/agents review".into(), "Configure code review model"),
                     ("/agents judge".into(), "Configure judge model"),
-                    ("/agents memory".into(), "Configure memory sidecar model"),
+                    (
+                        "/agents memory".into(),
+                        "Configure optional memory extraction model",
+                    ),
                     ("/agents ambient".into(), "Configure ambient model"),
                 ],
             );
