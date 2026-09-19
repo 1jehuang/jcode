@@ -344,6 +344,65 @@ fn tool_result_clearing_keeps_small_results() {
 }
 
 #[test]
+fn tool_result_clearing_counts_characters_not_bytes() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
+    crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", "0");
+    crate::config::Config::invalidate_cache();
+
+    // 100 CJK chars = 300 bytes: under the 200-char policy, must survive.
+    let cjk = "\u{4e2d}".repeat(100);
+    assert_eq!(cjk.len(), 300);
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "call_cjk".to_string(),
+            content: cjk.clone(),
+            is_error: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    // keep=0 with a single message: len 1 <= keep... use keep path via two
+    // messages so index 0 clears-or-keeps by size only.
+    let two = vec![messages[0].clone(), messages[0].clone()];
+    let out = Agent::apply_tool_result_clearing(two);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert_eq!(content, &cjk),
+        other => panic!("CJK result under policy must survive, got: {other:?}"),
+    }
+    // 300 CJK chars = 900 bytes: over policy, stubbed with char count.
+    let big_cjk = "\u{4e2d}".repeat(300);
+    let two_big = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_big".to_string(),
+                content: big_cjk,
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        messages[0].clone(),
+    ];
+    let out = Agent::apply_tool_result_clearing(two_big);
+    match &out[0].content[0] {
+        ContentBlock::ToolResult { content, .. } => assert!(
+            content.starts_with("[cleared by retention: was 300 chars]"),
+            "got: {content}"
+        ),
+        other => panic!("big CJK result must stub with char count, got: {other:?}"),
+    }
+
+    match prev {
+        Some(value) => crate::env::set_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN", value),
+        None => crate::env::remove_var("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN"),
+    }
+    crate::config::Config::invalidate_cache();
+}
+
+#[test]
 fn agent_drop_removes_its_configured_session_tool_policy() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let session = Session::create(None, None);

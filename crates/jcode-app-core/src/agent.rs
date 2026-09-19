@@ -754,10 +754,12 @@ impl Agent {
         for message in messages.iter_mut().take(cutoff) {
             for block in message.content.iter_mut() {
                 if let ContentBlock::ToolResult { content, .. } = block
-                    && content.len() > Self::TOOL_RESULT_CLEAR_MIN_CHARS
+                    // Character count, not byte length: a 100-CJK-char result
+                    // is 300 bytes but reads as 100 chars of context.
+                    && content.chars().count() > Self::TOOL_RESULT_CLEAR_MIN_CHARS
                     && !content.starts_with("[cleared by retention")
                 {
-                    let was = content.len();
+                    let was = content.chars().count();
                     *content = format!("[cleared by retention: was {was} chars]");
                 }
             }
