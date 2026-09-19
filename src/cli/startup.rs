@@ -406,9 +406,8 @@ fn spawn_background_update_check(args: &Args) {
 
             let start = std::time::Instant::now();
             Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Checking));
-            if let Some(update_available) = hot_exec::check_for_updates()
-                && update_available
-            {
+            let status = source_update_check_status(hot_exec::check_for_updates());
+            if matches!(status, UpdateStatus::Available { .. }) {
                 // A checkout with local commits can never fast-forward, so the
                 // pull below would always fail and surface a noisy "Update
                 // diverged. Press Ctrl+Y..." card in every new session.
@@ -421,10 +420,7 @@ fn spawn_background_update_check(args: &Args) {
                     );
                     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
                 } else {
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                        current: jcode_build_meta::version().to_string(),
-                        latest: "latest source".to_string(),
-                    }));
+                    Bus::global().publish(BusEvent::UpdateStatus(status));
                     if auto_update {
                         logging::info("Update available - auto-updating...");
                         Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
@@ -446,7 +442,10 @@ fn spawn_background_update_check(args: &Args) {
                     }
                 }
             } else {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
+                if let UpdateStatus::Error(message) = &status {
+                    logging::info(message);
+                }
+                Bus::global().publish(BusEvent::UpdateStatus(status));
             }
             logging::info(&format!(
                 "[TIMING] background_update_check: auto_update={}, total={}ms",
@@ -454,6 +453,23 @@ fn spawn_background_update_check(args: &Args) {
                 start.elapsed().as_millis()
             ));
         });
+    }
+}
+
+fn source_update_check_status(result: Option<bool>) -> crate::bus::UpdateStatus {
+    use crate::bus::UpdateStatus;
+
+    match result {
+        Some(true) => UpdateStatus::Available {
+            current: jcode_build_meta::version().to_string(),
+            latest: "latest source".to_string(),
+        },
+        Some(false) => UpdateStatus::UpToDate,
+        None => UpdateStatus::Error(
+            "Source update check failed: unable to compare the source checkout with its upstream. \
+             The repository or upstream may be unavailable, or git fetch may have failed."
+                .to_string(),
+        ),
     }
 }
 
@@ -503,6 +519,91 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn source_update_check_unknown_reports_comparison_error() {
+        let crate::bus::UpdateStatus::Error(message) = source_update_check_status(None) else {
+            panic!("an indeterminate source comparison must report an error");
+        };
+        assert!(message.contains("unable to compare the source checkout with its upstream"));
+        assert!(message.contains("git fetch may have failed"));
+    }
+
+    #[test]
+    fn source_update_check_false_reports_up_to_date() {
+        assert!(matches!(
+            source_update_check_status(Some(false)),
+            crate::bus::UpdateStatus::UpToDate
+        ));
+    }
+
+    #[test]
+    fn source_update_check_true_reports_available() {
+        let crate::bus::UpdateStatus::Available { current, latest } =
+            source_update_check_status(Some(true))
+        else {
+            panic!("a source update must remain available");
+        };
+        assert_eq!(current, jcode_build_meta::version());
+        assert_eq!(latest, "latest source");
+    }
+
+    #[test]
+    fn source_update_check_real_git_upstream_states() {
+        let repo = tempfile::tempdir().expect("temporary source checkout");
+        let git = |args: &[&str]| {
+            let output = ProcessCommand::new("git")
+                .args([
+                    "-c",
+                    "user.name=Update Test",
+                    "-c",
+                    "user.email=update-test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "source"]);
+        git(&["commit", "--allow-empty", "-m", "initial"]);
+
+        // A valid checkout without a tracking branch cannot be compared.
+        let result = hot_exec::source_update_available(repo.path());
+        assert_eq!(result, None);
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Error(_)
+        ));
+
+        // Local branches supply tracking controls without fetching or networking.
+        git(&["branch", "upstream"]);
+        git(&["branch", "--set-upstream-to=upstream", "source"]);
+        let result = hot_exec::source_update_available(repo.path());
+        assert_eq!(result, Some(false));
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::UpToDate
+        ));
+
+        git(&["checkout", "upstream"]);
+        git(&["commit", "--allow-empty", "-m", "upstream update"]);
+        git(&["checkout", "source"]);
+        let result = hot_exec::source_update_available(repo.path());
+        assert_eq!(result, Some(true));
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Available { .. }
+        ));
     }
 
     #[test]
