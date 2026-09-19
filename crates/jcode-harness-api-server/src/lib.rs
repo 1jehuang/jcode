@@ -71,15 +71,18 @@ async fn read_frame_bytes<R>(reader: &mut R, frame: &mut Vec<u8>) -> std::io::Re
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let mut limited = tokio::io::AsyncReadExt::take(reader, MAX_FRAME_BYTES);
-    let read = limited.read_until(b'\n', frame).await?;
-    if frame.len() as u64 == MAX_FRAME_BYTES && !frame.ends_with(b"\n") {
+    // A cancelled read retains its prefix. Limit the remaining bytes, not
+    // each invocation separately, or repeated cancellation defeats the cap.
+    let remaining = MAX_FRAME_BYTES.saturating_sub(frame.len() as u64);
+    let mut limited = tokio::io::AsyncReadExt::take(reader, remaining);
+    limited.read_until(b'\n', frame).await?;
+    if frame.len() as u64 >= MAX_FRAME_BYTES && !frame.ends_with(b"\n") {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("frame exceeds {MAX_FRAME_BYTES} byte limit"),
         ));
     }
-    Ok(read)
+    Ok(frame.len())
 }
 
 /// Run the bridge accept loop forever.
@@ -306,7 +309,7 @@ where
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.
     let mut api_frame = Vec::new();
-    let mut legacy_line = String::new();
+    let mut legacy_frame = Vec::new();
     loop {
         tokio::select! {
             // A busy daemon can keep the legacy socket continuously readable.
@@ -364,7 +367,7 @@ where
                     }
                 }
             }
-            n = legacy_reader.read_line({ legacy_line.clear(); &mut legacy_line }) => {
+            n = read_frame_bytes(&mut legacy_reader, &mut legacy_frame) => {
                 if n? == 0 {
                     let frame = ServerFrame::event(ApiEvent::Error {
                         code: ErrorCode::Internal,
@@ -373,8 +376,13 @@ where
                     write_json_line(&mut write_half, &frame).await?;
                     return Ok(());
                 }
-                if legacy_line.trim().is_empty() { continue; }
-                let event: Value = match serde_json::from_str(legacy_line.trim()) {
+                if legacy_frame.iter().all(u8::is_ascii_whitespace) {
+                    legacy_frame.clear();
+                    continue;
+                }
+                let parsed = serde_json::from_slice(&legacy_frame);
+                legacy_frame.clear();
+                let event: Value = match parsed {
                     Ok(value) => value,
                     Err(_) => continue,
                 };
@@ -655,5 +663,82 @@ mod socket_permission_tests {
             "API socket must be owner-only (0600); a wider mode exposes every \
              session behind the bridge to other local users"
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fragmented_reply_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::net::UnixListener;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_history_replies_survive_api_requests_between_fragments() {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let path = std::env::temp_dir().join(format!("jcode-fragments-{}-{}.sock", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let listener = UnixListener::bind(&path).unwrap();
+            let (client, bridge) = tokio::io::duplex(4 * 1024 * 1024);
+            let (bridge_read, bridge_write) = tokio::io::split(bridge);
+            let task = tokio::spawn(run_bridge_stream(bridge_read, bridge_write, path.clone()));
+            let (client_read, mut client_write) = tokio::io::split(client);
+            let mut replies = BufReader::new(client_read).lines();
+            write_json_line(&mut client_write, &json!({"v":1,"id":1,"req":"hello","min_version":1,"max_version":1})).await.unwrap();
+            let (daemon, _) = listener.accept().await.unwrap();
+            let (daemon_read, mut daemon_write) = daemon.into_split();
+            let mut requests = BufReader::new(daemon_read).lines();
+            assert_eq!(serde_json::from_str::<Value>(&replies.next_line().await.unwrap().unwrap()).unwrap()["ev"], "hello_ok");
+            write_json_line(&mut client_write, &json!({"v":1,"id":2,"req":"attach_session","session_id":"fragment-session"})).await.unwrap();
+            for _ in 0..3 {
+                let request: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+                if request["type"] == "state" {
+                    write_json_line(&mut daemon_write, &json!({"type":"state","id":request["id"],"session_id":"fragment-session"})).await.unwrap();
+                }
+            }
+            loop {
+                let frame: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+                if frame["ev"] == "attached" { break; }
+            }
+            for id in 3..6 {
+                write_json_line(&mut client_write, &json!({"v":1,"id":id,"req":"get_history","session_id":"fragment-session"})).await.unwrap();
+            }
+            let mut history_ids = Vec::new();
+            for _ in 0..3 {
+                let request: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["type"], "get_history");
+                history_ids.push(request["id"].clone());
+            }
+            for (index, id) in history_ids.into_iter().enumerate() {
+                // Larger than the socket send buffer, forcing the bridge to
+                // consume an unterminated prefix before API activity cancels it.
+                let text = "x".repeat(1024 * 1024);
+                let prefix = format!("{{\"type\":\"history\",\"id\":{id},\"session_id\":\"fragment-session\",\"messages\":[{{\"role\":\"assistant\",\"content\":\"{text}");
+                daemon_write.write_all(prefix.as_bytes()).await.unwrap();
+                let ping_id = 20 + index;
+                write_json_line(&mut client_write, &json!({"v":1,"id":ping_id,"req":"ping"})).await.unwrap();
+                let ping: Value = serde_json::from_str(&requests.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(ping["type"], "ping");
+                daemon_write.write_all(b"\"}]}\n").await.unwrap();
+                write_json_line(&mut daemon_write, &json!({"type":"pong","id":ping["id"]})).await.unwrap();
+                let mut history_seen = false;
+                let mut pong_seen = false;
+                while !history_seen || !pong_seen {
+                    let reply: Value = serde_json::from_str(&replies.next_line().await.unwrap().unwrap()).unwrap();
+                    if reply["reply_to"] == index + 3 {
+                        assert_eq!(reply["ev"], "history");
+                        assert_eq!(reply["messages"][0]["content"], text);
+                        history_seen = true;
+                    }
+                    if reply["reply_to"] == ping_id {
+                        assert_eq!(reply["ev"], "pong");
+                        pong_seen = true;
+                    }
+                }
+            }
+            drop(client_write);
+            drop(replies);
+            task.await.unwrap().unwrap();
+            drop(listener);
+            std::fs::remove_file(path).unwrap();
+        }).await.expect("fragmented history requests must all receive correlated replies");
     }
 }
