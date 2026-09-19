@@ -409,6 +409,33 @@ impl MemoryManager {
 
     /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
     /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
+    ///
+    /// 60 is the Cormack et al. 2009 default every engine ships
+    /// (Elasticsearch, Milvus, Qdrant, Chroma) — tuned for thousand-item
+    /// corpora. Memory stores are tens to hundreds of entries, where k=60
+    /// damps rank gaps hard; operators wanting sharper top-rank separation
+    /// at small scale typically run 10-30. Tunable instead of hardcoded
+    /// for exactly this reason; the default stays 60 for least surprise.
+    /// Aboutness-trap guard: cosine similarity in the 0.85-0.94 band answers
+    /// whether two texts are *about* the same topic, not whether they agree
+    /// ("the server is encrypted" vs "the server is not encrypted" scores
+    /// ~0.93). Reinforcing on a contradiction would strengthen the old fact
+    /// and silently drop the correction, so a negation-polarity mismatch
+    /// vetoes the merge. Conservative by construction: the worst case stores
+    /// a duplicate instead of destroying a correction.
+    pub(crate) fn same_polarity(a: &str, b: &str) -> bool {
+        fn negations(text: &str) -> usize {
+            let lower = text.to_lowercase();
+            [
+                "not", "n't", "never", "no ", "none", "neither", "nor ", "without", "against",
+            ]
+            .iter()
+            .map(|m| lower.matches(m).count())
+            .sum()
+        }
+        negations(a) == negations(b)
+    }
+
     pub(crate) fn rrf_k() -> f32 {
         // Same NaN guard as above: clamp preserves NaN, and a NaN k
         // would poison every fused score.
@@ -432,9 +459,14 @@ impl MemoryManager {
                 Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_project_graph(&graph)?;
-                return Ok(existing_id);
+                // Contradiction, not a duplicate (aboutness trap): store
+                // separately so the correction survives instead of
+                // reinforcing the old fact.
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
+                    self.save_project_graph(&graph)?;
+                    return Ok(existing_id);
+                }
             }
 
             // Cross-store dedup: also check global graph
@@ -446,9 +478,11 @@ impl MemoryManager {
                 )
                 && let Some(existing) = global_graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_global_graph(&global_graph)?;
-                return Ok(existing_id);
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
+                    self.save_global_graph(&global_graph)?;
+                    return Ok(existing_id);
+                }
             }
         }
 
@@ -470,9 +504,14 @@ impl MemoryManager {
                 Self::find_duplicate_in_graph(&graph, emb, Self::storage_dedup_threshold())
                 && let Some(existing) = graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_global_graph(&graph)?;
-                return Ok(existing_id);
+                // Contradiction, not a duplicate (aboutness trap): store
+                // separately so the correction survives instead of
+                // reinforcing the old fact.
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
+                    self.save_global_graph(&graph)?;
+                    return Ok(existing_id);
+                }
             }
 
             // Cross-store dedup: also check project graph
@@ -484,9 +523,11 @@ impl MemoryManager {
                 )
                 && let Some(existing) = project_graph.get_memory_mut(&existing_id)
             {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_project_graph(&project_graph)?;
-                return Ok(existing_id);
+                if Self::same_polarity(&existing.content, &entry.content) {
+                    existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
+                    self.save_project_graph(&project_graph)?;
+                    return Ok(existing_id);
+                }
             }
         }
 

@@ -501,6 +501,9 @@ swarm_max_concurrent_agents = 32
 #
 # RRF k for hybrid (BM25 + dense) recall fusion (default 60.0, clamped to
 # [1,1000]). Higher k flattens rank gaps, lower k rewards top ranks.
+# 60 is the Cormack-2009 industry default tuned for thousand-item corpora;
+# memory stores are tens to hundreds of entries, where 10-30 gives sharper
+# top-rank separation. Default stays 60 for least surprise.
 # Env: JCODE_MEMORY_RRF_K (wins over file).
 # memory_rrf_k = 60.0
 #

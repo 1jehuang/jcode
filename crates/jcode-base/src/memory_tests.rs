@@ -13,6 +13,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static PENDING_MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+#[test]
+fn same_polarity_matches_negation_counts() {
+    // Identical and paraphrased facts agree.
+    assert!(MemoryManager::same_polarity(
+        "the server is encrypted",
+        "server uses encryption"
+    ));
+    assert!(MemoryManager::same_polarity("nothing here", "nothing here"));
+    // The aboutness trap: near-identical embeddings, opposite meaning.
+    assert!(!MemoryManager::same_polarity(
+        "the server is encrypted",
+        "the server is not encrypted"
+    ));
+    assert!(!MemoryManager::same_polarity(
+        "deploys run automatically",
+        "deploys never run automatically"
+    ));
+    assert!(!MemoryManager::same_polarity(
+        "cache without ttl",
+        "cache with ttl"
+    ));
+}
+
 fn with_temp_home<F, T>(f: F) -> T
 where
     F: FnOnce(&Path) -> T,
