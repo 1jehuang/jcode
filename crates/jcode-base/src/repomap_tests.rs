@@ -135,7 +135,10 @@ fn ambiguous_symbols_carry_no_edge() {
     for (file, rel) in files.iter().zip(rels.iter()) {
         texts.insert(rel.clone(), fs::read_to_string(file).unwrap());
     }
-    let graph = build_graph(&rels, &symbols, &texts);
+    // Isolated root: synthetic graphs must not inherit co-change edges
+    // from the checkout the suite runs in.
+    let isolated = tempfile::TempDir::new().expect("temp dir");
+    let graph = build_graph(isolated.path(), &rels, &symbols, &texts);
     assert!(graph.iter().all(|outs| outs.is_empty()), "{graph:?}");
 }
 
@@ -163,7 +166,10 @@ fn unique_reference_creates_directed_edge() {
     for (file, rel) in files.iter().zip(rels.iter()) {
         texts.insert(rel.clone(), fs::read_to_string(file).unwrap());
     }
-    let graph = build_graph(&rels, &symbols, &texts);
+    // Isolated root: synthetic graphs must not inherit co-change edges
+    // from the checkout the suite runs in.
+    let isolated = tempfile::TempDir::new().expect("temp dir");
+    let graph = build_graph(isolated.path(), &rels, &symbols, &texts);
     // rels sorted: a.rs=0, b.rs=1. Edge 0 -> 1, none back.
     assert_eq!(graph, vec![vec![1], vec![]]);
 }
@@ -293,6 +299,101 @@ fn exported_functions_render_once() {
     let map = build_map(dir.path(), &[], 2000).expect("map");
     assert_eq!(map.matches("start").count(), 1, "{map}");
     assert_eq!(map.matches("go").count(), 1, "{map}");
+}
+
+#[test]
+fn symbol_name_seed_personalizes_toward_defining_file() {
+    let dir = write_tree(&[
+        ("aaa.rs", "fn unrelated() {}\n"),
+        ("zzz.rs", "fn target_symbol() {}\n"),
+    ]);
+    // "aaa" sorts first; seeding the symbol must surface its file first.
+    let map = build_map(dir.path(), &["target_symbol"], 2000).expect("map");
+    let pos_aaa = map.find("aaa.rs").expect("aaa listed");
+    let pos_zzz = map.find("zzz.rs").expect("zzz listed");
+    assert!(pos_zzz < pos_aaa, "{map}");
+}
+
+#[cfg(unix)]
+fn git_repo_with_history() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return None;
+    }
+    let dir = write_tree(&[
+        ("a.rs", "fn a() {}\n"),
+        ("b.rs", "fn b() {}\n"),
+        ("c.rs", "fn c() {}\n"),
+    ]);
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    };
+    if !run(&["init", "-q"]).status.success() {
+        return None;
+    }
+    // a+b together twice (signal), c alone (no co-change with a).
+    for msg in ["one", "two"] {
+        if !run(&["add", "a.rs", "b.rs"]).status.success() {
+            return None;
+        }
+        if !run(&["commit", "-qm", msg]).status.success() {
+            return None;
+        }
+    }
+    if !run(&["add", "c.rs"]).status.success() {
+        return None;
+    }
+    if !run(&["commit", "-qm", "three"]).status.success() {
+        return None;
+    }
+    let root = dir.path().to_path_buf();
+    Some((dir, root))
+}
+
+#[test]
+#[cfg(unix)]
+fn cochange_pairs_detect_repeated_cocommits() {
+    let Some((_dir, root)) = git_repo_with_history() else {
+        return;
+    };
+    let files = vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()];
+    let mut pairs = cochange_pairs(&root, &files);
+    pairs.sort();
+    // a+b twice: edge. c committed once with nobody (bulk add was split):
+    // no edge. Note c.rs was added alone, so it shares no commit at all.
+    assert_eq!(pairs, vec![(0, 1)], "{pairs:?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn cochange_boosts_base_dependents_end_to_end() {
+    let Some((_dir, root)) = git_repo_with_history() else {
+        return;
+    };
+    // Seed a: b (co-changed twice) must outrank c (unrelated).
+    let map = build_map(&root, &["a.rs"], 2000).expect("map");
+    let pos_b = map.find("b.rs").expect("b listed");
+    let pos_c = map.find("c.rs").expect("c listed");
+    assert!(pos_b < pos_c, "{map}");
+}
+
+#[test]
+fn cochange_outside_repo_is_empty() {
+    let dir = write_tree(&[("a.rs", "fn a() {}\n")]);
+    let files = vec!["a.rs".to_string()];
+    assert!(cochange_pairs(dir.path(), &files).is_empty());
 }
 
 #[test]
