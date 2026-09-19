@@ -92,7 +92,7 @@ async fn fake_subprocess_covers_handshake_models_new_prompt_and_auth_isolation()
     assert!(requests.contains("\"method\":\"session/new\""));
     assert!(requests.contains("\"method\":\"session/set_model\""));
     assert!(requests.contains("\"rules\":\"outer-system\""));
-    assert!(requests.contains("\"yoloMode\":true"));
+    assert!(requests.contains("\"yoloMode\":false"));
     let prompt_line = requests
         .lines()
         .find(|line| line.contains("\"method\":\"session/prompt\""))

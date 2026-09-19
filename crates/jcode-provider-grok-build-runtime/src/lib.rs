@@ -47,11 +47,7 @@ impl GrokBuildProcess {
             .unwrap_or_else(|| PathBuf::from("grok"));
         Self {
             command,
-            args: vec![
-                "agent".to_string(),
-                "--always-approve".to_string(),
-                "stdio".to_string(),
-            ],
+            args: vec!["agent".to_string(), "stdio".to_string()],
             env: BTreeMap::new(),
         }
     }
@@ -1052,19 +1048,23 @@ impl acp::Client for GrokAcpClient {
         &self,
         request: acp::RequestPermissionRequest,
     ) -> acp::Result<acp::RequestPermissionResponse> {
-        let selected = request.options.iter().find(|option| {
-            matches!(
-                option.kind,
-                acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-            )
-        });
-        let outcome = match selected {
-            Some(option) => acp::RequestPermissionOutcome::Selected(
-                acp::SelectedPermissionOutcome::new(option.option_id.clone()),
-            ),
-            None => acp::RequestPermissionOutcome::Cancelled,
+        let action = grok_permission_action(&request);
+        let description = grok_permission_description(&request);
+        let approved = if jcode_base::safety::SafetySystem::new().classify(&action)
+            == jcode_base::safety::ActionTier::AutoAllowed
+        {
+            true
+        } else {
+            let _ = self.tx.try_send(Ok(StreamEvent::StatusDetail {
+                detail: format!(
+                    "Grok ACP wants permission for '{action}'. Approve in /permissions."
+                ),
+            }));
+            wait_for_jcode_permission(&action, &description).await
         };
-        Ok(acp::RequestPermissionResponse::new(outcome))
+        Ok(acp::RequestPermissionResponse::new(
+            acp_permission_outcome(approved, &request.options),
+        ))
     }
 
     async fn session_notification(
@@ -1242,6 +1242,91 @@ impl GrokAcpClient {
         }
         events
     }
+}
+
+fn grok_permission_action(request: &acp::RequestPermissionRequest) -> String {
+    let title = request
+        .tool_call
+        .fields
+        .title
+        .as_deref()
+        .unwrap_or("tool")
+        .trim();
+    grok_tool_alias(title)
+        .or_else(|| (!title.is_empty()).then_some(title))
+        .unwrap_or("tool")
+        .to_string()
+}
+
+fn grok_permission_description(request: &acp::RequestPermissionRequest) -> String {
+    let title = request
+        .tool_call
+        .fields
+        .title
+        .clone()
+        .unwrap_or_else(|| "tool".to_string());
+    let path = request
+        .tool_call
+        .fields
+        .locations
+        .as_ref()
+        .and_then(|locations| locations.first())
+        .map(|location| location.path.display().to_string());
+    match path {
+        Some(path) => format!("{title} {path}"),
+        None => title,
+    }
+}
+
+fn acp_permission_outcome(
+    approved: bool,
+    options: &[acp::PermissionOption],
+) -> acp::RequestPermissionOutcome {
+    let preferred = if approved {
+        acp::PermissionOptionKind::AllowOnce
+    } else {
+        acp::PermissionOptionKind::RejectOnce
+    };
+    let selected = options.iter().find(|option| option.kind == preferred).or_else(|| {
+        if approved {
+            None
+        } else {
+            options.iter().find(|option| {
+                matches!(
+                    option.kind,
+                    acp::PermissionOptionKind::RejectOnce | acp::PermissionOptionKind::RejectAlways
+                )
+            })
+        }
+    });
+    match selected {
+        Some(option) => acp::RequestPermissionOutcome::Selected(
+            acp::SelectedPermissionOutcome::new(option.option_id.clone()),
+        ),
+        None => acp::RequestPermissionOutcome::Cancelled,
+    }
+}
+
+async fn wait_for_jcode_permission(action: &str, description: &str) -> bool {
+    let request_id = jcode_base::safety::enqueue_tool_permission(
+        action,
+        description,
+        "Grok CLI ACP requested permission before running a tool.",
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    while tokio::time::Instant::now() < deadline {
+        if let Some(approved) = jcode_base::safety::decision_via_file(&request_id) {
+            return approved;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let _ = jcode_base::safety::record_permission_via_file(
+        &request_id,
+        false,
+        "grok_acp_timeout",
+        Some("Timed out waiting for /permissions".to_string()),
+    );
+    false
 }
 
 fn grok_http_unauthorized(error: &anyhow::Error) -> bool {
@@ -1903,7 +1988,7 @@ fn grok_session_meta(system: &str) -> acp::Meta {
             Value::String(system.trim().to_string()),
         );
     }
-    meta.insert("yoloMode".to_string(), Value::Bool(true));
+    meta.insert("yoloMode".to_string(), Value::Bool(false));
     meta
 }
 
@@ -2151,6 +2236,52 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn grok_acp_process_does_not_pass_always_approve() {
+        let process = GrokBuildProcess::from_env();
+        assert!(
+            !process.args.iter().any(|arg| arg == "--always-approve"),
+            "ACP fallback must not skip Jcode permission: {:?}",
+            process.args
+        );
+    }
+
+    #[test]
+    fn acp_permission_outcome_never_selects_allow_always() {
+        let allow_always = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("allow-always"),
+            "Allow always",
+            acp::PermissionOptionKind::AllowAlways,
+        );
+        let allow_once = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("allow-once"),
+            "Allow once",
+            acp::PermissionOptionKind::AllowOnce,
+        );
+        let reject_once = acp::PermissionOption::new(
+            acp::PermissionOptionId::new("reject-once"),
+            "Reject",
+            acp::PermissionOptionKind::RejectOnce,
+        );
+        let options = vec![allow_always.clone(), allow_once.clone(), reject_once.clone()];
+        match acp_permission_outcome(true, &options) {
+            acp::RequestPermissionOutcome::Selected(selected) => {
+                assert_eq!(selected.option_id.0.as_ref(), "allow-once");
+            }
+            other => panic!("expected AllowOnce, got {other:?}"),
+        }
+        match acp_permission_outcome(false, &options) {
+            acp::RequestPermissionOutcome::Selected(selected) => {
+                assert_eq!(selected.option_id.0.as_ref(), "reject-once");
+            }
+            other => panic!("expected RejectOnce, got {other:?}"),
+        }
+        match acp_permission_outcome(true, std::slice::from_ref(&allow_always)) {
+            acp::RequestPermissionOutcome::Cancelled => {}
+            other => panic!("AllowAlways-only must cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unauthorized_classifier_matches_proxy_status_line() {
         let error = anyhow!(
             "OpenAI-compatible chat request failed\n  status: 401 Unauthorized\n  response: {{\"error\":\"invalid token\"}}"
@@ -2365,7 +2496,7 @@ mod tests {
             meta.get("rules").and_then(Value::as_str),
             Some("Jcode coordinator\nUse skills when relevant.")
         );
-        assert_eq!(meta.get("yoloMode").and_then(Value::as_bool), Some(true));
+        assert_eq!(meta.get("yoloMode").and_then(Value::as_bool), Some(false));
     }
 
     #[test]
