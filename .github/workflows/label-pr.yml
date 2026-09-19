@@ -1,0 +1,31 @@
+name: Semantic PR labels
+on:
+  workflow_dispatch:
+    inputs:
+      pull-request:
+        description: Existing open PR number to classify
+        required: true
+        type: string
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+concurrency:
+  group: jev-label-${{ github.event.pull_request.number || inputs.pull-request }}
+  cancel-in-progress: false
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Reviewed Jev labeler, pinned to an immutable revision.
+      # Never check out the PR branch or execute its scripts with these permissions.
+      - uses: 1jehuang/jev-pr-labeler@07e219fcdcfd5b94463f492760e33e5f0baa99c2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          repository: ${{ github.repository }}
+          pull-request: ${{ github.event.pull_request.number || inputs.pull-request }}
+          apply: 'true'
