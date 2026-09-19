@@ -202,7 +202,8 @@ pub(in crate::tui::app) async fn submit_remote_slash_input(
     let trimmed = raw_input.trim();
     let is_command_shaped = trimmed == "/?"
         || (input::parse_dropped_paths(&raw_input).is_none()
-            && snapshot.resolve_invocation(&raw_input).is_some());
+            && (snapshot.resolve_invocation(&raw_input).is_some()
+                || app_mod::commands_dispatch::contains_registered_slash_command(trimmed)));
     if !is_command_shaped {
         return submit_prepared_remote_input(app, remote, prepared).await;
     }

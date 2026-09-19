@@ -3796,7 +3796,9 @@ impl App {
         let trimmed = input.trim();
         let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
-            if trimmed.starts_with('/') {
+            if trimmed.starts_with('/')
+                || super::commands_dispatch::contains_registered_slash_command(trimmed)
+            {
                 crate::telemetry::record_command_family(trimmed);
             }
             return;

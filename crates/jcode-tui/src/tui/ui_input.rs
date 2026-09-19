@@ -40,7 +40,7 @@ fn composer_mode(input: &str, is_remote_mode: bool) -> ComposerMode {
         } else {
             ComposerMode::ShellLocal
         }
-    } else if input.trim_start().starts_with('/') {
+    } else if app::has_safe_slash_command_token(input) {
         ComposerMode::SlashCommand
     } else {
         ComposerMode::Chat
