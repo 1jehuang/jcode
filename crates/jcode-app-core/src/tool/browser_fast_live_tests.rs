@@ -116,7 +116,7 @@ async fn handoff_with_candidates(
 }
 
 #[tokio::test]
-#[ignore = "requires OpenRouter credentials, an existing BROWSER_SESSION, and a disposable local fixture tab; makes paid Jev requests and clicks fixture links"]
+#[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture tab; makes Jev requests and clicks fixture links"]
 async fn live_browser_handoff_completes_local_navigation() {
     let ctx = fixture_context();
     let tab_id =
@@ -156,7 +156,7 @@ async fn live_browser_handoff_completes_local_navigation() {
 }
 
 #[tokio::test]
-#[ignore = "requires OpenRouter credentials, an existing BROWSER_SESSION, and a disposable local fixture with visible password/verification controls"]
+#[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture with visible password/verification controls"]
 async fn live_browser_handoff_sensitive_fixture_hands_back_without_actions() {
     let ctx = fixture_context();
     let tab_id = local_fixture_tab("JCODE_BROWSER_HANDOFF_TEST_BLOCKED_TAB_ID", &ctx).await;
@@ -177,7 +177,7 @@ async fn live_browser_handoff_sensitive_fixture_hands_back_without_actions() {
 }
 
 #[tokio::test]
-#[ignore = "requires OpenRouter credentials, an existing BROWSER_SESSION, and a disposable local fixture tab; makes paid Jev requests and changes only the fixture document title"]
+#[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture tab; makes Jev requests and changes only the fixture document title"]
 async fn live_browser_handoff_requests_script_and_resumes() {
     const TITLE: &str = "Jev hybrid verified";
     const GOAL: &str = "Set this page's document.title to exactly Jev hybrid verified, then finish only when the fresh page title matches. Stay on this page.";

@@ -1,39 +1,27 @@
-//! OpenRouter's typed Decisions API, intentionally separate from chat completions.
+//! Subscription-first typed Decisions API, separate from chat completions.
 //! Jev selects an existing browser action. It never generates executable arguments.
 use super::{Decision, DecisionRequest, DecisionTransport};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::time::Duration;
 
-const ENDPOINT: &str = "https://openrouter.ai/api/alpha/decisions";
 const MODEL: &str = "typesafe/jev-1.13";
-const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 
 pub(super) struct JevTransport {
-    client: reqwest::Client,
-    api_key: String,
+    client: crate::jev::JevClient,
 }
 
 impl JevTransport {
     pub(super) fn new() -> Result<Self> {
-        // Do not use the shared OpenAI-compatible slot: it may hold a different
-        // provider's credential. This endpoint must only receive an OpenRouter key.
-        let api_key = crate::provider_catalog::load_api_key_from_env_or_config(
-            "OPENROUTER_API_KEY",
-            "openrouter.env",
-        )
-        .filter(|key| !key.trim().is_empty())
-        .context("Fast browser handoff needs OpenRouter. Connect it with `jcode login openrouter`; direct browser actions remain available.")?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(25))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .context("Could not initialize the Jev decision client")?;
-        Ok(Self { client, api_key })
+        Ok(Self {
+            client: crate::jev::JevClient::for_browser()?,
+        })
+    }
+
+    pub(super) fn provider_name(&self) -> &str {
+        self.client.provider_name()
     }
 }
 
@@ -190,57 +178,16 @@ fn parse_decision(value: &Value, request: &DecisionRequest) -> Result<Decision> 
 #[async_trait]
 impl DecisionTransport for JevTransport {
     fn model(&self) -> &str {
-        MODEL
+        self.client.model_id()
     }
 
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision> {
         let body = request_body(request)?;
-        let mut response = self
-            .client
-            .post(ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .header("HTTP-Referer", "https://jcode.sh")
-            .header("X-Title", "Jcode Fast Browser")
-            .json(&body)
-            .send()
-            .await
-            // Do not echo provider response bodies or requests. They may contain
-            // page data or credentials, including on proxy/network errors.
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "Jev decision request failed or timed out; use the normal browser agent"
-                )
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            let hint = match status.as_u16() {
-                401 | 403 => "check OpenRouter credentials and Jev access",
-                402 => "OpenRouter credits or the key's usage limit are exhausted",
-                429 | 529 => "Jev is rate limited or overloaded; try again later",
-                _ => "the OpenRouter Decisions API is unavailable or rejected the request",
-            };
-            bail!("Jev returned HTTP {}: {}", status.as_u16(), hint);
-        }
-        if response
-            .content_length()
-            .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
-        {
-            bail!("Jev response exceeds the bounded decision size");
-        }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .context("Could not read Jev decision response")?
-        {
-            ensure!(
-                bytes.len() + chunk.len() <= MAX_RESPONSE_BYTES,
-                "Jev response exceeds the bounded decision size"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
-        let value: Value =
-            serde_json::from_slice(&bytes).context("Jev returned invalid decision JSON")?;
+        let questions = body["questions"]
+            .as_object()
+            .context("Browser decision questions are missing")?
+            .clone();
+        let value = self.client.evaluate(body["state"].clone(), questions).await?;
         let decision = parse_decision(&value, request)?;
         #[cfg(test)]
         if std::env::var_os("JCODE_BROWSER_HANDOFF_TEST_TRACE").is_some() {
@@ -287,7 +234,6 @@ mod tests {
     #[test]
     fn uses_decisions_protocol_not_chat_completions() {
         let body = request_body(&request()).unwrap();
-        assert_eq!(ENDPOINT, "https://openrouter.ai/api/alpha/decisions");
         assert_eq!(body["model"], "typesafe/jev-1.13");
         assert_eq!(body["questions"]["action"]["type"], "choice");
         assert!(body["state"].is_string());
@@ -355,13 +301,27 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires OpenRouter credentials and makes one small paid Jev request"]
+    #[ignore = "requires Jcode subscription or Jev BYOK credentials and makes one small Jev request"]
     async fn live_jev_decision_smoke() {
         let transport = JevTransport::new().unwrap();
         let decision = transport.decide(&request()).await.unwrap();
         assert_eq!(decision.choice, "a0");
         // This probes the transport/schema, not permission to execute. The
         // controller independently enforces its unchanged 0.8 confidence gate.
+        assert!(decision.confidence.is_finite() && (0.0..=1.0).contains(&decision.confidence));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an eligible Jcode account, deployed browser_jev capability, and makes one small subscription Jev request"]
+    async fn live_subscription_jev_decision_smoke() {
+        let transport = JevTransport::new().unwrap();
+        assert_eq!(
+            transport.provider_name(),
+            "jcode",
+            "Set JCODE_BROWSER_JEV_PROVIDER=jcode and sign in with jcode account login. BYOK is not subscription validation."
+        );
+        let decision = transport.decide(&request()).await.unwrap();
+        assert_eq!(decision.choice, "a0");
         assert!(decision.confidence.is_finite() && (0.0..=1.0).contains(&decision.confidence));
     }
 }

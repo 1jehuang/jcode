@@ -3,7 +3,8 @@
 
 Owns the HTTP fixture for the entire test run. Never opens a window, changes a
 user tab, or prints credentials. Requires a ready browser bridge, an existing
-BROWSER_SESSION, and OpenRouter credentials. Calls incur small inference costs.
+BROWSER_SESSION, and Jcode subscription or Jev BYOK credentials. Calls incur
+small inference costs.
 """
 import argparse
 import fcntl

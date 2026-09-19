@@ -2,26 +2,37 @@
 
 The shared app-core browser tool supports `action: "handoff"`. The normal agent
 supplies the goal, an explicit tab, optional exact actions, and any exact typing
-values. A bounded controller uses OpenRouter's typed Decisions API with
+values. A bounded controller uses Jev's typed Decisions API with
 `typesafe/jev-1.13` to choose an offered action ID, `done`, `hand_back`,
 `script_needed`, or `text_needed`. Jev is the fast general-purpose classifier.
 The main LLM supplies generated code or text only when asked, then hands the
 next stretch back to Jev. Jev never generates executable browser arguments.
 
-This is the preferred multi-step browser path in the tool description. Direct
-browser actions remain available. The implementation lives in the shared
+This is the default browser-task path in both the tool description and action
+schema. Direct actions remain available for setup, tab discovery/creation, and
+tasks handoff cannot complete. The implementation lives in the shared
 runtime, so Desktop and the TUI use the same controller.
 
 ## Setup
 
 Check `browser` with `action: "status"` first and run setup only if not ready.
-Connect OpenRouter using `jcode login openrouter`. The controller reads
-`OPENROUTER_API_KEY` or the owner-only `~/.config/jcode/openrouter.env` file,
-never a different OpenAI-compatible provider's credential.
+Sign in with `jcode account login` for subscription access. The browser client
+prefers the Jcode subscription credential, verifies the live `/v1/me`
+`browser_jev` capability, then sends bounded choice requests to `/v1/decisions`.
+This requires the gateway browser rollout and its upstream service configuration.
+A saved login alone is not proof of entitlement or deployed support.
 
-Jev uses `POST https://openrouter.ai/api/alpha/decisions`, not chat completions.
-Its requests use OpenRouter credits and honor the key's usage cap. Jcode does
-not buy credits or switch your main coding model.
+`JCODE_BROWSER_JEV_PROVIDER` can explicitly select `jcode`, `openrouter`,
+`typesafe`, or `aimlapi`. Its default is `auto`: Jcode, then OpenRouter, TypeSafe,
+and AI/ML API, choosing the first configured credential. This setting is separate
+from memory's Jev provider. An entitlement, billing, or network error never
+silently switches to a personal paid key. Direct browser actions remain available.
+
+For OpenRouter BYOK, connect using `jcode login openrouter`. Credentials remain
+bound to the selected provider, never the shared OpenAI-compatible credential.
+The OpenRouter route uses `POST https://openrouter.ai/api/alpha/decisions`, not
+chat completions, and uses that key's credits and cap. Jcode does not buy credits
+or switch your main coding model.
 
 ## Interface and control boundary
 
@@ -65,7 +76,10 @@ Every decision receives a fresh bounded DOM observation. Before execution or
 accepting `done`, the controller observes again and hands back if the observed
 DOM changed. Observations include node identities and scroll position. The
 result contains `status`, `reason`, `requested_help`, `action_trace`,
-`final_observation`, and `model`. A help choice returns `status: "hand_back"`
+`final_observation`, and `model`. When the transport is configured,
+`decision_provider` records its selected route (`jcode` for subscription).
+This route field alone is not proof of a successful upstream request.
+A help choice returns `status: "hand_back"`
 with `requested_help: "script"` or `"text"`. The parent reads the goal and page
 observation, supplies a trusted exact `eval`/other action in `candidates` or the
 needed `text_values`, then invokes handoff again. Other handbacks use
@@ -78,8 +92,9 @@ page title." Do not repeat a request for a missing script once it is supplied.
 Candidate results and screenshots return to the parent. Jev is text-only and
 does not receive screenshot pixels or arbitrary action-result payloads. Known
 credential patterns are redacted, but this is not a complete secret detector.
-Do not delegate confidential page content you do not want sent to OpenRouter
-and TypeSafe. A screenshot returned to the parent cannot be text-redacted.
+Do not delegate confidential page content you do not want sent to the selected
+provider and its upstream Jev service. Subscription requests also pass through
+the Jcode gateway. A screenshot returned to the parent cannot be text-redacted.
 
 An uncertain in-flight action must not be blindly retried: cancellation
 or a timeout cannot undo an action already delivered to Firefox.
@@ -149,6 +164,19 @@ this shell and can expire when its owner exits. Do not run shared-server stop,
 reload, or promotion commands to clean up an acceptance daemon.
 
 ## Opt-in live tests
+
+To verify subscription access without accidentally measuring BYOK:
+
+```bash
+JCODE_BROWSER_JEV_PROVIDER=jcode cargo test -p jcode-app-core \
+  live_subscription_jev_decision_smoke -- --ignored --nocapture
+```
+
+This test refuses any non-Jcode route and requires a real typed decision. For
+fresh-session default selection and paired latency measurement, see
+`scripts/benchmark_browser_handoff.md`. Use the newly built binary and validate
+both completion and the recorded provider before attributing timings to the
+subscription route. BYOK results do not establish subscription availability.
 
 Run `python3 scripts/browser_handoff_fixture.py` to serve the disposable pages
 on an ephemeral loopback port. It never opens a browser or reads credentials.

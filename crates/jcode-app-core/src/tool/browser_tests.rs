@@ -278,10 +278,19 @@ fn ordinary_click_preserves_existing_bridge_dispatch() {
 }
 
 #[test]
-fn handoff_schema_prefers_fast_agent_and_bounds_inputs() {
+fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
     let tool = BrowserTool::new();
-    assert!(tool.description().contains("Prefer action='handoff'"));
+    assert!(
+        tool.description()
+            .contains("Use action='handoff' by default for browser tasks")
+    );
     let schema = tool.parameters_schema();
+    assert!(
+        schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Use handoff by default for browser tasks")
+    );
     assert_eq!(schema["properties"]["max_steps"]["default"], 12);
     assert_eq!(schema["properties"]["max_steps"]["maximum"], 30);
     assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);

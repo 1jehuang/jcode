@@ -89,7 +89,14 @@ pub(super) async fn handoff(
     ctx: &ToolContext,
 ) -> Result<ToolOutput> {
     match browser_jev::JevTransport::new() {
-        Ok(transport) => run(provider, &transport, input, ctx).await,
+        Ok(transport) => {
+            let mut output = run(provider, &transport, input, ctx).await?;
+            if let Some(metadata) = output.metadata.as_mut() {
+                metadata["decision_provider"] = json!(transport.provider_name());
+                output.output = serde_json::to_string(metadata)?;
+            }
+            Ok(output)
+        }
         Err(error) => Ok(outcome(
             "hand_back",
             &format!("Decision transport unavailable: {error}"),

@@ -1,7 +1,7 @@
 //! Shared Jev typed Decisions transport, separate from chat completions.
 //!
 //! BYOK credentials are bound to fixed provider endpoints. The Jcode route uses
-//! the configured trusted account gateway, and checks its live `memory_jev`
+//! the configured trusted account gateway, and checks its live purpose-specific
 //! capability before each evaluation. Credential presence is not entitlement.
 
 use anyhow::{Result, anyhow, bail, ensure};
@@ -10,10 +10,52 @@ use serde_json::{Map, Value, json};
 use std::time::Duration;
 
 const PROVIDER_ENV: &str = "JCODE_MEMORY_JEV_PROVIDER";
+const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
 const MAX_QUESTIONS: usize = 24;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JevPurpose {
+    Memory,
+    Browser,
+}
+
+impl JevPurpose {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Browser => "browser",
+        }
+    }
+
+    fn capability(self) -> &'static str {
+        match self {
+            Self::Memory => "memory_jev",
+            Self::Browser => "browser_jev",
+        }
+    }
+
+    fn selector_with(
+        self,
+        env: impl FnOnce(&str) -> Result<String, std::env::VarError>,
+        memory_default: impl FnOnce() -> String,
+    ) -> Result<String> {
+        let key = match self {
+            Self::Memory => PROVIDER_ENV,
+            Self::Browser => BROWSER_PROVIDER_ENV,
+        };
+        match env(key) {
+            Ok(value) => Ok(value),
+            Err(std::env::VarError::NotPresent) => Ok(match self {
+                Self::Memory => memory_default(),
+                Self::Browser => "auto".into(),
+            }),
+            Err(_) => bail!("{key} must contain a valid provider name"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JevProvider {
@@ -67,6 +109,7 @@ impl JevProvider {
 #[derive(Clone)]
 pub struct JevClient {
     client: Client,
+    purpose: JevPurpose,
     provider: JevProvider,
     api_key: String,
     endpoint: String,
@@ -77,16 +120,27 @@ impl JevClient {
     /// A configured credential route exists. This is not a health or entitlement
     /// probe. In particular, Jcode entitlement is checked live by `evaluate`.
     pub fn available() -> bool {
-        Self::resolve().is_ok()
+        Self::resolve(JevPurpose::Memory).is_ok()
     }
 
     pub fn new() -> Result<Self> {
-        let (provider, api_key, endpoint, me_endpoint) = Self::resolve()?;
+        Self::for_purpose(JevPurpose::Memory)
+    }
+
+    /// Browser routing is independent of memory configuration and defaults to
+    /// subscription-first auto selection. Evaluation never changes accounts.
+    pub fn for_browser() -> Result<Self> {
+        Self::for_purpose(JevPurpose::Browser)
+    }
+
+    fn for_purpose(purpose: JevPurpose) -> Result<Self> {
+        let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
         let client = client_builder()
             .build()
             .map_err(|_| anyhow!("Could not initialize the Jev decision client"))?;
         Ok(Self {
             client,
+            purpose,
             provider,
             api_key,
             endpoint,
@@ -94,14 +148,11 @@ impl JevClient {
         })
     }
 
-    fn resolve() -> Result<(JevProvider, String, String, Option<String>)> {
-        let selector = match std::env::var(PROVIDER_ENV) {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => {
-                crate::config::config().agents.memory_jev_provider.clone()
-            }
-            Err(_) => bail!("JCODE_MEMORY_JEV_PROVIDER must contain a valid provider name"),
-        };
+    fn resolve(purpose: JevPurpose) -> Result<(JevProvider, String, String, Option<String>)> {
+        let selector = purpose.selector_with(
+            |key| std::env::var(key),
+            || crate::config::config().agents.memory_jev_provider.clone(),
+        )?;
         let (provider, api_key) = resolve_with(&selector, |env, file| {
             // Unlike the API-key helper, this does not consult registered
             // cross-provider fallback resolvers or the shared compatible slot.
@@ -125,11 +176,15 @@ impl JevClient {
         self.provider.name()
     }
 
+    pub fn model_id(&self) -> &str {
+        self.provider.model()
+    }
+
     /// Return the full typed Decisions response, including provider usage.
     /// Never retries using another provider or account after an auth/billing
     /// failure. Callers own the relevance threshold and uncertainty policy.
     pub async fn evaluate(&self, state: Value, questions: Map<String, Value>) -> Result<Value> {
-        let body = request_body(self.provider, state, &questions)?;
+        let body = request_body_for(self.purpose, self.provider, state, &questions)?;
         if let Some(endpoint) = &self.me_endpoint {
             let response = self
                 .client
@@ -139,14 +194,20 @@ impl JevClient {
                 .send()
                 .await
                 .map_err(|_| {
-                    anyhow!("Could not verify Jcode memory entitlement; try again later")
+                    anyhow!(
+                        "Could not verify Jcode {} entitlement; try again later",
+                        self.purpose.name()
+                    )
                 })?;
             let me = read_response(response, MAX_ME_BYTES).await?;
             ensure!(
-                me.pointer("/capabilities/memory_jev")
+                me["capabilities"]
+                    .get(self.purpose.capability())
                     .and_then(Value::as_bool)
                     == Some(true),
-                "Jcode Jev memory is unavailable for this account or gateway. An active entitled subscription and a gateway with memory_jev support are required. Configure a Jev BYOK provider to use your own account."
+                "Jcode Jev {} is unavailable for this account or gateway. An active entitled subscription and a gateway with {} support are required. Configure a Jev BYOK provider to use your own account.",
+                self.purpose.name(),
+                self.purpose.capability()
             );
         }
         let value = self.send(&self.endpoint, body).await?;
@@ -162,9 +223,13 @@ impl JevClient {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
         if self.provider == JevProvider::OpenRouter {
-            request = request
-                .header("HTTP-Referer", "https://jcode.sh")
-                .header("X-Title", "Jcode Memory");
+            request = request.header("HTTP-Referer", "https://jcode.sh").header(
+                "X-Title",
+                match self.purpose {
+                    JevPurpose::Memory => "Jcode Memory",
+                    JevPurpose::Browser => "Jcode Browser",
+                },
+            );
         }
         let response = request.send().await.map_err(|_| {
             anyhow!("Jev decision request failed or timed out; check the selected provider")
@@ -242,11 +307,37 @@ fn trusted_gateway_base(base: &str) -> Result<String> {
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
+#[cfg(test)]
 fn request_body(
     provider: JevProvider,
     state: Value,
     questions: &Map<String, Value>,
 ) -> Result<Vec<u8>> {
+    request_body_for(JevPurpose::Memory, provider, state, questions)
+}
+
+fn request_body_for(
+    purpose: JevPurpose,
+    provider: JevProvider,
+    state: Value,
+    questions: &Map<String, Value>,
+) -> Result<Vec<u8>> {
+    if purpose == JevPurpose::Browser {
+        ensure!(
+            questions.len() == 1
+                && questions.get("action").is_some_and(|question| {
+                    question["type"] == "choice"
+                        && question["instructions"]
+                            .as_str()
+                            .is_some_and(|s| !s.trim().is_empty())
+                        && question["criteria"].as_object().is_some_and(|criteria| {
+                            (2..=255).contains(&criteria.len())
+                                && criteria.values().all(Value::is_string)
+                        })
+                }),
+            "Browser Decisions requires exactly one action choice question with text instructions and 2 to 255 text criteria"
+        );
+    }
     ensure!(
         state.is_string() || state.is_object() || state.is_array(),
         "Jev state must be text, an object, or an array"
@@ -282,7 +373,7 @@ fn request_body(
             ),
             _ => bail!("Unsupported Jev question type; expected noul, choice, or score"),
         }
-        if provider == JevProvider::Jcode {
+        if provider == JevProvider::Jcode && purpose == JevPurpose::Memory {
             ensure!(
                 question["type"] == "noul"
                     && instructions.as_str().is_some_and(|s| !s.trim().is_empty())
@@ -387,6 +478,118 @@ mod tests {
 
     fn response() -> Value {
         json!({"answers": {"m0": {"type": "noul", "noul": 0.91}}, "usage": {"input_tokens": 123, "output_tokens": 4}})
+    }
+
+    fn browser_questions() -> Map<String, Value> {
+        json!({"action": {"type": "choice", "instructions": "Choose the next browser action", "criteria": {"click": "Click the button", "stop": "Return control"}}})
+            .as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn purpose_selectors_are_independent_and_browser_defaults_to_subscription_first() {
+        let env = |key: &str| match key {
+            PROVIDER_ENV => Ok("typesafe".into()),
+            BROWSER_PROVIDER_ENV => Ok("openrouter".into()),
+            _ => panic!("unexpected configuration lookup"),
+        };
+        assert_eq!(
+            JevPurpose::Memory.selector_with(env, || panic!()).unwrap(),
+            "typesafe"
+        );
+        assert_eq!(
+            JevPurpose::Browser.selector_with(env, || panic!()).unwrap(),
+            "openrouter"
+        );
+        let selector = JevPurpose::Browser
+            .selector_with(
+                |key| {
+                    assert_eq!(key, BROWSER_PROVIDER_ENV);
+                    Err(std::env::VarError::NotPresent)
+                },
+                || panic!("browser must not consult memory config"),
+            )
+            .unwrap();
+        assert_eq!(selector, "auto");
+        assert_eq!(
+            resolve_with(&selector, |_, _| Some("present".into()))
+                .unwrap()
+                .0,
+            JevProvider::Jcode
+        );
+        assert_eq!(
+            JevPurpose::Memory
+                .selector_with(
+                    |key| {
+                        assert_eq!(key, PROVIDER_ENV);
+                        Err(std::env::VarError::NotPresent)
+                    },
+                    || "aimlapi".into(),
+                )
+                .unwrap(),
+            "aimlapi"
+        );
+        for purpose in [JevPurpose::Memory, JevPurpose::Browser] {
+            assert!(
+                purpose
+                    .selector_with(
+                        |_| Err(std::env::VarError::NotUnicode("invalid".into())),
+                        || panic!("invalid override must not use defaults"),
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn browser_choice_contract_is_distinct_from_memory_noul() {
+        let valid = browser_questions();
+        for provider in [
+            JevProvider::Jcode,
+            JevProvider::OpenRouter,
+            JevProvider::TypeSafe,
+            JevProvider::Aimlapi,
+        ] {
+            assert!(request_body_for(JevPurpose::Browser, provider, json!("page"), &valid).is_ok());
+            assert!(
+                request_body_for(JevPurpose::Browser, provider, json!("page"), &questions())
+                    .is_err()
+            );
+            for invalid in [
+                json!({}),
+                json!({"pick": valid["action"]}),
+                json!({"action": valid["action"], "extra": valid["action"]}),
+                json!({"action": {"type": "noul", "instructions": "Pick", "criteria": {"a": "A", "b": "B"}}}),
+                json!({"action": {"type": "choice", "instructions": {}, "criteria": {"a": "A", "b": "B"}}}),
+                json!({"action": {"type": "choice", "instructions": "  ", "criteria": {"a": "A", "b": "B"}}}),
+                json!({"action": {"type": "choice", "instructions": "Pick", "criteria": {"a": "A"}}}),
+                json!({"action": {"type": "choice", "instructions": "Pick", "criteria": {"a": "A", "b": null}}}),
+            ] {
+                assert!(
+                    request_body_for(
+                        JevPurpose::Browser,
+                        provider,
+                        json!("page"),
+                        invalid.as_object().unwrap()
+                    )
+                    .is_err(),
+                    "{invalid}"
+                );
+            }
+            for count in [255, 256] {
+                let mut q = valid.clone();
+                q.get_mut("action").unwrap()["criteria"] = Value::Object(
+                    (0..count)
+                        .map(|i| (i.to_string(), json!("option")))
+                        .collect(),
+                );
+                assert_eq!(
+                    request_body_for(JevPurpose::Browser, provider, json!("page"), &q).is_ok(),
+                    count == 255
+                );
+            }
+        }
+        assert!(request_body(JevProvider::Jcode, json!("state"), &valid).is_err());
+        assert!(request_body(JevProvider::Jcode, json!("state"), &questions()).is_ok());
     }
 
     #[test]
@@ -669,10 +872,114 @@ mod tests {
     fn mock_client(base: &str, provider: JevProvider) -> JevClient {
         JevClient {
             client: client_builder().no_proxy().build().unwrap(),
+            purpose: JevPurpose::Memory,
             provider,
             api_key: "test-route-secret".into(),
             endpoint: format!("{base}/v1/decisions"),
             me_endpoint: (provider == JevProvider::Jcode).then(|| format!("{base}/v1/me")),
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_subscription_checks_browser_capability_and_posts_choice() {
+        let answer = json!({"answers": {"action": {"type": "choice", "choice": "click", "confidence": 0.9}}});
+        let (base, worker) = mock_server(vec![
+            (
+                200,
+                json!({"capabilities": {"browser_jev": true, "memory_jev": false}}).to_string(),
+                vec![],
+            ),
+            (200, answer.to_string(), vec![]),
+        ]);
+        let mut client = mock_client(&base, JevProvider::Jcode);
+        client.purpose = JevPurpose::Browser;
+        assert_eq!(client.provider_name(), "jcode");
+        assert_eq!(client.model_id(), "typesafe/jev-1.13");
+        assert_eq!(
+            client
+                .evaluate(json!({"page": "private-page"}), browser_questions())
+                .await
+                .unwrap(),
+            answer
+        );
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /v1/me "));
+        assert!(!requests[0].contains("private-page"));
+        assert!(requests[1].starts_with("POST /v1/decisions "));
+        let body: Value =
+            serde_json::from_str(requests[1].split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body["questions"], Value::Object(browser_questions()));
+        assert!(body["state"].is_string());
+    }
+
+    #[tokio::test]
+    async fn browser_capability_denial_prevents_page_upload() {
+        for me in [
+            json!({"capabilities": {"memory_jev": true}}),
+            json!({"capabilities": {"browser_jev": false}}),
+            json!({"capabilities": {"browser_jev": "true"}}),
+        ] {
+            let (base, worker) = mock_server(vec![(200, me.to_string(), vec![])]);
+            let mut client = mock_client(&base, JevProvider::Jcode);
+            client.purpose = JevPurpose::Browser;
+            let error = client
+                .evaluate(json!("private-page"), browser_questions())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("browser_jev"));
+            let requests = worker.join().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("GET /v1/me "));
+            assert!(!requests[0].contains("private-page"));
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_auth_billing_and_redirect_failures_never_retry_or_fallback() {
+        for provider in [JevProvider::Jcode, JevProvider::OpenRouter] {
+            for preflight in [false, true] {
+                if preflight && provider != JevProvider::Jcode {
+                    continue;
+                }
+                for status in [401, 402, 403, 302, 307] {
+                    let mut replies = Vec::new();
+                    if provider == JevProvider::Jcode && !preflight {
+                        replies.push((
+                            200,
+                            json!({"capabilities": {"browser_jev": true}}).to_string(),
+                            vec![],
+                        ));
+                    }
+                    replies.push((
+                        status,
+                        "private-provider-error test-route-secret".into(),
+                        vec![("Location".into(), "http://127.0.0.1:1/never-follow".into())],
+                    ));
+                    let expected_requests = replies.len();
+                    let (base, worker) = mock_server(replies);
+                    let mut client = mock_client(&base, provider);
+                    client.purpose = JevPurpose::Browser;
+                    let error = client
+                        .evaluate(json!("private-page"), browser_questions())
+                        .await
+                        .unwrap_err();
+                    let detail = format!("{error:#}");
+                    assert!(detail.contains(&status.to_string()));
+                    for secret in [
+                        "private-provider-error",
+                        "test-route-secret",
+                        "private-page",
+                    ] {
+                        assert!(!detail.contains(secret));
+                    }
+                    let requests = worker.join().unwrap();
+                    assert_eq!(requests.len(), expected_requests);
+                    if preflight {
+                        assert!(!requests[0].contains("private-page"));
+                    }
+                }
+            }
         }
     }
 
