@@ -883,7 +883,18 @@ impl MemoryAgent {
                 }
             }
 
-            if let Some(prompt) = memory::format_relevant_prompt(&relevant, MAX_MEMORIES_PER_TURN) {
+            let repo_root = self
+                .session_state(session_id)
+                .working_dir
+                .clone()
+                .map(std::path::PathBuf::from);
+            let prompt_opt = match repo_root {
+                Some(ref root) => {
+                    memory::format_relevant_prompt_verified(&relevant, MAX_MEMORIES_PER_TURN, root)
+                }
+                None => memory::format_relevant_prompt(&relevant, MAX_MEMORIES_PER_TURN),
+            };
+            if let Some(prompt) = prompt_opt {
                 let display_prompt =
                     memory::format_relevant_display_prompt(&relevant, MAX_MEMORIES_PER_TURN);
                 let count = prompt

@@ -271,6 +271,12 @@ pub struct MemoryEntry {
     /// Confidence score (0.0-1.0) - decays over time, boosted by use
     #[serde(default = "default_confidence")]
     pub confidence: f32,
+    /// Provenance citation: the exact source span this memory was drawn
+    /// from. `None` for memories banked before citations or from
+    /// non-file sources. Serde-defaulted: old entries load unchanged and
+    /// recall ignores uncited memories for verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation: Option<SourceCitation>,
 }
 
 /// Model id used for memories embedded before model tagging existed. These were
@@ -328,6 +334,7 @@ impl MemoryEntry {
             embedding: None,
             embedding_model: None,
             confidence: 1.0,
+            citation: None,
         }
     }
 
@@ -649,16 +656,172 @@ fn selected_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Vec<&Me
     selected
 }
 
+/// Provenance citation for a memory: the exact source span the fact was
+/// drawn from. A tripwire, not a judge: it answers whether the cited lines
+/// changed, never whether the meaning changed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceCitation {
+    /// Repo-relative path (e.g. `src/agent/turn_loops.rs`). Absolute paths
+    /// and any `..` component are rejected at verify time.
+    pub path: String,
+    /// 0-based start line of the span (inclusive).
+    pub start_line: usize,
+    /// 0-based end line of the span (exclusive).
+    pub end_line: usize,
+    /// sha256 hex of the EXACT span bytes (lines joined with a single
+    /// `\n`, no trailing newline). No normalization: a byte change inside
+    /// a string literal or indentation in a whitespace-sensitive language
+    /// is a real change and must read as one.
+    pub span_hash: String,
+    /// The span text at bank time (lines joined with `\n`). Used to find
+    /// a moved block by content search when offsets shift.
+    pub span_text: String,
+    /// Up to 5 lines immediately before the span at bank time (joined with
+    /// `\n`). Relocation context only.
+    #[serde(default)]
+    pub context_before: String,
+    /// Up to 5 lines immediately after the span at bank time (joined with
+    /// `\n`). Relocation context only.
+    #[serde(default)]
+    pub context_after: String,
+}
+
+/// Lines of file context stored each side of a cited span for relocation.
+pub const CITATION_CONTEXT_LINES: usize = 5;
+
+/// Outcome of checking a citation against the current tree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CitationStatus {
+    /// Span bytes hash equal at the stored offsets.
+    Fresh,
+    /// Span moved; content found at the returned offsets. Offsets are NOT
+    /// persisted (the entry is never rewritten by verification); the fresh
+    /// location is used for this check only.
+    Relocated { start_line: usize, end_line: usize },
+    /// Span content no longer matches anywhere in the file.
+    Stale,
+    /// File missing, unreadable, or the path escapes the repo root.
+    /// Treated as no mark (never blocks recall).
+    Unverifiable,
+}
+
+impl SourceCitation {
+    /// sha256 hex of lines joined with a single `\n`, no trailing newline.
+    pub fn hash_span_lines(lines: &[&str]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(lines.join("\n"));
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Confine a repo-relative path under `repo_root`. Rejects absolute
+    /// paths and any `..` component, then canonicalizes and requires the
+    /// result to stay under the canonicalized root (symlink escape safe).
+    fn confined_path(&self, repo_root: &std::path::Path) -> Option<std::path::PathBuf> {
+        let rel = std::path::Path::new(&self.path);
+        if rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return None;
+        }
+        let root = repo_root.canonicalize().ok()?;
+        let full = root.join(rel).canonicalize().ok()?;
+        if full.starts_with(&root) {
+            Some(full)
+        } else {
+            None
+        }
+    }
+
+    /// Check the citation against the current tree. Pure read: never writes
+    /// the entry, never deletes, never blocks.
+    pub fn verify(&self, repo_root: &std::path::Path) -> CitationStatus {
+        if self.end_line <= self.start_line {
+            return CitationStatus::Unverifiable;
+        }
+        let path = match self.confined_path(repo_root) {
+            Some(path) => path,
+            None => return CitationStatus::Unverifiable,
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => return CitationStatus::Unverifiable,
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        // Exact window first.
+        if self.end_line <= lines.len() {
+            let window = &lines[self.start_line..self.end_line];
+            if Self::hash_span_lines(window) == self.span_hash {
+                return CitationStatus::Fresh;
+            }
+        }
+        // Relocation: exact content search for the banked span lines.
+        let span_lines: Vec<&str> = self.span_text.lines().collect();
+        if !span_lines.is_empty() && span_lines.len() == self.end_line - self.start_line {
+            let n = span_lines.len();
+            if n <= lines.len() {
+                for start in 0..=lines.len() - n {
+                    if lines[start..start + n] == span_lines[..]
+                        && Self::hash_span_lines(&lines[start..start + n]) == self.span_hash
+                    {
+                        return CitationStatus::Relocated {
+                            start_line: start,
+                            end_line: start + n,
+                        };
+                    }
+                }
+            }
+        }
+        CitationStatus::Stale
+    }
+}
+
 pub fn format_entries_for_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, false, false)
+    format_entries_for_prompt_with_header(entries, limit, false, false, None)
 }
 
 pub fn format_relevant_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
     format_entries_for_prompt(entries, limit).map(|formatted| format!("# Memory\n\n{formatted}"))
 }
 
+/// Recall-facing formatter: verifies cited entries against `repo_root` and
+/// carries an advisory stale mark on drifted ones. Never withholds a memory.
+pub fn format_relevant_prompt_verified(
+    entries: &[MemoryEntry],
+    limit: usize,
+    repo_root: &std::path::Path,
+) -> Option<String> {
+    format_entries_for_prompt_with_header(entries, limit, false, false, Some(repo_root))
+        .map(|formatted| format!("# Memory\n\n{formatted}"))
+}
+
 pub fn format_relevant_display_prompt(entries: &[MemoryEntry], limit: usize) -> Option<String> {
-    format_entries_for_prompt_with_header(entries, limit, true, true)
+    format_entries_for_prompt_with_header(entries, limit, true, true, None)
+}
+
+/// Advisory stale mark for a cited memory, or `None` when no mark applies.
+/// Fresh, relocated, unverifiable, and uncited memories render unmarked:
+/// staleness never blocks recall, it only informs the model that the source
+/// changed since banking so it can re-verify before relying on the fact.
+pub fn citation_stale_mark(
+    entry: &MemoryEntry,
+    repo_root: Option<&std::path::Path>,
+) -> Option<String> {
+    let citation = entry.citation.as_ref()?;
+    let root = repo_root?;
+    if citation.verify(root) == CitationStatus::Stale {
+        Some(format!(
+            "  (source changed since this was recorded: {} — verify before relying on it)",
+            citation.path
+        ))
+    } else {
+        None
+    }
 }
 
 fn format_entries_for_prompt_with_header(
@@ -666,6 +829,7 @@ fn format_entries_for_prompt_with_header(
     limit: usize,
     include_header: bool,
     include_updated_at_comments: bool,
+    repo_root: Option<&std::path::Path>,
 ) -> Option<String> {
     let mut sections: HashMap<MemoryCategory, Vec<&MemoryEntry>> = HashMap::new();
 
@@ -695,6 +859,10 @@ fn format_entries_for_prompt_with_header(
         output.push_str(&format!("## {title}\n"));
         for (idx, item) in items.into_iter().enumerate() {
             output.push_str(&format!("{}. {}\n", idx + 1, item.content.trim()));
+            if let Some(mark) = citation_stale_mark(item, repo_root) {
+                output.push_str(&mark);
+                output.push('\n');
+            }
             if include_updated_at_comments {
                 output.push_str(&format!(
                     "<!-- updated_at: {} -->\n",
@@ -985,6 +1153,10 @@ pub mod ranking {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{
+            CitationStatus, MemoryCategory, MemoryEntry, SourceCitation, format_relevant_prompt,
+            format_relevant_prompt_verified,
+        };
 
         #[test]
         fn top_k_by_score_keeps_highest_scores_in_order() {
@@ -1002,6 +1174,214 @@ pub mod ranking {
         fn top_k_zero_limit_is_empty() {
             assert!(top_k_by_score([("a", 1.0)], 0).is_empty());
             assert!(top_k_by_ord([("a", 1)], 0).is_empty());
+        }
+
+        fn write_tree(files: &[(&str, &str)]) -> tempfile::TempDir {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            for (name, content) in files {
+                std::fs::write(dir.path().join(name), content).expect("write file");
+            }
+            dir
+        }
+
+        fn cite(path: &str, start: usize, end: usize, text: &str) -> SourceCitation {
+            let lines: Vec<&str> = text.lines().collect();
+            let span: Vec<&str> = lines[start..end].to_vec();
+            SourceCitation {
+                path: path.to_string(),
+                start_line: start,
+                end_line: end,
+                span_hash: SourceCitation::hash_span_lines(&span),
+                span_text: span.join("\n"),
+                context_before: String::new(),
+                context_after: String::new(),
+            }
+        }
+
+        fn cited_entry(path: &str, start: usize, end: usize, text: &str) -> MemoryEntry {
+            let mut entry = MemoryEntry::new(MemoryCategory::Fact, "banked fact");
+            entry.citation = Some(cite(path, start, end, text));
+            entry
+        }
+
+        const SAMPLE: &str = "line0\nfn alpha() {\n    let x = 1;\n}\nline4\n";
+
+        #[test]
+        fn citation_fresh_on_unchanged_span() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Fresh
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_content_edit() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 2;"),
+            )
+            .unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_whitespace_only_edit() {
+            // Exact bytes: an indentation change is a real change.
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("    let x", "  let x"),
+            )
+            .unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_stale_on_string_literal_edit() {
+            let dir = write_tree(&[("s.py", "a = 1\nname = \"old\"\nb = 2\n")]);
+            let text = "a = 1\nname = \"old\"\nb = 2\n";
+            let entry = cited_entry("s.py", 1, 2, text);
+            std::fs::write(dir.path().join("s.py"), text.replace("old", "new")).unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Stale
+            );
+        }
+
+        #[test]
+        fn citation_relocated_when_block_moves() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            let moved = "// header\n// more\n".to_string() + SAMPLE;
+            std::fs::write(dir.path().join("a.rs"), &moved).unwrap();
+            assert_eq!(
+                entry.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Relocated {
+                    start_line: 3,
+                    end_line: 6
+                }
+            );
+        }
+
+        #[test]
+        fn citation_unverifiable_paths() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            // Absolute path rejected.
+            let mut abs = entry.clone();
+            abs.citation.as_mut().unwrap().path =
+                dir.path().join("a.rs").to_string_lossy().to_string();
+            assert_eq!(
+                abs.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Parent traversal rejected.
+            let mut trav = entry.clone();
+            trav.citation.as_mut().unwrap().path = "../a.rs".to_string();
+            assert_eq!(
+                trav.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Missing file.
+            let mut missing = entry.clone();
+            missing.citation.as_mut().unwrap().path = "gone.rs".to_string();
+            assert_eq!(
+                missing.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+            // Degenerate range.
+            let mut degen = entry;
+            degen.citation.as_mut().unwrap().end_line = 1;
+            assert_eq!(
+                degen.citation.as_ref().unwrap().verify(dir.path()),
+                CitationStatus::Unverifiable
+            );
+        }
+
+        #[test]
+        fn citation_symlink_escape_rejected() {
+            #[cfg(unix)]
+            {
+                let outside = write_tree(&[("secret.rs", SAMPLE)]);
+                let dir = write_tree(&[("a.rs", SAMPLE)]);
+                std::os::unix::fs::symlink(
+                    outside.path().join("secret.rs"),
+                    dir.path().join("link.rs"),
+                )
+                .unwrap();
+                let entry = cited_entry("link.rs", 1, 4, SAMPLE);
+                assert_eq!(
+                    entry.citation.as_ref().unwrap().verify(dir.path()),
+                    CitationStatus::Unverifiable
+                );
+            }
+        }
+
+        #[test]
+        fn verified_prompt_marks_only_stale() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let fresh = cited_entry("a.rs", 1, 4, SAMPLE);
+            let mut stale = cited_entry("a.rs", 1, 4, SAMPLE);
+            stale.content = "drifted fact".to_string();
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 9;"),
+            )
+            .unwrap();
+            let plain = MemoryEntry::new(MemoryCategory::Fact, "plain fact");
+            // After the edit both cited entries verify Stale; relocate the
+            // fresh one's target back so it reads Fresh.
+            std::fs::write(dir.path().join("a.rs"), SAMPLE).unwrap();
+            let out = format_relevant_prompt_verified(
+                &[fresh.clone(), stale.clone(), plain.clone()],
+                10,
+                dir.path(),
+            )
+            .expect("prompt");
+            assert!(!out.contains("source changed"), "fresh + plain unmarked");
+            // Now drift again: only the mark path matters.
+            std::fs::write(
+                dir.path().join("a.rs"),
+                SAMPLE.replace("let x = 1;", "let x = 9;"),
+            )
+            .unwrap();
+            let out = format_relevant_prompt_verified(&[stale], 10, dir.path()).expect("prompt");
+            assert!(out.contains("drifted fact"));
+            assert!(out.contains("source changed since this was recorded: a.rs"));
+        }
+
+        #[test]
+        fn relocated_entry_renders_unmarked() {
+            let dir = write_tree(&[("a.rs", SAMPLE)]);
+            let entry = cited_entry("a.rs", 1, 4, SAMPLE);
+            let moved = "// header\n".to_string() + SAMPLE;
+            std::fs::write(dir.path().join("a.rs"), &moved).unwrap();
+            let out = format_relevant_prompt_verified(std::slice::from_ref(&entry), 10, dir.path())
+                .expect("prompt");
+            assert!(!out.contains("source changed"));
+        }
+
+        #[test]
+        fn uncited_entries_load_and_recall_unchanged() {
+            // Old JSON without `citation` loads with None (no migration).
+            let json = r#"{"id":"m1","category":"fact","content":"c","tags":[],"search_text":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","access_count":0}"#;
+            let entry: MemoryEntry = serde_json::from_str(json).expect("old json loads");
+            assert!(entry.citation.is_none());
+            // Unverified formatter ignores citations entirely.
+            let out = format_relevant_prompt(std::slice::from_ref(&entry), 10).expect("prompt");
+            assert!(out.contains('c'));
+            assert!(!out.contains("source changed"));
         }
     }
 }
