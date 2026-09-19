@@ -916,13 +916,15 @@ pub(crate) fn connection_type_icon(connection_type: Option<&str>) -> Option<&'st
 /// Cache TTL information for the current provider
 #[derive(Debug, Clone)]
 pub struct CacheTtlInfo {
-    /// Seconds until cache expires (0 = already expired)
+    /// Provider retention varies, so this countdown cannot establish a hit or expiry.
+    pub is_estimate: bool,
+    /// Seconds until the retention window ends (estimated for some providers)
     pub remaining_secs: u64,
     /// Total TTL for this provider in seconds
     pub ttl_secs: u64,
-    /// Whether the cache is expired (cold)
+    /// Whether the retention window elapsed, not proof of eviction for estimates
     pub is_cold: bool,
-    /// How long ago the cache went cold, in seconds (0 while warm)
+    /// How long ago the retention window ended, in seconds (0 before it ends)
     pub cold_for_secs: u64,
     /// Estimated cached tokens (from last response's input tokens)
     pub cached_tokens: Option<u64>,
@@ -1056,7 +1058,9 @@ fn min_cacheable_input_tokens(provider: &str, upstream_provider: Option<&str>) -
 }
 
 fn cache_expected_warm(cache_ttl: Option<&CacheTtlInfo>) -> bool {
-    cache_ttl.map(|info| !info.is_cold).unwrap_or(false)
+    cache_ttl
+        .map(|info| !info.is_cold && !info.is_estimate)
+        .unwrap_or(false)
 }
 
 /// Detect a KV/prompt-cache problem that is reliable enough to surface in the UI.
@@ -1899,6 +1903,7 @@ mod tests {
 
     fn warm_cache_ttl() -> CacheTtlInfo {
         CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 240,
             ttl_secs: 300,
             is_cold: false,
@@ -1909,12 +1914,21 @@ mod tests {
 
     fn cold_cache_ttl() -> CacheTtlInfo {
         CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 0,
             ttl_secs: 300,
             is_cold: true,
             cold_for_secs: 90,
             cached_tokens: Some(12_000),
         }
+    }
+
+    #[test]
+    fn cache_estimate_is_not_evidence_of_an_expected_warm_hit() {
+        let mut timer = warm_cache_ttl();
+        assert!(super::cache_expected_warm(Some(&timer)));
+        timer.is_estimate = true;
+        assert!(!super::cache_expected_warm(Some(&timer)));
     }
 
     #[test]

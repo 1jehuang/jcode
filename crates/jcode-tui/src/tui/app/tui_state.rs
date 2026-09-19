@@ -202,6 +202,37 @@ impl App {
             .filter(|provider| !provider.trim().is_empty())
     }
 
+    /// Cache policy needs credential identity, not a display label or just OpenAI.
+    pub(super) fn cache_provider_identity(&self, provider: &str) -> String {
+        if !provider.eq_ignore_ascii_case("openai") {
+            return provider.to_string();
+        }
+        // Unlike a display hint, only authoritative credential metadata can
+        // turn generic OpenAI into a documented API cache policy. Do not infer
+        // a timer from credentials merely present on the client's machine.
+        let credential = if self.uses_server_or_replay_metadata() {
+            self.remote_resolved_credential.or_else(|| {
+                self.session
+                    .route_api_method
+                    .as_deref()
+                    .and_then(jcode_provider_core::AuthRoute::parse)
+                    .filter(|route| {
+                        route.active_provider() == jcode_provider_core::ActiveProvider::OpenAI
+                    })
+                    .map(|route| route.resolved_credential())
+            })
+        } else {
+            // This helper also runs on every frame. Auto resolution can read
+            // credentials from disk, so leave unpinned local routes unknown.
+            self.provider.active_explicit_credential()
+        };
+        match credential {
+            Some(jcode_provider_core::ResolvedCredential::ApiKey) => "openai-api".to_string(),
+            Some(jcode_provider_core::ResolvedCredential::Oauth) => "openai-oauth".to_string(),
+            None => "openai".to_string(),
+        }
+    }
+
     fn widget_route_info(&self, model: Option<&str>) -> WidgetRouteInfo {
         let uses_remote_widget_metadata = self.is_remote || self.is_replay_runtime();
         let remote_provider_name = if uses_remote_widget_metadata {
@@ -2006,23 +2037,24 @@ impl crate::tui::TuiState for App {
     }
 
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
-        let last_completed = self.last_api_completed?;
-        let provider = self.provider_name();
-        let model = self.provider_model();
-        let last_provider = self.last_api_completed_provider.as_deref()?;
-        let last_model = self.last_api_completed_model.as_deref()?;
-        if last_provider != provider || last_model != model {
+        let baseline = self.kv_cache.kv_cache_baseline.as_ref()?;
+        if baseline.session_id != self.kv_cache_session_id()
+            || baseline.cache_generation != self.kv_cache.cache_generation
+            || baseline.provider != self.kv_cache_provider_name()
+            || baseline.model != self.kv_cache_provider_model()
+        {
             return None;
         }
-        let ttl_secs = crate::tui::cache_ttl_for_provider_model(provider, Some(&model))?;
-        let elapsed = last_completed.elapsed().as_secs();
+        let ttl_secs = baseline.cache_ttl_secs?;
+        let elapsed = baseline.completed_at.elapsed().as_secs();
         let remaining = ttl_secs.saturating_sub(elapsed);
         Some(crate::tui::CacheTtlInfo {
             remaining_secs: remaining,
             ttl_secs,
             is_cold: remaining == 0,
             cold_for_secs: elapsed.saturating_sub(ttl_secs),
-            cached_tokens: self.last_turn_input_tokens,
+            cached_tokens: Some(baseline.input_tokens),
+            is_estimate: crate::provider::cache_ttl_is_estimate(&baseline.provider),
         })
     }
 }

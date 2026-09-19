@@ -1878,10 +1878,18 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
                     .unwrap_or_default();
                 push_sep(&mut spans);
                 spans.push(Span::styled(
-                    format!("🧊 cache cold{}", tokens_str),
+                    format!(
+                        "{}{}",
+                        if cache_info.is_estimate {
+                            "⏳ cache retention uncertain"
+                        } else {
+                            "🧊 cache cold"
+                        },
+                        tokens_str
+                    ),
                     Style::default().fg(rgb(140, 180, 255)),
                 ));
-                // Small gray "how long ago it went cold" hint, e.g. `1h 1m`.
+                // Small gray age since the retention window elapsed, e.g. `1h 1m`.
                 spans.push(Span::styled(
                     format!(
                         " {}",
@@ -1910,7 +1918,12 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
                 };
                 push_sep(&mut spans);
                 spans.push(Span::styled(
-                    format!("⏳ cache {}{}", time_str, tokens_str),
+                    format!(
+                        "⏳ cache {}{}{}",
+                        if cache_info.is_estimate { "~" } else { "" },
+                        time_str,
+                        tokens_str
+                    ),
                     Style::default().fg(rgb(255, 193, 7)),
                 ));
             }

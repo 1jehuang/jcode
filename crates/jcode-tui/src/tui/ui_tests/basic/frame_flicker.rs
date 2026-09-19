@@ -85,6 +85,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 0,
             ttl_secs: 300,
             is_cold: true,
@@ -108,6 +109,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 30,
             ttl_secs: 300,
             is_cold: false,
@@ -127,6 +129,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 300,
             ttl_secs: 3600,
             is_cold: false,
@@ -145,6 +148,7 @@ fn test_cold_cache_warning_keeps_redrawing_at_deep_idle() {
         display_messages: vec![DisplayMessage::system("seed".to_string())],
         time_since_activity: Some(deep_idle),
         cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+            is_estimate: false,
             remaining_secs: 200,
             ttl_secs: 300,
             is_cold: false,
@@ -991,4 +995,27 @@ fn test_flicker_frame_history_ignores_manual_scroll_feedback() {
     let payload = debug_flicker_frame_history(8);
     assert_eq!(payload["buffered_samples"], 3);
     assert_eq!(payload["buffered_events"], 0);
+}
+
+#[test]
+fn test_cache_retention_estimate_rendering_never_claims_cold() {
+    for (remaining_secs, expected) in [(30, "cache ~30s"), (0, "cache retention uncertain")] {
+        let state = TestState {
+            cache_ttl_status: Some(crate::tui::CacheTtlInfo {
+                is_estimate: true,
+                remaining_secs,
+                ttl_secs: 300,
+                is_cold: remaining_secs == 0,
+                cold_for_secs: 90,
+                cached_tokens: Some(4000),
+            }),
+            ..Default::default()
+        };
+        let text = crate::tui::ui::input_ui::build_notification_spans(&state)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains(expected), "{text}");
+        assert!(!text.contains("cache cold"), "{text}");
+    }
 }
