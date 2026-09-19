@@ -535,7 +535,6 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) => {
                 if !self.copy_selection_dragging {
                     let pending = self.copy_selection_pending_anchor?;
-                    let point = point.filter(|point| point.pane == pending.pane)?;
                     // Kitty reports mouse motion at pixel granularity, so a
                     // plain click with sub-cell hand jitter still delivers
                     // Drag events for the *same* cell between press and
@@ -544,13 +543,30 @@ impl App {
                     // through to the click handlers (inline-image expand
                     // badge, link open) instead of being swallowed as an
                     // empty selection.
-                    if point == pending {
+                    if point == Some(pending) {
                         return Some(false);
                     }
                     self.copy_selection_pending_anchor = None;
                     self.copy_selection_dragging = true;
                     self.collapse_selection_to(pending);
-                    self.update_selection_with_point(point, true);
+
+                    // A drag can leave the originating pane immediately, for
+                    // example when the user starts in chat and moves into the
+                    // composer.  Keep the selection anchored to the original
+                    // pane and clamp to that pane's nearest drag point instead
+                    // of dropping selection state.
+                    let resolved = point
+                        .filter(|point| point.pane == pending.pane)
+                        .or_else(|| {
+                            crate::tui::ui::copy_pane_drag_point(
+                                pending.pane,
+                                mouse.column,
+                                mouse.row,
+                            )
+                        });
+                    if let Some(point) = resolved.filter(|point| point.pane == pending.pane) {
+                        self.update_selection_with_point(point, true);
+                    }
                     return Some(false);
                 }
                 let active_pane = self.current_copy_selection_pane();

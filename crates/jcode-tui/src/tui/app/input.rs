@@ -185,6 +185,27 @@ pub(super) struct PreparedInput {
     pub raw_input: String,
     pub expanded: String,
     pub images: Vec<(String, String)>,
+    /// File chips consumed from the composer. Kept so failure-restore paths
+    /// (new-session launch, split request) can put them back alongside the
+    /// raw input instead of silently dropping the attachment.
+    pub file_chips: Vec<PathBuf>,
+}
+
+/// Expand @file references: read file contents into the prompt. Takes the
+/// composer's chips (caller stores or drops them) and resolves relative
+/// paths against the workspace root so file reads work regardless of the
+/// process current directory.
+pub(super) fn expand_file_chips(app: &App, input: String, file_chips: &[PathBuf]) -> String {
+    if file_chips.is_empty() {
+        return input;
+    }
+    let cwd: PathBuf = app
+        .session
+        .working_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    crate::tui::app::file_mention::build_prompt_with_files(&input, file_chips, &cwd)
 }
 
 // Roughly 500k English words at ~6 bytes/word including spaces. This is still
@@ -1980,12 +2001,14 @@ fn route_prompt_to_new_session_local(app: &mut App) -> bool {
     let prepared = take_prepared_input(app);
     let restored_raw = prepared.raw_input.clone();
     let restored_images = prepared.images.clone();
+    let restored_chips = prepared.file_chips.clone();
     match commands::launch_prompt_in_new_session_local(app, prepared.expanded, prepared.images) {
         Ok(_) => true,
         Err(error) => {
             app.input = restored_raw;
             app.cursor_pos = app.input.len();
             app.pending_images = restored_images;
+            app.file_chips = restored_chips;
             app.set_status_notice("Prompt launch failed");
             app.push_display_message(DisplayMessage::error(format!(
                 "Failed to launch prompt in a new session: {}",
@@ -2806,15 +2829,95 @@ pub(super) fn handle_enter(app: &mut App) -> bool {
     true
 }
 
+// ── File-chip aware deletion ───────────────────────────────────────
+
+/// Return the byte range `[start, end)` of every file chip path found in `input`.
+///
+/// Matching is path-separator aware: a chip only matches when it lands on a
+/// full path-segment boundary. That is, the character before the match (if
+/// any) must be a `/`, `\`, or whitespace, and the character after the match
+/// (if any) must be a `/`, `\`, or whitespace. This prevents a shorter chip
+/// like `main.rs` from matching inside a longer path like `src/main.rs`.
+fn file_chip_spans(input: &str, chips: &[PathBuf]) -> Vec<(usize, usize)> {
+    fn is_path_boundary(ch: char) -> bool {
+        ch == '/' || ch == '\\' || ch.is_whitespace()
+    }
+    let mut spans = Vec::new();
+    for chip in chips {
+        let path = chip.to_string_lossy();
+        let mut search_from = 0usize;
+        while let Some(pos) = input[search_from..].find(path.as_ref()) {
+            let start = search_from + pos;
+            let end = start + path.len();
+            // Verify path-segment boundaries on both sides so a chip path only
+            // matches a complete path token, not a substring of a longer one.
+            let left_ok = start == 0
+                || input[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_path_boundary);
+            let right_ok =
+                end == input.len() || input[end..].chars().next().is_some_and(is_path_boundary);
+            if left_ok && right_ok {
+                spans.push((start, end));
+            }
+            search_from = if end > search_from {
+                end
+            } else {
+                search_from + 1
+            };
+        }
+    }
+    spans.sort_by_key(|(s, _)| *s);
+    spans
+}
+
+/// If `cursor` sits at or past the end of a file chip, return the byte offset
+/// of the chip's start so a single Backspace deletes the entire path.
+/// Also handles cursor sitting *inside* a chip (treated as atomic unit).
+pub(super) fn file_chip_backspace_start(
+    input: &str,
+    cursor: usize,
+    chips: &[PathBuf],
+) -> Option<usize> {
+    let spans = file_chip_spans(input, chips);
+    // Priority 1: cursor inside a chip → delete entire chip.
+    for (start, end) in &spans {
+        if cursor > *start && cursor <= *end {
+            return Some(*start);
+        }
+    }
+    // Priority 2: cursor exactly at chip end → delete entire chip.
+    spans
+        .iter()
+        .filter(|(_, end)| *end == cursor)
+        .map(|(start, _)| *start)
+        .max_by_key(|start| cursor - start)
+}
+
+/// If `cursor` sits at or before the start of a file chip, return the byte
+/// offset of the chip's end so a single Delete removes the entire path.
+pub(super) fn file_chip_delete_end(input: &str, cursor: usize, chips: &[PathBuf]) -> Option<usize> {
+    let spans = file_chip_spans(input, chips);
+    spans
+        .iter()
+        .filter(|(start, _)| *start == cursor)
+        .map(|(_, end)| *end)
+        .max_by_key(|end| end - cursor) // longest match wins
+}
+
 pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Char(c) => handle_text_input(app, &c.to_string()),
         KeyCode::Backspace => {
             if app.cursor_pos > 0 {
                 let prev = crate::tui::core::prev_char_boundary(&app.input, app.cursor_pos);
+                let drain_start =
+                    file_chip_backspace_start(&app.input, app.cursor_pos, &app.file_chips)
+                        .unwrap_or(prev);
                 app.remember_input_undo_state();
-                app.input.drain(prev..app.cursor_pos);
-                app.cursor_pos = prev;
+                app.input.drain(drain_start..app.cursor_pos);
+                app.cursor_pos = drain_start;
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2823,8 +2926,10 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Delete => {
             if app.cursor_pos < app.input.len() {
                 let next = crate::tui::core::next_char_boundary(&app.input, app.cursor_pos);
+                let drain_end = file_chip_delete_end(&app.input, app.cursor_pos, &app.file_chips)
+                    .unwrap_or(next);
                 app.remember_input_undo_state();
-                app.input.drain(app.cursor_pos..next);
+                app.input.drain(app.cursor_pos..drain_end);
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
             }
@@ -2921,6 +3026,13 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
     app.pasted_contents.clear();
+    // Expand @file references on EVERY preparation path (direct submit,
+    // queue-for-reconnect, startup auto-submit, new-session routing), not
+    // just the local submit path: a queued message must carry the file
+    // contents it was composed with, and the chips must be consumed so a
+    // stale chip cannot leak into a later prompt.
+    let file_chips = std::mem::take(&mut app.file_chips);
+    let expanded = expand_file_chips(app, expanded, &file_chips);
     let images = std::mem::take(&mut app.pending_images);
     app.cursor_pos = 0;
     app.clear_input_undo_history();
@@ -2928,6 +3040,7 @@ pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
         raw_input,
         expanded,
         images,
+        file_chips,
     }
 }
 
@@ -3803,6 +3916,11 @@ impl App {
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
+
+        // Expand @file references: read file contents into the prompt.
+        let file_chips = std::mem::take(&mut self.file_chips);
+        input = expand_file_chips(self, input, &file_chips);
+
         self.follow_chat_bottom(); // Reset to bottom and resume auto-scroll on new input
 
         // If the previous assistant turn still has visible streamed text that has not yet been
@@ -4233,5 +4351,194 @@ mod terminal_control_sequence_tests {
             strip_terminal_control_sequences("array[0] = 1"),
             std::borrow::Cow::Borrowed(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod chip_deletion_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn chip(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    #[test]
+    fn backspace_at_chip_end_deletes_whole_path() {
+        let input = "hello src/main.rs";
+        let cursor = input.len();
+        let chips = vec![chip("src/main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(start, Some(6), "should find chip start at byte 6");
+    }
+
+    #[test]
+    fn backspace_inside_chip_deletes_whole_path() {
+        let input = "hello src/main.rs";
+        let cursor = input.len() - 3;
+        let chips = vec![chip("src/main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(
+            start,
+            Some(6),
+            "cursor inside chip → bulk delete entire chip"
+        );
+    }
+
+    #[test]
+    fn backspace_no_chip_is_unchanged() {
+        let input = "hello world";
+        let cursor = input.len();
+        let chips: Vec<PathBuf> = vec![];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(start, None);
+    }
+
+    #[test]
+    fn delete_at_chip_start_deletes_whole_path() {
+        let input = "src/main.rs world";
+        let cursor = 0;
+        let chips = vec![chip("src/main.rs")];
+        let end = file_chip_delete_end(input, cursor, &chips);
+        assert_eq!(end, Some(11), "should find chip end at byte 11");
+    }
+
+    #[test]
+    fn delete_inside_chip_is_single_char() {
+        let input = "src/main.rs world";
+        let cursor = 3;
+        let chips = vec![chip("src/main.rs")];
+        let end = file_chip_delete_end(input, cursor, &chips);
+        assert_eq!(end, None, "cursor not at chip start → no bulk delete");
+    }
+
+    #[test]
+    fn delete_no_chip_is_unchanged() {
+        let input = "hello world";
+        let cursor = 0;
+        let chips: Vec<PathBuf> = vec![];
+        let end = file_chip_delete_end(input, cursor, &chips);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn longest_match_wins_on_overlap() {
+        // "main.rs" is a suffix of "src/main.rs"
+        let input = "check src/main.rs";
+        let cursor = input.len();
+        let chips = vec![chip("src/main.rs"), chip("main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(
+            start,
+            Some(6),
+            "longest match 'src/main.rs' wins over 'main.rs'"
+        );
+    }
+
+    #[test]
+    fn backspace_at_chip_end_with_non_ascii_path() {
+        let input = "查看 中文路径/文件.rs";
+        let cursor = input.len();
+        let chips = vec![chip("中文路径/文件.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert!(start.is_some(), "should handle non-ASCII paths");
+        assert_eq!(&input[start.unwrap()..cursor], "中文路径/文件.rs");
+    }
+
+    /// Simulates the full flow: user selects @src/main.rs → chip stored,
+    /// cursor ends at path end → Backspace deletes entire path.
+    #[test]
+    fn backspace_deletes_whole_path_realistic_scenario() {
+        // After picking "src/main.rs" from @ suggestions, input is:
+        let input = "hello src/main.rs some more text";
+        // Cursor is at end of path: "hello src/main.rs" has 17 bytes,
+        // cursor on the space after main.rs
+        let cursor = 17; // right after "hello src/main.rs"
+        let chips = vec![chip("src/main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(start, Some(6), "should find chip start");
+        // After drain(6..17): "hello  some more text"
+        let mut s = input.to_string();
+        s.drain(start.unwrap()..cursor);
+        assert_eq!(s, "hello  some more text", "entire path removed at once");
+    }
+
+    /// Cursor at path end with suffix text: Backspace still deletes whole path.
+    #[test]
+    fn backspace_at_path_end_with_suffix() {
+        let input = "hello src/main.rs";
+        let cursor = input.len(); // 17
+        let chips = vec![chip("src/main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(start, Some(6));
+        let mut s = input.to_string();
+        s.drain(start.unwrap()..cursor);
+        assert_eq!(s, "hello ", "path fully removed, cursor at 'hello '");
+    }
+
+    /// Delete at path start with more text before: Delete removes whole path.
+    #[test]
+    fn delete_at_path_start_realistic() {
+        let input = "hello src/main.rs more";
+        let cursor = 6; // at start of "src/main.rs"
+        let chips = vec![chip("src/main.rs")];
+        let end = file_chip_delete_end(input, cursor, &chips);
+        assert_eq!(end, Some(17)); // "src/main.rs".len() == 11, 6+11=17
+        let mut s = input.to_string();
+        s.drain(cursor..end.unwrap());
+        assert_eq!(s, "hello  more", "Delete removes whole path at once");
+    }
+
+    #[test]
+    fn file_chip_backspace_after_non_ascii_suffix() {
+        let chips = [PathBuf::from("src/main.rs")];
+        // "help " (5) + "src/main.rs" (11) + "测试" (6) = 22 bytes
+        let input = "help src/main.rs\u{6d4b}\u{8bd5}";
+        let cursor = input.len(); // 22
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        // Cursor past chip end → None (fallback to single-char deletion).
+        assert_eq!(
+            start, None,
+            "cursor past chip → normal single-char backspace"
+        );
+
+        // Simulate single-char backspaces one at a time.
+        let mut s = String::from(input);
+        // 1st BS: prev_char_boundary from 22 → 19 (first byte of 试)
+        let prev = crate::tui::core::prev_char_boundary(&s, 22);
+        s.drain(prev..s.len());
+        assert_eq!(s, "help src/main.rs\u{6d4b}");
+        // 2nd BS: prev_char_boundary from 19 → 16 (end of chip)
+        let prev = crate::tui::core::prev_char_boundary(&s, s.len());
+        s.drain(prev..s.len());
+        assert_eq!(s, "help src/main.rs");
+
+        // Now cursor at chip end → delete entire chip.
+        let start2 = file_chip_backspace_start(&s, s.len(), &chips);
+        assert_eq!(start2, Some(5), "cursor at chip end → delete entire chip");
+        s.drain(start2.unwrap()..s.len());
+        assert_eq!(s, "help ");
+    }
+
+    /// A chip path must not match as a substring of a longer path when the
+    /// adjacent characters are not path/whitespace boundaries. Here `main.rs`
+    /// is a suffix of `src/main.rs.bak`; the `.` after `main.rs` is not a path
+    /// boundary, so the short chip must not match at that position.
+    #[test]
+    fn chip_does_not_match_inside_longer_path_with_dot_suffix() {
+        let input = "edit src/main.rs.bak";
+        let cursor = input.len();
+        // `main.rs` should not match inside `src/main.rs.bak`.
+        let chips = [PathBuf::from("main.rs")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(
+            start, None,
+            "main.rs must not match the substring of src/main.rs.bak"
+        );
+
+        // `src/main.rs.bak` matches as a whole chip.
+        let chips = [PathBuf::from("src/main.rs.bak")];
+        let start = file_chip_backspace_start(input, cursor, &chips);
+        assert_eq!(start, Some(5), "full path chip matches on its own");
     }
 }

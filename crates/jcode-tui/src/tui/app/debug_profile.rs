@@ -209,7 +209,7 @@ impl App {
         let input_undo_stack_bytes: usize = self
             .input_undo_stack
             .iter()
-            .map(|(text, _)| text.capacity())
+            .map(|entry| entry.input.capacity())
             .sum();
         let stashed_input_bytes = self
             .stashed_input
