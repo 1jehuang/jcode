@@ -162,6 +162,10 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
 #[test]
 fn cold_cache_warning_is_persisted_when_starting_next_request() {
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
@@ -202,6 +206,10 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
     // idle tick must therefore push it as soon as the TTL expires, not wait
     // for the next request to start.
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
@@ -263,6 +271,10 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
 #[test]
 fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
@@ -1938,12 +1950,14 @@ fn cache_timer_estimate_never_claims_definite_expiry() {
     baseline.completed_at =
         Instant::now() - Duration::from_secs(baseline.cache_ttl_secs.unwrap() + 10);
     let baseline = baseline.clone();
-    assert!(app.maybe_push_idle_cold_cache_warning());
+    let before = app.display_messages.len();
     assert!(!app.maybe_push_idle_cold_cache_warning());
-    let warning = &app.display_messages.last().unwrap().content;
-    assert!(warning.contains("retention estimate elapsed"), "{warning}");
-    assert!(!warning.contains("went cold"));
-    assert!(!warning.contains("/cache extends"));
+    app.maybe_push_cold_cache_warning(2, 1, Some(&baseline));
+    assert_eq!(
+        app.display_messages.len(),
+        before,
+        "elapsed estimates must not create unsolicited eviction warnings"
+    );
     let request = app.fallback_pending_kv_cache_request();
     assert_ne!(
         app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
@@ -1999,4 +2013,31 @@ fn cache_timer_local_explicit_openai_route_does_not_probe_auto_credentials() {
         app.provider = Arc::new(PinnedOpenAI(credential));
         assert_eq!(app.kv_cache_provider_name(), expected);
     }
+}
+
+#[test]
+fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("openai-api".into());
+    app.remote_provider_model = Some("gpt-6-astra".into());
+    app.display_messages.push(DisplayMessage::user("first"));
+    let baseline = KvCacheBaseline {
+        session_id: app.kv_cache_session_id(),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 42_000,
+        completed_at: Instant::now() - Duration::from_secs(3700),
+        cache_ttl_secs: Some(3600),
+        provider: "anthropic".into(),
+        model: "claude-opus-4-6".into(),
+        upstream_provider: None,
+        signature: None,
+    };
+    app.kv_cache.kv_cache_baseline = Some(baseline.clone());
+    let before = app.display_messages.len();
+    assert!(!app.maybe_push_idle_cold_cache_warning());
+    app.maybe_push_cold_cache_warning(2, 1, Some(&baseline));
+    assert_eq!(app.display_messages.len(), before);
+    assert!(<App as TuiState>::cache_ttl_status(&app).is_none());
 }

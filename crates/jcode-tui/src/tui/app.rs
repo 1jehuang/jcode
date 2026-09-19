@@ -1916,6 +1916,7 @@ impl App {
                 return false;
             };
             if self.kv_cache.cold_cache_warned_baseline_completed_at == Some(baseline.completed_at)
+                || crate::provider::cache_ttl_is_estimate(&baseline.provider)
             {
                 return false;
             }
@@ -1950,6 +1951,14 @@ impl App {
         baseline: &KvCacheBaseline,
         trigger: ColdCacheWarningTrigger,
     ) -> bool {
+        // An elapsed estimate is not evidence of eviction. Also never warn
+        // about a previous route's cache after switching provider or model.
+        if crate::provider::cache_ttl_is_estimate(&baseline.provider)
+            || baseline.provider != self.kv_cache_provider_name()
+            || baseline.model != self.kv_cache_provider_model()
+        {
+            return false;
+        }
         let Some(ttl_secs) = baseline.cache_ttl_secs else {
             return false;
         };
@@ -1977,23 +1986,16 @@ impl App {
         // the TTL expires, so an "N ago" detail would always read ~0s there;
         // the request-start fallback can fire long after expiry (e.g.
         // suspended TUI), where the age is genuinely informative.
-        let message = if crate::provider::cache_ttl_is_estimate(&baseline.provider) {
-            format!(
-                "⏳ Prompt cache retention estimate elapsed · ~{} tok may need resending · actual retention varies",
+        let message = match trigger {
+            ColdCacheWarningTrigger::IdleExpiry => format!(
+                "🧊 Prompt cache went cold · next turn may resend ~{} tok · /cache extends",
                 token_label
-            )
-        } else {
-            match trigger {
-                ColdCacheWarningTrigger::IdleExpiry => format!(
-                    "🧊 Prompt cache went cold · next turn may resend ~{} tok · /cache extends",
-                    token_label
-                ),
-                ColdCacheWarningTrigger::RequestStart => format!(
-                    "🧊 Prompt cache went cold {} ago · this request may resend ~{} tok",
-                    crate::tui::format_compact_age(expired_ago_secs),
-                    token_label
-                ),
-            }
+            ),
+            ColdCacheWarningTrigger::RequestStart => format!(
+                "🧊 Prompt cache went cold {} ago · this request may resend ~{} tok",
+                crate::tui::format_compact_age(expired_ago_secs),
+                token_label
+            ),
         };
         self.push_display_message(DisplayMessage::system(message));
         true
