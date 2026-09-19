@@ -453,10 +453,7 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
         scroll_only,
         "preview wheel should be classified as scroll-only"
     );
-    // Drain any remaining queued momentum so the move completes.
-    for _ in 0..32 {
-        app.progress_mouse_scroll_animation();
-    }
+    // A wheel notch scrolls the preview immediately.
     let scroll_after = app
         .session_picker_overlay
         .as_ref()
@@ -466,10 +463,6 @@ fn session_picker_preview_wheel_uses_shared_scroll_momentum() {
     assert!(
         scroll_after < scroll_before,
         "wheel up should scroll the preview toward the top (before={scroll_before}, after={scroll_after})"
-    );
-    assert!(
-        !app.has_pending_mouse_scroll_animation(),
-        "momentum queue should drain to empty"
     );
 }
 

@@ -255,7 +255,6 @@ pub struct SessionPicker {
     focus: PaneFocus,
     /// Sessions explicitly selected for multi-resume / multi-catchup.
     selected_session_ids: HashSet<String>,
-    last_mouse_scroll: Option<std::time::Instant>,
     /// Normalized query from the most recent search pass.
     cached_search_query: String,
     /// Session refs that matched the cached search query.
@@ -328,7 +327,6 @@ impl SessionPicker {
             hidden_test_count,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
-            last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: None,
@@ -373,7 +371,6 @@ impl SessionPicker {
             hidden_test_count: 0,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
-            last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: Some("Loading sessions…".to_string()),
@@ -450,7 +447,6 @@ impl SessionPicker {
             hidden_test_count,
             focus: PaneFocus::Sessions,
             selected_session_ids: HashSet::new(),
-            last_mouse_scroll: None,
             cached_search_query: String::new(),
             cached_search_refs: Vec::new(),
             loading_message: None,

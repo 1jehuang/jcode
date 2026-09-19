@@ -237,36 +237,18 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
         delta: -2,
     });
     assert_eq!(
-        app.scroll_offset, 5,
-        "the first row should render immediately"
+        app.scroll_offset, 4,
+        "a native scroll applies the exact row delta immediately"
     );
-    assert_eq!(
-        app.mouse_scroll_queue, -1,
-        "the second row should remain queued"
-    );
-    app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 4);
 
     app.apply_handterm_native_scroll(super::handterm_native_scroll::HostToApp::Scroll {
         pane: super::handterm_native_scroll::PaneKind::Chat,
         delta: 3,
     });
     assert_eq!(
-        app.scroll_offset, 5,
-        "the first row should render immediately"
+        app.scroll_offset, 7,
+        "a native scroll applies the exact row delta immediately"
     );
-    assert_eq!(
-        app.mouse_scroll_queue, 2,
-        "later rows should animate on ticks"
-    );
-    app.progress_mouse_scroll_animation();
-    assert_eq!(
-        app.scroll_offset, 6,
-        "the queued rows should be revealed separately"
-    );
-    assert_eq!(app.mouse_scroll_queue, 1);
-    app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 7);
 }
 
 #[cfg(unix)]
@@ -319,9 +301,6 @@ fn test_handterm_native_scroll_client_roundtrips_over_socket() {
         .expect("scroll command should arrive");
 
     app.apply_handterm_native_scroll(command);
-    assert_eq!(app.scroll_offset, 5);
-    assert_eq!(app.mouse_scroll_queue, -1);
-    app.progress_mouse_scroll_animation();
     assert_eq!(app.scroll_offset, 4);
 
     unsafe {
@@ -450,8 +429,6 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
                         "hover must not pause chat auto-scroll"
                     );
                     assert_eq!(app.scroll_offset, 0, "hover must not scroll chat");
-                    assert_eq!(app.mouse_scroll_queue, 0);
-                    assert_eq!(app.mouse_scroll_target, None);
                     assert_eq!(app.diagram_pane_ratio, 40);
                     assert_eq!(app.diagram_pane_ratio_from, 40);
                     assert_eq!(app.diagram_pane_ratio_target, 40);
@@ -534,10 +511,6 @@ fn test_mouse_scroll_over_diagram_at_top_does_not_scroll_chat() {
         );
         assert_eq!(app.diagram_scroll_y, 0);
         assert_eq!(app.diagram_focus, focused);
-        assert_eq!(
-            app.mouse_scroll_target, None,
-            "must not enqueue chat scrolling"
-        );
     }
 
     crate::tui::mermaid::clear_active_diagrams();

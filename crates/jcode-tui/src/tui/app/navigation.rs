@@ -6,8 +6,6 @@ use ratatui::layout::Rect;
 struct MouseScrollTraceState {
     chat_offset: usize,
     auto_scroll_paused: bool,
-    mouse_queue: i16,
-    mouse_target: Option<MouseScrollTarget>,
     diff_offset: usize,
     diff_auto_scroll: bool,
     diagram_focus: bool,
@@ -23,8 +21,6 @@ impl MouseScrollTraceState {
         Self {
             chat_offset: app.scroll_offset,
             auto_scroll_paused: app.auto_scroll_paused,
-            mouse_queue: app.mouse_scroll_queue,
-            mouse_target: app.mouse_scroll_target,
             diff_offset: app.diff_pane_scroll,
             diff_auto_scroll: app.diff_pane_auto_scroll,
             diagram_focus: app.diagram_focus,
@@ -38,11 +34,9 @@ impl MouseScrollTraceState {
 
     fn summary(&self) -> String {
         format!(
-            "chat={} auto={} queue={} target={:?} diff={} diff_auto={} diagram_focus={} diagram=({},{} @ {}%) help={:?} changelog={:?}",
+            "chat={} auto={} diff={} diff_auto={} diagram_focus={} diagram=({},{} @ {}%) help={:?} changelog={:?}",
             self.chat_offset,
             self.auto_scroll_paused,
-            self.mouse_queue,
-            self.mouse_target,
             self.diff_offset,
             self.diff_auto_scroll,
             self.diagram_focus,
@@ -70,14 +64,12 @@ fn is_mouse_scroll_kind(kind: MouseEventKind) -> bool {
 }
 
 impl App {
-    const MOUSE_SCROLL_INTENT_LINES: i16 = 3;
-    /// Upper bound on lines enqueued per wheel notch after velocity
-    /// acceleration. Kept close to the base intent so the boost is only a subtle
-    /// nudge on fast flicks rather than a large jump.
-    const MOUSE_SCROLL_MAX_INTENT_LINES: i16 = 5;
-    /// Maximum accumulated scroll momentum. Slightly above the original so a fast
-    /// flick still glides a touch, without long runaway momentum.
-    const MOUSE_SCROLL_MAX_QUEUE: i16 = 30;
+    /// Lines moved per mouse-wheel notch, matching Neovim's `mousescroll`
+    /// default (`ver:3`). A wheel event is a discrete command: scroll N lines
+    /// now. There is deliberately no momentum queue or velocity acceleration — a
+    /// terminal reports discrete notches, so "how hard the wheel was flicked"
+    /// was a guess, and a held drag's tick-driven scroll looked like a hard flick.
+    const WHEEL_LINES: i16 = 3;
     /// How long the overscroll status line stays revealed after the last
     /// downward overscroll tick before it rebounds away. Long enough that the
     /// depleting countdown indicator is perceivable and the line reads as a
@@ -735,172 +727,47 @@ impl App {
         stored != next
     }
 
+    /// Scroll `target` by `lines` in `direction` (-1 up, +1 down), stopping
+    /// early at the pane edge. Returns whether anything moved.
+    fn scroll_target_lines(
+        &mut self,
+        target: MouseScrollTarget,
+        direction: i16,
+        lines: i16,
+    ) -> bool {
+        let mut moved = false;
+        for _ in 0..lines.unsigned_abs() {
+            if !self.apply_mouse_scroll_step(target, direction) {
+                break;
+            }
+            moved = true;
+        }
+        moved
+    }
+
     pub(super) fn enqueue_mouse_scroll(&mut self, target: MouseScrollTarget, direction: i16) {
         if direction == 0 {
             return;
         }
-
-        let trace_scroll = tui_mouse_scroll_trace_enabled();
-        let before_queue = self.mouse_scroll_queue;
-        let before_target = self.mouse_scroll_target;
-        if self.mouse_scroll_target != Some(target) {
-            self.mouse_scroll_target = Some(target);
-            self.mouse_scroll_queue = 0;
-        }
-
-        // Velocity-based acceleration: infer how hard the wheel was flicked from
-        // the gap since the previous wheel event (the terminal does not report a
-        // physical force). Rapid consecutive notches (a fast flick) advance more
-        // lines per notch; deliberate single notches stay at the base intent so
-        // fine positioning is still precise. Shared by the chat viewport and the
-        // /resume preview since both enqueue here.
-        let now = Instant::now();
-        let multiplier = self
-            .last_mouse_scroll
-            .map(|last| Self::scroll_acceleration_multiplier(now.saturating_duration_since(last)))
-            .unwrap_or(1);
-        self.last_mouse_scroll = Some(now);
-        let intent = Self::scroll_intent_lines(multiplier);
-        let delta = direction * intent;
-        self.mouse_scroll_queue = self
-            .mouse_scroll_queue
-            .saturating_add(delta)
-            .clamp(-Self::MOUSE_SCROLL_MAX_QUEUE, Self::MOUSE_SCROLL_MAX_QUEUE);
-        if trace_scroll {
-            crate::logging::event_info(
-                "TUI_MOUSE_SCROLL_QUEUE",
-                [
-                    ("target", format!("{:?}", target)),
-                    ("direction", direction.to_string()),
-                    ("delta", delta.to_string()),
-                    ("multiplier", multiplier.to_string()),
-                    ("before_queue", before_queue.to_string()),
-                    ("before_target", format!("{:?}", before_target)),
-                    ("after_queue", self.mouse_scroll_queue.to_string()),
-                    ("after_target", format!("{:?}", self.mouse_scroll_target)),
-                ],
-            );
-        }
-        self.drain_mouse_scroll_animation(Self::MOUSE_SCROLL_INTENT_LINES as usize);
+        self.scroll_target_lines(target, direction, Self::WHEEL_LINES);
     }
 
-    /// Queue an exact row delta supplied by a native terminal integration.
-    ///
-    /// Unlike a terminal mouse notch, the native host has already converted its
-    /// pixel gesture into rows, so applying the regular three-line intent would
-    /// amplify the gesture. Commit one row immediately for responsive feedback
-    /// and let subsequent redraw ticks reveal the remaining intermediate rows.
+    /// Apply an exact row delta supplied by a native terminal integration. The
+    /// host has already converted its pixel gesture into rows, so scroll exactly
+    /// that many.
     pub(super) fn enqueue_native_scroll(&mut self, target: MouseScrollTarget, delta: i32) {
         if delta == 0 {
             return;
         }
-
-        if self.mouse_scroll_target != Some(target) {
-            self.mouse_scroll_target = Some(target);
-            self.mouse_scroll_queue = 0;
-        }
-
-        let delta = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-        self.mouse_scroll_queue = self
-            .mouse_scroll_queue
-            .saturating_add(delta)
-            .clamp(-Self::MOUSE_SCROLL_MAX_QUEUE, Self::MOUSE_SCROLL_MAX_QUEUE);
-        self.drain_mouse_scroll_animation(1);
+        let lines = delta.unsigned_abs().min(i16::MAX as u32) as i16;
+        self.scroll_target_lines(target, delta.signum() as i16, lines);
     }
 
-    /// Map the gap between consecutive wheel events to an intent multiplier. A
-    /// shorter gap means a faster flick (more "force"), so the wheel covers a
-    /// little more ground. The boost is intentionally subtle: at most a modest
-    /// bump on rapid flicks, with deliberate notches staying at 1x for precise
-    /// positioning.
-    pub(super) fn scroll_acceleration_multiplier(gap: std::time::Duration) -> i16 {
-        let ms = gap.as_millis();
-        if ms <= 30 { 2 } else { 1 }
-    }
-
-    /// Lines enqueued per wheel notch for a given velocity multiplier, capped so
-    /// even the hardest flick stays controllable.
-    pub(super) fn scroll_intent_lines(multiplier: i16) -> i16 {
-        (Self::MOUSE_SCROLL_INTENT_LINES * multiplier).min(Self::MOUSE_SCROLL_MAX_INTENT_LINES)
-    }
-
-    pub(super) fn mouse_scroll_drain_amount(&self) -> usize {
-        // Gentle ease-out: drain a few lines per frame for a fresh flick,
-        // decelerating to one line as the queue empties. Kept close to the
-        // original feel so momentum does not glide far.
-        let queued = self.mouse_scroll_queue.unsigned_abs() as usize;
-
-        if queued >= 6 {
-            3
-        } else if queued >= 3 {
-            2
-        } else {
-            1
-        }
-    }
-
-    fn drain_mouse_scroll_animation(&mut self, max_steps: usize) {
-        let Some(target) = self.mouse_scroll_target else {
-            self.mouse_scroll_queue = 0;
-            return;
-        };
-        if self.mouse_scroll_queue == 0 || max_steps == 0 {
-            if self.mouse_scroll_queue == 0 {
-                self.mouse_scroll_target = None;
-            }
-            return;
-        }
-
-        let direction = self.mouse_scroll_queue.signum();
-        let steps = max_steps.min(self.mouse_scroll_queue.unsigned_abs() as usize);
-        let before_queue = self.mouse_scroll_queue;
-        let before = tui_mouse_scroll_trace_enabled().then(|| MouseScrollTraceState::capture(self));
-
-        for _ in 0..steps {
-            if !self.apply_mouse_scroll_step(target, direction) {
-                self.mouse_scroll_queue = 0;
-                self.mouse_scroll_target = None;
-                if let Some(before) = before.as_ref() {
-                    crate::logging::event_info(
-                        "TUI_MOUSE_SCROLL_DRAIN",
-                        [
-                            ("target", format!("{:?}", target)),
-                            ("direction", direction.to_string()),
-                            ("steps", steps.to_string()),
-                            ("before_queue", before_queue.to_string()),
-                            ("after_queue", self.mouse_scroll_queue.to_string()),
-                            ("stopped_early", "true".to_string()),
-                            ("before", before.summary()),
-                            ("after", MouseScrollTraceState::capture(self).summary()),
-                        ],
-                    );
-                }
-                return;
-            }
-        }
-
-        self.mouse_scroll_queue -= direction * steps as i16;
-        if self.mouse_scroll_queue == 0 {
-            self.mouse_scroll_target = None;
-        }
-        if let Some(before) = before.as_ref() {
-            crate::logging::event_info(
-                "TUI_MOUSE_SCROLL_DRAIN",
-                [
-                    ("target", format!("{:?}", target)),
-                    ("direction", direction.to_string()),
-                    ("steps", steps.to_string()),
-                    ("before_queue", before_queue.to_string()),
-                    ("after_queue", self.mouse_scroll_queue.to_string()),
-                    ("stopped_early", "false".to_string()),
-                    ("before", before.summary()),
-                    ("after", MouseScrollTraceState::capture(self).summary()),
-                ],
-            );
-        }
-    }
-
-    fn apply_mouse_scroll_step(&mut self, target: MouseScrollTarget, direction: i16) -> bool {
+    pub(super) fn apply_mouse_scroll_step(
+        &mut self,
+        target: MouseScrollTarget,
+        direction: i16,
+    ) -> bool {
         match target {
             MouseScrollTarget::Chat => {
                 if direction < 0 {
@@ -954,10 +821,6 @@ impl App {
                     .apply_preview_scroll_step(direction)
             }
         }
-    }
-
-    pub(super) fn progress_mouse_scroll_animation(&mut self) {
-        self.drain_mouse_scroll_animation(self.mouse_scroll_drain_amount());
     }
 
     pub(super) fn cycle_diagram(&mut self, direction: i32) {

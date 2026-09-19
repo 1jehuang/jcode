@@ -94,7 +94,6 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
     if !app.is_processing
         || !app.streaming.streaming_text.is_empty()
         || app.centered_mode()
-        || app.has_pending_mouse_scroll_animation()
         || app.remote_startup_phase_active()
     {
         return None;

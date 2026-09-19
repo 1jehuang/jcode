@@ -621,84 +621,6 @@ fn test_overscroll_requires_gesture_starting_at_bottom() {
 }
 
 #[test]
-fn test_scroll_acceleration_multiplier_scales_with_flick_speed() {
-    use std::time::Duration;
-    // A fast flick (short gap between wheel events) gets a subtle 2x boost; a
-    // slow, deliberate notch stays at 1x for precise positioning.
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(10)), 2);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(100)), 1);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_millis(200)), 1);
-    assert_eq!(App::scroll_acceleration_multiplier(Duration::from_secs(5)), 1);
-}
-
-#[test]
-fn test_fast_flick_enqueues_more_lines_than_a_slow_notch() {
-    use std::time::Duration;
-    // "Scroll power": the lines committed per wheel notch scale with flick speed
-    // (shorter inter-event gap => bigger multiplier => more lines), capped so the
-    // hardest flick stays controllable. Shared by the chat and /resume preview.
-    let fast = App::scroll_intent_lines(App::scroll_acceleration_multiplier(Duration::from_millis(10)));
-    let slow =
-        App::scroll_intent_lines(App::scroll_acceleration_multiplier(Duration::from_millis(400)));
-    assert!(fast > slow, "a fast flick commits more lines than a slow notch ({fast} > {slow})");
-    assert_eq!(slow, 3, "a deliberate notch uses the base intent");
-    // Even a maximum-velocity multiplier stays within the controllable cap.
-    assert!(App::scroll_intent_lines(8) <= 5, "intent is capped");
-}
-
-#[test]
-fn test_momentum_drain_decelerates_to_one_line() {
-    // The drain rate eases out: a large queue glides several lines per frame,
-    // decelerating to a single line as it empties (natural momentum decay).
-    let mut app = create_test_app();
-    app.mouse_scroll_queue = 40;
-    let big = app.mouse_scroll_drain_amount();
-    app.mouse_scroll_queue = 4;
-    let small = app.mouse_scroll_drain_amount();
-    app.mouse_scroll_queue = 1;
-    let tail = app.mouse_scroll_drain_amount();
-    app.mouse_scroll_queue = 0;
-    let empty = app.mouse_scroll_drain_amount();
-
-    assert!(big > small, "large momentum should drain faster ({big} > {small})");
-    assert_eq!(tail, 1, "the last line should drain one at a time");
-    let _ = empty;
-}
-
-#[test]
-fn test_queued_wheel_down_at_bottom_does_not_accumulate_phantom_scroll() {
-    // Touchpad/mouse momentum can queue many downward wheel steps. If they keep
-    // "succeeding" against the already-pinned bottom, the queue (or offset) would
-    // accumulate phantom scroll that a later wheel-up has to drain first. The
-    // queue must be cleared as soon as a step can no longer move the view.
-    let _render_lock = scroll_render_test_lock();
-    let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
-    render_and_snap(&app, &mut terminal);
-
-    // Already following the bottom.
-    assert!(!app.auto_scroll_paused);
-
-    // Simulate a burst of queued downward wheel momentum.
-    app.mouse_scroll_target = Some(super::MouseScrollTarget::Chat);
-    app.mouse_scroll_queue = 24;
-
-    app.progress_mouse_scroll_animation();
-
-    assert_eq!(
-        app.mouse_scroll_queue, 0,
-        "blocked downward momentum must clear the queue instead of parking phantom scroll"
-    );
-    assert!(
-        app.mouse_scroll_target.is_none(),
-        "scroll target should reset once the queue is drained"
-    );
-    assert!(
-        !app.auto_scroll_paused,
-        "still following the bottom after blocked downward momentum"
-    );
-}
-
-#[test]
 fn test_copy_selection_from_bottom_rebases_scroll_instead_of_jumping_to_top() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(80, 25, 0, 40);
@@ -1066,10 +988,6 @@ fn repro_wheel_up_from_bottom_always_moves_viewport() {
                     row: height / 2,
                     modifiers: KeyModifiers::empty(),
                 });
-                // Drain any queued momentum the way handle_tick does.
-                for _ in 0..16 {
-                    app.progress_mouse_scroll_animation();
-                }
                 let after = render_and_snap(&app, &mut terminal);
 
                 if after == bottom {
@@ -1121,9 +1039,6 @@ fn repro_wheel_down_after_up_burst_moves_viewport() {
                         modifiers: KeyModifiers::empty(),
                     });
                 }
-                for _ in 0..30 {
-                    app.progress_mouse_scroll_animation();
-                }
                 let scrolled = render_and_snap(&app, &mut terminal);
 
                 // One wheel-down notch must move the viewport back toward bottom.
@@ -1133,9 +1048,6 @@ fn repro_wheel_down_after_up_burst_moves_viewport() {
                     row: height / 2,
                     modifiers: KeyModifiers::empty(),
                 });
-                for _ in 0..16 {
-                    app.progress_mouse_scroll_animation();
-                }
                 let after = render_and_snap(&app, &mut terminal);
 
                 if after == scrolled {
@@ -1348,11 +1260,7 @@ fn repro_mouse_wheel_during_token_by_token_reasoning() {
             row: height / 2,
             modifiers: KeyModifiers::empty(),
         });
-        // Drain momentum the way the tick does, rendering each frame.
-        for _ in 0..20 {
-            app.progress_mouse_scroll_animation();
-            render_and_snap(&app, &mut terminal);
-        }
+        // A wheel notch scrolls immediately now; render the moved frame.
         let scrolled = render_and_snap(&app, &mut terminal);
 
         if scrolled == bottom {
@@ -1366,8 +1274,8 @@ fn repro_mouse_wheel_during_token_by_token_reasoning() {
             continue;
         }
 
-        // Keep trickling reasoning tokens + draining momentum; the scrolled view
-        // must hold (not snap back), as it would in the real loop.
+        // Keep trickling reasoning tokens; the scrolled view must hold (not snap
+        // back), as it would in the real loop.
         for i in 0..20 {
             app.handle_server_event(
                 crate::protocol::ServerEvent::ReasoningDelta {
@@ -1377,7 +1285,6 @@ fn repro_mouse_wheel_during_token_by_token_reasoning() {
             );
             let ops = app.stream_buffer.flush_smooth_frame();
             app.apply_stream_ops(ops);
-            app.progress_mouse_scroll_animation();
             let frame = render_and_snap(&app, &mut terminal);
             if frame == bottom || !app.auto_scroll_paused {
                 failures.push(format!(
@@ -1440,9 +1347,6 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
                 row: height / 2,
                 modifiers: KeyModifiers::empty(),
             });
-            for _ in 0..20 {
-                app.progress_mouse_scroll_animation();
-            }
             let scrolled = render_and_snap(&app, &mut terminal);
             let scrolled_offset = app.scroll_offset;
             if !app.auto_scroll_paused {
@@ -1488,9 +1392,6 @@ fn repro_scroll_held_across_reasoning_close_and_answer() {
                 row: height / 2,
                 modifiers: KeyModifiers::empty(),
             });
-            for _ in 0..20 {
-                app.progress_mouse_scroll_animation();
-            }
             let after_more = render_and_snap(&app, &mut terminal);
             if after_more == before_more && app.scroll_offset > 0 {
                 failures.push(format!(

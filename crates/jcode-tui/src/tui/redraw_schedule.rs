@@ -17,6 +17,11 @@ pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(5000);
 pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
+/// Tick cadence while a drag-held edge autoscroll runs. The autoscroll advances
+/// exactly one line per tick, so pacing the tick here rather than at
+/// `redraw_fps` makes the scroll speed a property of the gesture instead of the
+/// display refresh rate, and keeps it stable on perf tiers that clamp fps.
+pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether this session has been left alone long enough to be treated as
@@ -161,7 +166,6 @@ const FULL_FRAME_REDRAW_REASONS: &[&str] = &[
     "tail_catchup",
     "status_notice",
     "learn_hint",
-    "mouse_scroll_animation",
     "copy_autoscroll",
     "chat_overscroll",
     "notification",
@@ -259,7 +263,6 @@ fn primary_status_spinner_fast_path_available_with_policy(
         && app::run_shell::status_uses_primary_spinner(&state.status())
         && state.streaming_text().is_empty()
         && !state.centered_mode()
-        && !state.has_pending_mouse_scroll_animation()
         && !state.remote_startup_phase_active()
 }
 
@@ -420,6 +423,14 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         };
     }
 
+    // A drag held at a pane edge scrolls one line per tick, so cap the tick at
+    // the scroll period: speed follows the gesture, not the refresh rate. This
+    // precedes the live-output branches so a drag stays on this cadence even
+    // while the transcript streams.
+    if state.copy_selection_edge_autoscroll_active() {
+        return REDRAW_COPY_AUTOSCROLL;
+    }
+
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
     // worth a fast tick: decorative animations are paused and the run loop only
     // repaints throttled idle frames. Use the slow deep-idle interval so the
@@ -428,7 +439,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     if !state.client_focused()
         && !state.is_processing()
         && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
@@ -442,7 +452,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     if deep_idle
         && !state.is_processing()
         && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         && !state.remote_startup_phase_active()
         && !rate_limit_countdown_redraw_active(state)
@@ -494,7 +503,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
     // this to keep agent spinners smooth while the swarm works.
     if (swarm_spinner_redraw_active(state) || session_picker_spinner_redraw_active(state))
         && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
     {
         return match policy.tier {
             // Minimal tier drops decorative animation; a liveness-rate tick
@@ -504,8 +512,7 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         };
     }
 
-    if !state.has_pending_mouse_scroll_animation()
-        && state.streaming_text().is_empty()
+    if state.streaming_text().is_empty()
         && (state.is_processing() || rate_limit_countdown_redraw_active(state))
     {
         return REDRAW_PASSIVE_LIVENESS;
@@ -513,8 +520,6 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
 
     if state.is_processing()
         || !state.streaming_text().is_empty()
-        || state.has_pending_mouse_scroll_animation()
-        || state.copy_selection_edge_autoscroll_active()
         || rate_limit_countdown_redraw_active(state)
     {
         return match policy.tier {
@@ -584,7 +589,6 @@ fn periodic_redraw_required_inner(state: &dyn TuiState, include_idle_animation: 
     if deep_idle
         && !state.is_processing()
         && state.streaming_text().is_empty()
-        && !state.has_pending_mouse_scroll_animation()
         && !state.copy_selection_edge_autoscroll_active()
         // Only the elastic countdown needs ticks; a config-pinned line is static.
         && state.chat_overscroll_remaining().is_none()
@@ -650,9 +654,6 @@ fn live_activity_redraw_reason(state: &dyn TuiState) -> Option<&'static str> {
     if state.learn_hint().is_some() {
         return Some("learn_hint");
     }
-    if state.has_pending_mouse_scroll_animation() {
-        return Some("mouse_scroll_animation");
-    }
     if state.copy_selection_edge_autoscroll_active() {
         return Some("copy_autoscroll");
     }
@@ -694,7 +695,6 @@ mod tests {
             "tail_catchup",
             "status_notice",
             "learn_hint",
-            "mouse_scroll_animation",
             "copy_autoscroll",
             "chat_overscroll",
             "notification",

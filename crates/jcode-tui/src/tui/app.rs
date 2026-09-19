@@ -1606,12 +1606,6 @@ pub struct App {
     /// without the clear-then-repaint flicker around kitty image placeholders
     /// (issue #404).
     force_full_repaint: bool,
-    /// Last mouse scroll event timestamp (for trackpad velocity detection)
-    last_mouse_scroll: Option<Instant>,
-    /// Active smooth-scroll target for queued mouse-wheel motion.
-    mouse_scroll_target: Option<MouseScrollTarget>,
-    /// Remaining queued mouse-wheel lines. Positive = down, negative = up.
-    mouse_scroll_queue: i16,
     /// When the user overscrolls past the bottom of the transcript, an extra
     /// status line is revealed below the input. This records the last time an
     /// overscroll tick was received; the line dwells for a fixed window after
