@@ -1166,3 +1166,248 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
 }
+// ── Custom summary command ───────────────────────────────────────────────
+
+/// Restores touched env vars and the config cache on drop.
+struct SummaryCommandEnv {
+    previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl SummaryCommandEnv {
+    fn set(command: Option<&str>, timeout_ms: Option<&str>) -> Self {
+        let mut previous = Vec::new();
+        for (key, value) in [
+            ("JCODE_COMPACTION_SUMMARY_COMMAND", command),
+            ("JCODE_COMPACTION_SUMMARY_COMMAND_TIMEOUT_MS", timeout_ms),
+        ] {
+            previous.push((key, std::env::var_os(key)));
+            match value {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+        crate::config::Config::invalidate_cache();
+        Self { previous }
+    }
+}
+
+impl Drop for SummaryCommandEnv {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.drain(..) {
+            match previous {
+                Some(value) => crate::env::set_var(key, value),
+                None => crate::env::remove_var(key),
+            }
+        }
+        crate::config::Config::invalidate_cache();
+    }
+}
+
+#[cfg(unix)]
+fn write_summary_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, body).expect("write script");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+fn two_messages() -> Vec<Message> {
+    vec![
+        make_text_message(Role::User, "do the thing"),
+        make_text_message(Role::Assistant, "did the thing"),
+    ]
+}
+
+#[tokio::test]
+async fn summary_command_unconfigured_falls_through() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = SummaryCommandEnv::set(None, None);
+    let result = run_summary_command(&two_messages(), None, "reactive").await;
+    assert!(result.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_success_returns_trimmed_stdout() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let stdin_record = temp.path().join("stdin.json");
+    let script = write_summary_script(
+        temp.path(),
+        "summarize.sh",
+        &format!(
+            "#!/bin/sh\ncat > '{}'\nprintf '  canned summary  \\n'\n",
+            stdin_record.display()
+        ),
+    );
+    let _env = SummaryCommandEnv::set(Some(&script.to_string_lossy()), None);
+    let result = run_summary_command(&two_messages(), None, "reactive").await;
+    assert_eq!(result.as_deref(), Some("canned summary"));
+    let stdin = std::fs::read_to_string(&stdin_record).expect("stdin recorded");
+    assert!(stdin.contains("\"event\":\"summarize\""), "got: {stdin}");
+    assert!(stdin.contains("do the thing"), "got: {stdin}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_failures_fall_through() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let failing = write_summary_script(temp.path(), "fail.sh", "#!/bin/sh\nexit 3\n");
+    let empty = write_summary_script(temp.path(), "empty.sh", "#!/bin/sh\nexit 0\n");
+    for script in [
+        &failing,
+        &empty,
+        std::path::Path::new("/nonexistent/summarize"),
+    ] {
+        let _env = SummaryCommandEnv::set(Some(&script.to_string_lossy()), None);
+        let result = run_summary_command(&two_messages(), None, "reactive").await;
+        assert!(result.is_none(), "failing command must fall through");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_timeout_falls_through() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let slow = write_summary_script(temp.path(), "slow.sh", "#!/bin/sh\nsleep 30\n");
+    let _env = SummaryCommandEnv::set(Some(&slow.to_string_lossy()), Some("50"));
+    let start = std::time::Instant::now();
+    let result = run_summary_command(&two_messages(), None, "reactive").await;
+    assert!(result.is_none());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(25),
+        "timeout must bound the wait"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_streaming_stdout_does_not_deadlock() {
+    // A summarizer that streams stdout while incrementally reading stdin:
+    // sequential write-then-drain deadlocks (child blocks on its full
+    // stdout pipe, stops reading stdin). Concurrent halves complete.
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let streamer = write_summary_script(
+        temp.path(),
+        "streamer.py",
+        "#!/usr/bin/env python3\nimport sys\npart = sys.stdin.read(4096)\nsys.stdout.write('x' * 100000)\nsys.stdout.flush()\nrest = sys.stdin.read()\nsys.stdout.write('DONE:' + str(len(part) + len(rest)))\nsys.stdout.flush()\n",
+    );
+    let _env = SummaryCommandEnv::set(Some(&streamer.to_string_lossy()), Some("15000"));
+    // Payload over the pipe buffer so a sequential write would block while
+    // the child fills its own stdout pipe.
+    let mut bulky = two_messages();
+    for _ in 0..32 {
+        bulky.push(make_text_message(Role::User, &"z".repeat(4096)));
+    }
+    let start = std::time::Instant::now();
+    let result = run_summary_command(&bulky, None, "reactive").await;
+    assert!(result.is_some(), "streaming summarizer must succeed");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(14),
+        "concurrent IO must finish well inside the deadline"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_blocked_stdin_times_out() {
+    // A child that never reads stdin must not wedge the write past the
+    // deadline: the whole interaction shares one timeout and the child is
+    // killed on expiry.
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let stuck = write_summary_script(temp.path(), "stuck.sh", "#!/bin/sh\nsleep 30\n");
+    let _env = SummaryCommandEnv::set(Some(&stuck.to_string_lossy()), Some("200"));
+    // Payload well over the 64 KiB pipe buffer so the write genuinely blocks
+    // against a child that never reads stdin.
+    let mut bulky = two_messages();
+    for _ in 0..64 {
+        bulky.push(make_text_message(Role::User, &"y".repeat(4096)));
+    }
+    let start = std::time::Instant::now();
+    let result = run_summary_command(&bulky, None, "reactive").await;
+    assert!(result.is_none());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(25),
+        "blocked stdin must not outlive the deadline"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn summary_command_oversize_output_truncates() {
+    let _lock = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let big = write_summary_script(
+        temp.path(),
+        "big.sh",
+        "#!/bin/sh\nhead -c 2000000 /dev/zero | tr '\\0' 'x'\n",
+    );
+    let _env = SummaryCommandEnv::set(Some(&big.to_string_lossy()), None);
+    let result = run_summary_command(&two_messages(), None, "reactive").await;
+    let summary = result.expect("oversize output truncates, not fails");
+    assert_eq!(summary.len(), SUMMARY_COMMAND_STDOUT_LIMIT);
+    assert!(summary.bytes().all(|byte| byte == b'x'));
+}
+
+#[test]
+fn compaction_lifecycle_hooks_resolve_by_name() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = SummaryCommandEnv::set(None, None);
+    crate::env::set_var("JCODE_HOOK_COMPACTION_COMPLETED", "/bin/true");
+    crate::config::Config::invalidate_cache();
+    assert!(crate::hooks::hook_configured("compaction_completed"));
+    assert!(!crate::hooks::hook_configured("compaction_started"));
+    assert!(!crate::hooks::hook_configured("compaction_emergency"));
+}
+
+#[test]
+fn applied_metadata_round_trips_through_persisted_state() {
+    let _lock = crate::storage::lock_test_env();
+    let mut manager = CompactionManager::new();
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "old work".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 4,
+            original_turn_count: 4,
+            compacted_count: 4,
+            trigger: Some("reactive".to_string()),
+            summarizer: Some("custom".to_string()),
+            mode: Some("reactive".to_string()),
+        },
+        10,
+    );
+    let state = manager.persisted_state().expect("state");
+    assert_eq!(state.trigger.as_deref(), Some("reactive"));
+    assert_eq!(state.summarizer.as_deref(), Some("custom"));
+    assert_eq!(state.mode.as_deref(), Some(manager.mode().as_str()));
+}
+
+#[test]
+fn apply_path_records_summarizer_and_trigger() {
+    let _lock = crate::storage::lock_test_env();
+    let messages: Vec<Message> = (0..10)
+        .map(|index| {
+            make_text_message(
+                if index % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                &format!("message {index}"),
+            )
+        })
+        .collect();
+    let mut manager = CompactionManager::new().with_budget(1_000_000);
+    manager.inject_completed_result_for_test(4, "reactive", "custom summary", "custom");
+    manager.check_and_apply_compaction_with(&messages);
+    let state = manager.persisted_state().expect("state applied");
+    assert_eq!(state.summary_text, "custom summary");
+    assert_eq!(state.trigger.as_deref(), Some("reactive"));
+    assert_eq!(state.summarizer.as_deref(), Some("custom"));
+}

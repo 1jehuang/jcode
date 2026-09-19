@@ -11,20 +11,49 @@ impl Agent {
     pub fn poll_compaction_completion_event(&mut self) -> Option<CompactionEvent> {
         let provider_messages = self.session.messages_for_provider();
         let compaction = self.registry.compaction();
-        let event = match compaction.try_write() {
+        let (event, mode) = match compaction.try_write() {
             Ok(mut manager) => {
                 let event = manager.poll_compaction_event_with(&provider_messages);
                 if event.is_some() {
                     self.sync_session_compaction_state_from_manager(&manager);
                 }
-                event
+                let mode = manager.mode().as_str().to_string();
+                (event, mode)
             }
             Err(_) => return None,
         };
 
-        if event.is_some() {
+        if let Some(event) = event.as_ref() {
             self.note_compaction_applied();
             self.persist_session_best_effort("compaction completion");
+            let opt = |value: &Option<u64>| value.map(|v| v.to_string()).unwrap_or_default();
+            let opt_usize =
+                |value: &Option<usize>| value.map(|v| v.to_string()).unwrap_or_default();
+            Self::fire_compaction_hook(
+                self.session.id.clone(),
+                self.provider_model(),
+                self.working_dir().map(str::to_string),
+                "compaction_completed",
+                &[
+                    ("TRIGGER", event.trigger.clone()),
+                    ("MODE", mode),
+                    (
+                        "SUMMARIZER",
+                        self.session
+                            .compaction
+                            .as_ref()
+                            .and_then(|state| state.summarizer.clone())
+                            .unwrap_or_default(),
+                    ),
+                    ("PRE_TOKENS", opt(&event.pre_tokens)),
+                    ("POST_TOKENS", opt(&event.post_tokens)),
+                    ("TOKENS_SAVED", opt(&event.tokens_saved)),
+                    ("DURATION_MS", opt(&event.duration_ms)),
+                    ("MESSAGES_COMPACTED", opt_usize(&event.messages_compacted)),
+                    ("SUMMARY_CHARS", opt_usize(&event.summary_chars)),
+                    ("ACTIVE_MESSAGES", opt_usize(&event.active_messages)),
+                ],
+            );
         }
 
         event
@@ -131,9 +160,9 @@ impl Agent {
         let context_limit = self.provider.context_window() as u64;
         let compaction = self.registry.compaction();
 
-        let (dropped, usage_pct) = match compaction.try_write() {
+        let (dropped, usage_pct, mode) = match compaction.try_write() {
             Ok(mut manager) => {
-                let (dropped, usage_pct) = {
+                let (dropped, usage_pct, mode) = {
                     let all_messages = self.session.provider_messages();
                     manager.update_observed_input_tokens(context_limit);
                     let usage_pct = manager.context_usage_with(all_messages) * 100.0;
@@ -147,10 +176,10 @@ impl Agent {
                             return false;
                         }
                     };
-                    (dropped, usage_pct)
+                    (dropped, usage_pct, manager.mode().as_str().to_string())
                 };
                 self.sync_session_compaction_state_from_manager(&manager);
-                (dropped, usage_pct)
+                (dropped, usage_pct, mode)
             }
             Err(_) => {
                 logging::warn("Context-limit auto-recovery skipped: compaction manager lock busy");
@@ -167,6 +196,18 @@ impl Agent {
             "Context limit exceeded; auto-compacted and retrying (dropped {} messages, usage was {:.1}%)",
             dropped, usage_pct
         ));
+        Self::fire_compaction_hook(
+            self.session.id.clone(),
+            self.provider_model(),
+            self.working_dir().map(str::to_string),
+            "compaction_emergency",
+            &[
+                ("TRIGGER", "context_limit".to_string()),
+                ("MODE", mode),
+                ("MESSAGES_DROPPED", dropped.to_string()),
+                ("USAGE_PCT", format!("{usage_pct:.1}")),
+            ],
+        );
         crate::runtime_memory_log::emit_event(
             crate::runtime_memory_log::RuntimeMemoryLogEvent::new(
                 "auto_compaction_applied",

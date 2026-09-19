@@ -131,6 +131,9 @@ fn clone_split_session_uses_persisted_session_state() {
         covers_up_to_turn: 1,
         original_turn_count: 1,
         compacted_count: 1,
+        trigger: None,
+        summarizer: None,
+        mode: None,
     });
     parent.save().expect("save parent");
 
