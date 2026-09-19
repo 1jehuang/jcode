@@ -3704,3 +3704,103 @@ fn opencode_session_header_is_sent_on_the_wire_only_to_opencode_hosts() {
         "non-opencode host received the header:\n{raw}"
     );
 }
+
+#[test]
+fn configured_swarm_root_effort_covers_all_wire_formats() {
+    let unified = make_provider();
+    let deepseek = OpenRouterProvider {
+        profile_id: Some("deepseek".into()),
+        ..make_custom_compatible_provider()
+    };
+    let openai = OpenRouterProvider {
+        profile_id: Some("zai".into()),
+        ..make_custom_compatible_provider()
+    };
+    for mode in ["swarm", "swarm-deep"] {
+        for (provider, strict, field, max) in [
+            (&unified, false, "reasoning", "xhigh"),
+            (&deepseek, false, "reasoning_effort", "max"),
+            (&openai, false, "reasoning_effort", "max"),
+            (&openai, true, "reasoning_effort", "xhigh"),
+        ] {
+            provider.set_reasoning_effort(mode).unwrap();
+            for (resolved, expected) in [("low", "low"), ("medium", "medium"), ("max", max)] {
+                let mut request = serde_json::json!({});
+                assert!(provider.apply_resolved_reasoning_effort(&mut request, resolved, strict));
+                let wire = if field == "reasoning" {
+                    &request[field]["effort"]
+                } else {
+                    &request[field]
+                };
+                assert_eq!(wire, expected);
+                assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+            }
+            let mut request = serde_json::json!({});
+            assert_eq!(
+                provider.apply_resolved_reasoning_effort(&mut request, "none", strict),
+                field == "reasoning"
+            );
+            if field == "reasoning" {
+                assert_eq!(request[field]["effort"], "none");
+            } else {
+                assert!(request.get(field).is_none());
+            }
+        }
+    }
+    for (effort, expected) in [("minimal", "low"), ("xhigh", "high")] {
+        let mut request = serde_json::json!({});
+        assert!(deepseek.apply_resolved_reasoning_effort(&mut request, effort, false));
+        assert_eq!(request["reasoning_effort"], expected);
+    }
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("JCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("JCODE_SWARM_ROOT_EFFORT", "low")
+            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+        let (api_base, request_rx) = spawn_single_response_chat_server();
+        let provider = OpenRouterProvider {
+            api_base,
+            supports_model_catalog: false,
+            ..make_provider()
+        };
+        provider.set_reasoning_effort(mode).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut stream = provider.complete(&[], &[], "test", None).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        });
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            request.contains(&format!(r#""reasoning":{{"effort":"{expected}"}}"#)),
+            "{request}"
+        );
+        assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+    }
+}

@@ -943,6 +943,46 @@ pub struct OpenRouterProvider {
 }
 
 impl OpenRouterProvider {
+    /// Apply a real (already resolved) effort without changing the stored swarm mode.
+    fn apply_resolved_reasoning_effort(
+        &self,
+        request: &mut Value,
+        effort: &str,
+        strict_openai_schema: bool,
+    ) -> bool {
+        if self.supports_deepseek_reasoning_effort() {
+            let effort = match effort {
+                "minimal" => "low",
+                "xhigh" => "high",
+                other => other,
+            };
+            if effort == "none" {
+                return false;
+            }
+            request["reasoning_effort"] = serde_json::json!(effort);
+        } else if self.supports_openai_reasoning_effort() {
+            // Strict endpoints such as Mistral reject the UX alias `max`.
+            let effort = if strict_openai_schema && effort == "max" {
+                "xhigh"
+            } else {
+                effort
+            };
+            if effort == "none" {
+                return false;
+            }
+            request["reasoning_effort"] = serde_json::json!(effort);
+        } else if Self::profile_supports_unified_reasoning(
+            self.profile_id.as_deref(),
+            self.send_openrouter_headers,
+        ) {
+            let effort = if effort == "max" { "xhigh" } else { effort };
+            request["reasoning"] = serde_json::json!({"effort": effort});
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn profile_supports_reasoning_effort(profile_id: Option<&str>) -> bool {
         matches!(profile_id, Some(id) if id.eq_ignore_ascii_case("deepseek"))
     }

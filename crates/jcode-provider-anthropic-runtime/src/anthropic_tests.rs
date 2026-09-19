@@ -548,17 +548,17 @@ fn test_anthropic_max_alias_uses_strongest_real_effort() {
         AnthropicProvider::actual_effort_for_model("claude-sonnet-4-6", "xhigh"),
         "high"
     );
-    // Swarm rungs pin to the strongest supported level.
+    // The default resolved swarm effort preserves strongest-supported mapping.
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-opus-4-8", "swarm"),
+        AnthropicProvider::resolved_effort_for_model("claude-opus-4-8", "max"),
         "max"
     );
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-sonnet-4-6", "swarm-deep"),
+        AnthropicProvider::resolved_effort_for_model("claude-sonnet-4-6", "max"),
         "max"
     );
     assert_eq!(
-        AnthropicProvider::actual_effort_for_model("claude-opus-4-5", "swarm"),
+        AnthropicProvider::resolved_effort_for_model("claude-opus-4-5", "max"),
         "high"
     );
 }
@@ -2101,5 +2101,121 @@ fn test_anthropic_unknown_content_block_start_does_not_drop_event() {
             !state.current_thinking_block,
             "{block_type}: unknown block must not start a thinking block"
         );
+    }
+}
+
+#[test]
+fn configured_swarm_root_effort_controls_adaptive_and_manual_thinking() {
+    let mut provider = AnthropicProvider::new();
+    provider.max_tokens_override = Some(32_768);
+    for mode in ["swarm", "swarm-deep"] {
+        *provider.reasoning_effort.write().unwrap() = Some(mode.to_string());
+        for (effort, budget) in [
+            ("minimal", 1_024),
+            ("low", 1_024),
+            ("medium", 4_096),
+            ("high", 8_192),
+            ("max", 16_384),
+        ] {
+            let (thinking, output, temperature) = provider
+                .build_reasoning_request_parts_with_effort(
+                    "claude-opus-4-5",
+                    true,
+                    true,
+                    Some(effort),
+                );
+            assert!(
+                matches!(thinking, Some(ApiThinking::Enabled { budget_tokens }) if budget_tokens == budget)
+            );
+            assert_eq!(
+                output.unwrap().effort,
+                if effort == "minimal" {
+                    "low"
+                } else if effort == "max" {
+                    "high"
+                } else {
+                    effort
+                }
+            );
+            assert_eq!(temperature, None);
+        }
+        let (thinking, output, _) = provider.build_reasoning_request_parts_with_effort(
+            "claude-opus-4-8",
+            false,
+            true,
+            Some("low"),
+        );
+        assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+        assert_eq!(output.unwrap().effort, "low");
+        for model in ["claude-opus-4-8", "claude-opus-4-5"] {
+            let (thinking, output, temperature) =
+                provider.build_reasoning_request_parts_with_effort(model, true, true, Some("none"));
+            assert!(thinking.is_none());
+            assert!(output.is_none());
+            assert_eq!(temperature, Some(1.0));
+        }
+        assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
+    }
+    assert_eq!(
+        AnthropicProvider::manual_thinking_budget("max", 8_192),
+        Some(8_191)
+    );
+    assert_eq!(
+        AnthropicProvider::manual_thinking_budget("low", 1_024),
+        None
+    );
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("JCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("JCODE_SWARM_ROOT_EFFORT", "low")
+            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let mut provider = AnthropicProvider::new();
+    provider.max_tokens_override = Some(32_768);
+    for mode in ["swarm", "swarm-deep"] {
+        *provider.reasoning_effort.write().unwrap() = Some(mode.into());
+        for model in ["claude-opus-4-8", "claude-opus-4-5"] {
+            let (thinking, output, temperature) =
+                provider.build_reasoning_request_parts_inner(model, true, true);
+            if mode == "swarm" {
+                assert_eq!(output.unwrap().effort, "low");
+                assert_eq!(temperature, None);
+                if model == "claude-opus-4-5" {
+                    assert!(matches!(
+                        thinking,
+                        Some(ApiThinking::Enabled {
+                            budget_tokens: 1_024
+                        })
+                    ));
+                } else {
+                    assert!(matches!(thinking, Some(ApiThinking::Adaptive { .. })));
+                }
+            } else {
+                assert!(thinking.is_none());
+                assert!(output.is_none());
+                assert_eq!(temperature, Some(1.0));
+            }
+        }
+        assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
     }
 }

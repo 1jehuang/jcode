@@ -1463,3 +1463,82 @@ fn config_reload_generation_increments_on_cache_invalidation() {
         "invalidate_config_cache must bump the reload generation ({before} -> {after})"
     );
 }
+
+#[test]
+fn swarm_root_effort_config_defaults_and_independent_modes() {
+    let defaults = Config::default();
+    assert_eq!(defaults.agents.root_effort_for_swarm(false), "max");
+    assert_eq!(defaults.agents.root_effort_for_swarm(true), "max");
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_root_effort = 'low'\nswarm_deep_root_effort = ' High '\nswarm_effort = 'medium'\n",
+    ).unwrap();
+    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
+    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("medium"));
+    assert!(cfg.display_string().contains("Swarm root effort: low"));
+    assert!(
+        cfg.display_string()
+            .contains("Deep swarm root effort: high")
+    );
+    let serialized = toml::to_string(&cfg).unwrap();
+    let round_trip: Config = toml::from_str(&serialized).unwrap();
+    assert_eq!(round_trip.agents.root_effort_for_swarm(true), "high");
+
+    for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        let cfg: Config =
+            toml::from_str(&format!("[agents]\nswarm_root_effort = '{level}'")).unwrap();
+        assert_eq!(cfg.agents.root_effort_for_swarm(false), level);
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+    }
+    for invalid in ["", "swarm", "swarm-deep", "turbo"] {
+        let cfg: Config = toml::from_str(&format!("[agents]\nswarm_root_effort = '{invalid}'\nswarm_deep_root_effort = '{invalid}'\nswarm_effort = 'low'")).unwrap();
+        assert_eq!(cfg.agents.root_effort_for_swarm(false), "max");
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("low"));
+    }
+}
+
+#[test]
+fn swarm_root_effort_env_overrides_and_shared_resolution() {
+    let _guard = crate::storage::lock_test_env();
+    let keys = ["JCODE_SWARM_ROOT_EFFORT", "JCODE_SWARM_DEEP_ROOT_EFFORT"];
+    let previous = keys.map(std::env::var_os);
+    let fingerprint = config_env_fingerprint();
+    crate::env::set_var(keys[0], "low");
+    crate::env::set_var(keys[1], "high");
+    assert_ne!(config_env_fingerprint(), fingerprint);
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
+    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort("swarm"),
+        Some("low")
+    );
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort(" Swarm-Deep "),
+        Some("high")
+    );
+    assert_eq!(crate::prompt::swarm_root_reasoning_effort("low"), None);
+    crate::env::set_var(keys[0], "none");
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort("swarm"),
+        Some("none")
+    );
+    // Config changes must not turn orchestration off or misrepresent its effort.
+    for mode in ["swarm", "swarm-deep"] {
+        let mut split = crate::prompt::SplitSystemPrompt::default();
+        crate::prompt::append_swarm_effort_directive(&mut split, Some(mode));
+        assert!(split.dynamic_part.contains("swarm"));
+        assert!(!split.dynamic_part.contains("maximum reasoning effort"));
+    }
+    for key in keys {
+        crate::env::set_var(key, " ");
+    }
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.swarm_root_effort, None);
+    assert_eq!(cfg.agents.swarm_deep_root_effort, None);
+    for (key, value) in keys.into_iter().zip(previous) {
+        restore_env_var(key, value);
+    }
+}

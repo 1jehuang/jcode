@@ -692,7 +692,7 @@ impl AnthropicProvider {
         }
         match value.as_str() {
             "off" | "disabled" => Some("none".to_string()),
-            // `swarm` is a UI sentinel meaning "max effort + use the swarm tool".
+            // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // Stored verbatim; resolved to a real effort in `actual_effort_for_model`.
             "none" | "low" | "medium" | "high" | "xhigh" | "max" | "swarm" | "swarm-deep" => {
                 Some(value)
@@ -708,17 +708,13 @@ impl AnthropicProvider {
     }
 
     fn actual_effort_for_model(model: &str, effort: &str) -> String {
-        if jcode_base::prompt::is_swarm_effort(effort) {
-            // Swarm rungs sit above `max` on the ladder and mean "strongest
-            // reasoning the model supports", so cycling upward never lowers
-            // the wire effort.
-            if Self::model_supports_max_effort(model) {
-                "max".to_string()
-            } else if Self::model_supports_xhigh_effort(model) {
-                "xhigh".to_string()
-            } else {
-                "high".to_string()
-            }
+        let effort = jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+        Self::resolved_effort_for_model(model, effort)
+    }
+
+    fn resolved_effort_for_model(model: &str, effort: &str) -> String {
+        if effort == "minimal" {
+            "low".to_string()
         } else if effort == "max" && !Self::model_supports_max_effort(model) {
             if Self::model_supports_xhigh_effort(model) {
                 "xhigh".to_string()
@@ -837,12 +833,12 @@ impl AnthropicProvider {
     }
 
     fn manual_thinking_budget(effort: &str, max_tokens: u32) -> Option<u32> {
+        let effort = jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
         let desired = match effort {
-            "low" => 1_024,
+            "minimal" | "low" => 1_024,
             "medium" => 4_096,
             "high" => 8_192,
             "xhigh" | "max" => 16_384,
-            e if jcode_base::prompt::is_swarm_effort(e) => 16_384,
             _ => return None,
         };
         let budget = desired.min(max_tokens.saturating_sub(1));
@@ -867,24 +863,31 @@ impl AnthropicProvider {
         is_oauth: bool,
         show_thinking: bool,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
-        let effort = self.effort_for_model(model);
-        // An explicit "none" (user-configured or a model default) means
-        // reasoning was deliberately disabled, so it must also win over the
-        // `display.show_thinking` fallback below. `effort_for_model` returns
-        // Some("none") even when nothing is configured, so check the
-        // stored/default effort instead.
-        let effort_is_explicit_none = self
+        let effort = self
             .stored_reasoning_effort()
-            .or_else(|| Self::default_reasoning_effort_for_model(model))
-            .as_deref()
-            == Some("none");
-        let effort = effort.as_deref().filter(|effort| *effort != "none");
-        let show_thinking = show_thinking && !effort_is_explicit_none;
+            .or_else(|| Self::default_reasoning_effort_for_model(model));
+        let resolved = effort.as_deref().map(|effort| {
+            jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort)
+        });
+        self.build_reasoning_request_parts_with_effort(model, is_oauth, show_thinking, resolved)
+    }
+
+    fn build_reasoning_request_parts_with_effort(
+        &self,
+        model: &str,
+        is_oauth: bool,
+        show_thinking: bool,
+        resolved_effort: Option<&str>,
+    ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
+        // Configured swarm `none` must also suppress display-triggered thinking.
+        let show_thinking = show_thinking && resolved_effort != Some("none");
+        let effort = resolved_effort
+            .filter(|effort| *effort != "none" && Self::model_supports_reasoning_effort(model));
 
         let output_config = effort
             .filter(|_| Self::model_supports_output_effort(model))
             .map(|effort| ApiOutputConfig {
-                effort: Self::actual_effort_for_model(model, effort),
+                effort: Self::resolved_effort_for_model(model, effort),
             });
 
         // When only the display toggle is on (no explicit effort), request
