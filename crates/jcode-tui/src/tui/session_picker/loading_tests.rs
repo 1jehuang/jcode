@@ -1145,9 +1145,21 @@ fn benchmark_resume_loading_reports_timings() {
         session.save().expect("save benchmark session");
     }
 
+    // The shared in-memory session-list cache can be poisoned by a lock-less
+    // test running concurrently: such a call resolves this test's `JCODE_HOME`
+    // (env is process-global), scans the tempdir mid-write, and caches the
+    // partial listing under this test's key. Invalidate right before loading
+    // and retry once so the assertion observes a settled directory instead of
+    // a stale cache entry (upstream race; the fix lives in the test, not in
+    // the cache itself).
+    invalidate_session_list_cache();
     let load_start = std::time::Instant::now();
-    let sessions = load_sessions().expect("load sessions");
+    let mut sessions = load_sessions().expect("load sessions");
     let load_elapsed = load_start.elapsed();
+    if sessions.len() < 100 {
+        invalidate_session_list_cache();
+        sessions = load_sessions().expect("reload sessions after cache race");
+    }
 
     let group_start = std::time::Instant::now();
     let grouped = load_sessions_grouped().expect("load grouped sessions");
