@@ -38,6 +38,10 @@ impl Tool for McpTool {
         &self.tool_def.name
     }
 
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
+        Some((&self.server_name, &self.tool_def.name))
+    }
+
     fn description(&self) -> &str {
         self.tool_def.description.as_deref().unwrap_or("MCP tool")
     }
@@ -110,15 +114,76 @@ pub fn dispatch_name(server_name: &str, tool_name: &str) -> String {
     format!("mcp__{}__{}", server_name, tool_name).replace('-', "_")
 }
 
+/// Build deterministic registry keys for a complete MCP tool surface.
+///
+/// `dispatch_name` predates multi-server tool registration and intentionally
+/// normalizes hyphens for model compatibility. That normalization is lossy,
+/// so two distinct `(server, tool)` pairs can otherwise overwrite one another
+/// in the registry. Keep the historical spelling when it is unique, and add a
+/// stable suffix only to colliding entries.
+pub fn dispatch_names(tools: &[(String, McpToolDef)]) -> Vec<String> {
+    let bases: Vec<String> = tools
+        .iter()
+        .map(|(server, tool)| dispatch_name(server, &tool.name))
+        .collect();
+    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    for base in &bases {
+        *counts.entry(base).or_default() += 1;
+    }
+
+    let mut ordered_indices: Vec<usize> = (0..tools.len()).collect();
+    ordered_indices.sort_by(|&left, &right| {
+        tools[left]
+            .0
+            .cmp(&tools[right].0)
+            .then_with(|| tools[left].1.name.cmp(&tools[right].1.name))
+    });
+
+    let mut names = vec![String::new(); tools.len()];
+    let mut used = std::collections::HashSet::with_capacity(tools.len());
+    for index in ordered_indices {
+        let (server, tool) = &tools[index];
+        let base = &bases[index];
+        if counts[base.as_str()] == 1 && used.insert(base.clone()) {
+            names[index] = base.clone();
+            continue;
+        }
+
+        let suffix = format!("__{:08x}", stable_dispatch_hash(server, &tool.name));
+        let mut candidate = format!("{base}{suffix}");
+        let mut counter = 2u32;
+        while !used.insert(candidate.clone()) {
+            candidate = format!("{base}{suffix}_{counter}");
+            counter = counter.saturating_add(1);
+        }
+        names[index] = candidate;
+    }
+    names
+}
+
+fn stable_dispatch_hash(server_name: &str, tool_name: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in server_name
+        .as_bytes()
+        .iter()
+        .chain(std::iter::once(&0))
+        .chain(tool_name.as_bytes())
+    {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
+}
+
 /// Create tools from an MCP manager
 pub async fn create_mcp_tools(manager: Arc<RwLock<McpManager>>) -> Vec<(String, Arc<dyn Tool>)> {
     let mgr = manager.read().await;
     let all_tools = mgr.all_tools().await;
     drop(mgr);
 
+    let names = dispatch_names(&all_tools);
     let mut tools = Vec::new();
-    for (server_name, tool_def) in all_tools {
-        let prefixed_name = dispatch_name(&server_name, &tool_def.name);
+    for ((server_name, tool_def), prefixed_name) in all_tools.into_iter().zip(names) {
         let mcp_tool = McpTool::new(server_name, tool_def, Arc::clone(&manager));
         tools.push((prefixed_name, Arc::new(mcp_tool) as Arc<dyn Tool>));
     }
@@ -134,10 +199,25 @@ pub fn create_mcp_tools_from_cached(
     tool_defs: &[McpToolDef],
     manager: Arc<RwLock<McpManager>>,
 ) -> Vec<(String, Arc<dyn Tool>)> {
-    tool_defs
+    let all_tools: Vec<(String, McpToolDef)> = tool_defs
         .iter()
-        .map(|tool_def| {
-            let prefixed_name = dispatch_name(server_name, &tool_def.name);
+        .cloned()
+        .map(|tool_def| (server_name.to_string(), tool_def))
+        .collect();
+    create_mcp_tools_from_cached_many(&all_tools, manager)
+}
+
+/// Build proxy tools from cached schemas across all configured servers so the
+/// same collision handling is applied before registry insertion.
+pub fn create_mcp_tools_from_cached_many(
+    all_tools: &[(String, McpToolDef)],
+    manager: Arc<RwLock<McpManager>>,
+) -> Vec<(String, Arc<dyn Tool>)> {
+    let names = dispatch_names(all_tools);
+    all_tools
+        .iter()
+        .zip(names)
+        .map(|((server_name, tool_def), prefixed_name)| {
             let mcp_tool = McpTool::new(
                 server_name.to_string(),
                 tool_def.clone(),
@@ -150,7 +230,9 @@ pub fn create_mcp_tools_from_cached(
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_name;
+    use super::{dispatch_name, dispatch_names};
+    use crate::mcp::protocol::McpToolDef;
+    use serde_json::json;
 
     #[test]
     fn hyphenated_mcp_names_are_safe_for_the_standard_dispatcher() {
@@ -162,5 +244,34 @@ mod tests {
             dispatch_name("hyphenated-server", "query-docs"),
             "mcp__hyphenated_server__query_docs"
         );
+    }
+
+    #[test]
+    fn colliding_dispatch_names_are_unique_and_stable() {
+        let tools = vec![
+            (
+                "server-a".to_string(),
+                McpToolDef {
+                    name: "query-docs".to_string(),
+                    description: None,
+                    input_schema: json!({"type": "object"}),
+                },
+            ),
+            (
+                "server_a".to_string(),
+                McpToolDef {
+                    name: "query_docs".to_string(),
+                    description: None,
+                    input_schema: json!({"type": "object"}),
+                },
+            ),
+        ];
+        let first = dispatch_names(&tools);
+        let second = dispatch_names(&tools);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0], first[1]);
+        assert!(first.iter().all(|name| name.starts_with("mcp__")));
     }
 }

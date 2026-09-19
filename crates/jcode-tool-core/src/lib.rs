@@ -146,6 +146,11 @@ pub trait Tool: Send + Sync {
     /// Tool name (must match what's sent to the API).
     fn name(&self) -> &str;
 
+    /// Original MCP identity, independent of the provider-facing registry alias.
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
+        None
+    }
+
     /// Human-readable description.
     fn description(&self) -> &str;
 

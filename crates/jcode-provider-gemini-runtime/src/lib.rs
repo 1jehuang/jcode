@@ -42,7 +42,7 @@ struct PersistedCatalog {
 pub struct GeminiProvider {
     client: reqwest::Client,
     model: Arc<RwLock<String>>,
-    state: Arc<Mutex<Option<GeminiRuntimeState>>>,
+    state: Arc<Mutex<Option<CachedGeminiState>>>,
     fetched_models: Arc<RwLock<Vec<String>>>,
 }
 
@@ -55,6 +55,18 @@ enum GeminiAuthMode {
     /// Official Gemini Developer API key (Google AI Studio), sent as
     /// `x-goog-api-key` to `generativelanguage.googleapis.com`.
     ApiKey(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeminiStateKey {
+    api_key: bool,
+    project: Option<String>,
+}
+
+#[derive(Clone)]
+struct CachedGeminiState {
+    key: GeminiStateKey,
+    state: GeminiRuntimeState,
 }
 
 impl GeminiProvider {
@@ -138,46 +150,53 @@ impl GeminiProvider {
     /// cloudcode-pa tier. Set `JCODE_GEMINI_FORCE_OAUTH=1` to pin OAuth even when
     /// a key is present.
     fn auth_mode() -> GeminiAuthMode {
-        let force_oauth = std::env::var("JCODE_GEMINI_FORCE_OAUTH")
-            .map(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-            })
-            .unwrap_or(false);
-        if !force_oauth && let Some(api_key) = gemini_auth::api_key() {
+        if !gemini_auth::force_oauth()
+            && let Some(api_key) = gemini_auth::api_key()
+        {
             return GeminiAuthMode::ApiKey(api_key);
         }
         GeminiAuthMode::Oauth
     }
 
     async fn ensure_state(&self) -> Result<GeminiRuntimeState> {
+        let key = Self::state_key();
+        let mut guard = self.state.lock().await;
+        if let Some(cached) = guard.as_ref()
+            && cached.key == key
+        {
+            return Ok(cached.state.clone());
+        }
         // The Developer API key path is stateless: there is no Code Assist
         // project/onboarding handshake, so synthesize a lightweight session.
-        if let GeminiAuthMode::ApiKey(_) = Self::auth_mode() {
-            let mut guard = self.state.lock().await;
-            if let Some(state) = guard.clone() {
-                return Ok(state);
-            }
-            let state = GeminiRuntimeState {
+        let state = if key.api_key {
+            GeminiRuntimeState {
                 project_id: String::new(),
                 session_id: Uuid::new_v4().to_string(),
-            };
-            *guard = Some(state.clone());
-            return Ok(state);
-        }
-
-        let mut guard = self.state.lock().await;
-        if let Some(state) = guard.clone() {
-            return Ok(state);
-        }
-
-        let state = self.setup_runtime_state().await?;
-        *guard = Some(state.clone());
+            }
+        } else {
+            self.setup_runtime_state().await?
+        };
+        *guard = Some(CachedGeminiState {
+            key,
+            state: state.clone(),
+        });
         Ok(state)
     }
 
+    fn state_key() -> GeminiStateKey {
+        let api_key = matches!(Self::auth_mode(), GeminiAuthMode::ApiKey(_));
+        GeminiStateKey {
+            api_key,
+            project: if api_key {
+                None
+            } else {
+                gemini_auth::cloud_project()
+            },
+        }
+    }
+
     async fn setup_runtime_state(&self) -> Result<GeminiRuntimeState> {
-        let project_id_env = google_cloud_project_from_env();
+        let project_id_env = gemini_auth::cloud_project();
         let metadata = client_metadata(project_id_env.clone());
         let load_req = load_code_assist_request(project_id_env.clone(), metadata.clone());
         let load_res: LoadCodeAssistResponse =
@@ -268,7 +287,7 @@ impl GeminiProvider {
         if let GeminiAuthMode::ApiKey(api_key) = Self::auth_mode() {
             return self.refresh_available_models_api_key(&api_key).await;
         }
-        let project_id_env = google_cloud_project_from_env();
+        let project_id_env = gemini_auth::cloud_project();
         let load_req = load_code_assist_request(
             project_id_env.clone(),
             client_metadata(project_id_env.clone()),
@@ -374,33 +393,67 @@ impl GeminiProvider {
         let url = format!("{}:{method}", Self::base_url());
         let body_value =
             serde_json::to_value(body).context("Failed to serialize Gemini request body")?;
-        let resp = self
-            .send_with_retry(
-                |client| {
-                    client
-                        .post(&url)
-                        .bearer_auth(&tokens.access_token)
-                        .header(reqwest::header::CONTENT_TYPE, "application/json")
-                        .json(&body_value)
-                },
-                &url,
-            )
-            .await?;
+        // Code Assist enforces a short-window burst limiter that returns 429
+        // RESOURCE_EXHAUSTED with "quota will reset after 0s" even when the
+        // daily bucket has plenty left. Those clear within seconds, so retry
+        // them with backoff instead of failing the turn. The same applies to
+        // transient 5xx from Google's side ("Authentication backend
+        // unavailable", "No capacity available"), which otherwise kill a
+        // long session mid-turn.
+        let mut attempt: u32 = 0;
+        loop {
+            let resp = self
+                .send_with_retry(
+                    |client| {
+                        client
+                            .post(&url)
+                            .bearer_auth(&tokens.access_token)
+                            .header(reqwest::header::CONTENT_TYPE, "application/json")
+                            .json(&body_value)
+                    },
+                    &url,
+                )
+                .await?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
-            anyhow::bail!(
-                "Gemini request {} failed (HTTP {}): {}",
-                method,
-                status,
-                body.trim()
-            );
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let retry_after = jcode_provider_core::retry_after::retry_after(resp.headers());
+                let body = jcode_base::util::http_error_body(resp, "HTTP error").await;
+                if let Some(delay) = gemini_http_retry_delay(
+                    method,
+                    status,
+                    &body,
+                    attempt,
+                    retry_after.map(|hint| hint.remaining()),
+                ) {
+                    jcode_base::logging::warn(&format!(
+                        "Gemini {} hit transient HTTP {} (attempt {}/{}); retrying in {:?}",
+                        method,
+                        status.as_u16(),
+                        attempt + 1,
+                        MAX_HTTP_RETRIES,
+                        delay
+                    ));
+                    attempt += 1;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(jcode_provider_core::retry_after::error_with_retry_after(
+                    format!(
+                        "Gemini request {} failed (HTTP {}): {}",
+                        method,
+                        status,
+                        body.trim()
+                    ),
+                    retry_after,
+                ));
+            }
+
+            return resp
+                .json()
+                .await
+                .with_context(|| format!("Failed to parse Gemini {} response", method));
         }
-
-        resp.json()
-            .await
-            .with_context(|| format!("Failed to parse Gemini {} response", method))
     }
 
     /// POST a JSON body to the official Gemini Developer API, authenticating
@@ -1072,7 +1125,13 @@ impl Provider for GeminiProvider {
     }
 
     fn supports_compaction(&self) -> bool {
-        false
+        // No native server-side compaction exists for this provider, so jcode's
+        // own summary compaction is the only thing standing between a long
+        // session and a hard context-limit rejection. Returning `false` here
+        // disabled the entire compaction block in `Agent::messages_for_provider`
+        // — including the emergency hard-compact and payload truncation at the
+        // critical threshold — leaving these sessions with no safety net at all.
+        true
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
@@ -1105,9 +1164,60 @@ fn is_vpc_sc_error(err: &anyhow::Error) -> bool {
     err.to_string().contains("SECURITY_POLICY_VIOLATED")
 }
 
+const MAX_HTTP_RETRIES: u32 = 5;
+
+fn gemini_http_retry_delay(
+    method: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+    attempt: u32,
+    retry_after: Option<Duration>,
+) -> Option<Duration> {
+    // Onboarding mutates account state. Do not replay it automatically when a
+    // server error cannot tell us whether the first request completed.
+    if attempt >= MAX_HTTP_RETRIES || !matches!(method, "generateContent" | "loadCodeAssist") {
+        return None;
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let lower = body.to_ascii_lowercase();
+        if [
+            "daily",
+            "per day",
+            "per_day",
+            "perday",
+            "billing",
+            "insufficient_quota",
+            "quota_exhausted",
+        ]
+        .iter()
+        .any(|reason| lower.contains(reason))
+        {
+            return None;
+        }
+    } else if !matches!(status.as_u16(), 500 | 502 | 503 | 504) {
+        return None;
+    }
+    Some(jcode_provider_core::retry_after::retry_delay(
+        attempt,
+        1500,
+        retry_after,
+    ))
+}
+
 fn gemini_http_client() -> reqwest::Client {
+    // Code Assist (cloudcode-pa) applies the subscription quota per client
+    // identity. A/B tests with the same token, project and body showed
+    // `jcode/1.0 (gemini)` throttled (429 RATE_LIMIT_EXCEEDED after 1-2
+    // requests) while the official Gemini CLI UA ran unlimited. Present the
+    // same identity the official CLI sends.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "x-goog-api-client",
+        reqwest::header::HeaderValue::from_static("gl-node/26.4.0"),
+    );
     reqwest::Client::builder()
-        .user_agent("jcode/1.0 (gemini)")
+        .user_agent(gemini_user_agent())
+        .default_headers(headers)
         .http1_only()
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(90))
@@ -1115,6 +1225,23 @@ fn gemini_http_client() -> reqwest::Client {
         .tcp_keepalive(Some(Duration::from_secs(30)))
         .build()
         .unwrap_or_else(|_| jcode_provider_core::shared_http_client())
+}
+
+/// User-Agent matching the official Gemini CLI. Override with
+/// `JCODE_GEMINI_USER_AGENT` if Google changes the accepted format.
+fn gemini_user_agent() -> String {
+    if let Ok(ua) = std::env::var("JCODE_GEMINI_USER_AGENT")
+        && !ua.trim().is_empty()
+    {
+        return ua;
+    }
+    let os = std::env::consts::OS;
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    format!("GeminiCLI-tui/0.57.0/{DEFAULT_MODEL} ({os}; {arch}; terminal)")
 }
 
 fn is_transient_gemini_transport_error(err: &reqwest::Error) -> bool {

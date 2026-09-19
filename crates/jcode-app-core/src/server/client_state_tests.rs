@@ -35,6 +35,13 @@ impl Provider for MockProvider {
         "mock"
     }
 
+    /// Deliberately different from `name()`: the provider class id and the
+    /// profile label must not be interchangeable, or a fallback that reaches
+    /// for `name()` where a display label belongs goes unnoticed (#1286).
+    fn display_name(&self) -> String {
+        "Mock Profile".to_string()
+    }
+
     fn fork(&self) -> Arc<dyn Provider> {
         Arc::new(Self(self.0))
     }
@@ -370,7 +377,7 @@ async fn assert_model_catalog_service_tier(tier: Option<&'static str>, busy: boo
         } => {
             assert_eq!(id, 43);
             assert_eq!(returned_session_id, session_id);
-            assert_eq!(provider_name.as_deref(), Some("mock"));
+            assert_eq!(provider_name.as_deref(), Some("Mock Profile"));
             assert_eq!(
                 provider_model.as_deref(),
                 Some(if busy {

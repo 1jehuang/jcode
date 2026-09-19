@@ -116,7 +116,7 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
         | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
-/// Enable Kitty keyboard protocol for unambiguous key reporting.
+/// Request Kitty keyboard reporting and tmux's extended-key mode.
 ///
 /// Intentionally avoid REPORT_ALL_KEYS_AS_ESCAPE_CODES for now. When that flag is enabled,
 /// terminals such as kitty/Alacritty/Warp can report printable keys as a base key plus
@@ -125,27 +125,64 @@ fn keyboard_enhancement_flags() -> crossterm::event::KeyboardEnhancementFlags {
 /// shifted symbols for every keyboard layout. Prefer the terminal-delivered printable character
 /// and only synthesize ASCII letter casing in the input fallback.
 ///
-/// Returns true if successfully enabled, false if the terminal doesn't support it.
+/// Returns whether the requests were written, not whether the terminal supports them.
 pub fn enable_keyboard_enhancement() -> bool {
-    use crossterm::event::PushKeyboardEnhancementFlags;
-    let result = crossterm::execute!(
-        std::io::stdout(),
-        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-    )
-    .is_ok();
+    let result = enable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux()).is_ok();
     crate::logging::info(&format!(
-        "Kitty keyboard protocol: {}",
-        if result { "enabled" } else { "FAILED" }
+        "Keyboard enhancement request: {}",
+        if result { "sent" } else { "FAILED" }
     ));
     result
 }
 
-/// Disable Kitty keyboard protocol, restoring default key reporting.
+fn inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some_and(|value| !value.is_empty())
+}
+
+fn enable_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    use crossterm::event::PushKeyboardEnhancementFlags;
+    request_tmux_extended_keys_to(writer, inside_tmux)?;
+    crossterm::execute!(
+        writer,
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    )
+}
+
+/// Reset tmux extended keys and pop Kitty keyboard reporting.
 pub fn disable_keyboard_enhancement() {
-    let _ = crossterm::execute!(
-        std::io::stdout(),
-        crossterm::event::PopKeyboardEnhancementFlags
-    );
+    let _ = disable_keyboard_enhancement_to(&mut std::io::stdout(), inside_tmux());
+}
+
+fn disable_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    if inside_tmux {
+        writer.write_all(b"\x1b[>4;0m")?;
+    }
+    crossterm::execute!(writer, crossterm::event::PopKeyboardEnhancementFlags)
+}
+
+fn request_tmux_extended_keys_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    if inside_tmux {
+        // `extended-keys on` needs modifyOtherKeys opt-in, not a Kitty push.
+        writer.write_all(b"\x1b[>4;2m")?;
+    }
+    Ok(())
+}
+
+fn reapply_keyboard_enhancement_to(
+    writer: &mut impl std::io::Write,
+    inside_tmux: bool,
+) -> std::io::Result<()> {
+    request_tmux_extended_keys_to(writer, inside_tmux)?;
+    write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())
 }
 
 /// Reassert terminal modes that terminals may clear while the TUI remains alive.
@@ -173,7 +210,7 @@ pub(crate) fn reapply_terminal_modes_to(
         writer.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1015h\x1b[?1006h")?;
     }
     if keyboard_enhanced {
-        write!(writer, "\x1b[={}u", keyboard_enhancement_flags().bits())?;
+        reapply_keyboard_enhancement_to(writer, inside_tmux())?;
     }
     writer.flush()
 }
@@ -192,7 +229,47 @@ pub(crate) fn reapply_configured_terminal_modes() {
 
 #[cfg(test)]
 mod terminal_mode_tests {
-    use super::reapply_terminal_modes_to;
+    use super::{
+        disable_keyboard_enhancement_to, enable_keyboard_enhancement_to,
+        reapply_keyboard_enhancement_to, reapply_terminal_modes_to,
+    };
+
+    #[test]
+    fn tmux_keyboard_lifecycle_requests_and_resets_extended_keys() {
+        let mut output = Vec::new();
+        enable_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;2m\x1b[>7u");
+
+        output.clear();
+        reapply_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;2m\x1b[=7u");
+
+        output.clear();
+        disable_keyboard_enhancement_to(&mut output, true).unwrap();
+        assert_eq!(output, b"\x1b[>4;0m\x1b[<1u");
+    }
+
+    #[test]
+    fn outside_tmux_keyboard_lifecycle_keeps_kitty_protocol_only() {
+        let mut output = Vec::new();
+        enable_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[>7u");
+
+        output.clear();
+        reapply_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[=7u");
+
+        output.clear();
+        disable_keyboard_enhancement_to(&mut output, false).unwrap();
+        assert_eq!(output, b"\x1b[<1u");
+    }
+
+    #[test]
+    fn reapply_omits_keyboard_protocols_when_disabled() {
+        let mut output = Vec::new();
+        reapply_terminal_modes_to(&mut output, false, false, false).unwrap();
+        assert_eq!(output, b"\x1b[?2004h");
+    }
 
     #[test]
     fn reapply_omits_mouse_sequences_when_capture_is_disabled() {
@@ -216,7 +293,7 @@ mod terminal_mode_tests {
         assert!(output.contains("\x1b[?1000h"));
         assert!(output.contains("\x1b[="), "must set Kitty keyboard flags");
         assert!(
-            !output.contains("\x1b[>"),
+            !output.contains("\x1b[>7u"),
             "must not push the Kitty keyboard stack"
         );
     }
