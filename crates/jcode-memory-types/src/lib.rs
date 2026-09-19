@@ -695,10 +695,11 @@ pub struct SourceCitation {
     pub start_line: usize,
     /// 0-based end line of the span (exclusive).
     pub end_line: usize,
-    /// sha256 hex of the EXACT span bytes (lines joined with a single
-    /// `\n`, no trailing newline). No normalization: a byte change inside
-    /// a string literal or indentation in a whitespace-sensitive language
-    /// is a real change and must read as one.
+    /// sha256 hex of the EXACT span bytes (raw file bytes from the first
+    /// byte of start_line through the last byte of end_line-1, line
+    /// endings included). No normalization: CRLF/LF swaps, trailing
+    /// newlines, string-literal bytes, and whitespace-sensitive indentation
+    /// all read as real changes.
     pub span_hash: String,
     /// The span text at bank time (lines joined with `\n`). Used to find
     /// a moved block by content search when offsets shift.
@@ -733,12 +734,36 @@ pub enum CitationStatus {
 }
 
 impl SourceCitation {
-    /// sha256 hex of lines joined with a single `\n`, no trailing newline.
-    pub fn hash_span_lines(lines: &[&str]) -> String {
+    /// sha256 hex of raw bytes. The citation hash covers the exact span
+    /// bytes (line endings included): LF-to-CRLF conversion or a
+    /// trailing-newline add/remove changes the hash and reads as Stale.
+    pub fn hash_span_bytes(bytes: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(lines.join("\n"));
+        hasher.update(bytes);
         format!("{:x}", hasher.finalize())
+    }
+
+    /// sha256 hex of lines joined with a single `\n`. Used only as a fast
+    /// prefilter for relocation search (normalization-tolerant); the verdict
+    /// always confirms against the raw-byte hash.
+    pub fn hash_span_lines(lines: &[&str]) -> String {
+        Self::hash_span_bytes(lines.join("\n").as_bytes())
+    }
+
+    /// Byte offset where each line starts, plus EOF as the final sentinel,
+    /// so a line span maps to an exact byte window (line endings intact).
+    fn line_byte_offsets(text: &str) -> Vec<usize> {
+        let mut offsets = vec![0];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                offsets.push(i + 1);
+            }
+        }
+        if *offsets.last().unwrap() != text.len() {
+            offsets.push(text.len());
+        }
+        offsets
     }
 
     /// Confine a repo-relative path under `repo_root`. Rejects absolute
@@ -780,10 +805,11 @@ impl SourceCitation {
             Err(_) => return CitationStatus::Unverifiable,
         };
         let lines: Vec<&str> = text.lines().collect();
-        // Exact window first.
-        if self.end_line <= lines.len() {
-            let window = &lines[self.start_line..self.end_line];
-            if Self::hash_span_lines(window) == self.span_hash {
+        let offsets = Self::line_byte_offsets(&text);
+        // Exact window first, on raw bytes (line-ending faithful).
+        if self.end_line + 1 <= offsets.len() {
+            let window = &text.as_bytes()[offsets[self.start_line]..offsets[self.end_line]];
+            if Self::hash_span_bytes(window) == self.span_hash {
                 return CitationStatus::Fresh;
             }
         }
@@ -799,9 +825,11 @@ impl SourceCitation {
                 let before: Vec<&str> = self.context_before.lines().collect();
                 let after: Vec<&str> = self.context_after.lines().collect();
                 for start in 0..=lines.len() - n {
-                    if lines[start..start + n] != span_lines[..]
-                        || Self::hash_span_lines(&lines[start..start + n]) != self.span_hash
-                    {
+                    if lines[start..start + n] != span_lines[..] {
+                        continue;
+                    }
+                    let raw = &text.as_bytes()[offsets[start]..offsets[start + n]];
+                    if Self::hash_span_bytes(raw) != self.span_hash {
                         continue;
                     }
                     let end = start + n;
@@ -862,6 +890,10 @@ impl SourceCitation {
         if end_line > lines.len() {
             return None;
         }
+        // Raw span bytes (line endings intact): LF/CRLF and trailing
+        // newlines participate in the hash.
+        let offsets = Self::line_byte_offsets(&text);
+        let span_bytes = &text.as_bytes()[offsets[start_line]..offsets[end_line]];
         let span = &lines[start_line..end_line];
         let from = start_line.saturating_sub(CITATION_CONTEXT_LINES);
         let to = (end_line + CITATION_CONTEXT_LINES).min(lines.len());
@@ -869,7 +901,7 @@ impl SourceCitation {
             path: path.to_string(),
             start_line,
             end_line,
-            span_hash: Self::hash_span_lines(span),
+            span_hash: Self::hash_span_bytes(span_bytes),
             span_text: span.join("\n"),
             context_before: lines[from..start_line].join("\n"),
             context_after: lines[end_line..to].join("\n"),
@@ -1285,16 +1317,19 @@ pub mod ranking {
         }
 
         fn cite(path: &str, start: usize, end: usize, text: &str) -> SourceCitation {
-            // Mirrors SourceCitation::bank: exact span plus 5 lines each side.
+            // Mirrors SourceCitation::bank: raw span bytes plus 5 lines each side.
             let lines: Vec<&str> = text.lines().collect();
             let span: Vec<&str> = lines[start..end].to_vec();
             let from = start.saturating_sub(5);
             let to = (end + 5).min(lines.len());
+            let offsets = SourceCitation::line_byte_offsets(text);
             SourceCitation {
                 path: path.to_string(),
                 start_line: start,
                 end_line: end,
-                span_hash: SourceCitation::hash_span_lines(&span),
+                span_hash: SourceCitation::hash_span_bytes(
+                    &text.as_bytes()[offsets[start]..offsets[end]],
+                ),
                 span_text: span.join("\n"),
                 context_before: lines[from..start].join("\n"),
                 context_after: lines[end..to].join("\n"),
@@ -1539,6 +1574,34 @@ pub mod ranking {
             // With .git at top: nested sessions anchor at the root.
             std::fs::create_dir_all(dir.path().join(".git")).unwrap();
             assert_eq!(find_repo_root(&nested), dir.path().to_path_buf());
+        }
+
+        #[test]
+        fn crlf_to_lf_conversion_reads_stale() {
+            let crlf = "a = 1\r\nb = 2\r\n";
+            let dir = write_tree(&[("w.py", crlf)]);
+            let cited = SourceCitation::bank(dir.path(), "w.py", 0, 2).expect("bank");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+            std::fs::write(dir.path().join("w.py"), "a = 1\nb = 2\n").unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+        }
+
+        #[test]
+        fn trailing_newline_add_remove_reads_stale() {
+            let dir = write_tree(&[("t.rs", "fn a() {}\n")]);
+            let cited = SourceCitation::bank(dir.path(), "t.rs", 0, 1).expect("bank");
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Fresh);
+            std::fs::write(dir.path().join("t.rs"), "fn a() {}").unwrap();
+            assert_eq!(cited.verify(dir.path()), CitationStatus::Stale);
+            // Appending a line AFTER the cited span leaves the span bytes
+            // intact: Fresh is correct, the citation covers line 0 only.
+            std::fs::write(dir.path().join("t.rs"), "fn a() {}\n\n").unwrap();
+            assert_eq!(
+                SourceCitation::bank(dir.path(), "t.rs", 0, 1)
+                    .expect("re-bank")
+                    .verify(dir.path()),
+                CitationStatus::Fresh
+            );
         }
 
         #[test]
