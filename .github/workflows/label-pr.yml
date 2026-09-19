@@ -1,5 +1,11 @@
 name: Semantic PR labels
 on:
+  workflow_dispatch:
+    inputs:
+      pull-request:
+        description: Existing open PR number to classify
+        required: true
+        type: string
   pull_request_target:
     types: [opened, reopened, synchronize, edited, ready_for_review]
 permissions:
@@ -7,7 +13,7 @@ permissions:
   pull-requests: write
   issues: write
 concurrency:
-  group: jev-label-${{ github.event.pull_request.number }}
+  group: jev-label-${{ github.event.pull_request.number || inputs.pull-request }}
   cancel-in-progress: false
 jobs:
   label:
@@ -21,5 +27,5 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           repository: ${{ github.repository }}
-          pull-request: ${{ github.event.pull_request.number }}
+          pull-request: ${{ github.event.pull_request.number || inputs.pull-request }}
           apply: 'true'
