@@ -64,6 +64,9 @@ impl App {
             "commit" => {
                 "/commit\nAsk the agent to inspect current uncommitted changes and create interactive, logical commits.\n\nThe agent should group related files or hunks, preserve unrelated work, validate as appropriate, and report the commits created plus anything left uncommitted."
             }
+            "merge" => {
+                "/merge\nAsk the agent to merge the current branch into main/master, then leave HEAD on that destination branch.\n\nRequires a clean worktree and an attached branch. If both main and master exist, use the unambiguous configured remote default or ask. The agent validates the changes, uses a normal merge (fast-forward when possible), and stops on conflicts, aborting its own merge and returning to the source branch when safe. Uncommitted changes are never auto-committed or stashed. Nothing is pushed and no branches are deleted."
+            }
             "commit-push" | "commit-and-push" => {
                 "/commit-push\nSame as /commit, then push the new commits to the remote tracking branch.\n\nThe agent groups related changes into logical commits, preserves unrelated work, then runs git push (using git push -u if the branch has no upstream). It will not force-push or rewrite already-pushed history, and reports the commits created plus the push result."
             }

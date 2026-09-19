@@ -53,6 +53,7 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
+include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");

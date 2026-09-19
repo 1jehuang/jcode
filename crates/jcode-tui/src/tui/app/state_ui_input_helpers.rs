@@ -68,6 +68,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
+        "/merge",
+        "Merge current branch into main/master and switch to it (no push)",
+    ),
+    RegisteredCommand::public(
         "/commit-push",
         "Make logical commits from current changes, then push",
     ),
