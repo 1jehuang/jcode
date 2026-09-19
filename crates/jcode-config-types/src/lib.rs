@@ -891,6 +891,12 @@ impl<'de> Deserialize<'de> for HookCommands {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
+    /// Synchronous input transformers run before each tool call. Each receives
+    /// the tool input JSON on stdin and may print replacement JSON on stdout.
+    /// Empty stdout or any failure leaves the input unchanged.
+    pub pre_tool_transform: Option<HookCommands>,
+    /// Max milliseconds to wait for each input transformer (default: 500).
+    pub pre_tool_transform_timeout_ms: u64,
     /// Runs when an agent turn begins (after the user message is added and
     /// before the model starts generating). Fires before the first `pre_tool`,
     /// so integrations can detect that the agent is actively working even while
@@ -925,6 +931,8 @@ pub struct HooksConfig {
 impl Default for HooksConfig {
     fn default() -> Self {
         Self {
+            pre_tool_transform: None,
+            pre_tool_transform_timeout_ms: 500,
             turn_start: None,
             turn_end: None,
             session_start: None,
