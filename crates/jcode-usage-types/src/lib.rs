@@ -95,7 +95,7 @@ pub fn classify_telemetry_tool_category(name: &str) -> TelemetryToolCategory {
         "subagent" => TelemetryToolCategory::Subagent,
         "swarm" | "communicate" => TelemetryToolCategory::Swarm,
         "gmail" => TelemetryToolCategory::Email,
-        "side_panel" => TelemetryToolCategory::SidePanel,
+        "side_panel" | "panel" => TelemetryToolCategory::SidePanel,
         "initiative" => TelemetryToolCategory::Goal,
         "todo" | "todowrite" | "todo_write" | "todoread" | "todo_read" => {
             TelemetryToolCategory::Todo

@@ -1157,7 +1157,7 @@ fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Val
                 turn.feature_email_used = true;
             }
         }
-        "side_panel" => {
+        "side_panel" | "panel" => {
             state.feature_side_panel_used = true;
             if let Some(turn) = state.current_turn.as_mut() {
                 turn.feature_side_panel_used = true;

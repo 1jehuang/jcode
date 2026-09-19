@@ -330,6 +330,7 @@ impl App {
             title: title.clone(),
             file_path: path.to_string_lossy().into_owned(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::LinkedFile,
             content,
             updated_at_ms: 0,

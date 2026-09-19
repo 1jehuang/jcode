@@ -260,6 +260,7 @@ impl App {
             title: TODOS_VIEW_TITLE.to_string(),
             file_path: "todos://current-session".to_string(),
             format: SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: if self.todos_view_markdown.trim().is_empty() {
                 todos_view_placeholder_markdown()

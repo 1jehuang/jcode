@@ -84,3 +84,14 @@ async fn each_frame_starts_from_a_clean_buffer() {
     read_frame(&mut reader, &mut line).await.unwrap();
     assert_eq!(line, "second\n");
 }
+
+#[tokio::test]
+async fn aggregate_pdf_base64_payload_fits_transport_frame() {
+    // 32 MiB decoded budget expands to 44,739,244 base64 bytes.
+    let payload = "A".repeat((32 * 1024 * 1024_usize).div_ceil(3) * 4);
+    let input = format!("{{\"pdf_data\":\"{payload}\"}}\n");
+    let mut reader = BufReader::new(input.as_bytes());
+    let mut line = String::new();
+    assert_eq!(read_frame(&mut reader, &mut line).await.unwrap(), input.len());
+    assert_eq!(line, input);
+}

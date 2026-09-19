@@ -34,6 +34,7 @@ pub(crate) mod serde_coerce;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
+mod panel;
 mod skill;
 mod todo;
 mod webfetch;
@@ -332,6 +333,7 @@ impl Registry {
                 "side_panel",
                 side_panel::SidePanelTool::new,
             );
+            Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             Self::insert_tool_timed(
                 &mut m,

@@ -40,9 +40,9 @@ pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
 /// `read_line` grows its buffer until it finds a newline, so a client that
 /// never sends one makes the bridge allocate without bound: one connection can
 /// exhaust the host's memory, and the bridge serves every client on the
-/// machine. 16 MiB is far above any legitimate frame (the largest real one is a
-/// message carrying base64 images) and far below a problem.
-const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
+/// machine. A 32 MiB aggregate PDF budget expands to ~43 MiB of base64,
+/// so 64 MiB leaves room for metadata while retaining a finite frame bound.
+const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Read one newline-delimited frame, refusing to buffer more than
 /// `MAX_FRAME_BYTES`. Returns `Ok(0)` at end of stream, like `read_line`.

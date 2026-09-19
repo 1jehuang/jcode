@@ -485,12 +485,14 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
         activity: None,
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "# Notes".to_string(),
                 updated_at_ms: 42,
@@ -575,12 +577,14 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
 fn test_side_panel_state_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePanelState {
         snapshot: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "updated".to_string(),
                 updated_at_ms: 99,

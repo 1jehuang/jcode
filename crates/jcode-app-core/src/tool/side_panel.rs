@@ -38,7 +38,7 @@ impl Tool for SidePanelTool {
     }
 
     fn description(&self) -> &str {
-        "Manage side panel pages."
+        "Legacy panel management. Prefer panel to spawn, update, focus, close or list desktop panels. Load accepts Markdown or PDF files. Write and append accept Markdown only."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -58,7 +58,7 @@ impl Tool for SidePanelTool {
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "File path."
+                    "description": "Markdown or PDF file path for load (PDF maximum 20 MiB)."
                 },
                 "title": {
                     "type": "string",
@@ -66,7 +66,7 @@ impl Tool for SidePanelTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Page content."
+                    "description": "Markdown content for write or append. Append rejects PDF pages."
                 },
                 "focus": {
                     "type": "boolean",
@@ -132,7 +132,7 @@ impl Tool for SidePanelTool {
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
                 });
-                crate::side_panel::load_markdown_file(
+                crate::side_panel::load_file(
                     &ctx.session_id,
                     &page_id,
                     title.as_deref(),
@@ -164,9 +164,15 @@ impl Tool for SidePanelTool {
             }));
         }
 
-        Ok(ToolOutput::new(crate::side_panel::status_output(&snapshot))
+        let status = crate::side_panel::status_output(&snapshot);
+        // Full PDF bytes travel only in panel state events, never tool history.
+        let mut metadata_snapshot = snapshot;
+        for page in &mut metadata_snapshot.pages {
+            page.pdf_data = None;
+        }
+        Ok(ToolOutput::new(status)
             .with_title("side_panel")
-            .with_metadata(serde_json::to_value(&snapshot)?))
+            .with_metadata(serde_json::to_value(&metadata_snapshot)?))
         .map_err(|err| {
             crate::logging::warn(&format!(
                 "[tool:side_panel] action failed action={} page_id={} file_path={} session_id={} error={}",

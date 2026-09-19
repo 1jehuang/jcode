@@ -30,12 +30,14 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -60,12 +62,14 @@ fn test_tool_side_panel_focus_supports_image_zoom_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -97,12 +101,14 @@ fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change()
     app.diff_pane_scroll_x = 0;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -138,12 +144,14 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
     app.side_panel_image_zoom_percent = 100;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -1092,12 +1100,14 @@ fn test_context_command_reports_session_context_snapshot() {
         app.pending_images
             .push(("image/png".to_string(), "abc".to_string()));
         app.side_panel = crate::side_panel::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("goals".to_string()),
             pages: vec![crate::side_panel::SidePanelPage {
                 id: "goals".to_string(),
                 title: "Goals".to_string(),
                 file_path: "".to_string(),
                 format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: crate::side_panel::SidePanelPageSource::Managed,
                 content: "goal details".to_string(),
                 updated_at_ms: 0,
@@ -1476,12 +1486,14 @@ fn test_panel_image_preview_click_render_dismiss_and_restore() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("preview".into()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "preview".into(),
             title: "Preview fixture".into(),
             file_path: "".into(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!(
                 "# Preview fixture\n\n![Image]({})\n\nAfter image",

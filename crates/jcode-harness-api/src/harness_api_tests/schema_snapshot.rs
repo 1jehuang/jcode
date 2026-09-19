@@ -505,6 +505,7 @@ fn hidden_system_reminder_wire_shape_and_legacy_default() {
 #[test]
 fn side_panel_state_shared_types_roundtrip() {
     let snapshot = SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("notes".into()),
         pages: vec![SidePanelPage {
             id: "notes".into(),
@@ -516,7 +517,12 @@ fn side_panel_state_shared_types_roundtrip() {
             ..Default::default()
         }],
     };
-    for snapshot in [snapshot, SidePanelSnapshot::default()] {
+    let mut pdf_snapshot = snapshot.clone();
+    pdf_snapshot.focus_revision = 123;
+    pdf_snapshot.pages[0].format = jcode_side_panel_types::SidePanelPageFormat::Pdf;
+    pdf_snapshot.pages[0].pdf_data = Some("JVBERi0xLjQKJSVFT0Y=".into());
+    pdf_snapshot.pages[0].content = "PDF document fallback".into();
+    for snapshot in [snapshot, pdf_snapshot, SidePanelSnapshot::default()] {
         let frame = ServerFrame::event(ApiEvent::SidePanelState {
             session_id: "s1".into(),
             snapshot,

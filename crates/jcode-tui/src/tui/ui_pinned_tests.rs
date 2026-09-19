@@ -45,6 +45,7 @@ fn sample_mermaid_page(content: impl Into<String>) -> crate::side_panel::SidePan
         title: format!("Mermaid Demo {content_hash:016x}"),
         file_path: format!("mermaid_demo_{content_hash:016x}.md"),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content,
         updated_at_ms: content_hash,
@@ -686,6 +687,7 @@ fn render_side_panel_markdown_wraps_long_text_lines() {
             title: "Wrap Demo".to_string(),
             file_path: "wrap_demo.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "This is a deliberately long side panel line that should wrap instead of overflowing the pane.".to_string(),
             updated_at_ms: 1,
@@ -718,6 +720,7 @@ fn render_side_panel_markdown_keeps_table_rows_intact() {
         title: "Table Demo".to_string(),
         file_path: "table_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content:
             "| # | Principle | Story Ready |\n| - | - | - |\n| 1 | Customer Obsession | unchecked |"
@@ -752,12 +755,14 @@ fn render_side_panel_markdown_live_syncs_file_content() {
     std::fs::write(&file_path, "# First").expect("write initial content");
 
     let mut snapshot = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("live_demo".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "live_demo".to_string(),
             title: "Live Demo".to_string(),
             file_path: file_path.display().to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::LinkedFile,
             content: "# Stale".to_string(),
             updated_at_ms: 1,
@@ -816,6 +821,7 @@ fn render_side_panel_height_change_reuses_markdown_render_cache() {
         title: "Height Cache Demo".to_string(),
         file_path: "height_cache_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# Demo\n\nThis side panel should only parse markdown once for a stable width."
             .to_string(),
@@ -846,6 +852,7 @@ fn render_side_panel_content_change_with_same_revision_invalidates_cache() {
         title: "Cache Invalidation Demo".to_string(),
         file_path: "cache_invalidation_demo.md".to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# First version".to_string(),
         updated_at_ms: 1,
@@ -891,12 +898,14 @@ fn prewarm_focused_side_panel_reuses_markdown_cache_on_first_draw() {
     // Thread-local counter: see render_side_panel_height_change test.
     let before = markdown::thread_render_count();
     let snapshot = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("prewarm_demo".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "prewarm_demo".to_string(),
             title: "Prewarm Demo".to_string(),
             file_path: "prewarm_demo.md".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "# Demo\n\nThis should be warm before first draw.".to_string(),
             updated_at_ms: 7,
@@ -934,6 +943,7 @@ fn render_side_panel_managed_pages_ignore_disk_file_content() {
         title: "Managed Demo".to_string(),
         file_path: file_path.display().to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::Managed,
         content: "# In Memory".to_string(),
         updated_at_ms: 42,
@@ -968,6 +978,7 @@ fn render_side_panel_linked_file_missing_file_falls_back_to_snapshot_content() {
         title: "Linked Missing Demo".to_string(),
         file_path: file_path.display().to_string(),
         format: crate::side_panel::SidePanelPageFormat::Markdown,
+        pdf_data: None,
         source: crate::side_panel::SidePanelPageSource::LinkedFile,
         content: "# Snapshot Fallback".to_string(),
         updated_at_ms: 7,

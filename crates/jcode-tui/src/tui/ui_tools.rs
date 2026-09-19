@@ -1430,15 +1430,16 @@ pub(super) fn get_tool_summary_with_budget(
                 .unwrap_or("selfdev");
             action.to_string()
         }
-        "side_panel" => {
+        "side_panel" | "panel" => {
             let action = tool
                 .input
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("side_panel");
+                .unwrap_or(if tool.name == "panel" { "spawn" } else { "side_panel" });
             let target = tool
                 .input
                 .get("title")
+                .or_else(|| tool.input.get("panel_id"))
                 .or_else(|| tool.input.get("page_id"))
                 .or_else(|| tool.input.get("file_path"))
                 .and_then(|v| v.as_str());

@@ -183,6 +183,7 @@ impl App {
             title: OBSERVE_PAGE_TITLE.to_string(),
             file_path: "observe://latest-context".to_string(),
             format: SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: SidePanelPageSource::Ephemeral,
             content: if self.observe_page_markdown.trim().is_empty() {
                 observe_placeholder_markdown()
@@ -281,7 +282,7 @@ fn fenced_block(language: &str, text: &str) -> String {
 fn is_noise_tool(name: &str) -> bool {
     matches!(
         name,
-        "side_panel" | "goal" | "todo" | "todoread" | "todowrite"
+        "side_panel" | "panel" | "goal" | "todo" | "todoread" | "todowrite"
     )
 }
 

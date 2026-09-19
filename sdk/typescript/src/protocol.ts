@@ -172,8 +172,8 @@ export type ApiRequest =
   | { req: "cancel_soft_interrupts"; session_id: string }
   | { req: "ping" };
 
-/** Full Markdown side-panel state, shared with the native runtime. */
-export type SidePanelPageFormat = "markdown";
+/** Markdown/PDF panel state, shared with the native runtime. */
+export type SidePanelPageFormat = "markdown" | "pdf";
 export type SidePanelPageSource = "managed" | "linked_file" | "ephemeral";
 export interface SidePanelPage {
   id: string;
@@ -182,9 +182,13 @@ export interface SidePanelPage {
   format: SidePanelPageFormat;
   source: SidePanelPageSource;
   content: string;
+  /** Base64 PDF bytes, separate from the human-readable Markdown fallback. */
+  pdf_data?: string;
   updated_at_ms: number;
 }
 export interface SidePanelSnapshot {
+  /** Monotonic explicit-focus intent. Absent on older servers. */
+  focus_revision?: number;
   focused_page_id: string | null;
   /** Omitted by the runtime when empty. */
   pages?: SidePanelPage[];
