@@ -132,9 +132,31 @@ fn run_main() -> Result<()> {
         return jcode::cli::macos_notification_broker::run();
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    // Unhandled panics in spawned tasks previously shut the whole runtime
+    // down, leaving the backgrounded server to record the session as
+    // `Crashed` and the user's terminal stuck in raw mode (issue #214,
+    // investigation 2026-09-16). Switch to `Task` so a panicking task is
+    // killed in isolation; the panic hook in `cli::terminal` still writes
+    // the panic to `<session>.panic.log` and restores the terminal.
+    //
+    // `unhandled_panic` is gated behind `tokio_unstable` in Tokio 1.49;
+    // pass `--cfg tokio_unstable` (or `RUSTFLAGS=--cfg tokio_unstable`)
+    // when building this binary so the runtime honors the policy. Without
+    // that cfg the call is a no-op and the previous default (`Shutdown`)
+    // still applies, which preserves the existing behaviour for builds
+    // that do not opt in to the unstable surface.
+    #[allow(unexpected_cfgs)]
+    {
+        if true {
+            #[cfg(tokio_unstable)]
+            {
+                builder = builder.unhandled_panic(tokio::runtime::UnhandledPanic::Task);
+            }
+        }
+    }
+    let runtime = builder.build()?;
 
     runtime.block_on(async { jcode::run().await })
 }
