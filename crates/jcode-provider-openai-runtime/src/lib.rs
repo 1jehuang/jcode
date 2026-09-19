@@ -726,16 +726,11 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
-    pub(crate) fn supports_extended_prompt_cache_retention(model_id: &str) -> bool {
-        jcode_base::provider::openai::supports_extended_prompt_cache_retention(model_id)
-    }
-
     fn effective_prompt_cache_retention<'a>(
         model_id: &str,
         configured: Option<&'a str>,
     ) -> Option<&'a str> {
-        configured
-            .or_else(|| Self::supports_extended_prompt_cache_retention(model_id).then_some("24h"))
+        jcode_base::provider::openai::effective_prompt_cache_retention(model_id, configured)
     }
 
     pub fn new(credentials: CodexCredentials) -> Self {
@@ -800,21 +795,17 @@ impl OpenAIProvider {
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-        let prompt_cache_retention = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let prompt_cache_retention = match prompt_cache_retention.as_deref() {
-            Some("in_memory") | Some("24h") => prompt_cache_retention,
-            Some(other) => {
-                jcode_base::logging::info(&format!(
-                    "Warning: Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
-                    other
-                ));
-                None
-            }
-            None => None,
-        };
+        let prompt_cache_retention =
+            jcode_base::provider::openai::prompt_cache_retention_from_env();
+        if prompt_cache_retention.is_none()
+            && let Ok(raw) = std::env::var("JCODE_OPENAI_PROMPT_CACHE_RETENTION")
+            && !raw.trim().is_empty()
+        {
+            jcode_base::logging::warn(&format!(
+                "Unsupported JCODE_OPENAI_PROMPT_CACHE_RETENTION '{}'; expected 'in_memory' or '24h'",
+                raw.trim()
+            ));
+        }
         let max_output_tokens = Self::load_max_output_tokens();
         let reasoning_effort = jcode_base::config::config()
             .provider
