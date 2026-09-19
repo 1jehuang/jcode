@@ -25,6 +25,7 @@ export type { LaunchOptions, LaunchedInstance } from "./launch.js";
 export { bundledJcodeBinary, platformBinaryPackage } from "./binary.js";
 export { JcodeClient, unixSocketTransport } from "./client.js";
 export type {
+  AssistantTextMessage,
   ConnectOptions,
   FileContent,
   FileStatus,

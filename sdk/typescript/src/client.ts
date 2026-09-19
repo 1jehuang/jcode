@@ -1057,7 +1057,9 @@ export class JcodeClient extends EventEmitter {
    * Send a message and collect the assistant reply until the turn ends.
    *
    * The convenience path for scripts: one call in, the text and tool calls of
-   * one turn out. Streaming consumers should use `events()` instead.
+   * one turn out. `text` includes all narration in the turn. Use `finalText`
+   * for the last framed assistant message. Streaming consumers should use
+   * `events()` instead.
    */
   async run(
     sessionId: string,
@@ -1066,7 +1068,29 @@ export class JcodeClient extends EventEmitter {
   ): Promise<TurnResult> {
     const stream = this.events(sessionId);
     await this.sendMessage(sessionId, content, options.images ?? []);
-    const result: TurnResult = { text: "", reasoning: "", toolCalls: [], usage: undefined };
+    const result: TurnResult = {
+      text: "", finalText: "", messages: [], reasoning: "", toolCalls: [], usage: undefined,
+    };
+    const parts: AssistantTextMessage[] = [];
+    const messagesById = new Map<string, AssistantTextMessage>();
+    const completed = new Set<AssistantTextMessage>();
+    const messageFor = (id?: string): AssistantTextMessage => {
+      const key = id ?? "";
+      let message = messagesById.get(key);
+      if (!message) {
+        message = { text: "", ...(id === undefined ? {} : { messageId: id }) };
+        messagesById.set(key, message);
+        parts.push(message);
+      }
+      return message;
+    };
+    const finish = (): TurnResult => {
+      result.messages = parts.filter((message) => completed.has(message) && message.text.length > 0);
+      // Older bridges have no text_done. Do not guess boundaries from
+      // reasoning or tools: retain the historical whole-turn result.
+      result.finalText = result.messages.at(-1)?.text ?? result.text;
+      return result;
+    };
     for await (const event of stream) {
       options.onEvent?.(event);
       switch (event.ev) {
@@ -1075,7 +1099,21 @@ export class JcodeClient extends EventEmitter {
         // also what stops a renamed wire field from compiling.
         case "text_delta":
           result.text += event.text;
+          messageFor(event.message_id).text += event.text;
           break;
+        case "text_replace":
+          messageFor(event.message_id).text = event.text;
+          result.text = parts.map((message) => message.text).join("");
+          break;
+        case "text_done": {
+          const key = event.message_id ?? "";
+          const message = messagesById.get(key);
+          if (message) completed.add(message);
+          // Id-less framing still separates sequential messages. Keep keyed
+          // messages addressable for authoritative corrections after completion.
+          if (event.message_id === undefined) messagesById.delete(key);
+          break;
+        }
         case "reasoning_delta":
           result.reasoning += event.text;
           break;
@@ -1101,13 +1139,13 @@ export class JcodeClient extends EventEmitter {
           break;
         case "turn_done":
           await stream.return?.(undefined as never);
-          return result;
+          return finish();
         case "error":
           await stream.return?.(undefined as never);
           throw new HarnessError(event.code ?? "internal", event.message ?? "harness error");
       }
     }
-    return result;
+    return finish();
   }
 
   /**
@@ -1131,10 +1169,10 @@ export class JcodeClient extends EventEmitter {
 
     for (let attemptNumber = 1; attemptNumber <= maxRetries + 1; attemptNumber += 1) {
       const turn = await this.run(sessionId, prompt, runOptions);
-      const validation = validateStructuredText(turn.text, validate);
+      const validation = validateStructuredText(turn.finalText, validate);
       const attempt: StructuredOutputAttempt = {
         attempt: attemptNumber,
-        text: turn.text,
+        text: turn.finalText,
         errors: validation.errors,
       };
       attempts.push(attempt);
@@ -1160,10 +1198,21 @@ export class JcodeClient extends EventEmitter {
 }
 
 export interface TurnResult {
+  /** All assistant text deltas in the turn, including process narration. */
   text: string;
+  /** Last completed assistant message, or whole-turn text on older bridges. */
+  finalText: string;
+  /** Completed text messages. Empty when the bridge does not support framing. */
+  messages: AssistantTextMessage[];
   reasoning: string;
   toolCalls: Array<{ callId: string; name: string; output: string; error?: string }>;
   usage?: { input: number; output: number; cacheReadInput?: number };
+}
+
+export interface AssistantTextMessage {
+  /** Stream-local correlation id, not a persisted history message id. */
+  messageId?: string;
+  text: string;
 }
 
 export interface StructuredTurnResult<T> extends TurnResult {

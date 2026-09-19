@@ -203,7 +203,9 @@ export type ApiEvent =
   | { ev: "session_forked"; session: SessionInfo }
   | { ev: "history"; session_id: string; messages: HistoryMessage[]; images?: RenderedImage[] }
   | { ev: "pong" }
-  | { ev: "text_delta"; session_id: string; text: string }
+  | { ev: "text_delta"; session_id: string; text: string; message_id?: string }
+  | { ev: "text_done"; session_id: string; message_id?: string }
+  | { ev: "text_replace"; session_id: string; message_id?: string; text: string }
   | { ev: "reasoning_delta"; session_id: string; text: string }
   | { ev: "reasoning_done"; session_id: string; duration_secs?: number }
   | { ev: "tool_start"; session_id: string; call_id: string; name: string }
@@ -342,6 +344,8 @@ export const KNOWN_EVENT_KINDS = [
   "side_panel_state",
   "pong",
   "text_delta",
+  "text_done",
+  "text_replace",
   "reasoning_delta",
   "reasoning_done",
   "tool_start",
