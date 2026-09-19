@@ -132,6 +132,10 @@ impl Chunker {
                 / channels as f32;
             let before = self.chunk.len();
             self.resampler.push(mono, &mut self.chunk);
+            // Upsampling can emit two output samples for one native frame.
+            // Clamp this final frame as well as the filter tail.
+            let remaining = 16000 * MAX_RECORDING_DURATION.as_secs() as usize - self.samples;
+            self.chunk.truncate(before + remaining);
             self.samples += self.chunk.len() - before;
             if self.chunk.len() >= 1600 {
                 self.flush();
@@ -625,6 +629,22 @@ mod tests {
             assert_eq!(total, cap, "rate {rate}");
             assert!(!c.failed);
         }
+    }
+
+    #[test]
+    fn upsampling_final_frame_cannot_exceed_cap() {
+        let (tx, _rx) = nari_pcm_channel();
+        let cap = 16000 * MAX_RECORDING_DURATION.as_secs() as usize;
+        let mut c = Chunker {
+            resampler: Resampler::new(11025).unwrap(),
+            chunk: Vec::new(),
+            tx,
+            failed: false,
+            samples: cap - 1,
+        };
+        c.push(&[0.5f32; 100], 1);
+        assert_eq!(c.samples, cap);
+        assert_eq!(c.chunk.len(), 1);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_slow_factory_does_not_block_constructor_or_start_stale_capture() {
