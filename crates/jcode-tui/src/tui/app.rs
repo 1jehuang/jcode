@@ -2189,7 +2189,7 @@ impl App {
             .unwrap_or(false);
 
         crate::logging::info(&format!(
-            "KV_CACHE_USAGE: turn={} call={} provider={} upstream={:?} model={} \
+            "KV_CACHE_USAGE: turn={} call={} provider={} label={} upstream={:?} model={} \
              input={} cache_read={} cache_write={} read_pct={} write_pct={} \
              optimal_input={:?} optimal_read_pct={:?} missed_tokens={:?} miss={} \
              session_input={} session_read={} session_write={} session_read_pct={} \
@@ -2205,6 +2205,7 @@ impl App {
             request.turn_number,
             request.call_index,
             request.provider,
+            self.kv_cache_provider_label(),
             request.upstream_provider,
             request.model,
             input_tokens,
@@ -2439,6 +2440,14 @@ impl App {
         KvCacheMissReason::Unknown
     }
 
+    /// Canonical provider identity for the KV-cache baseline and its TTL logic.
+    ///
+    /// Deliberately the machine id, not the rendered profile label: the TTL
+    /// classifier (`cache_ttl_for_provider_model`) recognises provider families
+    /// (`openrouter`, `openai`, ...), so handing it a profile label such as
+    /// `NVIDIA NIM` would stop `KvCacheMissReason::Expired` from ever firing for
+    /// direct OpenAI-compatible profiles. The label belongs in the log line only
+    /// ([`Self::kv_cache_provider_label`], #1286).
     fn kv_cache_provider_name(&self) -> String {
         if self.uses_server_or_replay_metadata() {
             self.remote_provider_name
@@ -2446,6 +2455,21 @@ impl App {
                 .unwrap_or_else(|| self.provider.name().to_string())
         } else {
             self.provider.name().to_string()
+        }
+    }
+
+    /// Human-facing profile label for KV-cache diagnostics (#1286).
+    ///
+    /// Kept separate from [`Self::kv_cache_provider_name`] on purpose: the
+    /// baseline stores the machine id, while people reading `KV_CACHE_USAGE`
+    /// want the profile the session actually talks to.
+    fn kv_cache_provider_label(&self) -> String {
+        if self.uses_server_or_replay_metadata() {
+            self.remote_provider_name
+                .clone()
+                .unwrap_or_else(|| self.provider.display_name())
+        } else {
+            self.provider.display_name()
         }
     }
 
