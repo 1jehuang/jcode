@@ -32,7 +32,7 @@ jobs:
     steps:
       # Reviewed action code, pinned to an immutable revision.
       # No PR checkout or PR-controlled executable code.
-      - uses: 1jehuang/jev-pr-labeler@e0f57f97afccad77134025434e1eb83f24c0f554
+      - uses: 1jehuang/jev-pr-labeler@267b789247298b06e04fcf3cac01730694c9dcb5
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
