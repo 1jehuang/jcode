@@ -8,6 +8,8 @@
   26 passed (12 client/transport, 13 source snapshot, 1 agent schema regression).
 - `cargo test -p jcode-tool-core subcall_ids_are_parent_scoped_and_retry_stable`:
   passed.
+- `cargo test --lib -p jcode-app-core --no-default-features tool::batch`:
+  15 existing batch regressions passed.
 - New Rust modules pass targeted `rustfmt --check`. `git diff --check` passed.
 
 ## Requirement-to-evidence ledger
@@ -35,6 +37,14 @@ atomic account/global admission, idempotent grants and jobs, rounding, failed
 build charges, expiry, rollback, uncertain cleanup retaining capacity, invalid
 uploads and bounded outputs. See its `REMOTE_COMPILE.md` and `COMPUTE_CREDITS.md`
 for current commands and deployment requirements.
+
+The backend's retained `test/compile-runtime-smoke.mjs` exercises the actual
+local workerd runtime and D1 through the full handler with a controlled E2B
+boundary. A 2 MiB minus one byte file, an exact 2 MiB file, and an exact 20 MiB
+source snapshot (27,962,741 encoded bytes) all returned HTTP 200 and settled
+credits. An approximately 9 MiB request containing three million empty objects
+returned HTTP 400 before object-graph parsing. These checks exercise real Worker
+memory constraints and native base64 decoding, but not a live cloud machine.
 
 Independent review found and corrected two important integration issues:
 reused batch child IDs causing permanent job conflicts, and JSON graph expansion
