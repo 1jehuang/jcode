@@ -120,6 +120,7 @@ async fn handle_resume_session_allows_multiple_live_tui_attach() -> Result<()> {
         &event_history,
         &event_counter,
         &swarm_event_tx,
+        false,
     )
     .await?;
 

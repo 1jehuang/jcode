@@ -2713,6 +2713,43 @@ fn markdown_panel() -> Value {
         "content":"# Notes\n```mermaid\ngraph LR; A-->B\n```","updated_at_ms":42}]})
 }
 
+#[test]
+fn pdf_panels_opt_in_and_survive_native_api_attach_reconnect_and_live_updates() {
+    let snapshot = json!({"focus_revision":123,"focused_page_id":"report","pages":[{
+        "id":"report","title":"Report","file_path":"/report.pdf","format":"pdf",
+        "source":"linked_file","content":"PDF document fallback","updated_at_ms":42,
+        "pdf_data":"JVBERi0xLjQKJSVFT0Y="
+    }]});
+    for action in ["create_session", "attach_session"] {
+        let mut state = BridgeState::default();
+        let actions = state.api_request_to_legacy(&json!({
+            "req":action,"id":71,"session_id":"recover","working_dir":"/workspace"
+        }));
+        assert!(actions.iter().any(|action| matches!(action,
+            Outbound::Legacy(request) if request["type"] == "subscribe"
+                && request["supports_pdf_panels"] == true
+        )));
+    }
+    let mut state = BridgeState::default();
+    for _ in 0..2 {
+        let (mut history, reply) = recovery_attach(&mut state, Some("recover"));
+        history["side_panel"] = snapshot.clone();
+        state.legacy_event_to_api(&reply);
+        assert_panel(
+            &state.legacy_event_to_api(&history),
+            "recover",
+            snapshot.clone(),
+        );
+        assert_panel(
+            &state.legacy_event_to_api(&json!({
+                "type":"side_panel_state","snapshot":snapshot
+            })),
+            "recover",
+            snapshot.clone(),
+        );
+    }
+}
+
 fn assert_panel(frames: &[ServerFrame], session: &str, snapshot: Value) {
     let panels: Vec<_> = frames
         .iter()

@@ -111,7 +111,16 @@ async fn session_activity_snapshot_uses_fallback_when_no_live_connection_is_mark
 #[tokio::test]
 async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy() {
     for tier in [Some("priority"), Some("flex"), None] {
-        assert_busy_history_service_tier(tier).await;
+        assert_history_service_tier_and_pdf_capability(tier, true, false).await;
+    }
+}
+
+#[tokio::test]
+async fn pdf_panels_history_capability_covers_live_and_persisted_paths() {
+    for busy in [false, true] {
+        for supports_pdf_panels in [false, true] {
+            assert_history_service_tier_and_pdf_capability(None, busy, supports_pdf_panels).await;
+        }
     }
 }
 
@@ -119,7 +128,11 @@ async fn handle_get_history_falls_back_to_persisted_snapshot_when_agent_is_busy(
     clippy::await_holding_lock,
     reason = "test intentionally keeps the agent busy lock held to exercise persisted-history fallback"
 )]
-async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
+async fn assert_history_service_tier_and_pdf_capability(
+    tier: Option<&'static str>,
+    busy: bool,
+    supports_pdf_panels: bool,
+) {
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("create temp home");
     let prev_home = std::env::var_os("JCODE_HOME");
@@ -146,6 +159,12 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     });
     session.save().expect("save session");
 
+    let pdf_path = temp_home.path().join("report.pdf");
+    std::fs::write(&pdf_path, b"%PDF-1.4\n%%EOF").unwrap();
+    let original_panel =
+        crate::side_panel::load_file(session_id, "report", Some("Report"), &pdf_path, true)
+            .unwrap();
+
     let provider: Arc<dyn Provider> = Arc::new(MockProvider(tier));
     let registry = Registry::empty();
     let mut live_session = session.clone();
@@ -156,7 +175,7 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
         live_session,
         None,
     )));
-    let busy_guard = agent.lock().await;
+    let busy_guard = if busy { Some(agent.lock().await) } else { None };
 
     let sessions = Arc::new(RwLock::new(HashMap::from([(
         session_id.to_string(),
@@ -172,7 +191,7 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     handle_get_history(
         42,
         session_id,
-        true,
+        busy,
         &agent,
         &provider,
         &sessions,
@@ -182,6 +201,7 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
         "server-name",
         "🔥",
         None,
+        supports_pdf_panels,
     )
     .await
     .expect("history should be written from persisted fallback");
@@ -200,6 +220,34 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
     let event: crate::protocol::ServerEvent =
         serde_json::from_str(line.trim()).expect("decode history event");
 
+    if !supports_pdf_panels {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum LegacyFormat {
+            Markdown,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyPage {
+            format: LegacyFormat,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacySnapshot {
+            pages: Vec<LegacyPage>,
+        }
+        #[derive(serde::Deserialize)]
+        struct LegacyHistory {
+            messages: Vec<serde_json::Value>,
+            side_panel: LegacySnapshot,
+        }
+        let legacy: LegacyHistory = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(legacy.messages.len(), 1);
+        assert!(matches!(
+            legacy.side_panel.pages[0].format,
+            LegacyFormat::Markdown
+        ));
+        assert!(!line.contains("pdf_data"));
+    }
+
     match event {
         crate::protocol::ServerEvent::History {
             id,
@@ -207,6 +255,7 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
             messages,
             activity,
             service_tier,
+            side_panel,
             ..
         } => {
             assert_eq!(id, 42);
@@ -214,8 +263,22 @@ async fn assert_busy_history_service_tier(tier: Option<&'static str>) {
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].content, "persisted fallback history");
             assert_eq!(service_tier.as_deref(), tier);
-            let activity = activity.expect("fallback activity snapshot");
-            assert!(activity.is_processing);
+            assert_eq!(
+                side_panel,
+                super::super::client_writer::side_panel_for_client(
+                    original_panel.clone(),
+                    supports_pdf_panels,
+                )
+            );
+            // Wire projection must not alter shared persisted PDF state.
+            assert_eq!(
+                crate::side_panel::snapshot_for_session(session_id).unwrap(),
+                original_panel
+            );
+            if busy {
+                let activity = activity.expect("fallback activity snapshot");
+                assert!(activity.is_processing);
+            }
         }
         other => panic!("expected history event, got {:?}", other),
     }

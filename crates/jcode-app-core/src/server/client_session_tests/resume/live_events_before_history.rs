@@ -153,6 +153,7 @@ async fn handle_resume_session_registers_live_events_before_history_replay() -> 
                 &event_history,
                 &event_counter,
                 &swarm_event_tx,
+                false,
             )
             .await
         }

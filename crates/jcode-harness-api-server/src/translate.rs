@@ -430,6 +430,7 @@ impl BridgeState {
                 let mut subscribe = json!({
                     "type": "subscribe",
                     "id": id,
+                    "supports_pdf_panels": true,
                 });
                 if self.crash_on_disconnect {
                     subscribe["crash_on_disconnect"] = json!(true);

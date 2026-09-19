@@ -116,6 +116,7 @@ pub(super) async fn handle_get_history(
     server_name: &str,
     server_icon: &str,
     was_interrupted: Option<bool>,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
     let activity =
@@ -138,6 +139,7 @@ pub(super) async fn handle_get_history(
             server_icon,
             was_interrupted,
             activity,
+            supports_pdf_panels,
         )
         .await?;
         crate::logging::info(&format!(
@@ -161,6 +163,7 @@ pub(super) async fn handle_get_history(
         activity,
         HistoryPayloadMode::Full,
         true,
+        supports_pdf_panels,
     )
     .await?;
     let send_history_ms = history_start.elapsed().as_millis();
@@ -490,6 +493,7 @@ async fn send_history_from_persisted_session(
     server_icon: &str,
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
     let session = crate::session::Session::load_for_remote_startup(session_id)
         .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
@@ -516,7 +520,10 @@ async fn send_history_from_persisted_session(
         .into_iter()
         .map(rendered_to_history_message)
         .collect();
-    let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+    let side_panel = super::client_writer::side_panel_for_client(
+        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        supports_pdf_panels,
+    );
 
     let (all_sessions, current_client_count) = {
         let sessions_guard = sessions.read().await;
@@ -584,6 +591,7 @@ pub(super) async fn send_history(
     activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
     let agent_lock_start = Instant::now();
@@ -696,7 +704,10 @@ pub(super) async fn send_history(
     };
 
     let side_panel_start = Instant::now();
-    let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+    let side_panel = super::client_writer::side_panel_for_client(
+        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        supports_pdf_panels,
+    );
     let side_panel_ms = side_panel_start.elapsed().as_millis();
 
     let mut mcp_map: BTreeMap<String, usize> = BTreeMap::new();

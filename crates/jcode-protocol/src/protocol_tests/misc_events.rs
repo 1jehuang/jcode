@@ -339,6 +339,7 @@ fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
 #[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        supports_pdf_panels: true,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -354,6 +355,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        supports_pdf_panels,
         id,
         working_dir,
         selfdev,
@@ -369,6 +371,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
         return Err(anyhow!("expected Subscribe"));
     };
     assert_eq!(id, 89);
+    assert!(supports_pdf_panels);
     assert_eq!(working_dir.as_deref(), Some("/tmp/project"));
     assert_eq!(selfdev, Some(true));
     assert_eq!(target_session_id.as_deref(), Some("sess_target"));
@@ -389,6 +392,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        supports_pdf_panels,
         id,
         working_dir,
         selfdev,
@@ -404,6 +408,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
         return Err(anyhow!("expected Subscribe"));
     };
     assert_eq!(id, 91);
+    assert!(!supports_pdf_panels);
     assert_eq!(working_dir, None);
     assert_eq!(selfdev, None);
     assert_eq!(target_session_id, None);

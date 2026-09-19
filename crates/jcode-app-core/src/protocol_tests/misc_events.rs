@@ -198,6 +198,7 @@ fn test_set_feature_roundtrip() -> Result<()> {
 #[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        supports_pdf_panels: false,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
         selfdev: Some(true),
@@ -213,6 +214,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        supports_pdf_panels: _,
         id,
         working_dir,
         selfdev,
@@ -248,6 +250,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        supports_pdf_panels: _,
         id,
         working_dir,
         selfdev,

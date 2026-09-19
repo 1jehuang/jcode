@@ -120,6 +120,9 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Opt in to PDF panel payloads. Older clients only accept Markdown.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_pdf_panels: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

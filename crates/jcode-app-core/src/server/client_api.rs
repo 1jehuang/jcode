@@ -81,6 +81,7 @@ impl Client {
         };
 
         let request = Request::Subscribe {
+            supports_pdf_panels: false,
             id,
             working_dir: Some(working_dir),
             selfdev,

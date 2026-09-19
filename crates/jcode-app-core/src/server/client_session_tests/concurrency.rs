@@ -96,6 +96,7 @@ async fn restore_for_concurrency_test(
         &Arc::new(RwLock::new(VecDeque::new())),
         &Arc::new(std::sync::atomic::AtomicU64::new(0)),
         &swarm_event_tx,
+        false,
     )
     .await
 }

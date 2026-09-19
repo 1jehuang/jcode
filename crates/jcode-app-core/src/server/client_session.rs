@@ -1215,6 +1215,7 @@ pub(super) async fn handle_resume_session(
     event_history: &Arc<RwLock<std::collections::VecDeque<SwarmEvent>>>,
     event_counter: &Arc<std::sync::atomic::AtomicU64>,
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
+    supports_pdf_panels: bool,
 ) -> Result<Arc<Mutex<Agent>>> {
     let resume_start = Instant::now();
     let incoming_client_instance_id = client_instance_id.map(str::to_string);
@@ -1398,6 +1399,7 @@ pub(super) async fn handle_resume_session(
             server_name,
             server_icon,
             None,
+            supports_pdf_panels,
         )
         .await?;
         let _ = client_event_tx.send(ServerEvent::Done { id });
@@ -1684,6 +1686,7 @@ pub(super) async fn handle_resume_session(
                 server_name,
                 server_icon,
                 Some(was_interrupted),
+                supports_pdf_panels,
             )
             .await?;
             let _ = client_event_tx.send(ServerEvent::Done { id });
