@@ -1069,6 +1069,17 @@ acquire_cargo_gate() {
   log "acquired host-wide Cargo gate (waited ${cargo_gate_wait_ms}ms)"
 }
 
+# This host is memory-constrained (16GB), so `maybe_configure_low_memory_selfdev`
+# caps Cargo to a single job and every build is effectively serial. Incremental
+# compilation cannot be cached by sccache, so it buys little here and costs a
+# full recompile of the dependency graph on each agent. Default to a
+# non-incremental build instead: `build_is_incremental` keys off
+# CARGO_INCREMENTAL, which makes `maybe_enable_sccache` engage automatically and
+# lets unchanged crates be served from cache. Override for a focused edit loop
+# with `CARGO_INCREMENTAL=1 <cargo ...>`.
+: "${CARGO_INCREMENTAL:=0}"
+export CARGO_INCREMENTAL
+
 validate_feature_profile
 configure_build_tmpdir
 export_git_build_metadata
