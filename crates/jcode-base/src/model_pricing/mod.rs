@@ -1138,6 +1138,27 @@ output = 13.5
         });
     }
 
+    /// A card keyed by a bare model id must price an OpenRouter-style prefixed
+    /// model id, exactly as `lookup_entry` and `vendor_files::vendor_rule`
+    /// already do: `deepseek/deepseek-flash` retries on `deepseek-flash`.
+    #[test]
+    fn a_bare_card_key_prices_a_prefixed_model_id() {
+        let config = r#"
+[pricing.providers.openrouter.models."deepseek-flash".cost]
+input = 0.04844
+output = 0.09688
+"#;
+        with_pricing_env(Some(config), &[], || {
+            let at = SystemTime::now();
+            let money = effective_cost("openrouter", "deepseek/deepseek-flash", at)
+                .expect("the bare card key must price the prefixed model id");
+            assert!(
+                (money.amount - reference_cost(0.04844, 0.09688)).abs() <= 1e-9,
+                "the card's own rates must price the prefixed id, got {money:?}"
+            );
+        });
+    }
+
     /// F10/F18, the third cache point: the resolver's own memoized `[pricing]`
     /// view has to follow a config reload. A hand edit plus a reload must change
     /// the price on the very next read, with no pricing cache cleared by the

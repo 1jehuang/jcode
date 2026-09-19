@@ -342,7 +342,9 @@ fn merge_same_currency(entry: &mut ModelPricingEntry, fallback: &ModelCost) {
 /// a route-scoped rule can never misprice a call on another route.
 ///
 /// Callers may hand over ids carrying jcode-local decorations (`[1m]`, `@pin`);
-/// the catalog strips them, so config lookup does too.
+/// the catalog strips them, so config lookup does too. An OpenRouter-style
+/// prefixed id (`deepseek/deepseek-flash`) also retries on its bare tail, the
+/// same fallback `lookup_entry` and `vendor_files::vendor_rule` apply.
 fn find_rule<'a>(
     config: &'a PricingConfig,
     source_key: &str,
@@ -354,7 +356,7 @@ fn find_rule<'a>(
 )> {
     let normalized = normalize_model_id(model);
     config.providers.iter().find_map(|(vendor, provider)| {
-        provider
+        let rule = provider
             .models
             .get(model)
             .or_else(|| {
@@ -362,7 +364,16 @@ fn find_rule<'a>(
                     .then(|| provider.models.get(normalized))
                     .flatten()
             })
-            .filter(|rule| entry::route_matches(&rule.route, source_key))
+            // OpenRouter-style ids may still carry their `provider/` prefix;
+            // retry on the bare model name, exactly as `lookup_entry` and
+            // `vendor_files::vendor_rule` do, so a bare card key reaches the
+            // same model the other two layers reach.
+            .or_else(|| {
+                normalized
+                    .rsplit_once('/')
+                    .and_then(|(_, bare)| provider.models.get(bare))
+            });
+        rule.filter(|rule| entry::route_matches(&rule.route, source_key))
             .map(|rule| (vendor.as_str(), provider, rule))
     })
 }
