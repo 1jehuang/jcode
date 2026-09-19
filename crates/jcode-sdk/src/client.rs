@@ -366,6 +366,16 @@ impl Drop for JcodeClient {
 }
 
 impl JcodeClient {
+    /// Retain this client's shared SSH master for reconnecting independent API
+    /// channels. Returns None for isolated or already closed SSH channels.
+    #[cfg(unix)]
+    pub fn shared_ssh_transport(&self) -> Option<crate::SharedSshTransport> {
+        self.inner
+            .ssh_process
+            .as_ref()
+            .and_then(|process| process.shared_transport())
+    }
+
     /// Connect to a remote shared harness using system SSH credentials/config.
     ///
     /// The remote must have `jcode api --stdio`. Dropping the last client clone
@@ -1477,6 +1487,25 @@ fn start_global_child(parent: &JcodeClient, control: &Arc<GlobalEventControl>, s
     let connection = if let Some(options) = &parent.ssh_options {
         let mut options = options.clone();
         options.client_name = format!("{}/global-events", parent.inner.client_name);
+        #[cfg(unix)]
+        let shared = parent.shared_ssh_transport();
+        #[cfg(unix)]
+        if let Some(shared) = shared {
+            shared.connect()
+        } else if parent
+            .inner
+            .ssh_process
+            .as_ref()
+            .is_some_and(|process| process.was_shared)
+        {
+            Err(Error::new(
+                ErrorKind::Disconnected,
+                "shared SSH parent channel is closed",
+            ))
+        } else {
+            JcodeClient::connect_ssh(options)
+        }
+        #[cfg(not(unix))]
         JcodeClient::connect_ssh(options)
     } else {
         JcodeClient::connect(ConnectOptions {

@@ -78,6 +78,8 @@ pub use launch::{
     launch_instance, socket_accepts, user_app_config_dir, user_jcode_home, wait_for_socket,
 };
 pub use ssh::SshConnectOptions;
+#[cfg(unix)]
+pub use ssh::{SharedSshTransport, WeakSharedSshTransport};
 pub use structured::{
     RunStructuredError, RunStructuredOptions, StructuredEventCallback, StructuredOutputAttempt,
     StructuredOutputError, StructuredOutputSchema, StructuredSchemaError, StructuredTurnResult,
