@@ -414,7 +414,7 @@ cross_provider_failover = "countdown"
 wake_mode = "internal"
 
 [agents]
-# Defaults for spawned helper agents (swarm workers, subagents, sidecars).
+# Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
 #
 # Default model for spawned swarm/subagent sessions.
@@ -429,6 +429,14 @@ wake_mode = "internal"
 # workers inherit the provider-wide reasoning effort.
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "medium"
+#
+# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
+# These are independent of worker swarm_effort. Supported levels:
+# none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).
+# Providers map unsupported levels to their supported range.
+# Env overrides: JCODE_SWARM_ROOT_EFFORT, JCODE_SWARM_DEEP_ROOT_EFFORT
+swarm_root_effort = "max"
+swarm_deep_root_effort = "max"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)

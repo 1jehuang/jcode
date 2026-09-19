@@ -1138,6 +1138,18 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn swarm_effort_model_status_uses_shared_label() {
+        for mode in ["swarm", "swarm-deep"] {
+            assert_eq!(
+                overscroll_short_reasoning(mode),
+                Some(crate::tui::app::effort_display_label(mode))
+            );
+        }
+        assert_eq!(overscroll_short_reasoning(" high "), Some("high"));
+        assert_eq!(overscroll_short_reasoning(" "), None);
+    }
+
+    #[test]
     fn running_tool_header_emphasizes_detail_over_tool_name() {
         let accent = Color::Rgb(12, 34, 56);
         let spans = running_tool_header_spans("*", "bash", Some("cargo test"), accent);
@@ -2221,6 +2233,7 @@ fn overscroll_short_reasoning(effort: &str) -> Option<&str> {
         return None;
     }
     Some(match effort {
+        "swarm" | "swarm-deep" => crate::tui::app::effort_display_label(effort),
         "max" => "max",
         "xhigh" => "xhigh",
         "high" => "high",

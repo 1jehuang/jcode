@@ -27,6 +27,7 @@ use crossterm::event::{
 use debug::DebugTrace;
 use futures::StreamExt;
 use helpers::*;
+pub(crate) use helpers::effort_display_label;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
