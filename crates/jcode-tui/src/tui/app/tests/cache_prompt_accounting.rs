@@ -239,3 +239,41 @@ fn cache_accounting_missing_last_read_remains_unknown() {
             .is_none()
     );
 }
+
+#[test]
+fn cache_report_exposes_actual_expiry_notification_policy() {
+    let mut app = cache_accounting_openai_app();
+    app.begin_kv_cache_request(&[Message::user("test")], &[], "system", "");
+    app.streaming.streaming_input_tokens = 10_000;
+    app.streaming.streaming_cache_read_tokens = Some(6_000);
+    assert!(app.record_completed_stream_cache_usage());
+    for age in [0, 1770, 1900] {
+        app.kv_cache
+            .kv_cache_baseline
+            .as_mut()
+            .unwrap()
+            .completed_at = Instant::now() - Duration::from_secs(age);
+        let stats = cache_accounting_stats(&mut app);
+        assert!(stats.contains("cache_expiry_notification_policy: disabled (retention is estimated or provider-managed)"), "{stats}");
+        assert!(
+            stats.contains("cache_expiry_notification_active: false"),
+            "{stats}"
+        );
+    }
+    app.remote_provider_name = Some("anthropic".into());
+    app.remote_provider_model = Some("claude-opus-4-6".into());
+    let baseline = app.kv_cache.kv_cache_baseline.as_mut().unwrap();
+    baseline.provider = "anthropic".into();
+    baseline.model = "claude-opus-4-6".into();
+    baseline.cache_ttl_secs = Some(300);
+    baseline.completed_at = Instant::now() - Duration::from_secs(310);
+    let stats = cache_accounting_stats(&mut app);
+    assert!(
+        stats.contains("cache_expiry_notification_policy: explicit TTL only"),
+        "{stats}"
+    );
+    assert!(
+        stats.contains("cache_expiry_notification_active: true"),
+        "{stats}"
+    );
+}

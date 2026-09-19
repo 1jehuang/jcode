@@ -1376,6 +1376,22 @@ fn format_cache_stats(app: &App) -> String {
         None => "unknown, provider-managed retention".to_string(),
     };
     lines.push(format!("- active_route_cache_retention: {}", retention));
+    let expiry_policy =
+        if route_ttl.is_none() || crate::provider::cache_ttl_is_estimate(&route_provider) {
+            "disabled (retention is estimated or provider-managed)"
+        } else {
+            "explicit TTL only"
+        };
+    lines.push(format!(
+        "- cache_expiry_notification_policy: {}",
+        expiry_policy
+    ));
+    lines.push(format!(
+        "- cache_expiry_notification_active: {}",
+        app.cache_ttl_status()
+            .is_some_and(|info| info.expiry_notification_active())
+    ));
+
     lines.push(
         "- anthropic_cache_ttl_setting_scope: Anthropic only, does not configure OpenAI retention"
             .to_string(),
