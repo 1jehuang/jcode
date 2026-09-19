@@ -3974,6 +3974,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "jcode-provider-subprocess"
+version = "0.1.0"
+dependencies = [
+ "jcode-provider-protocol",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "jcode-render-core"
 version = "0.1.0"
 dependencies = [
