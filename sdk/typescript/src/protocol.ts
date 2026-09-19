@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 5;
+export const API_VERSION_MINOR = 6;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
