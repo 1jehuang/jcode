@@ -38,6 +38,10 @@ impl Tool for McpTool {
         &self.tool_def.name
     }
 
+    fn mcp_identity(&self) -> Option<(&str, &str)> {
+        Some((&self.server_name, &self.tool_def.name))
+    }
+
     fn description(&self) -> &str {
         self.tool_def.description.as_deref().unwrap_or("MCP tool")
     }

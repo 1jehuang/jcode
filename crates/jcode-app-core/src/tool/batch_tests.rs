@@ -249,6 +249,7 @@ fn test_normalize_arguments_aliases_to_parameters() {
 #[test]
 fn test_schema_only_requires_tool() {
     let registry = Registry {
+        mcp_policy: Arc::default(),
         tools: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         skills: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::skill::SkillRegistry::default(),
