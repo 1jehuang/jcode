@@ -442,8 +442,12 @@ fn spawn_background_update_check(args: &Args) {
                     }
                 }
             } else {
-                if let UpdateStatus::Error(message) = &status {
-                    logging::info(message);
+                match &status {
+                    UpdateStatus::Error(message) => logging::info(message),
+                    UpdateStatus::Skipped { reason } => {
+                        logging::info(&format!("Source update check skipped: {reason}"));
+                    }
+                    _ => {}
                 }
                 Bus::global().publish(BusEvent::UpdateStatus(status));
             }
@@ -456,20 +460,21 @@ fn spawn_background_update_check(args: &Args) {
     }
 }
 
-fn source_update_check_status(result: Option<bool>) -> crate::bus::UpdateStatus {
+fn source_update_check_status(result: anyhow::Result<Option<bool>>) -> crate::bus::UpdateStatus {
     use crate::bus::UpdateStatus;
 
     match result {
-        Some(true) => UpdateStatus::Available {
+        Ok(Some(true)) => UpdateStatus::Available {
             current: jcode_build_meta::version().to_string(),
             latest: "latest source".to_string(),
         },
-        Some(false) => UpdateStatus::UpToDate,
-        None => UpdateStatus::Error(
-            "Source update check failed: unable to compare the source checkout with its upstream. \
-             The repository or upstream may be unavailable, or git fetch may have failed."
-                .to_string(),
-        ),
+        Ok(Some(false)) => UpdateStatus::UpToDate,
+        Ok(None) => UpdateStatus::Skipped {
+            reason:
+                "no upstream configured for the source checkout (local branch or detached HEAD)"
+                    .to_string(),
+        },
+        Err(error) => UpdateStatus::Error(format!("Source update check failed: {error:#}")),
     }
 }
 
@@ -522,18 +527,19 @@ mod tests {
     }
 
     #[test]
-    fn source_update_check_unknown_reports_comparison_error() {
-        let crate::bus::UpdateStatus::Error(message) = source_update_check_status(None) else {
+    fn source_update_check_preserves_git_error() {
+        let crate::bus::UpdateStatus::Error(message) =
+            source_update_check_status(Err(anyhow::anyhow!("git fetch: offline")))
+        else {
             panic!("an indeterminate source comparison must report an error");
         };
-        assert!(message.contains("unable to compare the source checkout with its upstream"));
-        assert!(message.contains("git fetch may have failed"));
+        assert_eq!(message, "Source update check failed: git fetch: offline");
     }
 
     #[test]
     fn source_update_check_false_reports_up_to_date() {
         assert!(matches!(
-            source_update_check_status(Some(false)),
+            source_update_check_status(Ok(Some(false))),
             crate::bus::UpdateStatus::UpToDate
         ));
     }
@@ -541,7 +547,7 @@ mod tests {
     #[test]
     fn source_update_check_true_reports_available() {
         let crate::bus::UpdateStatus::Available { current, latest } =
-            source_update_check_status(Some(true))
+            source_update_check_status(Ok(Some(true)))
         else {
             panic!("a source update must remain available");
         };
@@ -577,19 +583,21 @@ mod tests {
         git(&["init", "-b", "source"]);
         git(&["commit", "--allow-empty", "-m", "initial"]);
 
-        // A valid checkout without a tracking branch cannot be compared.
-        let result = hot_exec::source_update_available(repo.path());
-        assert_eq!(result, None);
+        // A local branch without tracking is skipped before claiming a fetch slot.
+        let result = hot_exec::check_for_updates_in(repo.path(), || {
+            panic!("untracked checkouts must not fetch or claim the fetch slot")
+        });
+        assert_eq!(*result.as_ref().unwrap(), None);
         assert!(matches!(
             source_update_check_status(result),
-            crate::bus::UpdateStatus::Error(_)
+            crate::bus::UpdateStatus::Skipped { .. }
         ));
 
         // Local branches supply tracking controls without fetching or networking.
         git(&["branch", "upstream"]);
         git(&["branch", "--set-upstream-to=upstream", "source"]);
-        let result = hot_exec::source_update_available(repo.path());
-        assert_eq!(result, Some(false));
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(*result.as_ref().unwrap(), Some(false));
         assert!(matches!(
             source_update_check_status(result),
             crate::bus::UpdateStatus::UpToDate
@@ -598,11 +606,58 @@ mod tests {
         git(&["checkout", "upstream"]);
         git(&["commit", "--allow-empty", "-m", "upstream update"]);
         git(&["checkout", "source"]);
-        let result = hot_exec::source_update_available(repo.path());
-        assert_eq!(result, Some(true));
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(*result.as_ref().unwrap(), Some(true));
         assert!(matches!(
             source_update_check_status(result),
             crate::bus::UpdateStatus::Available { .. }
+        ));
+
+        // Local commits alone are not updates.
+        git(&["checkout", "upstream"]);
+        git(&["branch", "--set-upstream-to=source", "upstream"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(result.unwrap(), Some(false));
+
+        git(&["checkout", "--detach"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || {
+            panic!("detached checkouts must not fetch")
+        });
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Skipped { .. }
+        ));
+
+        // A configured but missing upstream must still report an error.
+        git(&["checkout", "source"]);
+        git(&["branch", "-D", "upstream"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Error(_)
+        ));
+
+        // Network/fetch failures on tracked branches must not become skips.
+        git(&["remote", "add", "origin", "./missing-remote"]);
+        git(&["update-ref", "refs/remotes/origin/source", "HEAD"]);
+        git(&["config", "branch.source.remote", "origin"]);
+        git(&["config", "branch.source.merge", "refs/heads/source"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || true);
+        let crate::bus::UpdateStatus::Error(message) = source_update_check_status(result) else {
+            panic!("failed fetch must report an error");
+        };
+        assert!(message.contains("git fetch -q:"));
+    }
+
+    #[test]
+    fn source_update_check_invalid_checkout_reports_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = hot_exec::check_for_updates_in(directory.path(), || {
+            panic!("invalid checkouts must not fetch")
+        });
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Error(_)
         ));
     }
 

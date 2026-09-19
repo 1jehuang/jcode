@@ -342,6 +342,10 @@ pub enum UpdateStatus {
         version: String,
     },
     UpToDate,
+    /// Automatic checks are not applicable, e.g. a local untracked checkout.
+    Skipped {
+        reason: String,
+    },
     Error(String),
 }
 

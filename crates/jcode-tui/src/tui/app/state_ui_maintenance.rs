@@ -209,7 +209,7 @@ impl App {
                     ),
                 );
             }
-            UpdateStatus::UpToDate => {
+            UpdateStatus::UpToDate | UpdateStatus::Skipped { .. } => {
                 if self.background_client_action == Some(action) {
                     self.background_client_action = None;
                 }
