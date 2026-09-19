@@ -2173,6 +2173,7 @@ pub(super) fn build_merge_prompt() -> String {
         Recheck that the worktree is clean and both branch tips are unchanged before switching. Use git switch to the destination and a normal non-interactive git merge --no-edit of the recorded source commit, allowing a fast-forward when possible. \
         Never reset, rebase, squash, force-update refs, bypass hooks, push, delete branches, or include unrelated branches. \
         If this merge conflicts, do not resolve conflicts automatically: abort only the merge you just started and return to the original branch when safe. If recovery fails, stop and report the exact state without destructive cleanup. \
+        After a successful merge, rerun the appropriate validation against the combined result. If it fails, report the failure and leave the completed merge intact rather than resetting it or claiming success. \
         Verify the final branch, clean status, and that the source commit is an ancestor of HEAD before claiming success. Report the source, destination, resulting commit, validation, and that nothing was pushed.",
     )
 }

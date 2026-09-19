@@ -83,6 +83,8 @@ fn merge_prompt_preserves_work_and_checks_result() {
         "Never reset, rebase, squash, force-update refs, bypass hooks, push, delete branches",
         "abort only the merge you just started",
         "return to the original branch when safe",
+        "validation against the combined result",
+        "leave the completed merge intact",
         "source commit is an ancestor of HEAD",
     ] {
         assert!(
