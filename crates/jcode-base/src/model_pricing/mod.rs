@@ -242,11 +242,13 @@ pub fn effective_entry_at_size(
 /// `None` in that second case is what sends the call on to models.dev instead of
 /// pricing it from half a card.
 ///
-/// Vendor files are matched by **model id, not route**, so a
+/// Vendor files are matched by **model id** by default, so a
 /// `provider = OpenRouter, model = deepseek-flash` call reaches DeepSeek's file.
-/// Vendors are consulted in `BTreeMap` (lexicographic) order; the first file
-/// that states a rule for the model decides. (A reserved future `route = [...]`
-/// field would narrow this; it is not implemented.)
+/// Vendors are consulted in `BTreeMap` (lexicographic) order; the first
+/// **applicable** file that states a rule for the model decides. A rule that
+/// opts into a `route = [...]` filter narrows itself to those billing
+/// identities; on any other route it is skipped (`provider` is the call's
+/// identity) and the next file or layer prices the call.
 pub(crate) fn vendor_file_card_at_size(
     provider: &str,
     model: &str,
@@ -258,12 +260,13 @@ pub(crate) fn vendor_file_card_at_size(
         let Some(path) = pricing.file.as_deref() else {
             continue;
         };
-        let Some(entry) = vendor_files::vendor_rule(vendor, path, model) else {
+        let Some(entry) = vendor_files::vendor_rule(vendor, path, provider, model) else {
             continue;
         };
-        // The first file that states a rule for this model decides: either it
-        // prices the call, or its validity window is why it did not. The same
-        // first-file rule is what `vendor_file_out_of_effect` mirrors.
+        // The first file that states an **applicable** rule for this model
+        // decides: either it prices the call, or its validity window is why it
+        // did not. The same first-file rule is what `vendor_file_out_of_effect`
+        // mirrors.
         if entry.out_of_effect_reason(at).is_some() {
             return None;
         }
@@ -407,12 +410,14 @@ pub fn models_dev_context_tier_in_force(
 /// tells the user their file stopped applying instead of a models.dev number
 /// taking over silently.
 ///
-/// Only the *first* file that states an entry for the model can be that reason,
-/// mirroring [`vendor_file_card_at_size`]'s iteration order: an earlier file
-/// that states nothing for this model would not have priced the call even while
-/// in effect, and an earlier file that *is* in effect wins outright, so neither
-/// is reported.
+/// Only the *first applicable* file that states an entry for the model can be
+/// that reason, mirroring [`vendor_file_card_at_size`]'s iteration order: an
+/// earlier file that states nothing for this model would not have priced the
+/// call even while in effect, and an earlier file that *is* in effect wins
+/// outright, so neither is reported. A rule whose `route` filter excludes this
+/// call is not a reason either: it never claimed the route.
 pub(super) fn vendor_file_out_of_effect(
+    provider: &str,
     model: &str,
     at: SystemTime,
 ) -> Option<(String, RuleOutOfEffect)> {
@@ -421,7 +426,7 @@ pub(super) fn vendor_file_out_of_effect(
         let Some(path) = pricing.file.as_deref() else {
             continue;
         };
-        let Some(entry) = vendor_files::vendor_rule(vendor, path, model) else {
+        let Some(entry) = vendor_files::vendor_rule(vendor, path, provider, model) else {
             continue;
         };
         return entry
@@ -1030,6 +1035,106 @@ output = 13.5
             )
             .expect("profile resolves to the deepseek card");
             assert_eq!(money.currency.as_str(), "CNY");
+        });
+    }
+
+    /// A `route = [...]` rule prices only the routes it names; on any other
+    /// route it is skipped and the next layer answers, so a route-scoped rule
+    /// can never misprice a call on a route it does not claim.
+    #[test]
+    fn a_route_scoped_card_prices_only_its_route() {
+        let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+route = ["openrouter"]
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+        with_pricing_env(Some(config), DEEPSEEK_CACHE, || {
+            let at = SystemTime::now();
+            let on_route = effective_cost("openrouter", "deepseek-v4-pro", at)
+                .expect("the named route is priced by the card");
+            assert_eq!(on_route.currency.as_str(), "CNY");
+            assert!(
+                (on_route.amount - reference_cost(4.5, 13.5)).abs() <= 1e-9,
+                "the card's own rates must price its route, got {on_route:?}"
+            );
+
+            // A route the rule does not name falls through to models.dev, in
+            // USD: the card must neither claim nor price it.
+            let off_route = effective_cost("deepseek", "deepseek-v4-pro", at)
+                .expect("the unnamed route falls through to models.dev");
+            assert!(
+                off_route.currency.is_usd(),
+                "the CNY card must not leak onto a route it does not name: {off_route:?}"
+            );
+            assert!(
+                (off_route.amount - reference_cost(0.66, 1.98)).abs() <= 1e-9,
+                "the unnamed route must be priced by the next layer, got {off_route:?}"
+            );
+        });
+    }
+
+    /// Compatibility guard: a rule with no `route` still prices every route,
+    /// exactly as before the field existed.
+    #[test]
+    fn an_unscoped_rule_still_prices_every_route() {
+        let config = r#"
+[pricing.providers.deepseek]
+currency = "CNY"
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+        with_pricing_env(Some(config), DEEPSEEK_CACHE, || {
+            let at = SystemTime::now();
+            for route in ["openrouter", "deepseek", "openai-compatible:deepseek"] {
+                let money =
+                    effective_cost(route, "deepseek-v4-pro", at).expect("every route is priced");
+                assert_eq!(money.currency.as_str(), "CNY", "route {route}");
+                assert!(
+                    (money.amount - reference_cost(4.5, 13.5)).abs() <= 1e-9,
+                    "route {route} must keep the unscoped card's rates: {money:?}"
+                );
+            }
+        });
+    }
+
+    /// A route entry may name a compatible profile by its short form: the call's
+    /// identity is `openai-compatible:<x>`, and `route = ["<x>"]` matches it, as
+    /// does the raw key.
+    #[test]
+    fn a_compatible_profile_short_name_matches_a_route() {
+        let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro"]
+route = ["deepseek"]
+
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 4.5
+output = 13.5
+"#;
+        with_pricing_env(Some(config), DEEPSEEK_CACHE, || {
+            let at = SystemTime::now();
+            let short = effective_cost("openai-compatible:deepseek", "deepseek-v4-pro", at)
+                .expect("the profile's short name matches the route");
+            assert!(
+                (short.amount - reference_cost(4.5, 13.5)).abs() <= 1e-9,
+                "the short name must reach the card: {short:?}"
+            );
+            let raw = effective_cost("deepseek", "deepseek-v4-pro", at)
+                .expect("the raw identity matches the route");
+            assert!((raw.amount - reference_cost(4.5, 13.5)).abs() <= 1e-9);
+
+            // A different profile is not matched: the rule names only DeepSeek.
+            assert!(
+                effective_cost("openai-compatible:groq", "deepseek-v4-pro", at).is_none(),
+                "a route the rule does not name must not be priced by it"
+            );
         });
     }
 

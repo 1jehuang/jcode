@@ -28,6 +28,15 @@ pub struct ModelPricingEntry {
     /// produced them. Optional so a layer can fill in what an earlier layer
     /// left out (spec 4.4 field-level merge).
     pub cost: CostFields,
+    /// Billing identities this entry is restricted to, trimmed and
+    /// case-sensitive.
+    ///
+    /// Empty means "applies to every route", which is the behaviour before
+    /// `route` existed and is byte-compatible with it. A non-empty list is
+    /// matched by [`Self::route_applies`]; a route it does not name is skipped
+    /// (the next layer prices the call), never mispriced by this entry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub route: Vec<String>,
     /// Named rate cards: absolute prices or a multiplier on `cost`.
     ///
     /// Selected by `model_pricing::rules`, so cache entries, config rules, and
@@ -98,6 +107,7 @@ impl ModelPricingEntry {
     pub fn from_rule(rule: &ModelPricingRule) -> Self {
         Self {
             cost: rule.cost.clone().unwrap_or_default(),
+            route: rule.route.clone(),
             tariffs: rule.tariffs.clone(),
             schedule: rule.schedule.clone(),
             context_tiers: rule.context_tiers.clone(),
@@ -106,6 +116,23 @@ impl ModelPricingEntry {
             effective_until: rule.effective_until,
             on_rule_expiry: rule.on_rule_expiry,
         }
+    }
+
+    /// Whether this entry applies to a call with the billing identity
+    /// `source_key` (e.g. `openrouter`, `deepseek`, `openai-compatible:deepseek`).
+    ///
+    /// An empty [`Self::route`] applies everywhere, which is what keeps a
+    /// route-less rule byte-compatible with the behaviour before the field
+    /// existed. A non-empty list matches when it names the call's identity
+    /// exactly, or when the call is a compatible profile
+    /// (`openai-compatible:<x>`) and the list names its short form `<x>`: a
+    /// profile may be addressed either way (`/pricing` prints the raw key as
+    /// "looked up as ...").
+    ///
+    /// This is the *only* matching implementation; every scan site calls it so
+    /// the layers cannot disagree about what a route is.
+    pub fn route_applies(&self, source_key: &str) -> bool {
+        route_matches(&self.route, source_key)
     }
 
     /// The complete rate card as the flat catalog type, if both base rates are
@@ -149,6 +176,27 @@ impl ModelPricingEntry {
     }
 }
 
+/// Whether a `route` filter applies to a call with the billing identity
+/// `source_key`.
+///
+/// The one matching rule shared by every scan site (inline cards, vendor files,
+/// the estimate path), so no layer can disagree about what a route is. An empty
+/// filter applies everywhere; a non-empty one matches the identity exactly, or a
+/// compatible profile's short form (`deepseek` matches
+/// `openai-compatible:deepseek`).
+pub(crate) fn route_matches(route: &[String], source_key: &str) -> bool {
+    if route.is_empty() {
+        return true;
+    }
+    if route.iter().any(|entry| entry == source_key) {
+        return true;
+    }
+    match source_key.strip_prefix("openai-compatible:") {
+        Some(short) => route.iter().any(|entry| entry == short),
+        None => false,
+    }
+}
+
 impl<'de> Deserialize<'de> for ModelPricingEntry {
     /// Accept both cache shapes:
     ///
@@ -165,6 +213,8 @@ impl<'de> Deserialize<'de> for ModelPricingEntry {
         #[derive(Deserialize)]
         struct FullEntry {
             cost: CostFields,
+            #[serde(default)]
+            route: Vec<String>,
             #[serde(default)]
             tariffs: BTreeMap<String, Tariff>,
             #[serde(default)]
@@ -191,6 +241,7 @@ impl<'de> Deserialize<'de> for ModelPricingEntry {
         match Repr::deserialize(deserializer)? {
             Repr::V2(full) => Ok(Self {
                 cost: full.cost,
+                route: full.route,
                 tariffs: full.tariffs,
                 schedule: full.schedule,
                 context_tiers: full.context_tiers,

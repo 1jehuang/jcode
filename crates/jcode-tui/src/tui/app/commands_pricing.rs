@@ -220,7 +220,7 @@ pub(super) fn handle_pricing_command(app: &mut App, trimmed: &str) -> bool {
             Some(crate::model_pricing::PricingNotice::ConfigCard(*reason))
         }
         crate::model_pricing::ConfigCallRates::Absent => {
-            crate::model_pricing::vendor_file_rule_out_of_effect(&model, now)
+            crate::model_pricing::vendor_file_rule_out_of_effect(&source_key, &model, now)
         }
         _ => None,
     };

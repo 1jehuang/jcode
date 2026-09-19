@@ -10,17 +10,19 @@
 //!
 //! Three rules from the spec are enforced here and nowhere else:
 //!
-//! * rules are matched by **model id, not route**: a vendor key is a label for
+//! * rules are matched by **model id** by default: a vendor key is a label for
 //!   a group of rules, so `provider = OpenRouter, model = deepseek-flash` still
 //!   reaches DeepSeek's card (binding rules to a route would silently fall them
-//!   back to models.dev's USD numbers);
+//!   back to models.dev's USD numbers). A rule that opts into a `route = [...]`
+//!   filter narrows itself to those billing identities; a route it does not name
+//!   is skipped, never mispriced (see [`entry::route_matches`]);
 //! * **currency follows the price** (F1): a card in a currency other than the
 //!   next layer's never inherits that layer's numbers.
 
 use crate::config::CostFields;
 use crate::config::PricingConfig;
 use crate::config::pricing::{PricingConfigError, ProviderPricing, validate};
-use crate::model_pricing::entry::{ModelPricingEntry, RuleOutOfEffect};
+use crate::model_pricing::entry::{self, ModelPricingEntry, RuleOutOfEffect};
 use crate::model_pricing::rules;
 use crate::model_pricing::{ModelCost, normalize_model_id};
 use jcode_provider_core::Currency;
@@ -153,7 +155,7 @@ pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> Con
     if config.providers.is_empty() {
         return ConfigPrice::Absent;
     }
-    let Some((_vendor, provider, rule)) = find_rule(&config, model) else {
+    let Some((_vendor, provider, rule)) = find_rule(&config, source_key, model) else {
         return ConfigPrice::Absent;
     };
 
@@ -332,12 +334,18 @@ fn merge_same_currency(entry: &mut ModelPricingEntry, fallback: &ModelCost) {
 }
 
 /// The first `[pricing.providers.<vendor>]` section (in `BTreeMap` order) that
-/// declares a rule for `model`, with the vendor key and section.
+/// declares an **applicable** rule for `model`, with the vendor key and section.
+///
+/// `source_key` is the call's billing identity. A rule whose `route` list does
+/// not name it is *skipped*, exactly as if the vendor had not written that
+/// model: resolution continues with the next vendor and then the next layer, so
+/// a route-scoped rule can never misprice a call on another route.
 ///
 /// Callers may hand over ids carrying jcode-local decorations (`[1m]`, `@pin`);
 /// the catalog strips them, so config lookup does too.
 fn find_rule<'a>(
     config: &'a PricingConfig,
+    source_key: &str,
     model: &str,
 ) -> Option<(
     &'a str,
@@ -354,6 +362,7 @@ fn find_rule<'a>(
                     .then(|| provider.models.get(normalized))
                     .flatten()
             })
+            .filter(|rule| entry::route_matches(&rule.route, source_key))
             .map(|rule| (vendor.as_str(), provider, rule))
     })
 }
