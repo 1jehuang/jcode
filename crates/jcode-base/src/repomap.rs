@@ -36,6 +36,13 @@ const SKIP_DIRS: &[&str] = &[
 const CHARS_PER_TOKEN: usize = 4;
 /// Max symbols rendered per file block (long files truncate, rank decides).
 const MAX_SYMBOLS_PER_FILE: usize = 50;
+/// Max mapped files per commit admitted to co-change pairing. Bulk commits
+/// (vendored drops, renames, generated-code check-ins) touch hundreds of
+/// files: expanding their pairs is quadratic CPU/memory for pure noise, and
+/// a repo-controlled history could stall the tool. Skipped whole, not
+/// sampled — partial pairs from a bulk commit are still noise.
+const MAX_COCOMMIT_FILES: usize = 50;
+
 /// Max bytes read per source file. Bounds the text-read path (a symlinked
 /// /dev/zero or multi-GB dump must not exhaust memory); oversized files
 /// contribute no symbols. Generous: real sources fit comfortably.
@@ -380,6 +387,7 @@ fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usi
         .arg(root)
         .args([
             "log",
+            "-z",
             "-n",
             "200",
             "--name-only",
@@ -413,25 +421,28 @@ fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usi
             })
         })
         .unwrap_or_default();
+    // NUL-delimited (-z): git C-quotes special names (tabs, quotes,
+    // non-UTF8) in line mode, silently dropping those files from pairing.
+    // In NUL mode names arrive raw; records split on \0.
     let mut commits: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let mut in_commit = false;
-    for line in text.lines() {
-        if let Some(_hash) = line.strip_prefix("COMMIT:") {
+    for record in text.split('\0') {
+        let mut record = record;
+        if let Some(_hash) = record.strip_prefix("COMMIT:") {
             if in_commit && !current.is_empty() {
                 commits.push(std::mem::take(&mut current));
             }
             in_commit = true;
+            // The wire glues the first path to the COMMIT record
+            // ("COMMIT:<hash>\n<file>"): skip the hash line, keep parsing
+            // the remainder as a path below.
+            record = record.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+        }
+        if !in_commit || record.is_empty() {
             continue;
         }
-        if !in_commit {
-            continue;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let rel = format!("{prefix}{line}");
+        let rel = format!("{prefix}{record}");
         if let Some(&i) = index.get(rel.as_str())
             && !current.contains(&i)
         {
@@ -441,6 +452,8 @@ fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usi
     if in_commit && !current.is_empty() {
         commits.push(current);
     }
+    // Bound the expansion: drop bulk commits before pairing.
+    commits.retain(|members| members.len() <= MAX_COCOMMIT_FILES);
     let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
     for members in &commits {
         for (x, &m) in members.iter().enumerate() {

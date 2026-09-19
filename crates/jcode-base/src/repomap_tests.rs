@@ -343,8 +343,16 @@ fn git_repo_with_history() -> Option<(tempfile::TempDir, std::path::PathBuf)> {
     if !run(&["init", "-q"]).status.success() {
         return None;
     }
-    // a+b together twice (signal), c alone (no co-change with a).
-    for msg in ["one", "two"] {
+    // a+b together twice (signal), c alone (no co-change with a). Each
+    // commit appends a line so no commit is empty (empty commits fail and
+    // would make this helper return None, passing vacuously).
+    for (i, msg) in ["one", "two"].iter().enumerate() {
+        for f in ["a.rs", "b.rs"] {
+            use std::fmt::Write as _;
+            let mut content = std::fs::read_to_string(dir.path().join(f)).expect("read");
+            write!(content, "// {msg}-{i}\n").unwrap();
+            std::fs::write(dir.path().join(f), content).expect("write");
+        }
         if !run(&["add", "a.rs", "b.rs"]).status.success() {
             return None;
         }
@@ -387,6 +395,89 @@ fn cochange_boosts_base_dependents_end_to_end() {
     let pos_b = map.find("b.rs").expect("b listed");
     let pos_c = map.find("c.rs").expect("c listed");
     assert!(pos_b < pos_c, "{map}");
+}
+
+#[test]
+#[cfg(unix)]
+fn cochange_skips_bulk_commits() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    // 60 files in one commit: over the 50-member cap, no pairs at all.
+    let files: Vec<(String, String)> = (0..60)
+        .map(|i| (format!("bulk{i:02}.rs"), "fn f() {}\n".to_string()))
+        .collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(n, c)| (n.as_str(), c.as_str()))
+        .collect();
+    let dir = write_tree(&refs);
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    };
+    assert!(run(&["init", "-q"]).status.success());
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "bulk"]).status.success());
+    assert!(
+        run(&["commit", "--allow-empty", "-qm", "second"])
+            .status
+            .success()
+    );
+    let names: Vec<String> = (0..60).map(|i| format!("bulk{i:02}.rs")).collect();
+    assert!(cochange_pairs(dir.path(), &names).is_empty());
+}
+
+#[test]
+#[cfg(unix)]
+fn cochange_handles_special_filenames() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = write_tree(&[
+        ("with space.rs", "fn s() {}\n"),
+        ("uni-\u{e9}.rs", "fn u() {}\n"),
+    ]);
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    };
+    assert!(run(&["init", "-q"]).status.success());
+    // Two non-empty commits (an unchanged second commit would fail).
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "one"]).status.success());
+    std::fs::write(dir.path().join("with space.rs"), "fn s() {}\n// two\n").unwrap();
+    std::fs::write(dir.path().join("uni-\u{e9}.rs"), "fn u() {}\n// two\n").unwrap();
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "two"]).status.success());
+    let files = vec!["with space.rs".to_string(), "uni-\u{e9}.rs".to_string()];
+    let mut pairs = cochange_pairs(dir.path(), &files);
+    pairs.sort();
+    assert_eq!(pairs, vec![(0, 1)], "{pairs:?}");
 }
 
 #[test]
