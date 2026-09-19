@@ -433,7 +433,38 @@ impl MemoryManager {
             .map(|m| lower.matches(m).count())
             .sum()
         }
-        negations(a) == negations(b)
+        if negations(a) != negations(b) {
+            return false;
+        }
+        // Antonym split across the pair with no negation marker: "enabled"
+        // vs "disabled" scores ~0.9 cosine (same topic) but contradicts.
+        // Whole-word match only ("on"/"off" must not fire inside "button").
+        // Conservative: a veto stores a duplicate, never destroys a fact.
+        const ANTONYMS: &[(&str, &str)] = &[
+            ("enable", "disable"),
+            ("enabled", "disabled"),
+            ("allow", "deny"),
+            ("add", "remove"),
+            ("start", "stop"),
+            ("open", "close"),
+            ("lock", "unlock"),
+            ("show", "hide"),
+            ("true", "false"),
+            ("on", "off"),
+            ("increase", "decrease"),
+            ("up", "down"),
+        ];
+        fn words(text: &str) -> std::collections::HashSet<String> {
+            text.to_lowercase()
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+        let (wa, wb) = (words(a), words(b));
+        !ANTONYMS.iter().any(|(x, y)| {
+            (wa.contains(*x) && wb.contains(*y)) || (wa.contains(*y) && wb.contains(*x))
+        })
     }
 
     pub(crate) fn rrf_k() -> f32 {
