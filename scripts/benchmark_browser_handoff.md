@@ -64,7 +64,8 @@ cleared between trials, so this is a fresh-session comparison, not a cold-cache 
 - Tool traces reconstruct streamed JSON inputs from `tool_start`, `tool_input`,
   `tool_exec`, and `tool_done`. Only executed browser actions count. Assistant
   prose saying “handoff” does not count. Unknown/missing actions invalidate a
-  trial for speed comparison. Tool errors remain visible in the trace. Actual
+  trial for speed comparison. Tool errors remain visible in the trace. Handoff result status and the number
+  of `action_trace` steps marked `executed` are captured per call and per trial. Actual
   handoff `decision_provider` receipts must equal `jcode` by default. For explicit
   BYOK comparisons use `--expected-handoff-provider openrouter`. Missing or
   mismatched provider metadata invalidates the trial, rather than silently
@@ -80,8 +81,9 @@ cleared between trials, so this is a fresh-session comparison, not a cold-cache 
   Inspect raw traces for suspicious shortcuts.
 - A successful direct arm that nevertheless called handoff is protocol-invalid.
   Other executed tools likewise invalidate the browser-only task. Only correct,
-  compliant pairs where the normal arm actually used handoff contribute to speed
-  ratios. Normal arms that chose direct actions still count in the trigger rate.
+  compliant pairs where the normal arm has an error-free `done` handoff or a
+  handoff with at least one executed step contribute to speed ratios. A failed
+  or zero-progress handback followed by direct success is not speed-eligible. Normal arms that chose direct actions still count in the trigger rate.
 - Full elapsed time runs from client process launch until exit, including model
   reasoning and final response. `seconds_to_confirmation` additionally records
   the fixture beacon time. Neither isolates browser execution alone.

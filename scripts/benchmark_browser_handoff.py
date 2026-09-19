@@ -136,6 +136,12 @@ def extract_trace(text):
                 try:
                     output = json.loads(event.get('output', '{}'))
                     call['decision_provider'] = output.get('decision_provider') if isinstance(output, dict) else None
+                    if isinstance(output, dict):
+                        call['handoff_status'] = output.get('status')
+                        steps = output.get('action_trace', [])
+                        call['handoff_executed_steps'] = sum(
+                            isinstance(step, dict) and step.get('status') == 'executed'
+                            for step in steps) if isinstance(steps, list) else 0
                 except (ValueError, TypeError):
                     call['decision_provider'] = None
         elif kind == 'text_delta':
@@ -157,6 +163,18 @@ def extract_trace(text):
         elif call.get('executed'):
             other.append(call['name'])
     return {'browser_calls': browser, 'other_tools': other, 'final_text': final, 'errors': errors}
+
+
+def handoff_metrics(trace):
+    calls = [call for call in trace['browser_calls']
+             if call.get('executed') and call.get('action') == 'handoff']
+    effective = [call for call in calls if not call.get('error') and
+                 (call.get('handoff_status') == 'done' or call.get('handoff_executed_steps', 0) > 0)]
+    return {'handoff_effective': bool(effective),
+            'handoff_done_calls': sum(call.get('handoff_status') == 'done' and not call.get('error')
+                                      for call in calls),
+            'handoff_executed_steps': sum(call.get('handoff_executed_steps', 0) for call in calls),
+            'handoff_statuses': [call.get('handoff_status') for call in calls]}
 
 
 def terminate(process):
@@ -259,7 +277,7 @@ def run_trial(args, fixture, runtime, output, index, mode):
     compliant = provider_valid and not trace['other_tools'] and not unknown and (mode != 'direct' or not handoff)
     result = {'type': 'trial', 'pair': index, 'mode': mode, 'model': args.model,
               'elapsed_seconds': round(elapsed, 3), 'exit_code': process.returncode,
-              'timed_out': timed_out, 'handoff_used': handoff,
+              'timed_out': timed_out, 'handoff_used': handoff, **handoff_metrics(trace),
               'decision_providers': providers, 'expected_handoff_provider': args.expected_handoff_provider, 'actions': actions,
               'trace_complete': not unknown and bool(actions), 'correct_page_state': correct,
               'final_dom_correct': final_dom_correct, 'validation_error': validation_error,
@@ -277,7 +295,8 @@ def summarize(results):
     for r in results:
         pairs.setdefault(r['pair'], {})[r['mode']] = r
     eligible = [p for p in pairs.values() if len(p) == 2 and all(r['valid_success'] for r in p.values())
-                and p['normal']['handoff_used'] and not p['direct']['handoff_used']]
+                and p['normal']['handoff_used'] and p['normal'].get('handoff_effective', False)
+                and not p['direct']['handoff_used']]
     ratios = [p['direct']['elapsed_seconds'] / p['normal']['elapsed_seconds'] for p in eligible]
     return {'type': 'summary', 'trials': len(results), 'eligible_speed_pairs': len(eligible),
             'normal_handoff_rate': sum(r['handoff_used'] for r in results if r['mode'] == 'normal') /
@@ -287,7 +306,7 @@ def summarize(results):
             'paired_direct_over_handoff_ratios': ratios,
             'median_direct_over_handoff_ratio': statistics.median(ratios) if ratios else None,
             'note': 'Ratio >1 favors handoff. Observed paired timings, not a guaranteed speedup. '
-                    'Only correct compliant pairs with actual normal-arm handoff are speed-eligible.'}
+                    'Only correct compliant pairs with a done or progress-making normal-arm handoff are speed-eligible.'}
 
 
 def self_test():
@@ -299,20 +318,32 @@ def self_test():
         {'type': 'tool_input', 'delta': '"handoff"}'},
         {'type': 'tool_exec', 'id': 'x', 'name': 'browser'},
         {'type': 'tool_done', 'id': 'x', 'name': 'browser', 'error': None,
-         'output': '{"decision_provider":"jcode"}'}]))
+         'output': '{"decision_provider":"jcode","status":"done","action_trace":[{"status":"executed"}]}'}]))
     assert trace['browser_calls'][0]['action'] == 'handoff'
     assert trace['browser_calls'][0]['executed']
     assert trace['browser_calls'][0]['decision_provider'] == 'jcode'
+    assert trace['browser_calls'][0]['handoff_status'] == 'done'
+    assert trace['browser_calls'][0]['handoff_executed_steps'] == 1
+    assert handoff_metrics(trace)['handoff_effective']
+    call = trace['browser_calls'][0]
+    for status, steps, error, effective in [('hand_back', 0, None, False),
+                                            ('hand_back', 2, None, True),
+                                            ('done', 0, None, True),
+                                            ('done', 2, 'failed', False),
+                                            (None, 0, None, False)]:
+        sample = {'browser_calls': [dict(call, handoff_status=status, handoff_executed_steps=steps, error=error)]}
+        assert handoff_metrics(sample)['handoff_effective'] == effective
     assert not extract_trace('{"type":"text_delta","text":"handoff"}')['browser_calls']
     assert environment(Path('/isolated-runtime'))['JCODE_DEBUG_CONTROL'] == '1'
     assert summarize([])['median_direct_over_handoff_ratio'] is None
     normal = {'pair': 1, 'mode': 'normal', 'valid_success': True,
-              'handoff_used': True, 'elapsed_seconds': 2}
+              'handoff_used': True, 'handoff_effective': True, 'elapsed_seconds': 2}
     direct = {'pair': 1, 'mode': 'direct', 'valid_success': True,
               'handoff_used': False, 'elapsed_seconds': 3}
     assert summarize([normal, direct])['median_direct_over_handoff_ratio'] == 1.5
     assert summarize([normal, dict(direct, valid_success=False)])['eligible_speed_pairs'] == 0
     assert summarize([dict(normal, handoff_used=False), direct])['eligible_speed_pairs'] == 0
+    assert summarize([dict(normal, handoff_effective=False), direct])['eligible_speed_pairs'] == 0
     fixture = Fixture()
     try:
         token, url = fixture.add()
