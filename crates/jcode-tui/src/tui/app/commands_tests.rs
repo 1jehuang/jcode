@@ -384,7 +384,7 @@ fn cache_extend_saves_preference_and_reset_survives_reload() {
         ("/cache 5m", false),
         ("/cache extend", true),
         ("/cache extend", true),
-        ("/cache", false),
+        ("/cache 5m", false),
     ] {
         assert!(crate::tui::app::commands_dispatch::dispatch_local_command(
             &mut app, command

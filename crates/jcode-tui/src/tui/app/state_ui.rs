@@ -1169,26 +1169,31 @@ fn format_cache_stats(app: &App) -> String {
     let read = remote_cache_read.saturating_add(app.token_accounting.total_cache_read_tokens);
     let write = remote_cache_write.saturating_add(app.token_accounting.total_cache_creation_tokens);
     let optimal = app.token_accounting.total_cache_optimal_input_tokens;
-    // `reported` is the aggregate of provider-reported `input_tokens`, which for
-    // split-accounting providers (Anthropic) excludes cached + cache-creation
-    // tokens. Percentages must use the effective prompt size so they stay in
-    // 0-100% instead of clamping at 100%.
-    let effective_reported =
-        crate::tui::info_widget::effective_prompt_tokens(reported, read, write);
-    let read_pct = cache_ratio_pct(read, effective_reported);
-    let write_pct = cache_ratio_pct(write, effective_reported);
-    let optimal_pct = (optimal > 0).then(|| cache_ratio_pct(read, optimal));
+    // Preserve per-request accounting across providers. Legacy history without an
+    // explicit denominator remains unknown rather than guessing from aggregate writes.
+    let effective_reported = remote_usage
+        .map_or(Some(0), |usage| usage.cache_prompt_tokens)
+        .map(|prompt| prompt.saturating_add(app.token_accounting.total_cache_prompt_tokens));
+    let format_pct = |tokens, prompt: Option<u64>| {
+        prompt
+            .filter(|prompt| *prompt > 0)
+            .map(|prompt| format!("{}%", cache_ratio_pct(tokens, prompt)))
+            .unwrap_or_else(|| "unknown (prompt accounting unavailable)".to_string())
+    };
+    let read_pct = format_pct(read, effective_reported);
+    let write_pct = format_pct(write, effective_reported);
+    let optimal_pct =
+        (optimal > 0 && remote_cache_read == 0).then(|| cache_ratio_pct(read, optimal));
     let cache_totals_source = match (
         remote_usage.is_some(),
-        app.token_accounting.total_cache_reported_input_tokens > 0,
+        app.token_accounting.total_cache_prompt_tokens > 0,
     ) {
         (true, true) => "remote_history+client_observed_api_calls",
         (true, false) => "remote_history",
         (false, true) => "client_observed_api_calls",
         (false, false) => "none_yet",
     };
-    let live_cache_telemetry = app.streaming.streaming_input_tokens > 0
-        && !app.kv_cache.current_api_usage_recorded
+    let live_cache_telemetry = !app.kv_cache.current_api_usage_recorded
         && (app.streaming.streaming_cache_read_tokens.is_some()
             || app.streaming.streaming_cache_creation_tokens.is_some());
     let live_reported = if live_cache_telemetry {
@@ -1207,22 +1212,19 @@ fn format_cache_stats(app: &App) -> String {
     } else {
         0
     });
-    let read_pct_including_live = cache_ratio_pct(
-        read_including_live,
+    let live_prompt = if live_cache_telemetry {
         crate::tui::info_widget::effective_prompt_tokens(
-            reported_including_live,
-            read_including_live,
-            write_including_live,
-        ),
-    );
-    let write_pct_including_live = cache_ratio_pct(
-        write_including_live,
-        crate::tui::info_widget::effective_prompt_tokens(
-            reported_including_live,
-            read_including_live,
-            write_including_live,
-        ),
-    );
+            &app.kv_cache_provider_name(),
+            live_reported,
+            app.streaming.streaming_cache_read_tokens.unwrap_or(0),
+            app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
+        )
+    } else {
+        0
+    };
+    let prompt_including_live = effective_reported.map(|prompt| prompt.saturating_add(live_prompt));
+    let read_pct_including_live = format_pct(read_including_live, prompt_including_live);
+    let write_pct_including_live = format_pct(write_including_live, prompt_including_live);
     let ttl = if crate::provider::anthropic::is_cache_ttl_1h() {
         "1 hour"
     } else {
@@ -1363,6 +1365,21 @@ fn format_cache_stats(app: &App) -> String {
     lines.push(format!("- is_replay: {}", app.is_replay));
     lines.push(format!("- current_provider: {}", current_provider));
     lines.push(format!("- current_model: {}", current_model));
+    let route_provider = app.kv_cache_provider_name();
+    let route_ttl = crate::tui::cache_ttl_for_provider_model(&route_provider, Some(&current_model));
+    let retention = match route_ttl {
+        Some(seconds) if crate::provider::cache_ttl_is_estimate(&route_provider) => format!(
+            "{} minutes, provider estimate/minimum, not a guaranteed expiry",
+            seconds / 60
+        ),
+        Some(seconds) => format!("{} minutes", seconds / 60),
+        None => "unknown, provider-managed retention".to_string(),
+    };
+    lines.push(format!("- active_route_cache_retention: {}", retention));
+    lines.push(
+        "- anthropic_cache_ttl_setting_scope: Anthropic only, does not configure OpenAI retention"
+            .to_string(),
+    );
     lines.push(format!(
         "- upstream_provider: {}",
         opt_string(app.upstream_provider.as_deref())
@@ -1459,15 +1476,23 @@ fn format_cache_stats(app: &App) -> String {
     ));
     lines.push(format!(
         "- effective_prompt_tokens (input+read+creation for split providers): {}",
-        bold_count(effective_reported)
+        effective_reported
+            .map(bold_count)
+            .unwrap_or_else(|| "unknown (legacy history lacks per-request accounting)".to_string())
     ));
     lines.push(format!(
-        "- cache_read_pct_of_effective_prompt: {}%",
+        "- cache_read_pct_of_effective_prompt: {}",
         read_pct
     ));
     lines.push(format!(
-        "- cache_write_pct_of_effective_prompt: {}%",
+        "- cache_write_pct_of_effective_prompt: {}",
         write_pct
+    ));
+    lines.push(format!(
+        "- effective_prompt_tokens_including_unrecorded_live: {}",
+        prompt_including_live
+            .map(bold_count)
+            .unwrap_or_else(|| "unknown".to_string())
     ));
     lines.push(format!(
         "- total_cache_reported_input_tokens_including_unrecorded_live: {}",
@@ -1482,11 +1507,11 @@ fn format_cache_stats(app: &App) -> String {
         bold_count(write_including_live)
     ));
     lines.push(format!(
-        "- cache_read_pct_of_effective_prompt_including_unrecorded_live: {}%",
+        "- cache_read_pct_of_effective_prompt_including_unrecorded_live: {}",
         read_pct_including_live
     ));
     lines.push(format!(
-        "- cache_write_pct_of_effective_prompt_including_unrecorded_live: {}%",
+        "- cache_write_pct_of_effective_prompt_including_unrecorded_live: {}",
         write_pct_including_live
     ));
     lines.push(format!(
@@ -1849,7 +1874,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
     if trimmed == "/cache" || trimmed.starts_with("/cache ") {
         let arg = trimmed.strip_prefix("/cache").unwrap_or("").trim();
         match arg {
-            "stats" | "status" => {
+            "" | "stats" | "status" => {
                 app.push_display_message(DisplayMessage {
                     role: "usage".to_string(),
                     content: format_cache_stats(app),
@@ -1860,10 +1885,9 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 });
                 app.set_status_notice("Cache stats");
             }
-            "extend" | "1h" | "1hour" | "extended" | "5m" | "5min" | "default" | "reset" | "" => {
+            "extend" | "1h" | "1hour" | "extended" | "5m" | "5min" | "default" | "reset" => {
                 let enabled = match arg {
                     "5m" | "5min" | "default" | "reset" => false,
-                    "" => !crate::config::config().provider.anthropic_cache_ttl_1h,
                     _ => true,
                 };
                 match crate::config::Config::set_anthropic_cache_ttl_1h(enabled) {
@@ -1884,7 +1908,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
             }
             _ => {
                 app.push_display_message(DisplayMessage::error(
-                    "Usage: /cache (toggle saved preference), /cache stats, /cache extend (1 hour), /cache 5m (5 minutes)"
+                    "Usage: /cache or /cache stats (report), /cache extend (save Anthropic 1 hour), /cache 5m (save Anthropic 5 minutes)"
                         .to_string(),
                 ));
             }

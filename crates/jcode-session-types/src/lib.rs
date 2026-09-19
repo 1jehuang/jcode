@@ -281,6 +281,10 @@ pub enum StoredDisplayRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTokenUsage {
+    /// Full prompt size resolved per request, before provider identity can change.
+    /// Older records lack this and cannot safely reconstruct mixed-provider totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

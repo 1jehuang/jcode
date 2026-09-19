@@ -15,11 +15,14 @@ use std::time::{Duration, Instant};
 fn effective_prompt_tokens_handles_split_and_subset_accounting() {
     // Anthropic-style split accounting: `input` is only the uncached remainder,
     // so cache_read pushed beyond input means the true prompt is the sum.
-    assert_eq!(effective_prompt_tokens(2449, 19499, 684), 22632);
+    assert_eq!(
+        effective_prompt_tokens("anthropic", 2449, 19499, 684),
+        22632
+    );
     // OpenAI-style subset accounting: cached tokens are inside `input`.
-    assert_eq!(effective_prompt_tokens(10000, 6000, 0), 10000);
+    assert_eq!(effective_prompt_tokens("openai", 10000, 6000, 0), 10000);
     // No cache telemetry at all behaves like a plain input count.
-    assert_eq!(effective_prompt_tokens(5000, 0, 0), 5000);
+    assert_eq!(effective_prompt_tokens("openai", 5000, 0, 0), 5000);
 }
 
 #[test]
@@ -28,6 +31,7 @@ fn cache_hit_ratio_uses_effective_prompt_for_split_providers() {
     // clamped the ratio to 100%.
     let cache = CacheHitInfo {
         reported_input_tokens: 2449,
+        prompt_tokens: Some(22632),
         read_tokens: 19499,
         creation_tokens: 684,
         ..Default::default()
@@ -59,6 +63,8 @@ fn kv_cache_widget_shows_session_hit_ratio() {
     let data = InfoWidgetData {
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 20_000,
+            prompt_tokens: Some(38_000),
+            last_prompt_tokens: Some(10_000),
             read_tokens: 15_000,
             creation_tokens: 3_000,
             optimal_input_tokens: 16_667,
@@ -1761,6 +1767,7 @@ fn compact_page_height_estimate_matches_rendered_lines() {
         }),
         cache_hit_info: Some(CacheHitInfo {
             reported_input_tokens: 1_000,
+            prompt_tokens: Some(1_000),
             read_tokens: 800,
             ..Default::default()
         }),

@@ -365,12 +365,14 @@ pub fn effective_context_tokens_from_usage(
     cache_read_input_tokens: Option<u64>,
     cache_creation_input_tokens: Option<u64>,
 ) -> u64 {
-    if input_tokens == 0 {
-        return 0;
-    }
     let cache_read = cache_read_input_tokens.unwrap_or(0);
     let cache_creation = cache_creation_input_tokens.unwrap_or(0);
     let provider_name = provider_name.to_lowercase();
+
+    // OpenAI cache writes, like reads, are subsets of the inclusive input count.
+    if provider_name.contains("openai") || provider_name.contains("codex") {
+        return input_tokens;
+    }
 
     let split_cache_accounting = provider_name.contains("anthropic")
         || provider_name.contains("claude")
@@ -739,6 +741,10 @@ mod tests {
             effective_context_tokens_from_usage("openai", 400_000, Some(390_000), None),
             400_000
         );
+        assert_eq!(
+            effective_context_tokens_from_usage("openai-api", 10_000, Some(6_000), Some(2_000)),
+            10_000
+        );
         // No cache info at all: pass through.
         assert_eq!(
             effective_context_tokens_from_usage("opencode-go", 396_000, None, None),
@@ -761,10 +767,10 @@ mod tests {
     }
 
     #[test]
-    fn effective_context_zero_input_reports_zero() {
+    fn effective_context_zero_uncached_input_preserves_cached_prompt() {
         assert_eq!(
             effective_context_tokens_from_usage("anthropic", 0, Some(300_000), Some(5_000)),
-            0
+            305_000
         );
     }
 

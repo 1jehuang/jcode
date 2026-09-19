@@ -69,6 +69,10 @@ pub struct SessionActivitySnapshot {
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsageTotals {
+    /// Sum of full prompt sizes for requests with cache telemetry. None means
+    /// legacy records lack per-request accounting, not that the total is zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prompt_tokens: Option<u64>,
     pub messages_with_token_usage: usize,
     pub input_tokens: u64,
     pub output_tokens: u64,

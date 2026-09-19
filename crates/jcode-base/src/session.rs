@@ -1186,7 +1186,10 @@ request in this new forked session, using the inherited conversation only as con
     }
 
     pub fn token_usage_totals(&self) -> crate::protocol::TokenUsageTotals {
-        let mut totals = crate::protocol::TokenUsageTotals::default();
+        let mut totals = crate::protocol::TokenUsageTotals {
+            cache_prompt_tokens: Some(0),
+            ..Default::default()
+        };
         for message in &self.messages {
             let Some(usage) = message.token_usage.as_ref() else {
                 continue;
@@ -1197,6 +1200,10 @@ request in this new forked session, using the inherited conversation only as con
             if usage.cache_read_input_tokens.is_some()
                 || usage.cache_creation_input_tokens.is_some()
             {
+                totals.cache_prompt_tokens = totals
+                    .cache_prompt_tokens
+                    .zip(usage.prompt_tokens)
+                    .map(|(total, prompt)| total.saturating_add(prompt));
                 totals.cache_reported_input_tokens = totals
                     .cache_reported_input_tokens
                     .saturating_add(usage.input_tokens);

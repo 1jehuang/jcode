@@ -384,6 +384,9 @@ pub struct UsageInfo {
 /// Session-level KV cache telemetry for providers that report cache usage.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CacheHitInfo {
+    /// Sum of per-request full prompt sizes, never inferred from aggregate counters.
+    pub prompt_tokens: Option<u64>,
+    pub last_prompt_tokens: Option<u64>,
     /// Input tokens from completed API requests that included explicit cache telemetry.
     pub reported_input_tokens: u64,
     /// Tokens read from provider KV/prefix cache across this session.
@@ -413,15 +416,14 @@ pub struct CacheHitInfo {
 /// - OpenAI-style (subset accounting): cached tokens are already counted inside
 ///   `input`, so the prompt size is just `input`.
 ///
-/// We don't always know the provider at the point a ratio is computed, so we use
-/// the same heuristic the compaction path uses: treat accounting as split when a
-/// cache-creation count exists or when reported reads exceed the bare input.
-pub fn effective_prompt_tokens(input: u64, read: u64, creation: u64) -> u64 {
-    if creation > 0 || read > input {
-        input.saturating_add(read).saturating_add(creation)
-    } else {
-        input
-    }
+/// Resolve the accounting while the request's provider identity is still known.
+pub fn effective_prompt_tokens(provider: &str, input: u64, read: u64, creation: u64) -> u64 {
+    crate::compaction::effective_context_tokens_from_usage(
+        provider,
+        input,
+        Some(read),
+        Some(creation),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,18 +435,9 @@ pub struct CacheMissAttribution {
 }
 
 impl CacheHitInfo {
-    /// Effective total prompt tokens across the session (read denominator).
-    fn effective_reported_tokens(&self) -> u64 {
-        effective_prompt_tokens(
-            self.reported_input_tokens,
-            self.read_tokens,
-            self.creation_tokens,
-        )
-    }
-
     /// Fraction of the session's prompt tokens that were served from cache.
     pub fn hit_ratio(&self) -> Option<f32> {
-        let denominator = self.effective_reported_tokens();
+        let denominator = self.prompt_tokens?;
         if denominator == 0 {
             None
         } else {
@@ -463,16 +456,11 @@ impl CacheHitInfo {
     }
 
     pub fn last_ratio(&self) -> Option<f32> {
-        let input = self.last_reported_input_tokens?;
-        let denominator = effective_prompt_tokens(
-            input,
-            self.last_read_tokens.unwrap_or(0),
-            self.last_creation_tokens.unwrap_or(0),
-        );
+        let denominator = self.last_prompt_tokens?;
         if denominator == 0 {
             None
         } else {
-            Some((self.last_read_tokens.unwrap_or(0) as f32 / denominator as f32).clamp(0.0, 1.0))
+            Some((self.last_read_tokens? as f32 / denominator as f32).clamp(0.0, 1.0))
         }
     }
 
@@ -481,7 +469,7 @@ impl CacheHitInfo {
         if optimal == 0 {
             None
         } else {
-            Some((self.last_read_tokens.unwrap_or(0) as f32 / optimal as f32).clamp(0.0, 1.0))
+            Some((self.last_read_tokens? as f32 / optimal as f32).clamp(0.0, 1.0))
         }
     }
 }

@@ -219,6 +219,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
         token_usage_totals: Some(TokenUsageTotals {
+            cache_prompt_tokens: Some(130),
             messages_with_token_usage: 2,
             input_tokens: 123,
             output_tokens: 45,

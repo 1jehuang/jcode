@@ -1729,6 +1729,7 @@ fn test_resumed_session_seeds_cost_from_history_token_totals() {
     crate::provider::anthropic::set_cache_ttl_1h(true);
 
     let totals = crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(141_000),
         messages_with_token_usage: 3,
         input_tokens: 1_000,
         output_tokens: 2_000,
