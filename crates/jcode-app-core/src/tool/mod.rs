@@ -27,6 +27,7 @@ pub mod mcp;
 mod memory;
 mod multiedit;
 mod open;
+mod panel;
 mod patch;
 mod read;
 pub mod selfdev;
@@ -34,7 +35,6 @@ pub(crate) mod serde_coerce;
 mod session_search;
 pub(crate) mod session_search_index;
 mod side_panel;
-mod panel;
 mod skill;
 mod todo;
 mod webfetch;
@@ -166,6 +166,18 @@ fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(session_id)
         .cloned()
+}
+
+/// Whether `tool_name` survives the session policy for `session_id`.
+/// No policy registered means unrestricted (true).
+pub(crate) fn session_tool_policy_allows_tool(session_id: &str, tool_name: &str) -> bool {
+    session_tool_policy(session_id).is_none_or(|policy| {
+        policy
+            .allowed_tools
+            .as_ref()
+            .is_none_or(|allowed| tool_name_is_allowed(allowed, tool_name))
+            && !tool_name_is_disabled(&policy.disabled_tools, tool_name)
+    })
 }
 
 #[cfg(test)]
