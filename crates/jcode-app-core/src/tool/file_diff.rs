@@ -44,16 +44,24 @@ pub(super) fn unified(old_path: &str, new_path: &str, old: &str, new: &str) -> S
             path.to_owned()
         }
     }
+    let old_header = header(old_path, "a");
+    let new_header = header(new_path, "b");
+    if old == new {
+        return format!("--- {old_header}\n+++ {new_header}\n");
+    }
     TextDiff::from_lines(old, new)
         .unified_diff()
         .context_radius(3)
-        .header(&header(old_path, "a"), &header(new_path, "b"))
+        .header(&old_header, &new_header)
         .to_string()
 }
 
 pub(super) fn attach(mut output: ToolOutput, diff: String) -> ToolOutput {
-    // An empty diff explicitly means no net text changes. Never substitute an
-    // input-snippet diff when this authoritative block is present.
+    // Header-only entries identify known no-ops. No entries means unknown,
+    // rather than claiming all requested files had no net changes.
+    if diff.is_empty() {
+        return output;
+    }
     output.output.push_str("\n\nFile diff:\n```diff\n");
     output.output.push_str(&diff);
     if !diff.is_empty() && !diff.ends_with('\n') {
@@ -87,7 +95,12 @@ mod tests {
         assert!(created.contains("@@ -0,0 +1 @@"), "{created}");
         assert!(created.contains("\\ No newline at end of file"));
         assert!(unified("f", "/dev/null", "old\n", "").contains("@@ -1 +0,0 @@"));
-        assert!(unified("f", "f", "same\n", "same\n").is_empty());
+        assert_eq!(unified("f", "f", "same\n", "same\n"), "--- a/f\n+++ b/f\n");
+        assert!(
+            attach(ToolOutput::new("unknown"), String::new())
+                .metadata
+                .is_none()
+        );
     }
 
     #[test]
@@ -205,8 +218,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(noop.metadata.as_ref().unwrap()["diff"], "");
-        assert!(noop.output.contains("```diff\n```"));
+        assert_eq!(
+            noop.metadata.as_ref().unwrap()["diff"],
+            "--- a/moved.rs\n+++ b/moved.rs\n"
+        );
+        assert!(
+            noop.output
+                .contains("```diff\n--- a/moved.rs\n+++ b/moved.rs\n```")
+        );
         let failed = super::super::edit::EditTool::new()
             .execute(
                 json!({
@@ -223,11 +242,31 @@ mod tests {
                 json!({
                     "file_path":"file.rs", "content":"text"
                 }),
-                ctx,
+                ctx.clone(),
             )
             .await
             .unwrap();
         assert!(unknown.metadata.is_none());
         assert!(!unknown.output.contains("```diff"));
+        std::fs::write(&path, [0xff]).unwrap();
+        let mixed = super::super::apply_patch::ApplyPatchTool::new().execute(json!({
+            "patch_text":"*** Begin Patch\n*** Add File: file.rs\n+text\n*** Update File: moved.rs\n@@\n-patched\n+patched\n*** End Patch"
+        }), ctx.clone()).await.unwrap();
+        assert_eq!(
+            mixed.metadata.as_ref().unwrap()["diff"],
+            "--- a/moved.rs\n+++ b/moved.rs\n"
+        );
+        std::fs::write(&path, [0xff]).unwrap();
+        let all_unknown = super::super::apply_patch::ApplyPatchTool::new()
+            .execute(
+                json!({
+                    "patch_text":"*** Begin Patch\n*** Add File: file.rs\n+text\n*** End Patch"
+                }),
+                ctx,
+            )
+            .await
+            .unwrap();
+        assert!(all_unknown.metadata.is_none());
+        assert!(!all_unknown.output.contains("```diff"));
     }
 }

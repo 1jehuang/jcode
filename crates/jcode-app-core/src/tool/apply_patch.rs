@@ -311,7 +311,6 @@ impl Tool for ApplyPatchTool {
                     super::file_diff::snapshot(&ctx.resolve_path(Path::new(path))).await,
                 );
             }
-            let complete = before.values().chain(after.values()).all(Option::is_some);
             let mut combined = std::collections::BTreeSet::new();
             // A simple successful move to a new path can retain the source's
             // coordinates. For overwrites or move chains, keep net per-path
@@ -349,18 +348,22 @@ impl Tool for ApplyPatchTool {
                     (old, after.remove(&path))
                 {
                     unified.push_str(&super::file_diff::unified(
-                        if old_exists { &path } else { "/dev/null" },
-                        if new_exists { &path } else { "/dev/null" },
+                        if old_exists || !new_exists {
+                            &path
+                        } else {
+                            "/dev/null"
+                        },
+                        if new_exists || !old_exists {
+                            &path
+                        } else {
+                            "/dev/null"
+                        },
                         &old,
                         &new,
                     ));
                 }
             }
-            let output = if complete {
-                super::file_diff::attach(ToolOutput::new(body), unified)
-            } else {
-                ToolOutput::new(body)
-            };
+            let output = super::file_diff::attach(ToolOutput::new(body), unified);
             if touched_paths.len() == 1 {
                 Ok(output.with_title(touched_paths[0].clone()))
             } else {
