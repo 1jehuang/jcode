@@ -30,7 +30,7 @@ async fn fetch_usage() -> Result<UsageData> {
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&active_label));
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, Some(active_label)).await
 }
 
 async fn refresh_usage(usage: Arc<RwLock<UsageData>>) {
@@ -350,7 +350,7 @@ async fn fetch_usage_for_account(
     }
 
     let cache_key = anthropic_usage_cache_key(&access_token, None);
-    fetch_anthropic_usage_data(access_token, cache_key).await
+    fetch_anthropic_usage_data(access_token, cache_key, None).await
 }
 
 /// Fetch the current Anthropic OAuth usage for an already-resolved access
@@ -359,7 +359,7 @@ async fn fetch_usage_for_account(
 /// an empty snapshot while a background refresh starts.
 pub async fn fetch_usage_for_access_token(access_token: &str) -> Result<UsageData> {
     let cache_key = anthropic_usage_cache_key(access_token, None);
-    fetch_anthropic_usage_data(access_token.to_string(), cache_key).await
+    fetch_anthropic_usage_data(access_token.to_string(), cache_key, None).await
 }
 
 /// Get usage data synchronously (returns cached data, triggers refresh if stale)

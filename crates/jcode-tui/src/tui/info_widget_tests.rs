@@ -626,7 +626,7 @@ fn cost_based_usage_widgets_show_price_and_tokens() {
     assert!(expanded_text.contains("$0.0123"));
     assert!(expanded_text.contains("12.3K in + 678 out"));
 
-    let compact_text = lines_text(&render_usage_compact(&usage, 40, false));
+    let compact_text = lines_text(&render_usage_compact(&usage, 40, false, false));
     assert!(compact_text.contains("$0.0123"));
     assert!(compact_text.contains("12.3K in + 678 out"));
 }

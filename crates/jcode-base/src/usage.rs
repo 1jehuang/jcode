@@ -18,7 +18,7 @@ pub use model::*;
 use provider_fetch::*;
 
 use anyhow::{Context, Result};
-pub use display::{format_reset_time, format_usage_bar};
+pub use display::{format_reset_time, format_usage_bar, window_elapsed_percent};
 use display::{format_token_count, humanize_key, provider_usage_cache_is_fresh};
 use openai_helpers::{parse_openai_usage_payload, usage_percent_to_ratio};
 use std::collections::HashMap;
@@ -51,11 +51,89 @@ static PROVIDER_USAGE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<HashMap<String, (Instant, ProviderUsage)>>,
 > = std::sync::OnceLock::new();
 
-async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> Result<UsageData> {
+/// Fetch Anthropic OAuth usage.
+///
+/// `account_label` names the stored account the token came from, when known.
+/// Anthropic rotates access tokens on refresh and rejects the superseded one
+/// with `401 OAuth access token has been revoked`, so a token snapshotted
+/// before a concurrent refresh looks revoked even though the account is fine.
+/// With a label we can re-read the freshly stored token and retry once instead
+/// of caching that misleading error for the whole backoff window.
+async fn fetch_anthropic_usage_data(
+    access_token: String,
+    cache_key: String,
+    account_label: Option<String>,
+) -> Result<UsageData> {
     if let Some(cached) = cached_anthropic_usage(&cache_key) {
         return Ok(cached);
     }
+    let mut access_token = access_token;
+    let mut retried_after_rotation = false;
 
+    loop {
+        match anthropic_usage_attempt(&access_token).await {
+            Ok(usage) => {
+                store_anthropic_usage(cache_key, usage.clone());
+                return Ok(usage);
+            }
+            Err(AnthropicUsageAttemptError::Unauthorized { message })
+                if !retried_after_rotation =>
+            {
+                // A rotated-away access token reports itself as revoked. Retry
+                // once with whatever the refresh path has since stored.
+                match account_label
+                    .as_deref()
+                    .and_then(|label| rotated_anthropic_access_token(label, &access_token))
+                {
+                    Some(current) => {
+                        retried_after_rotation = true;
+                        access_token = current;
+                    }
+                    None => {
+                        let err = anthropic_usage_error(message);
+                        store_anthropic_usage(cache_key, err.clone());
+                        anyhow::bail!(
+                            err.last_error.unwrap_or_else(|| "Usage API error".into())
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                let fallback = err.fallback_message();
+                let stored = anthropic_usage_error(err.into_message());
+                store_anthropic_usage(cache_key, stored.clone());
+                anyhow::bail!(stored.last_error.unwrap_or_else(|| fallback.into()));
+            }
+        }
+    }
+}
+
+/// Why a single usage request failed. `Unauthorized` is split out because it is
+/// the one status a token rotation can explain away.
+enum AnthropicUsageAttemptError {
+    Transport { message: String },
+    Unauthorized { message: String },
+    Status { message: String },
+}
+
+impl AnthropicUsageAttemptError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Transport { message } | Self::Unauthorized { message } | Self::Status { message } => message,
+        }
+    }
+
+    fn fallback_message(&self) -> &'static str {
+        match self {
+            Self::Transport { .. } => "Failed to fetch usage data",
+            Self::Unauthorized { .. } | Self::Status { .. } => "Usage API error",
+        }
+    }
+}
+
+async fn anthropic_usage_attempt(
+    access_token: &str,
+) -> std::result::Result<UsageData, AnthropicUsageAttemptError> {
     let client = crate::provider::shared_http_client();
     let response = crate::provider::anthropic::apply_oauth_attribution_headers(
         client
@@ -76,29 +154,33 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            let err = anthropic_usage_error(format!("Failed to fetch usage data: {}", e));
-            store_anthropic_usage(cache_key, err.clone());
-            anyhow::bail!(
-                err.last_error
-                    .unwrap_or_else(|| "Failed to fetch usage data".into())
-            );
+            return Err(AnthropicUsageAttemptError::Transport {
+                message: format!("Failed to fetch usage data: {}", e),
+            });
         }
     };
 
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        let err = anthropic_usage_error(format!("Usage API error ({}): {}", status, error_text));
-        store_anthropic_usage(cache_key, err.clone());
-        anyhow::bail!(err.last_error.unwrap_or_else(|| "Usage API error".into()));
+        let message = format!("Usage API error ({}): {}", status, error_text);
+        return Err(if status == reqwest::StatusCode::UNAUTHORIZED {
+            AnthropicUsageAttemptError::Unauthorized { message }
+        } else {
+            AnthropicUsageAttemptError::Status { message }
+        });
     }
 
-    let data: UsageResponse = response
-        .json()
-        .await
-        .context("Failed to parse usage response")?;
+    let data: UsageResponse = match response.json().await {
+        Ok(data) => data,
+        Err(e) => {
+            return Err(AnthropicUsageAttemptError::Status {
+                message: format!("Failed to parse usage response: {}", e),
+            });
+        }
+    };
 
-    let usage = UsageData {
+    Ok(UsageData {
         five_hour: data
             .five_hour
             .as_ref()
@@ -138,10 +220,15 @@ async fn fetch_anthropic_usage_data(access_token: String, cache_key: String) -> 
             .unwrap_or(false),
         fetched_at: Some(Instant::now()),
         last_error: None,
-    };
+    })
+}
 
-    store_anthropic_usage(cache_key, usage.clone());
-    Ok(usage)
+/// The access token currently stored for `label`, when it differs from the one
+/// that was just rejected (i.e. a concurrent refresh rotated it).
+fn rotated_anthropic_access_token(label: &str, rejected: &str) -> Option<String> {
+    let creds = auth::claude::load_credentials_for_account(label).ok()?;
+    let current = creds.access_token;
+    (!current.is_empty() && current != rejected).then_some(current)
 }
 
 /// Fetch usage from all connected providers with OAuth credentials.
