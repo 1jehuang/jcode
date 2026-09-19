@@ -186,10 +186,13 @@ fn resolve_with(
 ) -> Result<(JevProvider, String)> {
     let providers: &[JevProvider] = match selector.trim().to_ascii_lowercase().as_str() {
         "auto" => &[
+            // Included subscriber access wins over personal paid provider keys.
+            // Entitlement is checked live before evaluation. Failure must not
+            // silently spend a BYOK balance; users can select BYOK explicitly.
+            JevProvider::Jcode,
             JevProvider::OpenRouter,
             JevProvider::TypeSafe,
             JevProvider::Aimlapi,
-            JevProvider::Jcode,
         ],
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
@@ -451,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefers_byok_then_subscription_without_shared_slot() {
+    fn auto_prefers_included_subscription_without_shared_slot() {
         for available in [
             "OPENROUTER_API_KEY",
             "TYPESAFE_API_KEY",
@@ -467,6 +470,13 @@ mod tests {
         }
         assert_eq!(
             resolve_with("auto", |_, _| Some("all-present".into()))
+                .unwrap()
+                .0,
+            JevProvider::Jcode
+        );
+        // Deliberate BYOK remains available even when a Jcode login is present.
+        assert_eq!(
+            resolve_with("openrouter", |_, _| Some("all-present".into()))
                 .unwrap()
                 .0,
             JevProvider::OpenRouter
