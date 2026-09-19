@@ -799,7 +799,7 @@ impl Agent {
         match band {
             2 => format!(
                 "Context is {usage_pct:.0}% full (~{tokens} tokens) and compaction is near. \
-                 {bank_line} — after compaction only the summary survives, stale tool output \
+                 {bank_line} — after compaction only the summary plus the most recent messages survive, older tool output \
                  is dropped automatically, and middle context is already unreliable: do not \
                  trust details you have not banked or re-read. {recall_line}",
             ),
