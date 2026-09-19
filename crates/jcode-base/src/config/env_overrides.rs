@@ -419,6 +419,9 @@ impl Config {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
+            self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {

@@ -103,8 +103,8 @@ impl Config {
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
-- Memory: {}
-- Memory sidecar: {}
+- Memory recall: Jev ({})
+- Memory extraction sidecar: {}
 - Ambient: {}
 
 **Gateway:**
@@ -296,10 +296,7 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents
-                .memory_model
-                .as_deref()
-                .unwrap_or("(sidecar auto-select)"),
+            self.agents.memory_jev_provider,
             if self.agents.memory_sidecar_enabled {
                 "enabled"
             } else {

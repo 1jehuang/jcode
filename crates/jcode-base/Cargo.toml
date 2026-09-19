@@ -123,7 +123,7 @@ tempfile = "3"
 qrcode = { version = "0.14.1", default-features = false }
 
 [features]
-default = ["embeddings", "bedrock"]
+default = ["bedrock"]
 # Compiles the in-crate test helpers (storage::lock_test_env,
 # auth::test_sandbox, bus::reset_models_updated_publish_state_for_tests, ...) as
 # `pub` so downstream crates' test targets can reach them. Enabled as a

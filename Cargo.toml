@@ -207,11 +207,9 @@ jcode-selfdev-types = { path = "crates/jcode-selfdev-types" }
 tempfile = "3"
 
 [features]
-# Include local ONNX/tokenizer embeddings in default builds so memory recall,
-# semantic retrieval, and embedding-backed features work out of the box.
-# Use `JCODE_DEV_FEATURE_PROFILE=minimal` for compile-speed probes that need
-# to skip optional default feature stacks.
-default = ["pdf", "embeddings", "bedrock"]
+# Memory recall uses Jev Decisions and needs no local inference stack.
+# Keep embeddings opt-in for historical benchmarks/debugging only.
+default = ["pdf", "bedrock"]
 dev-bins = ["jcode-tui/dev-bins"]
 jemalloc = [
     "dep:tikv-jemallocator",
