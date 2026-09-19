@@ -621,6 +621,21 @@ fn test_overscroll_requires_gesture_starting_at_bottom() {
 }
 
 #[test]
+fn test_wheel_lines_scale_with_flick_speed() {
+    use std::time::Duration;
+    // Deliberate notches (slow or first) use the base; rapid notches ramp up,
+    // capped so the hardest flick stays controllable.
+    assert_eq!(App::wheel_lines_for_gap(None), 3);
+    assert_eq!(
+        App::wheel_lines_for_gap(Some(Duration::from_millis(200))),
+        3
+    );
+    assert_eq!(App::wheel_lines_for_gap(Some(Duration::from_millis(30))), 6);
+    assert_eq!(App::wheel_lines_for_gap(Some(Duration::from_millis(5))), 9);
+    assert!(App::wheel_lines_for_gap(Some(Duration::from_millis(1))) <= 10);
+}
+
+#[test]
 fn test_copy_selection_from_bottom_rebases_scroll_instead_of_jumping_to_top() {
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(80, 25, 0, 40);

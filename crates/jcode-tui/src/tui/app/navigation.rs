@@ -64,12 +64,12 @@ fn is_mouse_scroll_kind(kind: MouseEventKind) -> bool {
 }
 
 impl App {
-    /// Lines moved per mouse-wheel notch, matching Neovim's `mousescroll`
-    /// default (`ver:3`). A wheel event is a discrete command: scroll N lines
-    /// now. There is deliberately no momentum queue or velocity acceleration — a
-    /// terminal reports discrete notches, so "how hard the wheel was flicked"
-    /// was a guess, and a held drag's tick-driven scroll looked like a hard flick.
+    /// Lines moved by a deliberate mouse-wheel notch, matching Neovim's
+    /// `mousescroll` default (`ver:3`).
     const WHEEL_LINES: i16 = 3;
+    /// Ceiling on lines for a very fast flick. The terminal reports no physical
+    /// force, so the only velocity signal is the gap between notches.
+    const WHEEL_LINES_MAX: i16 = 10;
     /// How long the overscroll status line stays revealed after the last
     /// downward overscroll tick before it rebounds away. Long enough that the
     /// depleting countdown indicator is perceivable and the line reads as a
@@ -745,11 +745,28 @@ impl App {
         moved
     }
 
+    /// Lines per wheel notch, scaled by how fast notches arrive. A deliberate
+    /// notch moves `WHEEL_LINES`; rapid notches (a flick) ramp toward
+    /// `WHEEL_LINES_MAX`. No queue or glide: each notch lands immediately, so a
+    /// programmatic scroll can never be mistaken for a flick.
+    pub(super) fn wheel_lines_for_gap(gap: Option<std::time::Duration>) -> i16 {
+        let multiplier = match gap.map(std::time::Duration::as_millis) {
+            Some(ms) if ms <= 15 => 3,
+            Some(ms) if ms <= 40 => 2,
+            _ => 1,
+        };
+        (Self::WHEEL_LINES * multiplier).min(Self::WHEEL_LINES_MAX)
+    }
+
     pub(super) fn enqueue_mouse_scroll(&mut self, target: MouseScrollTarget, direction: i16) {
         if direction == 0 {
             return;
         }
-        self.scroll_target_lines(target, direction, Self::WHEEL_LINES);
+        let now = Instant::now();
+        let lines =
+            Self::wheel_lines_for_gap(self.last_wheel.map(|t| now.saturating_duration_since(t)));
+        self.last_wheel = Some(now);
+        self.scroll_target_lines(target, direction, lines);
     }
 
     /// Apply an exact row delta supplied by a native terminal integration. The

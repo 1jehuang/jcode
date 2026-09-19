@@ -1606,6 +1606,9 @@ pub struct App {
     /// without the clear-then-repaint flicker around kitty image placeholders
     /// (issue #404).
     force_full_repaint: bool,
+    /// Time of the last mouse-wheel notch, used only to scale how many lines a
+    /// fast flick scrolls. No queue: each notch lands immediately.
+    last_wheel: Option<Instant>,
     /// When the user overscrolls past the bottom of the transcript, an extra
     /// status line is revealed below the input. This records the last time an
     /// overscroll tick was received; the line dwells for a fixed window after
