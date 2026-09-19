@@ -229,7 +229,7 @@ fn cache_cold_countdown_redraw_active(state: &dyn TuiState) -> bool {
     }
     state
         .cache_ttl_status()
-        .map(|info| info.is_cold || info.expiring_soon())
+        .map(|info| info.expiry_notification_active())
         .unwrap_or(false)
 }
 

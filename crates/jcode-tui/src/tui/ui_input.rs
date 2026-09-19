@@ -1862,7 +1862,9 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
             ));
         }
 
-        if let Some(cache_info) = app.cache_ttl_status() {
+        if let Some(cache_info) = app.cache_ttl_status()
+            && cache_info.expiry_notification_active()
+        {
             if cache_info.is_cold {
                 let tokens_str = cache_info
                     .cached_tokens
@@ -1878,15 +1880,7 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
                     .unwrap_or_default();
                 push_sep(&mut spans);
                 spans.push(Span::styled(
-                    format!(
-                        "{}{}",
-                        if cache_info.is_estimate {
-                            "⏳ cache retention uncertain"
-                        } else {
-                            "🧊 cache cold"
-                        },
-                        tokens_str
-                    ),
+                    format!("🧊 cache cold{}", tokens_str),
                     Style::default().fg(rgb(140, 180, 255)),
                 ));
                 // Small gray age since the retention window elapsed, e.g. `1h 1m`.
@@ -1918,12 +1912,7 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
                 };
                 push_sep(&mut spans);
                 spans.push(Span::styled(
-                    format!(
-                        "⏳ cache {}{}{}",
-                        if cache_info.is_estimate { "~" } else { "" },
-                        time_str,
-                        tokens_str
-                    ),
+                    format!("⏳ cache {}{}", time_str, tokens_str),
                     Style::default().fg(rgb(255, 193, 7)),
                 ));
             }

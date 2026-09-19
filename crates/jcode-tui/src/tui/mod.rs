@@ -885,7 +885,7 @@ pub trait TuiState {
                 return true;
             }
             if let Some(cache_info) = self.cache_ttl_status()
-                && (cache_info.is_cold || cache_info.expiring_soon())
+                && cache_info.expiry_notification_active()
             {
                 return true;
             }
@@ -972,7 +972,13 @@ impl CacheTtlInfo {
     /// Whether the cache is warm but close enough to expiry that the
     /// countdown should be shown (and idle redraws kept alive).
     pub fn expiring_soon(&self) -> bool {
-        !self.is_cold && self.remaining_secs <= self.warn_window_secs()
+        !self.is_estimate && !self.is_cold && self.remaining_secs <= self.warn_window_secs()
+    }
+
+    /// Only known TTLs may drive proactive expiry UI. An estimate or minimum
+    /// lifetime says nothing about when the provider will actually evict cache.
+    pub fn expiry_notification_active(&self) -> bool {
+        !self.is_estimate && (self.is_cold || self.expiring_soon())
     }
 }
 
