@@ -1620,6 +1620,7 @@ impl crate::tui::TuiState for App {
             background_info,
             usage_info,
             usage_display_used: crate::config::config().display.usage_display_used(),
+            usage_display_elapsed: crate::config::config().display.usage_display_elapsed(),
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name

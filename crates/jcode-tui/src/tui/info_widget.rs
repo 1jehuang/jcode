@@ -625,6 +625,9 @@ pub struct InfoWidgetData {
     pub usage_info: Option<UsageInfo>,
     /// Show consumed rather than remaining percentages in usage limits.
     pub usage_display_used: bool,
+    /// Replace the reset countdown with the window's elapsed percentage, so
+    /// consumed quota and elapsed time can be compared directly.
+    pub usage_display_elapsed: bool,
     /// Streaming output tokens per second (approximate)
     pub tokens_per_second: Option<f32>,
     /// Active provider name (openrouter/openai/anthropic/...)
@@ -2086,6 +2089,7 @@ fn render_sections(
             info,
             inner.width,
             data.usage_display_used,
+            data.usage_display_elapsed,
         ));
     }
 

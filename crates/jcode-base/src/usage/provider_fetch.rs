@@ -46,7 +46,7 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
+    match fetch_anthropic_usage_data(access_token, cache_key, Some(account_label)).await {
         Ok(data) => provider_report_from_usage_data(display_name, &data),
         Err(e) => ProviderUsage {
             provider_name: display_name,
