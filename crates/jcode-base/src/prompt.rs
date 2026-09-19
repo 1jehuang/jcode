@@ -925,6 +925,13 @@ fn gpu_summary() -> Option<String> {
     }
 }
 
+fn same_canonical_path(first: &Path, second: &Path) -> bool {
+    match (std::fs::canonicalize(first), std::fs::canonicalize(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
+}
+
 fn load_agents_md_files_from_dirs(
     project_dir: &Path,
     global_agents_md: Option<&Path>,
@@ -956,15 +963,8 @@ fn load_agents_md_files_from_dirs(
     // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
     // If either file is absent or cannot be resolved, loading below remains the
     // source of truth and simply skips unreadable files.
-    let global_duplicates_project = global_agents_md.is_some_and(|global_agents_md| {
-        match (
-            std::fs::canonicalize(&project_agents_md),
-            std::fs::canonicalize(global_agents_md),
-        ) {
-            (Ok(project), Ok(global)) => project == global,
-            _ => false,
-        }
-    });
+    let global_duplicates_project = global_agents_md
+        .is_some_and(|global_agents_md| same_canonical_path(&project_agents_md, global_agents_md));
 
     if !global_duplicates_project
         && let Some(global_agents_md) = global_agents_md
@@ -1008,8 +1008,9 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     };
 
     let project_dir = working_dir.unwrap_or(Path::new("."));
+    let project_overlay = project_dir.join(".jcode").join("prompt-overlay.md");
     if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("prompt-overlay.md"),
+        &project_overlay,
         "Project Prompt Overlay (.jcode/prompt-overlay.md)",
     ) {
         total_chars += size;
@@ -1017,6 +1018,7 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     }
 
     if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
+        && !same_canonical_path(&project_overlay, &global_overlay)
         && let Some((content, size)) = load_file(
             &global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
@@ -1051,8 +1053,9 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
     };
 
     let project_dir = working_dir.unwrap_or(Path::new("."));
+    let project_preferred_tools = project_dir.join(".jcode").join("preferred-tools.md");
     if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("preferred-tools.md"),
+        &project_preferred_tools,
         "Project Preferred Tools (.jcode/preferred-tools.md)",
     ) {
         total_chars += size;
@@ -1061,6 +1064,7 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
 
     if let Ok(global_preferred_tools) =
         crate::storage::jcode_dir().map(|dir| dir.join("preferred-tools.md"))
+        && !same_canonical_path(&project_preferred_tools, &global_preferred_tools)
         && let Some((content, size)) = load_file(
             &global_preferred_tools,
             "Global Preferred Tools (~/.jcode/preferred-tools.md)",
