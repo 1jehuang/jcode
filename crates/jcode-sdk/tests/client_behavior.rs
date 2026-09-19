@@ -826,3 +826,50 @@ fn send_system_reminder_is_hidden_and_does_not_wait_for_acceptance() {
         }
     );
 }
+
+#[test]
+fn side_panel_events_hydrate_before_attach_and_route_only_to_matching_session() {
+    let client = fake_harness(|frame, writer| {
+        if let ApiRequest::AttachSession { session_id } = &frame.request {
+            for sid in ["other", session_id.as_str()] {
+                push(
+                    ApiEvent::SidePanelState {
+                        session_id: sid.into(),
+                        snapshot: jcode_sdk::SidePanelSnapshot {
+                            focused_page_id: Some("notes".into()),
+                            pages: vec![jcode_sdk::SidePanelPage {
+                                id: "notes".into(),
+                                content: "# Notes".into(),
+                                ..Default::default()
+                            }],
+                        },
+                    },
+                    writer,
+                );
+            }
+            reply(
+                frame,
+                ApiEvent::Attached {
+                    session: session(session_id),
+                },
+                writer,
+            );
+        }
+    });
+    let ours = client.events(Some("s1"));
+    let other = client.events(Some("other"));
+    let all = client.events(None);
+    client.attach_session("s1").unwrap();
+    for (stream, expected) in [(&ours, "s1"), (&other, "other")] {
+        let event = stream.next_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            matches!(event, ApiEvent::SidePanelState { session_id, snapshot } if session_id == expected && snapshot.pages[0].content == "# Notes")
+        );
+        assert!(stream.next_timeout(Duration::from_millis(20)).is_none());
+    }
+    for expected in ["other", "s1"] {
+        assert!(
+            matches!(all.next_timeout(Duration::from_secs(1)).unwrap(), ApiEvent::SidePanelState { session_id, .. } if session_id == expected)
+        );
+    }
+}

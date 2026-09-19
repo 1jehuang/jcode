@@ -343,6 +343,21 @@ Agents are also able to spawn their own swarms autonomously. They have a swarm t
 
 ---
 
+Swarm modes keep root reasoning separate from worker effort. Configure each mode
+in `~/.jcode/config.toml`:
+
+```toml
+[agents]
+swarm_root_effort = "low"        # /effort swarm
+swarm_deep_root_effort = "high"  # /effort swarm-deep
+```
+
+Both default to `max`. Accepted levels are `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max`, mapped to the provider's supported range. The effort
+switcher shows the configured root level. These settings do not change worker
+`swarm_effort`. Environment overrides are `JCODE_SWARM_ROOT_EFFORT` and
+`JCODE_SWARM_DEEP_ROOT_EFFORT`.
+
 ## OAuth and Providers
 
 jcode works with subscription-backed OAuth flows and many provider integrations, so you can use the models you already pay for and still fall back to direct API providers when needed.

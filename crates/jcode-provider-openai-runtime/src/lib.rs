@@ -1001,7 +1001,7 @@ impl OpenAIProvider {
             return None;
         }
         match value.as_str() {
-            // `swarm` is a UI sentinel meaning "max effort + use the swarm tool".
+            // `swarm` is a UI sentinel meaning "configured root effort + use the swarm tool".
             // We keep it stored so the UI/session reflect it and the agent injects
             // the swarm directive; it is translated to a real effort at request time
             // by `api_reasoning_effort`.
@@ -1056,24 +1056,40 @@ impl OpenAIProvider {
         }
     }
 
-    /// Translate a stored reasoning effort into the value sent to the API.
-    /// The `swarm` sentinel maps to the active model's strongest advertised
-    /// effort, falling back to `max` before catalog metadata is available.
+    /// Resolve swarm effort only at the wire boundary, preserving the stored mode.
     fn api_reasoning_effort(&self, effort: Option<&str>) -> Option<String> {
-        match effort {
-            Some(e) if jcode_base::prompt::is_swarm_effort(e) => {
-                let available = self.available_efforts();
-                jcode_provider_core::OPENAI_SELECTABLE_EFFORTS
-                    .iter()
-                    .rev()
-                    .find(|candidate| {
-                        !jcode_base::prompt::is_swarm_effort(candidate)
-                            && available.contains(candidate)
-                    })
-                    .map(|effort| (*effort).to_string())
-            }
-            other => other.map(|e| e.to_string()),
+        self.api_reasoning_effort_with_swarm_root(
+            effort,
+            effort.and_then(jcode_base::prompt::swarm_root_reasoning_effort),
+        )
+    }
+
+    fn api_reasoning_effort_with_swarm_root(
+        &self,
+        effort: Option<&str>,
+        swarm_root: Option<&str>,
+    ) -> Option<String> {
+        let effort = effort?;
+        if !jcode_base::prompt::is_swarm_effort(effort) {
+            return Some(effort.to_string());
         }
+        let resolved = swarm_root.unwrap_or("max");
+        let available = self.available_efforts();
+        let ladder = jcode_provider_core::OPENAI_SELECTABLE_EFFORTS;
+        let requested = ladder.iter().position(|e| *e == resolved)?;
+        // Preserve the old strongest-advertised mapping for max. For lower
+        // configured levels prefer the closest supported level at or below it,
+        // falling back to the minimum on models with a restricted ladder.
+        ladder[..=requested]
+            .iter()
+            .rev()
+            .find(|candidate| available.contains(candidate))
+            .or_else(|| {
+                ladder.iter().find(|candidate| {
+                    !jcode_base::prompt::is_swarm_effort(candidate) && available.contains(candidate)
+                })
+            })
+            .map(|effort| (*effort).to_string())
     }
 
     fn native_compaction_threshold_for_context_window(

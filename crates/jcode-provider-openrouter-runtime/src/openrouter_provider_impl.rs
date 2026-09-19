@@ -138,54 +138,11 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        let mut sent_reasoning_config = false;
-        if let Some(effort) = reasoning_effort.as_deref() {
-            if self.supports_deepseek_reasoning_effort() {
-                // The `swarm` sentinel maps to the strongest real effort.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if self.supports_openai_reasoning_effort() {
-                // GPT-family models on direct compat gateways (e.g. OpenCode
-                // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
-                // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if strict_openai_schema
-                    && (jcode_base::prompt::is_swarm_effort(effort) || effort == "max")
-                {
-                    // Strict OpenAI-schema endpoints such as Mistral document
-                    // xhigh as their strongest accepted value and reject the
-                    // jcode/OpenAI UX alias `max`.
-                    "xhigh"
-                } else if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            ) {
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "xhigh"
-                } else {
-                    effort
-                };
-                request["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                });
-                sent_reasoning_config = true;
-            }
-        }
+        let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
+            let resolved =
+                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+        });
 
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);

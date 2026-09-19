@@ -2273,7 +2273,7 @@ fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
             state.legacy_event_to_api(&json!({"type":"text_delta", "text":"next"}));
         }
         let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "messages":[], "activity":{"is_processing":active}}));
-        assert_eq!(frames.len(), 1, "stale activity must not be forwarded");
+        assert_eq!(frames.len(), 2, "history and panel only, no stale activity");
         assert_eq!(state.observed_turn_active, !active);
     }
 }
@@ -2521,7 +2521,7 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
                 assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
             }
             let frames = state.legacy_event_to_api(&history);
-            assert_eq!(frames.len(), 1);
+            assert_eq!(frames.len(), 2);
             assert_eq!(
                 frames[0],
                 ServerFrame::event(ApiEvent::SessionRecovery {
@@ -2557,7 +2557,7 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
             );
             // Each new attachment gets its own single opportunity.
             let (history, _) = recovery_attach(&mut state, target);
-            assert_eq!(state.legacy_event_to_api(&history).len(), 1);
+            assert_eq!(state.legacy_event_to_api(&history).len(), 2);
         }
     }
 }
@@ -2595,7 +2595,12 @@ fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_on
             "blank" => history["reload_recovery"]["continuation_message"] = json!("  "),
             _ => unreachable!(),
         }
-        assert!(state.legacy_event_to_api(&history).is_empty(), "{case}");
+        assert!(
+            matches!(state.legacy_event_to_api(&history).as_slice(), [ServerFrame {
+                event: ApiEvent::SidePanelState { .. }, ..
+            }]),
+            "{case}"
+        );
         assert!(
             state.legacy_event_to_api(&recoverable).is_empty(),
             "{case} duplicate"
@@ -2700,4 +2705,122 @@ fn session_list_exposes_durable_edit_stats_without_phantom_sidecar_sessions() {
         panic!("expected sessions")
     };
     assert_eq!(sessions[0].edit_stats.unwrap().added, 84);
+}
+
+fn markdown_panel() -> Value {
+    json!({"focused_page_id":"notes","pages":[{"id":"notes","title":"Notes",
+        "file_path":"/notes.md","format":"markdown","source":"managed",
+        "content":"# Notes\n```mermaid\ngraph LR; A-->B\n```","updated_at_ms":42}]})
+}
+
+fn assert_panel(frames: &[ServerFrame], session: &str, snapshot: Value) {
+    let panels: Vec<_> = frames
+        .iter()
+        .filter(|f| matches!(f.event, ApiEvent::SidePanelState { .. }))
+        .collect();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(
+        panels[0],
+        &ServerFrame::event(ApiEvent::SidePanelState {
+            session_id: session.into(),
+            snapshot: serde_json::from_value(snapshot).unwrap(),
+        })
+    );
+}
+
+#[test]
+fn side_panel_live_updates_preserve_content_focus_and_session_routing() {
+    let mut state = state_with_session();
+    for snapshot in [markdown_panel(), json!({})] {
+        assert_panel(
+            &state.legacy_event_to_api(&json!({"type":"side_panel_state", "snapshot":snapshot})),
+            "s1",
+            snapshot,
+        );
+    }
+    assert_panel(
+        &state.legacy_event_to_api(
+            &json!({"type":"side_panel_state", "session_id":"other", "snapshot":markdown_panel()}),
+        ),
+        "other",
+        markdown_panel(),
+    );
+    assert_eq!(state.session_id.as_deref(), Some("s1"));
+    for snapshot in [Value::Null, json!({"pages":"broken"})] {
+        assert!(
+            state
+                .legacy_event_to_api(&json!({"type":"side_panel_state","snapshot":snapshot}))
+                .is_empty()
+        );
+    }
+    assert!(
+        BridgeState::default()
+            .legacy_event_to_api(&json!({"type":"side_panel_state", "snapshot":markdown_panel()}))
+            .is_empty()
+    );
+}
+
+#[test]
+fn side_panel_attach_and_reconnect_hydrate_in_either_order_and_clear_empty() {
+    for history_first in [false, true] {
+        for target in [None, Some("recover")] {
+            let mut state = BridgeState::default();
+            for snapshot in [Some(markdown_panel()), None] {
+                let (mut history, state_reply) = recovery_attach(&mut state, target);
+                if let Some(snapshot) = &snapshot {
+                    history["side_panel"] = snapshot.clone();
+                }
+                if !history_first {
+                    state.legacy_event_to_api(&state_reply);
+                }
+                assert_panel(
+                    &state.legacy_event_to_api(&history),
+                    "recover",
+                    snapshot.unwrap_or(json!({})),
+                );
+                if history_first {
+                    state.legacy_event_to_api(&state_reply);
+                }
+                assert!(state.legacy_event_to_api(&history).is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn side_panel_state_hydration_requires_correlated_attachment() {
+    let mut state = BridgeState::default();
+    let (_, mut reply) = recovery_attach(&mut state, Some("recover"));
+    reply["side_panel"] = markdown_panel();
+    let mut wrong = reply.clone();
+    wrong["session_id"] = json!("other");
+    assert!(state.legacy_event_to_api(&wrong).is_empty());
+    wrong = reply.clone();
+    wrong["id"] = json!(u64::MAX);
+    assert!(state.legacy_event_to_api(&wrong).is_empty());
+    assert_panel(
+        &state.legacy_event_to_api(&reply),
+        "recover",
+        markdown_panel(),
+    );
+}
+
+#[test]
+fn side_panel_history_refresh_hydrates_but_catalog_does_not_clear_panel() {
+    let mut state = state_with_session();
+    let actions =
+        state.api_request_to_legacy(&json!({"req":"get_history", "id":12, "session_id":"s1"}));
+    let Outbound::Legacy(request) = &actions[0] else {
+        panic!("history request")
+    };
+    assert_panel(&state.legacy_event_to_api(&json!({"type":"history", "id":request["id"], "session_id":"s1", "messages":[], "side_panel":markdown_panel()})), "s1", markdown_panel());
+    let (_, _) = recovery_attach(&mut state, Some("recover"));
+    let id = state.pending_model_probe.unwrap();
+    let frames =
+        state.legacy_event_to_api(&json!({"type":"history", "id":id, "session_id":"recover"}));
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, ApiEvent::SidePanelState { .. }))
+    );
 }
