@@ -47,7 +47,7 @@ impl Tool for RepomapTool {
                 "seeds": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Repo-relative path prefixes personalizing the rank (files under discussion). Omit for the global map."
+                    "description": "Path prefixes (files under discussion) or symbol names (identifiers under discussion) personalizing the rank. Omit for the global map."
                 },
                 "budget": {
                     "type": "integer",

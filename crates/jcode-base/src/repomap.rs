@@ -357,7 +357,110 @@ fn parse_files(
 /// symbol that is defined in exactly one file (B), excluding self-links.
 /// Ambiguous names (defined in several files) carry no edge. Returns
 /// adjacency (outgoing edges) over file indices plus the file list order.
+/// Recent-history co-change pairs: files committed together in >=2 of the
+/// last 200 commits reference each other (bidirectional edges). The
+/// standard fix for the base-module blind spot: dependents point AT the
+/// base, so forward-only reference edges never flow rank back to it.
+/// A single shared commit is ignored (bulk adds and renames commit
+/// everything once — that is noise, not signal). Fail-soft: outside a git
+/// repo, without git, or on any parse failure there are no co-change edges
+/// and the map is purely reference-ranked.
+fn cochange_pairs(root: &Path, files: &[String]) -> Vec<(usize, usize)> {
+    cochange_pairs_inner(root, files).unwrap_or_default()
+}
+
+fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usize)>> {
+    let index: HashMap<&str, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.as_str(), i))
+        .collect();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "log",
+            "-n",
+            "200",
+            "--name-only",
+            "--pretty=format:COMMIT:%H",
+            "--",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    // Git reports paths relative to the repo toplevel, which may sit above
+    // the mapped root: rebase our root-relative names when they differ.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let toplevel = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let canonical_root = root.canonicalize().ok()?;
+    let prefix = toplevel
+        .and_then(|t| {
+            let canon_top = std::path::PathBuf::from(&t).canonicalize().ok()?;
+            canonical_root.strip_prefix(&canon_top).ok().map(|p| {
+                let mut s = p.to_string_lossy().into_owned();
+                if !s.is_empty() {
+                    s.push('/');
+                }
+                s
+            })
+        })
+        .unwrap_or_default();
+    let mut commits: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut in_commit = false;
+    for line in text.lines() {
+        if let Some(_hash) = line.strip_prefix("COMMIT:") {
+            if in_commit && !current.is_empty() {
+                commits.push(std::mem::take(&mut current));
+            }
+            in_commit = true;
+            continue;
+        }
+        if !in_commit {
+            continue;
+        }
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let rel = format!("{prefix}{line}");
+        if let Some(&i) = index.get(rel.as_str())
+            && !current.contains(&i)
+        {
+            current.push(i);
+        }
+    }
+    if in_commit && !current.is_empty() {
+        commits.push(current);
+    }
+    let mut counts: HashMap<(usize, usize), usize> = HashMap::new();
+    for members in &commits {
+        for (x, &m) in members.iter().enumerate() {
+            for &n in &members[x + 1..] {
+                let pair = if m < n { (m, n) } else { (n, m) };
+                *counts.entry(pair).or_insert(0) += 1;
+            }
+        }
+    }
+    Some(
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c >= 2)
+            .map(|(pair, _)| pair)
+            .collect(),
+    )
+}
+
 fn build_graph(
+    root: &Path,
     files: &[String],
     symbols: &HashMap<String, Vec<Symbol>>,
     texts: &HashMap<String, String>,
@@ -404,6 +507,12 @@ fn build_graph(
                 edges[i].insert(j);
             }
         }
+    }
+    // Co-change pairs flow both ways: dependents boost their base even
+    // though no reference edge points back at them.
+    for (a, b) in cochange_pairs(root, files) {
+        edges[a].insert(b);
+        edges[b].insert(a);
     }
     edges.into_iter().map(|s| s.into_iter().collect()).collect()
 }
@@ -493,8 +602,10 @@ pub fn render_map(
 }
 
 /// Build the repo map for `root`. `seeds` are repo-relative path prefixes
-/// (files under discussion) personalizing the rank. Returns `None` when the
-/// budget is 0 or no symbols exist. Reads and refreshes the on-disk cache.
+/// (files under discussion) or symbol names (identifiers under discussion),
+/// personalizing the rank. Reference edges plus recent-history co-change
+/// pairs feed the rank. Returns `None` when the budget is 0 or no symbols
+/// exist. Reads and refreshes the on-disk cache.
 pub fn build_map(root: &Path, seeds: &[&str], token_budget: usize) -> Option<String> {
     if token_budget == 0 {
         return None;
@@ -523,11 +634,23 @@ pub fn build_map(root: &Path, seeds: &[&str], token_budget: usize) -> Option<Str
             texts.insert(rel.clone(), text);
         }
     }
-    let adjacency = build_graph(&rels, &symbols, &texts);
+    let adjacency = build_graph(root, &rels, &symbols, &texts);
+    // Seeds are path prefixes (files under discussion) or symbol names:
+    // naming an identifier personalizes toward the files defining it
+    // (multi-anchor personalization: chat files plus mentioned symbols).
+    let lowered: Vec<String> = seeds.iter().map(|s| s.to_lowercase()).collect();
     let seed_idx: Vec<usize> = rels
         .iter()
         .enumerate()
-        .filter(|(_, f)| seeds.iter().any(|s| f.starts_with(s)))
+        .filter(|(_, f)| {
+            seeds.iter().any(|s| f.starts_with(*s))
+                || symbols.get(*f).is_some_and(|syms| {
+                    syms.iter().any(|sym| {
+                        let name = sym.name.to_lowercase();
+                        lowered.iter().any(|s| name.contains(s as &str))
+                    })
+                })
+        })
         .map(|(i, _)| i)
         .collect();
     let ranks = pagerank(&adjacency, &seed_idx, MAX_ITERATIONS);
