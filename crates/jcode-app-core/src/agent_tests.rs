@@ -314,6 +314,41 @@ fn pressure_notice_fired_flag_tracks_crossing_turn() {
 }
 
 #[test]
+fn pressure_urgent_sets_expectations_about_dilution() {
+    let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+    let mut agent = Agent::new(provider, Registry::empty());
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "x".repeat(3100),
+            cache_control: None,
+        }],
+    );
+    {
+        let compaction = agent.registry.compaction();
+        let mut manager = compaction.try_write().expect("compaction lock");
+        manager.set_budget(1000);
+    }
+    agent.messages_for_provider();
+    let notice = agent
+        .current_turn_system_reminder
+        .clone()
+        .expect("urgent must fire");
+    assert!(
+        notice.contains("NOW"),
+        "urgent band expected, got: {notice}"
+    );
+    assert!(
+        notice.contains("dropped automatically"),
+        "must set clearing expectations, got: {notice}"
+    );
+    assert!(
+        notice.contains("unreliable"),
+        "must warn about middle dilution, got: {notice}"
+    );
+}
+
+#[test]
 fn pressure_band_rearms_on_session_restore() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
     let mut agent = Agent::new(provider, Registry::empty());

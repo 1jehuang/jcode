@@ -745,8 +745,21 @@ impl Agent {
     }
 
     /// Usage fraction at which the advisory pressure notice fires.
+    ///
+    /// Evidence: benchmark consensus (2026) puts the *effective* context of
+    /// production LLMs at ~60-70% of the advertised window (lost-in-the-middle
+    /// U-curve: Liu et al. 2023; FLLM 2025 notes newer flagships recover but
+    /// smaller/free-tier models still degrade). Firing at 75% means the model
+    /// is told to bank while its middle context is still readable — later,
+    /// the bank instruction itself would sit in the rotted zone.
     const PRESSURE_ADVISORY: f64 = 0.75;
     /// Usage fraction at which the urgent pressure notice fires.
+    ///
+    /// Evidence: past ~90% the middle is fully diluted and only primacy /
+    /// recency survive, so anything not banked or recent is already
+    /// unreliable. The notice sets expectations instead of asking: stale
+    /// tool output is dropped automatically and only banked facts plus the
+    /// summary survive compaction.
     const PRESSURE_URGENT: f64 = 0.90;
     /// Usage fraction below which notification bands re-arm (hysteresis, so a
     /// turn hovering at a threshold notifies once, not every turn).
@@ -786,11 +799,13 @@ impl Agent {
         match band {
             2 => format!(
                 "Context is {usage_pct:.0}% full (~{tokens} tokens) and compaction is near. \
-                 {bank_line} — after compaction only the summary survives. {recall_line}",
+                 {bank_line} — after compaction only the summary survives, stale tool output \
+                 is dropped automatically, and middle context is already unreliable: do not \
+                 trust details you have not banked or re-read. {recall_line}",
             ),
             _ => format!(
                 "Context is {usage_pct:.0}% full (~{tokens} tokens). Before continuing, consider \
-                 banking durable facts and decisions ({}) and recalling \
+                 banking durable facts and decisions {} and recalling \
                  only what is needed, so the coming compaction has less to summarize. \
                  No action needed if the remaining work is short.",
                 if memory_exposed {
