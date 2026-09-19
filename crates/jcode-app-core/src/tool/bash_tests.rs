@@ -8,6 +8,18 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 #[test]
+fn bash_input_accepts_null_optional_booleans() {
+    let input: BashInput = serde_json::from_value(json!({
+        "command": "printf ok",
+        "notify": null,
+        "wake": null,
+    }))
+    .expect("provider tool calls may encode omitted booleans as null");
+    assert!(input.notify);
+    assert!(!input.wake);
+}
+
+#[test]
 fn repository_commands_export_a_logged_cargo_function() {
     let repo =
         crate::build::find_repo_in_ancestors(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
