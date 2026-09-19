@@ -137,6 +137,16 @@ an irreversible final answer. The SDK applies them to `text`, `messages`, and
 With older bridges, `messages` is empty and `finalText` falls back to whole-turn
 `text`. Exact message boundaries cannot be reconstructed from that older stream.
 
+To verify message framing and concurrent history reads against a real provider
+in a private instance, run the opt-in acceptance check from the repository root:
+
+```sh
+JCODE_SDK_TEST_MODEL="your-model-id" node sdk/typescript/test/live-text-framing.mjs ./target/selfdev/jcode
+```
+
+This uses your existing provider login and quota, runs one harmless bash tool,
+and cleans up its private instance. It does not restart the shared daemon.
+
 ## Structured output
 
 `runStructured()` asks the model for JSON, validates the response with Ajv, and
