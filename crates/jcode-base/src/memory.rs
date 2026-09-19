@@ -31,8 +31,9 @@ mod pending;
 mod prompt_support;
 
 pub use crate::memory_types::{
-    MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement, TrustLevel,
-    format_relevant_display_prompt, format_relevant_prompt,
+    CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement,
+    SourceCitation, TrustLevel, citation_stale_mark, format_relevant_display_prompt,
+    format_relevant_prompt, format_relevant_prompt_verified,
 };
 use crate::memory_types::{
     collect_skill_query_terms, format_entries_for_prompt, memory_matches_search,
