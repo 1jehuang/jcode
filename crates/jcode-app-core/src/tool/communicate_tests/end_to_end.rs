@@ -293,6 +293,10 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Root sessions are isolated by default (`session:{id}` swarm ids), so two
+    // independent debug clients are not visible to each other and cross-session
+    // comm is refused. Opt into one shared swarm so this workflow can run.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "swarm-status-busy-test");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),

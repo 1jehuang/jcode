@@ -250,6 +250,7 @@ pub(super) async fn handle_comm_list(
             latest_completion_report: Option<String>,
             live_attachments: usize,
             status_age_secs: u64,
+            runtime: crate::protocol::SwarmMemberRuntime,
         }
 
         let statics: Vec<MemberStatic> = {
@@ -279,6 +280,7 @@ pub(super) async fn handle_comm_list(
                             latest_completion_report: member.latest_completion_report.clone(),
                             live_attachments: member.event_txs.len(),
                             status_age_secs: member.last_status_change.elapsed().as_secs(),
+                            runtime: member.runtime.clone(),
                         }
                     })
                 })
@@ -290,6 +292,7 @@ pub(super) async fn handle_comm_list(
             let extras = super::comm_sync::member_runtime_extras(
                 &m.session_id,
                 m.status == "running",
+                &m.runtime,
                 sessions,
                 client_connections,
             )
