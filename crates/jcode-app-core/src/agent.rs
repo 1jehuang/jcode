@@ -752,6 +752,23 @@ impl Agent {
         let mut messages = messages;
         let cutoff = messages.len() - keep;
         for message in messages.iter_mut().take(cutoff) {
+            // Tool-returned images ride in the same message as the ToolResult
+            // (tool_output_to_content_blocks) as base64, often 100KB-1MB each:
+            // the largest context hog and the first thing to go. Image blocks
+            // carry no tool-pairing ID, so a text placeholder keeps message
+            // structure intact while providers never miss them.
+            for block in message.content.iter_mut() {
+                if let ContentBlock::Image { media_type, data } = block {
+                    let was = data.len();
+                    let media_type = media_type.clone();
+                    *block = ContentBlock::Text {
+                        text: format!(
+                            "[cleared image by retention: was {media_type}, ~{was} base64 chars]"
+                        ),
+                        cache_control: None,
+                    };
+                }
+            }
             for block in message.content.iter_mut() {
                 if let ContentBlock::ToolResult { content, .. } = block
                     // Character count, not byte length: a 100-CJK-char result

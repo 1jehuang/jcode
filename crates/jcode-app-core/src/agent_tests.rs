@@ -313,6 +313,74 @@ fn tool_result_clearing_stubs_old_keeps_recent_and_pairing() {
 }
 
 #[test]
+#[test]
+fn tool_result_clearing_stubs_sibling_images_past_cutoff() {
+    use crate::message::{ContentBlock, Message, Role};
+    let img = ContentBlock::Image {
+        media_type: "image/png".to_string(),
+        data: "A".repeat(200_000),
+    };
+    let old_msg = Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "t-old".to_string(),
+                content: "tiny".to_string(),
+                is_error: None,
+            },
+            img,
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    let recent_msg = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "B".repeat(200_000),
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    };
+    // Seed the window so only old_msg falls past the cutoff.
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+    let mut cfg = crate::config::Config::default();
+    cfg.compaction.clear_tool_results_older_than = Some(1);
+    cfg.save().expect("save config");
+    crate::config::Config::invalidate_cache();
+    let out = Agent::apply_tool_result_clearing(vec![old_msg, recent_msg]);
+    // Old text kept (tiny), old image stubbed with pairing ID intact.
+    match &out[0].content[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            ..
+        } => {
+            assert_eq!(tool_use_id, "t-old");
+            assert_eq!(content, "tiny");
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+    match &out[0].content[1] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("cleared image by retention"), "{text}");
+            assert!(text.contains("image/png"), "{text}");
+        }
+        other => panic!("expected stub Text, got {other:?}"),
+    }
+    // Recent image untouched.
+    assert!(matches!(&out[1].content[0], ContentBlock::Image { .. }));
+    if let Some(prev) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+    crate::config::Config::invalidate_cache();
+}
+
 fn tool_result_clearing_keeps_small_results() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_COMPACTION_CLEAR_TOOL_RESULTS_OLDER_THAN");
