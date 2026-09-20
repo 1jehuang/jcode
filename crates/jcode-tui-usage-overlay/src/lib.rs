@@ -905,6 +905,7 @@ mod tests {
                     name: "5h".to_string(),
                     usage_percent: 92.0,
                     resets_at: Some("2020-01-01T00:00:00Z".to_string()),
+                    window_seconds: None,
                 }],
                 extra_info: vec![("plan".to_string(), "max".to_string())],
                 hard_limit_reached: false,

@@ -45,11 +45,13 @@ enum WindowDetail {
 fn window_detail(
     label: &str,
     resets_at: Option<&str>,
+    reported_window_seconds: Option<u64>,
     prefer_elapsed: bool,
 ) -> Option<WindowDetail> {
     let resets_at = resets_at?;
     if prefer_elapsed
-        && let Some(window_seconds) = window_seconds_for_label(label)
+        && let Some(window_seconds) =
+            reported_window_seconds.or_else(|| window_seconds_for_label(label))
         && let Some(elapsed) = crate::usage::window_elapsed_percent(resets_at, window_seconds)
     {
         return Some(WindowDetail::Elapsed(elapsed));
@@ -117,6 +119,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                 let detail = window_detail(
                     primary_label,
                     info.five_hour_resets_at.as_deref(),
+                    info.primary_window_seconds,
                     data.usage_display_elapsed,
                 );
                 lines.push(render_labeled_bar(
@@ -132,6 +135,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                 let detail = window_detail(
                     secondary_label,
                     info.seven_day_resets_at.as_deref(),
+                    info.secondary_window_seconds,
                     data.usage_display_elapsed,
                 );
                 lines.push(render_labeled_bar(
@@ -149,6 +153,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                 let spark_reset = window_detail(
                     "Spark",
                     info.spark_resets_at.as_deref(),
+                    None,
                     data.usage_display_elapsed,
                 );
                 lines.push(render_labeled_bar(
@@ -206,6 +211,7 @@ pub(super) fn render_usage_compact(
         let detail = window_detail(
             primary_label,
             info.five_hour_resets_at.as_deref(),
+            info.primary_window_seconds,
             usage_display_elapsed,
         );
         lines.push(render_labeled_bar(
@@ -221,6 +227,7 @@ pub(super) fn render_usage_compact(
         let detail = window_detail(
             secondary_label,
             info.seven_day_resets_at.as_deref(),
+            info.secondary_window_seconds,
             usage_display_elapsed,
         );
         lines.push(render_labeled_bar(
@@ -238,6 +245,7 @@ pub(super) fn render_usage_compact(
         let spark_reset = window_detail(
             "Spark",
             info.spark_resets_at.as_deref(),
+            None,
             usage_display_elapsed,
         );
         lines.push(render_labeled_bar(
@@ -582,17 +590,36 @@ mod tests {
     fn unknown_window_length_falls_back_to_the_countdown() {
         let resets_at = (chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339();
 
-        let spark = window_detail("Spark", Some(&resets_at), true);
+        let spark = window_detail("Spark", Some(&resets_at), None, true);
         assert!(matches!(spark, Some(WindowDetail::Countdown(_))));
 
-        let known = window_detail("5-hour", Some(&resets_at), true);
+        let known = window_detail("5-hour", Some(&resets_at), None, true);
         assert!(matches!(known, Some(WindowDetail::Elapsed(_))));
 
         // Opting out keeps the countdown even for a known window.
-        let opted_out = window_detail("5-hour", Some(&resets_at), false);
+        let opted_out = window_detail("5-hour", Some(&resets_at), None, false);
         assert!(matches!(opted_out, Some(WindowDetail::Countdown(_))));
 
-        assert!(window_detail("5-hour", None, true).is_none());
+        assert!(window_detail("5-hour", None, None, true).is_none());
+    }
+
+    #[test]
+    fn reported_window_length_wins_over_the_label() {
+        // OpenAI's monthly pool is 2,628,000s; inferring 30 days from the
+        // `Monthly` label would render a true midpoint as 49%.
+        const MONTHLY_SECONDS: u64 = 2_628_000;
+        let resets_at = (chrono::Utc::now()
+            + chrono::Duration::seconds(MONTHLY_SECONDS as i64 / 2))
+        .to_rfc3339();
+
+        assert_eq!(
+            window_detail("Monthly", Some(&resets_at), Some(MONTHLY_SECONDS), true),
+            Some(WindowDetail::Elapsed(50))
+        );
+        assert_eq!(
+            window_detail("Monthly", Some(&resets_at), None, true),
+            Some(WindowDetail::Elapsed(49))
+        );
     }
 }
 

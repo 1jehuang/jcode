@@ -355,12 +355,16 @@ pub struct UsageInfo {
     pub five_hour: f32,
     /// Primary reset timestamp (RFC3339), if known
     pub five_hour_resets_at: Option<String>,
+    /// Primary window length as the provider reported it, when it reports one.
+    pub primary_window_seconds: Option<u64>,
     /// Secondary subscription window label, when one exists.
     pub secondary_limit_label: Option<String>,
     /// Secondary window utilization (0.0-1.0) - for OAuth providers
     pub seven_day: f32,
     /// Secondary reset timestamp (RFC3339), if known
     pub seven_day_resets_at: Option<String>,
+    /// Secondary window length as the provider reported it, when it reports one.
+    pub secondary_window_seconds: Option<u64>,
     /// Codex Spark window utilization (0.0-1.0), if available
     pub spark: Option<f32>,
     /// Codex Spark reset timestamp (RFC3339), if known
