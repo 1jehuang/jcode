@@ -577,6 +577,18 @@ impl MemoryManager {
         ))
     }
 
+    /// RRF k from config, clamped to [1.0, 1000.0]. Config knob
+    /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
+    /// NaN/inf can arrive via TOML (`nan`) since clamp preserves NaN:
+    /// fall back to the default instead of poisoning every fused score.
+    pub(crate) fn rrf_k() -> f32 {
+        let v = crate::config::config().agents.memory_rrf_k;
+        if !v.is_finite() {
+            return 60.0;
+        }
+        v.clamp(1.0, 1000.0)
+    }
+
     /// Pull pool, rank by dense and BM25 separately, fuse with RRF.
     fn hybrid_fuse(
         entries: Vec<MemoryEntry>,
@@ -621,14 +633,15 @@ impl MemoryManager {
         // Sparse (BM25) ranking over memory search text.
         let sparse = bm25_rank(&entries, query_text, pool);
 
-        // RRF fusion.
-        const RRF_K: f32 = 60.0;
+        // RRF fusion. k comes from config (default 60.0); higher k
+        // compresses rank gaps, lower k rewards top ranks more steeply.
+        let rrf_k = Self::rrf_k();
         let mut fused: std::collections::HashMap<usize, f32> = std::collections::HashMap::new();
         for (rank, (idx, _)) in dense.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
         for (rank, (idx, _)) in sparse.iter().enumerate() {
-            *fused.entry(*idx).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *fused.entry(*idx).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
         }
 
         let mut entries: Vec<Option<MemoryEntry>> = entries.into_iter().map(Some).collect();

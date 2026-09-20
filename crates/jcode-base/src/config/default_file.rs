@@ -483,6 +483,13 @@ swarm_max_concurrent_agents = 32
 # memory_model = "gpt-5.6-luna"
 # Legacy memory_rerank_* and memory_embedding_* settings are accepted for
 # backwards compatibility, but have no effect on Jev recall.
+#
+# RRF k for hybrid (BM25 + dense) fusion: shared by manual hybrid recall,
+# the recall bench, and the public find_similar_hybrid API. (Jev auto-recall
+# does not fuse this way.) k=60 suits thousand-item corpora; memory stores
+# are far smaller, so 10-30 separates top ranks better there. Default 60.
+# Env override: JCODE_MEMORY_RRF_K (wins over file).
+# memory_rrf_k = 60.0
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.

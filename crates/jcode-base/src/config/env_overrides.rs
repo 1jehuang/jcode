@@ -416,6 +416,14 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
             self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_RRF_K") {
+            // Finite only: NaN/inf/garbage leaves the file value in place.
+            if let Ok(parsed) = v.trim().parse::<f32>() {
+                if parsed.is_finite() {
+                    self.agents.memory_rrf_k = parsed;
+                }
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
             self.agents.memory_model = if trimmed.is_empty() {
