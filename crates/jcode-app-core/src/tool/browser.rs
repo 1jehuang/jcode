@@ -21,7 +21,16 @@ impl BrowserTool {
 }
 
 fn browser_tool_description_text() -> &'static str {
+    if browser_handoff_disabled() {
+        return "Control the browser using direct actions. Check action='status' first; run setup only if not ready. Browser handoff is disabled for this process. Complete browser tasks with direct actions in the requested tab.";
+    }
     "Control the browser. Check action='status' first; run setup only if not ready. Use action='handoff' by default for browser tasks: the fast Jev browser agent owns the entire task in an explicit tab through an iterative observation/action/results loop until done or genuinely blocked. Supply a goal, tab_id, and optional trusted context with background and completion criteria. A hand_back with requested_help=script/text asks the main agent to supply exact executable script candidates or exact text_values and resume the same task. Navigation alone is not completion unless it satisfies the entire goal. Reserve direct actions for setup, tab discovery/creation, or when handoff cannot complete the task."
+}
+
+/// Opt-in process-local control for direct-only benchmark arms. Normal sessions
+/// retain the default handoff policy unless the switch is explicitly set to 1.
+fn browser_handoff_disabled() -> bool {
+    std::env::var("JCODE_BROWSER_HANDOFF_DISABLED").is_ok_and(|value| value == "1")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -317,6 +326,26 @@ impl Tool for BrowserTool {
                 }
             }),
         );
+        if browser_handoff_disabled() {
+            let action = properties.get_mut("action").expect("action schema");
+            action["enum"]
+                .as_array_mut()
+                .expect("action enum")
+                .retain(|value| value != "handoff");
+            action["description"] = json!(
+                "Action. Check status first and run setup only when not ready. Use direct browser actions in the requested tab. Handoff is disabled for this process."
+            );
+            for name in [
+                "goal",
+                "context",
+                "max_steps",
+                "confidence_threshold",
+                "text_values",
+                "candidates",
+            ] {
+                properties.remove(name);
+            }
+        }
         Value::Object(Map::from_iter([
             ("type".into(), json!("object")),
             ("required".into(), json!(["action"])),
@@ -326,6 +355,11 @@ impl Tool for BrowserTool {
 
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let params: BrowserInput = serde_json::from_value(input)?;
+        if params.action == "handoff" && browser_handoff_disabled() {
+            anyhow::bail!(
+                "Browser handoff is disabled by JCODE_BROWSER_HANDOFF_DISABLED=1. Use direct browser actions instead."
+            );
+        }
         let provider = resolve_provider(params.browser.as_deref())?;
 
         match params.action.as_str() {
@@ -1072,6 +1106,7 @@ mod task_contract_tests {
 
     #[test]
     fn handoff_schema_exposes_task_context_and_extended_budget() {
+        let _guard = jcode_base::storage::lock_test_env();
         let schema = BrowserTool::new().parameters_schema();
         let properties = &schema["properties"];
         assert_eq!(properties["context"]["type"], "string");

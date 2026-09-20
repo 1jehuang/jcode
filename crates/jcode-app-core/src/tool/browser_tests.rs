@@ -279,6 +279,7 @@ fn ordinary_click_preserves_existing_bridge_dispatch() {
 
 #[test]
 fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
+    let _guard = jcode_base::storage::lock_test_env();
     let tool = BrowserTool::new();
     assert!(
         tool.description()
@@ -296,6 +297,85 @@ fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
     assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
     for key in ["goal", "context", "candidates", "text_values"] {
         assert!(schema["properties"].get(key).is_some());
+    }
+}
+
+#[tokio::test]
+async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_provider_setup() {
+    const KEY: &str = "JCODE_BROWSER_HANDOFF_DISABLED";
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => jcode_base::env::set_var(KEY, value),
+                None => jcode_base::env::remove_var(KEY),
+            }
+        }
+    }
+
+    let _guard = jcode_base::storage::lock_test_env();
+    let _restore = RestoreEnv(std::env::var_os(KEY));
+    let tool = BrowserTool::new();
+    for value in [None, Some("0"), Some("1")] {
+        match value {
+            Some(value) => jcode_base::env::set_var(KEY, value),
+            None => jcode_base::env::remove_var(KEY),
+        }
+        let disabled = value == Some("1");
+        assert_eq!(browser_handoff_disabled(), disabled);
+        let schema = tool.parameters_schema();
+        let properties = &schema["properties"];
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        assert_eq!(actions.contains(&json!("handoff")), !disabled);
+        for action in ["status", "setup", "open", "click", "fill_form", "eval"] {
+            assert!(actions.contains(&json!(action)));
+        }
+        for key in [
+            "goal",
+            "context",
+            "max_steps",
+            "confidence_threshold",
+            "text_values",
+            "candidates",
+        ] {
+            assert_eq!(properties.get(key).is_some(), !disabled, "{key}");
+        }
+        assert_eq!(
+            tool.description()
+                .contains("Use action='handoff' by default"),
+            !disabled
+        );
+        assert_eq!(
+            properties["action"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Use handoff by default"),
+            !disabled
+        );
+        let ctx = ToolContext {
+            session_id: "browser-disable-test".into(),
+            message_id: "m".into(),
+            tool_call_id: "t".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+        // An unsupported provider makes the enabled branch hermetic. In the
+        // disabled branch the guard must fire before even resolving a provider.
+        let err = tool
+            .execute(json!({"action":"handoff", "browser":"chrome"}), ctx)
+            .await
+            .err()
+            .expect("request must fail without browser side effects");
+        if disabled {
+            assert!(err.to_string().contains("JCODE_BROWSER_HANDOFF_DISABLED=1"));
+        } else {
+            assert!(
+                err.to_string()
+                    .contains("not wired into the built-in browser tool")
+            );
+        }
     }
 }
 
