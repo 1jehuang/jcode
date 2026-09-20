@@ -1138,6 +1138,54 @@ mod tests {
     use ratatui::style::Modifier;
 
     #[test]
+    fn reset_status_hint_requires_openai_oauth_and_fresh_exhausted_account() {
+        use crate::tui::info_widget::AuthMethod;
+        let mut usage = crate::usage::OpenAIUsageData {
+            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+                available_count: 2,
+                account_label: Some("work".into()),
+                ordinary_usage_allowed: Some(false),
+            }),
+            fetched_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
+            Some("Reset available · /reset usage limits openai")
+        );
+        for auth in [
+            AuthMethod::OpenAIApiKey,
+            AuthMethod::AnthropicOAuth,
+            AuthMethod::Unknown,
+        ] {
+            assert_eq!(openai_reset_status_hint(auth, &usage, Some("work")), None);
+        }
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("other")),
+            None
+        );
+        usage
+            .openai_reset_credits
+            .as_mut()
+            .unwrap()
+            .ordinary_usage_allowed = Some(true);
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
+            None
+        );
+        usage
+            .openai_reset_credits
+            .as_mut()
+            .unwrap()
+            .ordinary_usage_allowed = Some(false);
+        usage.fetched_at = None;
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
+            None
+        );
+    }
+
+    #[test]
     fn swarm_effort_model_status_uses_shared_label() {
         for mode in ["swarm", "swarm-deep"] {
             assert_eq!(
@@ -1852,6 +1900,10 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
 
     if !app.is_processing() {
         let info = app.info_widget_data();
+        if let Some(hint) = app.openai_reset_hint() {
+            push_sep(&mut spans);
+            spans.push(Span::styled(hint, Style::default().fg(rgb(255, 193, 7))));
+        }
         if let Some(schedule_notice) =
             crate::tui::scheduled_notification_text(info.ambient_info.as_ref())
         {
@@ -1928,6 +1980,16 @@ pub(super) fn build_notification_spans(app: &dyn TuiState) -> Vec<Span<'static>>
     }
 
     spans
+}
+
+pub(crate) fn openai_reset_status_hint(
+    auth_method: super::info_widget::AuthMethod,
+    usage: &crate::usage::OpenAIUsageData,
+    account_label: Option<&str>,
+) -> Option<&'static str> {
+    (auth_method == super::info_widget::AuthMethod::OpenAIOAuth
+        && usage.banked_reset_available_for_account(account_label))
+    .then_some("Reset available · /reset usage limits openai")
 }
 
 pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rect) {

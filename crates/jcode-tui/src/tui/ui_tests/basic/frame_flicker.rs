@@ -1,4 +1,38 @@
 #[test]
+fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
+    let _lock = viewport_snapshot_test_lock();
+    let mut state = TestState {
+        display_messages: vec![DisplayMessage::system("seed")],
+        time_since_activity: Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1)),
+        openai_reset_hint: Some("Reset available · /reset usage limits openai"),
+        ..Default::default()
+    };
+    assert!(crate::tui::TuiState::has_notification(&state));
+    assert!(crate::tui::periodic_redraw_required(&state));
+    assert_ne!(
+        crate::tui::redraw_interval(&state),
+        crate::tui::REDRAW_DEEP_IDLE
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
+    terminal
+        .draw(|frame| input_ui::draw_notification(frame, &state, Rect::new(0, 1, 80, 1)))
+        .unwrap();
+    let rows = buffer_rows(&terminal);
+    assert!(rows[1].contains("Reset available · /reset usage limits openai"));
+    assert!(rows[0].trim().is_empty());
+    assert!(rows[2].trim().is_empty());
+
+    state.openai_reset_hint = None;
+    assert!(!crate::tui::TuiState::has_notification(&state));
+    assert!(!crate::tui::periodic_redraw_required(&state));
+    assert_eq!(
+        crate::tui::redraw_interval(&state),
+        crate::tui::REDRAW_DEEP_IDLE
+    );
+}
+
+#[test]
 fn test_redraw_interval_uses_low_frequency_during_remote_startup_phase() {
     let idle = TestState {
         anim_elapsed: 10.0,

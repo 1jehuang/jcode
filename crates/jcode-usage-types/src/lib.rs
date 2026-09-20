@@ -1,9 +1,19 @@
+/// Read-only banked reset metadata from the ChatGPT usage response, pinned to
+/// the login whose usage was fetched. `None` label denotes the default scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiResetCredits {
+    pub available_count: u64,
+    pub account_label: Option<String>,
+    pub ordinary_usage_allowed: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderUsage {
     pub provider_name: String,
     pub limits: Vec<UsageLimit>,
     pub extra_info: Vec<(String, String)>,
     pub hard_limit_reached: bool,
+    pub openai_reset_credits: Option<OpenAiResetCredits>,
     pub error: Option<String>,
     /// When jcode last successfully used this login/credential (unix seconds).
     /// Drives most-recently-used-first ordering in `/usage`. `None` sorts last.
