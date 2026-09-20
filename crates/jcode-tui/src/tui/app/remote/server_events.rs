@@ -721,8 +721,8 @@ pub(in crate::tui::app) fn handle_server_event(
             });
             eager_stream_redraw
         }
-        ServerEvent::ToolInput { delta } => {
-            remote.handle_tool_input(&delta);
+        ServerEvent::ToolInput { id, delta } => {
+            remote.handle_tool_input(id.as_deref(), &delta);
             false
         }
         ServerEvent::ToolExec { id, name } => {
@@ -730,7 +730,7 @@ pub(in crate::tui::app) fn handle_server_event(
             // snapshots often arrive later. Keep collecting deltas while excluding tool
             // runtime from the elapsed TPS denominator.
             app.pause_streaming_tps(true);
-            let parsed_input = remote.get_current_tool_input();
+            let parsed_input = remote.get_tool_input(&id);
             let tool_call = ToolCall {
                 id: id.clone(),
                 name: name.clone(),

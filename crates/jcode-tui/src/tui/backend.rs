@@ -285,8 +285,8 @@ fn remote_protocol_frame_exceeds_limit(buffered: usize, incoming: usize) -> bool
 
 pub(crate) trait RemoteEventState {
     fn handle_tool_start(&mut self, id: &str, name: &str);
-    fn handle_tool_input(&mut self, delta: &str);
-    fn get_current_tool_input(&self) -> serde_json::Value;
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str);
+    fn get_tool_input(&self, id: &str) -> serde_json::Value;
     fn handle_tool_exec(&mut self, id: &str, name: &str);
     fn handle_tool_done(&mut self, id: &str, name: &str, output: &str) -> String;
     fn clear_pending(&mut self);
@@ -1386,13 +1386,13 @@ impl RemoteConnection {
     }
 
     /// Handle tool input delta
-    pub fn handle_tool_input(&mut self, delta: &str) {
-        self.tool_diff.handle_tool_input(delta);
+    pub fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        self.tool_diff.handle_tool_input(id, delta);
     }
 
-    /// Get parsed current tool input (before it's cleared in handle_tool_exec)
-    pub fn get_current_tool_input(&self) -> serde_json::Value {
-        self.tool_diff.current_tool_input_json()
+    /// Get parsed input for this call (before handle_tool_exec clears it)
+    pub fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_json(id)
     }
 
     /// Handle tool exec - cache file content if edit/write
@@ -1426,12 +1426,12 @@ impl RemoteEventState for RemoteConnection {
         Self::handle_tool_start(self, id, name);
     }
 
-    fn handle_tool_input(&mut self, delta: &str) {
-        Self::handle_tool_input(self, delta);
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        Self::handle_tool_input(self, id, delta);
     }
 
-    fn get_current_tool_input(&self) -> serde_json::Value {
-        Self::get_current_tool_input(self)
+    fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        Self::get_tool_input(self, id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
@@ -1472,12 +1472,12 @@ impl RemoteEventState for ReplayRemoteState {
         self.tool_diff.handle_tool_start(id, name);
     }
 
-    fn handle_tool_input(&mut self, delta: &str) {
-        self.tool_diff.handle_tool_input(delta);
+    fn handle_tool_input(&mut self, id: Option<&str>, delta: &str) {
+        self.tool_diff.handle_tool_input(id, delta);
     }
 
-    fn get_current_tool_input(&self) -> serde_json::Value {
-        self.tool_diff.current_tool_input_json()
+    fn get_tool_input(&self, id: &str) -> serde_json::Value {
+        self.tool_diff.tool_input_json(id)
     }
 
     fn handle_tool_exec(&mut self, id: &str, name: &str) {
