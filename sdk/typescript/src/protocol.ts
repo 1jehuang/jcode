@@ -8,7 +8,7 @@
  */
 
 export const API_VERSION_MAJOR = 1;
-export const API_VERSION_MINOR = 7;
+export const API_VERSION_MINOR = 8;
 
 export type PermissionDecision = "allow" | "allow_always" | "deny";
 
@@ -248,6 +248,7 @@ export type ApiEvent =
       cache_read_input?: number;
       cache_creation_input?: number;
     }
+  | { ev: "turn_stopped"; session_id: string; reason: TurnStopReason; message: string; provider_stop_reason?: string }
   | { ev: "turn_done"; session_id: string }
   | {
       ev: "wake_requested";
@@ -375,6 +376,7 @@ export const KNOWN_EVENT_KINDS = [
   "tool_done",
   "token_usage",
   "turn_done",
+  "turn_stopped",
   "wake_requested",
   "background_progress",
   "message_accepted",
@@ -437,3 +439,6 @@ export const KNOWN_REQUEST_KINDS = [
 export function isKnownEvent(frame: AnyApiEvent): frame is ApiEvent {
   return (KNOWN_EVENT_KINDS as readonly string[]).includes(frame.ev);
 }
+
+/** Natural completion has no stop reason. Transport loss is not proof of a crash. */
+export type TurnStopReason = "interrupted" | "failure" | "crash" | "provider_guardrail" | "limit_reached" | "unknown";

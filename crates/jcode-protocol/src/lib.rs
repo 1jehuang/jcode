@@ -13,6 +13,7 @@ mod comm_format;
 mod notifications;
 
 pub use comm_format::*;
+pub use jcode_session_types::TurnStopReason;
 pub use notifications::{FeatureToggle, NotificationType};
 
 use jcode_batch_types::BatchProgress;

@@ -172,6 +172,6 @@ pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
     RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SessionToolDefinition,
     SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
-    ToolConfiguration, api_socket_path,
+    ToolConfiguration, TurnStopReason, api_socket_path,
 };
 pub use jcode_harness_api::{ModelUsage, compare_model_usage};

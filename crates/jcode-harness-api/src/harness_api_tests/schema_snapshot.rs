@@ -645,3 +645,27 @@ fn session_tool_control_wire_shapes_and_defaults() {
         json!({})
     );
 }
+
+#[test]
+fn turn_stopped_schema_and_future_reason_compatibility() {
+    for reason in [
+        "interrupted",
+        "failure",
+        "crash",
+        "provider_guardrail",
+        "limit_reached",
+    ] {
+        let wire = serde_json::json!({"v":1,"ev":"turn_stopped","session_id":"s1","reason":reason,"message":"Explanation"});
+        let frame: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    let wire = serde_json::json!({"v":1,"ev":"turn_stopped","session_id":"s1","reason":"future_reason","message":"Explanation","provider_stop_reason":"refusal"});
+    let frame: ServerFrame = serde_json::from_value(wire).unwrap();
+    assert!(
+        matches!(frame.event, ApiEvent::TurnStopped { reason: TurnStopReason::Unknown, provider_stop_reason: Some(reason), .. } if reason == "refusal")
+    );
+    let done: ServerFrame =
+        serde_json::from_value(serde_json::json!({"v":1,"ev":"turn_done","session_id":"s1"}))
+            .unwrap();
+    assert!(matches!(done.event, ApiEvent::TurnDone { .. }));
+}

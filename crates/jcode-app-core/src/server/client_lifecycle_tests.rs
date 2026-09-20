@@ -334,6 +334,13 @@ async fn cancel_without_local_task_still_signals_session_control() {
     assert!(session_id.is_none());
     assert!(matches!(
         client_event_rx.recv().await,
+        Some(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::Interrupted,
+            ..
+        })
+    ));
+    assert!(matches!(
+        client_event_rx.recv().await,
         Some(ServerEvent::Interrupted)
     ));
     assert!(matches!(

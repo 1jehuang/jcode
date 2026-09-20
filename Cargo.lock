@@ -3477,6 +3477,7 @@ dependencies = [
 name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
+ "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-usage-types",
  "serde",

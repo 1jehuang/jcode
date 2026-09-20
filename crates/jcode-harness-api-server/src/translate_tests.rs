@@ -3402,3 +3402,104 @@ fn detach_waits_for_release_barrier_and_drops_late_callbacks() {
         })]
     ));
 }
+
+#[test]
+fn abnormal_stop_precedes_error_and_done_and_preserves_specific_reason() {
+    use jcode_harness_api::TurnStopReason;
+    for (reason, expected) in [
+        ("failure", TurnStopReason::Failure),
+        ("crash", TurnStopReason::Crash),
+        ("limit_reached", TurnStopReason::LimitReached),
+    ] {
+        let mut state = state_with_session();
+        let stopped = state.legacy_event_to_api(
+            &json!({"type":"turn_stopped", "reason":reason, "message":"Specific explanation"}),
+        );
+        assert!(
+            matches!(&stopped[0].event, ApiEvent::TurnStopped { session_id, reason, message, .. } if session_id == "s1" && *reason == expected && message == "Specific explanation")
+        );
+        assert!(
+            state
+                .legacy_event_to_api(
+                    &json!({"type":"turn_stopped","reason":"failure","message":"generic wrapper"})
+                )
+                .is_empty()
+        );
+        let end = state.legacy_event_to_api(&json!({"type":"error","id":0,"message":"failed"}));
+        assert!(matches!(&end[0].event, ApiEvent::Error { .. }));
+        assert!(matches!(
+            &end.last().unwrap().event,
+            ApiEvent::TurnDone { .. }
+        ));
+        assert!(
+            state
+                .legacy_event_to_api(&json!({"type":"done","id":0}))
+                .is_empty()
+        );
+        state.legacy_event_to_api(&json!({"type":"text_delta","text":"next turn"}));
+        let natural = state.legacy_event_to_api(&json!({"type":"done","id":0}));
+        assert!(
+            natural
+                .iter()
+                .all(|f| !matches!(f.event, ApiEvent::TurnStopped { .. }))
+        );
+    }
+}
+
+#[test]
+fn guardrail_stop_preserves_provider_reason_and_finishes_observer_turn() {
+    let mut state = state_with_session();
+    let frames = state.legacy_event_to_api(
+        &json!({"type":"provider_guardrail","stop_reason":"refusal","message":"Provider refused"}),
+    );
+    assert!(
+        matches!(&frames[0].event, ApiEvent::TurnStopped { reason: jcode_harness_api::TurnStopReason::ProviderGuardrail, provider_stop_reason: Some(reason), .. } if reason == "refusal")
+    );
+    assert!(matches!(
+        &state.legacy_event_to_api(&json!({"type":"done","id":0}))[0].event,
+        ApiEvent::TurnDone { .. }
+    ));
+}
+
+#[test]
+fn legacy_interrupt_finishes_observer_turn_but_idle_cancel_is_not_a_stop() {
+    let mut state = state_with_session();
+    let idle = state.legacy_event_to_api(&json!({"type":"interrupted"}));
+    assert!(
+        idle.iter()
+            .all(|f| !matches!(f.event, ApiEvent::TurnStopped { .. }))
+    );
+    state.legacy_event_to_api(&json!({"type":"text_delta","text":"partial"}));
+    let stopped = state.legacy_event_to_api(&json!({"type":"interrupted"}));
+    assert!(matches!(
+        &stopped[0].event,
+        ApiEvent::TurnStopped {
+            reason: jcode_harness_api::TurnStopReason::Interrupted,
+            ..
+        }
+    ));
+    let done = state.legacy_event_to_api(&json!({"type":"done","id":0}));
+    assert!(matches!(
+        &done.last().unwrap().event,
+        ApiEvent::TurnDone { .. }
+    ));
+    let late = state.legacy_event_to_api(&json!({"type":"interrupted"}));
+    assert!(
+        late.iter()
+            .all(|f| !matches!(f.event, ApiEvent::TurnStopped { .. }))
+    );
+}
+
+#[test]
+fn request_error_does_not_fabricate_a_turn_stop() {
+    let mut state = state_with_session();
+    let frames =
+        state.legacy_event_to_api(&json!({"type":"error","id":777,"message":"request failed"}));
+    assert!(matches!(
+        frames.as_slice(),
+        [ServerFrame {
+            event: ApiEvent::Error { .. },
+            ..
+        }]
+    ));
+}

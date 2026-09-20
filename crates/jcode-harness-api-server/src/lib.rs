@@ -311,6 +311,7 @@ where
                 "sessions",
                 "streaming",
                 "text_framing",
+                "turn_stop_reasons",
                 "side_panel",
                 "persisted_session_discovery",
                 "runtime_info",

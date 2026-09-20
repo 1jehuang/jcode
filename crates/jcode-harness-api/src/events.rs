@@ -146,6 +146,17 @@ pub enum ApiEvent {
         cache_creation_input: Option<u64>,
     },
 
+    /// An abnormal stop, never emitted for natural completion. This precedes
+    /// TurnDone (and Error for failures). Render as status, not assistant text.
+    /// Transport loss alone does not establish a Crash.
+    TurnStopped {
+        session_id: String,
+        reason: crate::TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
+    },
+
     /// The turn finished; the agent is idle.
     TurnDone { session_id: String },
 

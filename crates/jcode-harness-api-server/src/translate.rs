@@ -125,6 +125,8 @@ pub struct BridgeState {
     text_response_ended: bool,
     /// A turn can belong to another attachment or a server-initiated wake.
     observed_turn_active: bool,
+    /// Deduplicate specific limit/cancel notices from the subsequent failure.
+    turn_stop_reported: bool,
     activity_version: u64,
     pending_activity_snapshots: std::collections::HashMap<u64, u64>,
     /// Control requests also emit done, sometimes after their richer reply.
@@ -1482,6 +1484,7 @@ impl BridgeState {
                 if let Some(api_id) = self.take_simple(id, SimpleKind::Detach) {
                     self.pending_control_done_ids.remove(&id);
                     self.session_id = None;
+                    self.turn_stop_reported = false;
                     self.observed_turn_active = false;
                     self.text_message_id = None;
                     self.text_attempt.clear();
@@ -1497,6 +1500,7 @@ impl BridgeState {
                     self.observed_turn_active && !control_done && self.session_id.is_some();
                 if completed_message || completed_idle_interrupt || observed_done {
                     self.observed_turn_active = false;
+                    self.turn_stop_reported = false;
                     self.activity_version += 1;
                     self.pending_message_id = None;
                     // Any other retained soft interrupts were queued into the
@@ -1512,15 +1516,53 @@ impl BridgeState {
                     vec![]
                 }
             }
+            "turn_stopped" | "provider_guardrail" => {
+                if self.session_id.is_none() || self.turn_stop_reported {
+                    return vec![];
+                }
+                self.turn_stop_reported = true;
+                self.observed_turn_active = true;
+                let reason = if kind == "provider_guardrail" {
+                    jcode_harness_api::TurnStopReason::ProviderGuardrail
+                } else {
+                    serde_json::from_value(event["reason"].clone())
+                        .unwrap_or(jcode_harness_api::TurnStopReason::Unknown)
+                };
+                vec![ServerFrame::event(ApiEvent::TurnStopped {
+                    session_id: session(self),
+                    reason,
+                    message: event["message"]
+                        .as_str()
+                        .unwrap_or("The turn stopped unexpectedly.")
+                        .to_string(),
+                    provider_stop_reason: event["provider_stop_reason"]
+                        .as_str()
+                        .or_else(|| event["stop_reason"].as_str())
+                        .map(str::to_string),
+                })]
+            }
             "interrupted" => {
                 self.activity_version += 1;
-                self.observed_turn_active = false;
-                self.text_message_id = None;
-                self.text_attempt.clear();
-                vec![ServerFrame::event(ApiEvent::SessionStatus {
+                let mut frames = vec![];
+                // Older runtimes may only emit Interrupted. An idle cancel is
+                // not an abnormal turn, and a late notice after Done is not a
+                // second stop. Keep observed activity until Done for observers.
+                if !self.turn_stop_reported
+                    && (self.observed_turn_active || self.pending_message_id.is_some())
+                {
+                    self.turn_stop_reported = true;
+                    frames.push(ServerFrame::event(ApiEvent::TurnStopped {
+                        session_id: session(self),
+                        reason: jcode_harness_api::TurnStopReason::Interrupted,
+                        message: "The turn was interrupted by a cancellation request.".into(),
+                        provider_stop_reason: None,
+                    }));
+                }
+                frames.push(ServerFrame::event(ApiEvent::SessionStatus {
                     session_id: session(self),
                     status: "cancelled".into(),
-                })]
+                }));
+                frames
             }
             "wake_requested" => vec![ServerFrame::event(ApiEvent::WakeRequested {
                 session_id: event["session_id"]
@@ -1992,10 +2034,21 @@ impl BridgeState {
                     code: ErrorCode::Internal,
                     message,
                 };
-                vec![match reply_to {
+                let mut frames = vec![match reply_to {
                     Some(api_id) => ServerFrame::reply(api_id, frame_event),
                     None => ServerFrame::event(frame_event),
-                }]
+                }];
+                if reply_to.is_none() && self.turn_stop_reported {
+                    self.turn_stop_reported = false;
+                    self.pending_message_id = None;
+                    self.pending_soft_interrupt_ids.clear();
+                    frames.extend(self.finish_text());
+                    self.text_attempt.clear();
+                    frames.push(ServerFrame::event(ApiEvent::TurnDone {
+                        session_id: session(self),
+                    }));
+                }
+                frames
             }
             // Everything else on the legacy stream is not part of the stable
             // API surface yet; drop it.

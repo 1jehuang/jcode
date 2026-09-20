@@ -33,6 +33,7 @@ import {
   type SessionInfo,
   type SessionToolDefinition,
   type TextMatch,
+  type TurnStopReason,
 } from "./protocol.js";
 
 export interface RuntimeInfo {
@@ -1232,6 +1233,10 @@ export class JcodeClient extends EventEmitter {
             await this.respondToPermission(sessionId, event.request_id, "allow");
           }
           break;
+        case "turn_stopped":
+          result.stopReason = event.reason;
+          result.stopMessage = event.message;
+          break;
         case "turn_done":
           await stream.return?.(undefined as never);
           return finish();
@@ -1294,6 +1299,9 @@ export class JcodeClient extends EventEmitter {
 }
 
 export interface TurnResult {
+  /** Absent for natural completion. Failures still throw after onEvent. */
+  stopReason?: TurnStopReason;
+  stopMessage?: string;
   /** All assistant text deltas in the turn, including process narration. */
   text: string;
   /** Last completed assistant message, or whole-turn text on older bridges. */

@@ -1028,6 +1028,15 @@ pub enum ServerEvent {
         tools_skipped: Option<usize>,
     },
 
+    /// Structured abnormal turn outcome, emitted before the terminal Done/Error.
+    #[serde(rename = "turn_stopped")]
+    TurnStopped {
+        reason: TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
+    },
+
     /// Current turn was interrupted by explicit user cancel.
     ///
     /// This is rendered as a system/status notice (not assistant content),

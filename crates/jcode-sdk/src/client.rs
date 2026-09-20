@@ -1347,6 +1347,12 @@ impl JcodeClient {
                 ApiEvent::PermissionRequest { request_id, .. } if options.auto_approve => {
                     self.respond_to_permission(session_id, &request_id, PermissionDecision::Allow)?;
                 }
+                ApiEvent::TurnStopped {
+                    reason, message, ..
+                } => {
+                    result.stop_reason = Some(reason);
+                    result.stop_message = Some(message);
+                }
                 ApiEvent::TurnDone { .. } => {
                     text_stream.finish(&mut result);
                     return Ok(result);
@@ -1425,6 +1431,10 @@ pub struct FileStatus {
 /// What one turn produced.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct TurnResult {
+    /// None for natural completion. Failures still return Err and are also
+    /// delivered to on_event as TurnStopped before the legacy Error event.
+    pub stop_reason: Option<jcode_harness_api::TurnStopReason>,
+    pub stop_message: Option<String>,
     /// All assistant text in the turn, including tool narration.
     pub text: String,
     /// Last completed assistant message, or aggregate text on older bridges.
@@ -1740,6 +1750,7 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
         | TurnDone { session_id, .. }
+        | TurnStopped { session_id, .. }
         | BackgroundProgress { session_id, .. }
         | MessageAccepted { session_id, .. }
         | PermissionRequest { session_id, .. }

@@ -75,6 +75,24 @@ fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, 
     )
 }
 
+/// Called only after automatic continuations have been exhausted.
+fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
+    let reason = stop_reason?;
+    if Agent::should_continue_after_stop_reason(reason)
+        || Agent::is_stranded_tool_use_stop(Some(reason))
+    {
+        Some(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::LimitReached,
+            message: format!(
+                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
+            ),
+            provider_stop_reason: Some(reason.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
@@ -279,6 +297,11 @@ impl Agent {
                                             logging::warn(
                                                 "Context-limit compaction retry limit reached; giving up",
                                             );
+                                            let _ = event_tx.send(ServerEvent::TurnStopped {
+                                                reason: crate::protocol::TurnStopReason::LimitReached,
+                                                message: format!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES),
+                                                provider_stop_reason: None,
+                                            });
                                             return Err(anyhow::anyhow!(
                                                 "Context limit exceeded after {} compaction retries",
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -447,6 +470,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -905,6 +936,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -1207,6 +1246,12 @@ impl Agent {
                     &mut incomplete_continuations,
                 )? {
                     NoToolCallOutcome::Break => {
+                        if saw_message_end
+                            && !self.is_graceful_shutdown()
+                            && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())
+                        {
+                            let _ = event_tx.send(event);
+                        }
                         // Surface silent guardrail/refusal stops: the provider
                         // ended the turn with no visible output (e.g. Anthropic
                         // stop_reason "refusal", or a reasoning-only response).
@@ -1653,6 +1698,21 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn abnormal_incomplete_stop_excludes_natural_completion() {
+        for reason in [None, Some("end_turn"), Some("stop")] {
+            assert!(super::incomplete_turn_stop(reason).is_none());
+        }
+        for reason in ["max_tokens", "length", "tool_use"] {
+            assert!(
+                matches!(super::incomplete_turn_stop(Some(reason)), Some(crate::protocol::ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::LimitReached,
+                provider_stop_reason: Some(raw), ..
+            }) if raw == reason)
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

@@ -3319,6 +3319,7 @@ async fn start_processing_message(
     crate::logging::info(&format!("Processing message id={} spawning task", id));
     *state.task = Some(tokio::spawn(async move {
         let event_tx = tx.clone();
+        let mut stop_reason = crate::protocol::TurnStopReason::Failure;
         let result = match std::panic::AssertUnwindSafe(crate::hooks::with_client_terminal_env(
             client_terminal_env,
             process_message_streaming_mpsc(agent, &content, images, system_reminder, event_tx),
@@ -3328,6 +3329,7 @@ async fn start_processing_message(
         {
             Ok(result) => result,
             Err(panic_payload) => {
+                stop_reason = crate::protocol::TurnStopReason::Crash;
                 let msg = if let Some(text) = panic_payload.downcast_ref::<&str>() {
                     text.to_string()
                 } else if let Some(text) = panic_payload.downcast_ref::<String>() {
@@ -3361,6 +3363,13 @@ async fn start_processing_message(
         // Keep the terminal event on the same ordered fanout channel as the
         // stream. Sending it later from the owning client's event loop could
         // race ahead of the final MessageEnd for newly attached clients.
+        if let Err(error) = &result {
+            let _ = tx.send(ServerEvent::TurnStopped {
+                reason: stop_reason,
+                message: crate::util::format_error_chain(error),
+                provider_stop_reason: None,
+            });
+        }
         let terminal_event = match &result {
             Ok(()) => ServerEvent::Done { id },
             Err(error) => ServerEvent::Error {
@@ -3411,6 +3420,18 @@ async fn cancel_processing_message(
             ));
             *state.task = Some(handle);
             return;
+        }
+        let stopped = ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::Interrupted,
+            message: "The turn was interrupted by a cancellation request.".into(),
+            provider_stop_reason: None,
+        };
+        // Publish before signalling: the worker can finish cooperatively and
+        // emit Done immediately after request_cancel.
+        if super::state::fanout_session_event(swarm.members, &session_label, stopped.clone()).await
+            == 0
+        {
+            let _ = client_event_tx.send(stopped);
         }
         let cancel_epoch = session_control.request_cancel();
         crate::logging::info(&format!(
@@ -3509,6 +3530,18 @@ async fn cancel_processing_message(
                 let _ = client_event_tx.send(ServerEvent::Done { id: message_id });
             }
             return;
+        }
+        let stopped = ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::Interrupted,
+            message: "The turn was interrupted by a cancellation request.".into(),
+            provider_stop_reason: None,
+        };
+        // Publish before signalling: the worker can finish cooperatively and
+        // emit Done immediately after request_cancel.
+        if super::state::fanout_session_event(swarm.members, &session_label, stopped.clone()).await
+            == 0
+        {
+            let _ = client_event_tx.send(stopped);
         }
         let cancel_epoch = session_control.request_cancel();
         let reset_control = session_control.clone();
