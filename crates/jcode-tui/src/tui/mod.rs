@@ -858,7 +858,9 @@ pub trait TuiState {
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
     /// Read-only reset guidance for the active OpenAI OAuth account.
     fn openai_reset_hint(&self) -> Option<&'static str> {
-        if self.is_processing() {
+        // SSH sessions may use a different login on the remote host. Local
+        // cached credits cannot establish reset availability for that account.
+        if self.is_processing() || is_ssh_remote() {
             return None;
         }
         let auth_method = self.info_widget_data().auth_method;
