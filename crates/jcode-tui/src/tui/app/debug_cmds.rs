@@ -189,6 +189,8 @@ impl App {
             // Return current state as JSON for easier parsing
             serde_json::json!({
                 "processing": self.is_processing,
+                "terminal_title": self.terminal_title.borrow().last_sent,
+                "session_edit_lines": self.display_edit_line_counts,
                 "messages": self.messages.len(),
                 "display_messages": self.display_messages.len(),
                 "input": self.input,

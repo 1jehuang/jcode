@@ -61,6 +61,7 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
+    app.refresh_terminal_title_metrics();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -597,6 +598,7 @@ fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
 }
 
 pub(super) fn finish_turn(app: &mut App) {
+    app.remember_terminal_title_work();
     let turn_duration_secs = app.display_turn_duration_secs();
     app.token_accounting.total_input_tokens += app.streaming.streaming_input_tokens;
     app.token_accounting.total_output_tokens += app.streaming.streaming_output_tokens;

@@ -1144,6 +1144,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 }
                 app.deferred_stream_done_id = None;
                 let turn_duration_secs = app.display_turn_duration_secs();
+                app.remember_terminal_title_work();
                 if completes_resumed_turn {
                     crate::logging::info(&format!(
                         "Treating Done id={} as completion for resumed remote activity",

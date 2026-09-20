@@ -334,6 +334,7 @@ impl App {
     }
 
     pub(super) fn clear_visible_turn_started(&mut self) {
+        self.remember_terminal_title_work();
         self.visible_turn_started = None;
     }
 

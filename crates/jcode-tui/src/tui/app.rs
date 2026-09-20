@@ -107,6 +107,7 @@ mod support;
 mod swarm_hint;
 mod terminal_liveness;
 mod terminal_setup_command;
+mod terminal_title;
 mod todos_view;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
@@ -846,6 +847,8 @@ pub struct App {
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
+    display_edit_line_counts: (usize, usize),
+    terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
     /// When older compacted history has just been loaded, this anchors the
     /// viewport to the content the reader was looking at so the prepend does not
@@ -2080,8 +2083,7 @@ impl App {
             .saturating_add(self.streaming.streaming_cache_creation_tokens.unwrap_or(0));
         self.token_accounting.last_cache_reported_input_tokens =
             Some(self.streaming.streaming_input_tokens);
-        self.token_accounting.last_cache_read_tokens =
-            self.streaming.streaming_cache_read_tokens;
+        self.token_accounting.last_cache_read_tokens = self.streaming.streaming_cache_read_tokens;
         self.token_accounting.last_cache_creation_tokens =
             self.streaming.streaming_cache_creation_tokens;
         self.token_accounting.last_cache_optimal_input_tokens = optimal_input_tokens;

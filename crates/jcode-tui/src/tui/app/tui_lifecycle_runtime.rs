@@ -67,10 +67,7 @@ impl App {
                 .as_deref()
                 .or(self.resume_session_id.as_deref())
                 .unwrap_or("connecting");
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::SetTitle(format!("jcode SSH {host} {session}"))
-            );
+            self.set_terminal_title_base(session, format!("jcode SSH {host} {session}"));
             return;
         }
         let session_id = if self.is_remote {
@@ -126,10 +123,7 @@ impl App {
             Some(&fallback_label),
             is_canary,
         );
-        let _ = crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::SetTitle(window_title)
-        );
+        self.set_terminal_title_base(session_id, window_title);
     }
 
     pub(super) fn reconnect_target_session_id(&self) -> Option<String> {

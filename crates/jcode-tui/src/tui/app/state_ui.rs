@@ -41,6 +41,10 @@ impl App {
     }
 
     fn recompute_display_message_stats(&mut self) {
+        self.display_edit_line_counts = self.display_messages.iter().fold((0, 0), |counts, msg| {
+            let (added, removed) = super::terminal_title::edit_line_counts(msg);
+            (counts.0 + added, counts.1 + removed)
+        });
         self.display_user_message_count = self
             .display_messages
             .iter()
@@ -69,6 +73,18 @@ impl App {
     /// `recompute_display_message_stats`, which made appending M messages one at
     /// a time cumulatively O(M^2).
     pub(super) fn adjust_display_message_stats(&mut self, message: &DisplayMessage, added: bool) {
+        let counts = super::terminal_title::edit_line_counts(message);
+        let update = |total: usize, count: usize| {
+            if added {
+                total.saturating_add(count)
+            } else {
+                total.saturating_sub(count)
+            }
+        };
+        self.display_edit_line_counts = (
+            update(self.display_edit_line_counts.0, counts.0),
+            update(self.display_edit_line_counts.1, counts.1),
+        );
         let delta: isize = if added { 1 } else { -1 };
         if message.effective_role() == "user" {
             self.display_user_message_count =
