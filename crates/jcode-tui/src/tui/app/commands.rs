@@ -961,7 +961,6 @@ fn parse_diff_mode_name(value: &str) -> Option<crate::config::DiffDisplayMode> {
         "full" | "full-inline" | "full_inline" | "fullinline" | "inline-full" => {
             Some(DiffDisplayMode::FullInline)
         }
-        "pinned" | "pin" | "pane" => Some(DiffDisplayMode::Pinned),
         "file" | "fullfile" | "full-file" => Some(DiffDisplayMode::File),
         _ => None,
     }
@@ -989,7 +988,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
 
     if arg.eq_ignore_ascii_case("status") {
         app.push_display_message(DisplayMessage::system(format!(
-            "Diff mode: {} (use /diff [off|inline|full|pinned|file] or /diff to cycle)",
+            "Diff mode: {} (use /diff [off|inline|full|file] or /diff to cycle)",
             app.diff_mode.label()
         )));
         return true;
@@ -998,7 +997,7 @@ pub(super) fn handle_diff_command(app: &mut App, trimmed: &str) -> bool {
     match parse_diff_mode_name(arg) {
         Some(mode) => apply_diff_mode(app, mode),
         None => app.push_display_message(DisplayMessage::error(
-            "Usage: /diff [off|inline|full|pinned|file|cycle|status]".to_string(),
+            "Usage: /diff [off|inline|full|file|cycle|status]".to_string(),
         )),
     }
     true

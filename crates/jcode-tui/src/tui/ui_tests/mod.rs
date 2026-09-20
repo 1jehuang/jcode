@@ -436,9 +436,6 @@ impl crate::tui::TuiState for TestState {
     fn inline_images_visible(&self) -> bool {
         self.inline_images_visible
     }
-    fn diff_line_wrap(&self) -> bool {
-        true
-    }
     fn inline_interactive_state(&self) -> Option<&crate::tui::InlineInteractiveState> {
         self.inline_interactive_state.as_ref()
     }

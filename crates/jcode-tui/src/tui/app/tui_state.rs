@@ -1933,9 +1933,6 @@ impl crate::tui::TuiState for App {
     fn side_panel_native_scrollbar(&self) -> bool {
         self.side_panel_native_scrollbar
     }
-    fn diff_line_wrap(&self) -> bool {
-        crate::config::config().display.diff_line_wrap
-    }
     fn inline_interactive_state(&self) -> Option<&crate::tui::InlineInteractiveState> {
         self.inline_interactive_state.as_ref()
     }

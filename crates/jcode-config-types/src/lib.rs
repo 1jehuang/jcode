@@ -81,8 +81,6 @@ pub enum DiffDisplayMode {
         alias = "full"
     )]
     FullInline,
-    /// Show diffs in a dedicated pinned pane.
-    Pinned,
     /// Show full file with diff highlights in side panel, synced to scroll position.
     File,
 }
@@ -96,24 +94,19 @@ impl DiffDisplayMode {
         matches!(self, Self::FullInline)
     }
 
-    pub fn is_pinned(&self) -> bool {
-        matches!(self, Self::Pinned)
-    }
-
     pub fn is_file(&self) -> bool {
         matches!(self, Self::File)
     }
 
     pub fn has_side_pane(&self) -> bool {
-        matches!(self, Self::Pinned | Self::File)
+        matches!(self, Self::File)
     }
 
     pub fn cycle(self) -> Self {
         match self {
             Self::Off => Self::Inline,
             Self::Inline => Self::FullInline,
-            Self::FullInline => Self::Pinned,
-            Self::Pinned => Self::File,
+            Self::FullInline => Self::File,
             Self::File => Self::Off,
         }
     }
@@ -123,8 +116,44 @@ impl DiffDisplayMode {
             Self::Off => "OFF",
             Self::Inline => "Inline",
             Self::FullInline => "Inline Full",
-            Self::Pinned => "Pinned",
             Self::File => "File",
+        }
+    }
+}
+
+#[cfg(test)]
+mod diff_display_mode_tests {
+    use super::DiffDisplayMode;
+
+    #[test]
+    fn diff_mode_cycle_keeps_inline_and_file_modes() {
+        use DiffDisplayMode::*;
+        let mut mode = Off;
+        for expected in [Inline, FullInline, File, Off, Inline] {
+            mode = mode.cycle();
+            assert_eq!(mode, expected);
+        }
+        for mode in [Off, Inline, FullInline, File] {
+            assert_eq!(mode.has_side_pane(), mode == File);
+            assert_eq!(mode.is_inline(), matches!(mode, Inline | FullInline));
+            assert_eq!(mode.is_full_inline(), mode == FullInline);
+            assert_eq!(mode.is_file(), mode == File);
+        }
+    }
+
+    #[test]
+    fn diff_mode_remaining_values_round_trip() {
+        for mode in [
+            DiffDisplayMode::Off,
+            DiffDisplayMode::Inline,
+            DiffDisplayMode::FullInline,
+            DiffDisplayMode::File,
+        ] {
+            let encoded = serde_json::to_string(&mode).unwrap();
+            assert_eq!(
+                serde_json::from_str::<DiffDisplayMode>(&encoded).unwrap(),
+                mode
+            );
         }
     }
 }

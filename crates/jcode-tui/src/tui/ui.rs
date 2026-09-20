@@ -149,9 +149,7 @@ pub(crate) use pinned_ui::{
     clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
     reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
 };
-use pinned_ui::{
-    collect_pinned_diffs_cached, draw_pinned_content_cached, draw_side_panel_markdown,
-};
+use pinned_ui::draw_side_panel_markdown;
 #[cfg(test)]
 use transitions::extract_line_text;
 #[cfg(test)]
@@ -2804,24 +2802,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = !swarm_page_active && app.side_panel().focused_page().is_some();
     let diff_mode = app.diff_mode();
-    let collect_diffs = diff_mode.is_pinned();
-    // Images now render inline in the transcript, so the side panel only handles
-    // pinned file diffs. `pin_images` no longer feeds the side-panel surface.
-    let has_pinned_content = if collect_diffs && !swarm_page_active {
-        collect_pinned_diffs_cached(app.display_messages(), app.display_messages_version())
-    } else {
-        false
-    };
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
-    let has_right_side_pane_content =
-        has_side_panel_content || has_pinned_content || has_file_diff_edits;
-    // The side panel is itself a single right-hand auxiliary surface and can render
-    // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
-    // also uses that same right-hand surface. Do not also open the global pinned
-    // diagram pane while any right-hand side pane is visible, otherwise combinations
-    // like pinned images + Mermaid can produce chat + side pane + diagram triple-split
-    // layouts.
+    let has_right_side_pane_content = has_side_panel_content || has_file_diff_edits;
+    // Regular side-panel pages and full-file diffs share the right-hand surface.
+    // Suppress a separate diagram pane to avoid a triple-split layout.
     let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if !swarm_page_active
         && diagram_mode == crate::config::DiagramDisplayMode::Pinned
@@ -2930,20 +2915,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
         const MIN_CHAT_WIDTH: u16 = 20;
-        // Pinned images live in a tall narrow column, so a wide image fits to
-        // the pane width and ends up small with empty space below it. When the
-        // pane is showing image content (and the user has not manually resized
-        // it), widen the default split so images use more of the available
-        // horizontal space. Diffs/markdown keep the standard ratio.
-        let image_dominant_pane =
-            has_pinned_content && !has_file_diff_edits && !has_side_panel_content;
-        const ADAPTIVE_IMAGE_RATIO: u32 = 55;
-        let base_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
-        let effective_ratio = if image_dominant_pane && !app.diagram_pane_ratio_user_adjusted() {
-            base_ratio.max(ADAPTIVE_IMAGE_RATIO)
-        } else {
-            base_ratio
-        };
+        let effective_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
         let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
         if max_diff >= MIN_DIFF_WIDTH {
             let diff_width = (((chat_area.width as u32 * effective_ratio) / 100) as u16)
@@ -3331,7 +3303,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         chat_scrollbar_visible,
         use_packed_layout: use_packed,
         has_side_panel_content,
-        has_pinned_content,
         has_file_diff_edits,
     });
 
@@ -3438,18 +3409,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app,
                 prepared.as_ref(),
                 app.diff_pane_scroll(),
-                app.diff_pane_focus(),
-            );
-        } else if has_pinned_content {
-            if let Some(ref mut capture) = debug_capture {
-                capture.render_order.push("draw_pinned_content".to_string());
-            }
-            draw_pinned_content_cached(
-                frame,
-                diff_area,
-                app,
-                app.diff_pane_scroll(),
-                app.diff_line_wrap(),
                 app.diff_pane_focus(),
             );
         }

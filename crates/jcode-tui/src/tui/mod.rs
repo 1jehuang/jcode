@@ -33,9 +33,8 @@ mod core;
 pub(crate) mod fuzzy;
 // Terminal image display + metadata helpers now live in the dependency-free
 // `jcode-terminal-image` crate (shared with the `read` tool). Re-exported here
-// so existing `crate::tui::image` / `crate::tui::image_metadata` paths keep working.
+// so existing `crate::tui::image` paths keep working.
 pub use jcode_terminal_image::display as image;
-use jcode_terminal_image::metadata as image_metadata;
 pub mod info_widget;
 mod info_widget_layout;
 mod info_widget_overview;
@@ -581,7 +580,7 @@ pub trait TuiState {
     fn is_canary(&self) -> bool;
     /// Whether running in replay mode
     fn is_replay(&self) -> bool;
-    /// Diff display mode (off/inline/full-inline/pinned/file)
+    /// Diff display mode (off/inline/full-inline/file)
     fn diff_mode(&self) -> crate::config::DiffDisplayMode;
     /// Current session ID (if available)
     fn current_session_id(&self) -> Option<String>;
@@ -786,8 +785,6 @@ pub trait TuiState {
     fn chat_native_scrollbar(&self) -> bool;
     /// Whether to show a native terminal scrollbar for the side panel
     fn side_panel_native_scrollbar(&self) -> bool;
-    /// Whether to wrap lines in the pinned diff pane
-    fn diff_line_wrap(&self) -> bool;
     /// Interactive inline UI state (picker-like flows shown above input)
     // ---- Inline ----
     fn inline_interactive_state(&self) -> Option<&InlineInteractiveState>;

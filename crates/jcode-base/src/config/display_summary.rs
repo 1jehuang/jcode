@@ -45,7 +45,6 @@ impl Config {
 - Markdown spacing: {}
 - LaTeX rendering: {}
 - Pin images: {}
-- Diff line wrap: {}
 - Queue mode: {}
 - Auto server reload: {}
 - Mouse capture: {}
@@ -175,7 +174,6 @@ impl Config {
             self.display.markdown_spacing.label(),
             self.display.latex_rendering.as_str(),
             self.display.pin_images,
-            self.display.diff_line_wrap,
             self.display.queue_mode,
             self.display.auto_server_reload,
             self.display.mouse_capture,

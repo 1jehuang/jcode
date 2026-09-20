@@ -124,7 +124,7 @@ key = "off"
 timeout_secs = 90
 
 [display]
-# Diff display mode: "off", "inline" (default), "full-inline", "pinned" (dedicated pane), or "file"
+# Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
 # Center all content by default (default: false)
@@ -136,10 +136,6 @@ pin_images = true
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
-
-# Wrap long lines in the pinned diff pane (default: true)
-# Set to false for horizontal scrolling instead of wrapping
-diff_line_wrap = true
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false

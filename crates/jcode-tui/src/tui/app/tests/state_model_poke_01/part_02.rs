@@ -173,11 +173,17 @@ fn test_side_panel_uses_left_splitter_instead_of_rounded_box() {
 }
 
 #[test]
-fn test_pinned_content_uses_left_splitter_instead_of_rounded_box() {
+fn test_removed_pinned_diff_config_renders_inline_without_side_pane() {
     let _lock = scroll_render_test_lock();
 
     let mut app = create_test_app();
-    app.diff_mode = crate::config::DiffDisplayMode::Pinned;
+    let legacy: crate::config::DisplayConfig = serde_json::from_value(serde_json::json!({
+        "diff_mode": "pinned",
+        "diff_line_wrap": false
+    }))
+    .expect("legacy display settings should remain loadable");
+    app.diff_mode = legacy.diff_mode;
+    assert_eq!(app.diff_mode, crate::config::DiffDisplayMode::Inline);
     app.display_messages = vec![DisplayMessage {
         role: "tool".to_string(),
         content: "wrote src/demo.rs".to_string(),
@@ -199,17 +205,15 @@ fn test_pinned_content_uses_left_splitter_instead_of_rounded_box() {
     let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
     let text = render_and_snap(&app, &mut terminal);
 
-    let diff_area = crate::tui::ui::last_layout_snapshot()
-        .and_then(|layout| layout.diff_pane_area)
-        .expect("expected pinned pane area after render");
-    let buf = terminal.backend().buffer();
-
-    assert_eq!(buf[(diff_area.x, diff_area.y)].symbol(), "│");
-    assert_eq!(buf[(diff_area.x, diff_area.y + 1)].symbol(), "│");
     assert!(
-        text.contains("side Pinned +1 -0 1f"),
-        "rendered text: {text}"
+        crate::tui::ui::last_layout_snapshot()
+            .expect("layout after render")
+            .diff_pane_area
+            .is_none(),
+        "removed pinned mode must not allocate a side pane"
     );
+    assert!(text.contains("fn demo() {}"), "inline diff must remain visible: {text}");
+    assert!(!text.contains("side Pinned"), "rendered text: {text}");
 }
 
 #[test]

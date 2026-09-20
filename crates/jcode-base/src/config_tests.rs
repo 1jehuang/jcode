@@ -1106,6 +1106,33 @@ fn test_env_override_native_scrollbars() {
 }
 
 #[test]
+fn test_removed_pinned_diff_mode_falls_back_inline() {
+    let cfg: Config = toml::from_str(
+        "[display]\ndiff_mode = 'pinned'\ndiff_line_wrap = false\ncentered = true\n",
+    )
+    .expect("legacy pinned diff settings must not invalidate the config");
+    assert_eq!(cfg.display.diff_mode, DiffDisplayMode::Inline);
+    assert!(cfg.display.centered, "unrelated settings must survive");
+}
+
+#[test]
+fn test_env_override_removed_pinned_diff_mode_is_ignored() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DIFF_MODE");
+    for removed in ["pinned", "pin"] {
+        crate::env::set_var("JCODE_DIFF_MODE", removed);
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.display.diff_mode, DiffDisplayMode::Inline);
+
+        cfg.display.diff_mode = DiffDisplayMode::File;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.display.diff_mode, DiffDisplayMode::File);
+    }
+    restore_env_var("JCODE_DIFF_MODE", prev);
+}
+
+#[test]
 fn test_env_override_diff_mode_full_inline() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_DIFF_MODE");

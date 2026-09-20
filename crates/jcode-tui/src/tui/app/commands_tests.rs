@@ -16,10 +16,6 @@ fn parse_diff_mode_name_maps_known_aliases() {
         parse_diff_mode_name("full"),
         Some(DiffDisplayMode::FullInline)
     );
-    assert_eq!(
-        parse_diff_mode_name("pinned"),
-        Some(DiffDisplayMode::Pinned)
-    );
     assert_eq!(parse_diff_mode_name("file"), Some(DiffDisplayMode::File));
 }
 
@@ -27,13 +23,16 @@ fn parse_diff_mode_name_maps_known_aliases() {
 fn parse_diff_mode_name_is_case_insensitive_and_trims() {
     use crate::config::DiffDisplayMode;
     assert_eq!(
-        parse_diff_mode_name("  PINNED "),
-        Some(DiffDisplayMode::Pinned)
+        parse_diff_mode_name("  FILE "),
+        Some(DiffDisplayMode::File)
     );
 }
 
 #[test]
 fn parse_diff_mode_name_rejects_unknown() {
+    for removed in ["pinned", "pin", "pane", "  PINNED "] {
+        assert_eq!(parse_diff_mode_name(removed), None);
+    }
     assert_eq!(parse_diff_mode_name("sidebyside"), None);
     assert_eq!(parse_diff_mode_name(""), None);
 }

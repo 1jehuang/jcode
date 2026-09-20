@@ -173,7 +173,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/keybindings", "Alias for /keys"),
     RegisteredCommand::public(
         "/diff",
-        "Cycle or set diff display mode (off/inline/full/pinned/file)",
+        "Cycle or set diff display mode (off/inline/full/file)",
     ),
     RegisteredCommand::public(
         "/onboarding-preview",
