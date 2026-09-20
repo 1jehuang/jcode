@@ -1622,3 +1622,35 @@ async fn one_shot_cleanup_preserves_the_original_command_error() {
         ));
     }
 }
+
+#[test]
+fn ndjson_tool_input_preserves_ids_and_legacy_shape() {
+    use crate::protocol::ServerEvent;
+
+    let mut output = Vec::new();
+    let mut state = NdjsonRunState::default();
+    for id in [Some("tool1"), Some("tool2"), None] {
+        emit_ndjson_event(
+            &mut output,
+            &mut state,
+            ServerEvent::ToolInput {
+                id: id.map(str::to_string),
+                delta: "{}".to_string(),
+            },
+        )
+        .expect("write tool input");
+    }
+    let events: Vec<serde_json::Value> = String::from_utf8(output)
+        .expect("UTF-8 output")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("JSON line"))
+        .collect();
+    assert_eq!(
+        events,
+        vec![
+            serde_json::json!({"type": "tool_input", "id": "tool1", "delta": "{}"}),
+            serde_json::json!({"type": "tool_input", "id": "tool2", "delta": "{}"}),
+            serde_json::json!({"type": "tool_input", "delta": "{}"}),
+        ]
+    );
+}

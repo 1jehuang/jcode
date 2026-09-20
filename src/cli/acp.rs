@@ -1495,8 +1495,8 @@ impl EventMapper {
                     "status": "pending",
                 })]
             }
-            ServerEvent::ToolInput { delta } => {
-                let Some(tool_id) = self.current_tool_id.clone() else {
+            ServerEvent::ToolInput { id, delta } => {
+                let Some(tool_id) = id.or_else(|| self.current_tool_id.clone()) else {
                     return Vec::new();
                 };
                 let buffer = self.tool_inputs.entry(tool_id.clone()).or_default();
@@ -1995,6 +1995,7 @@ mod tests {
         assert_eq!(start[0]["kind"], "execute");
 
         let input = mapper.map_event(ServerEvent::ToolInput {
+            id: None,
             delta: "{\"command\":\"true\"}".to_string(),
         });
         assert_eq!(input[0]["rawInput"]["command"], "true");
@@ -2007,6 +2008,55 @@ mod tests {
         });
         assert_eq!(done[0]["status"], "completed");
         assert_eq!(done[0]["content"][0]["content"]["text"], "ok");
+    }
+
+    #[test]
+    fn event_mapper_routes_interleaved_tool_input_by_id() {
+        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        for id in ["tool1", "tool2"] {
+            mapper.map_event(ServerEvent::ToolStart {
+                id: id.to_string(),
+                name: "bash".to_string(),
+            });
+        }
+        for (id, delta) in [
+            ("tool1", "{\"command\":"),
+            ("tool2", "{\"command\":\"second\"}"),
+            ("tool1", "\"first\"}"),
+        ] {
+            let update = mapper.map_event(ServerEvent::ToolInput {
+                id: Some(id.to_string()),
+                delta: delta.to_string(),
+            });
+            assert_eq!(update[0]["toolCallId"], id);
+        }
+        for (id, command) in [("tool1", "first"), ("tool2", "second")] {
+            let update = mapper.map_event(ServerEvent::ToolExec {
+                id: id.to_string(),
+                name: "bash".to_string(),
+            });
+            assert_eq!(update[0]["toolCallId"], id);
+            assert_eq!(update[0]["rawInput"]["command"], command);
+        }
+    }
+
+    #[test]
+    fn event_mapper_accepts_keyed_input_without_a_current_tool() {
+        let mut mapper = EventMapper::new("session1".to_string(), AcpProfile::Standard);
+        assert!(
+            mapper
+                .map_event(ServerEvent::ToolInput {
+                    id: None,
+                    delta: "{}".to_string(),
+                })
+                .is_empty()
+        );
+        let update = mapper.map_event(ServerEvent::ToolInput {
+            id: Some("tool1".to_string()),
+            delta: "{\"command\":\"true\"}".to_string(),
+        });
+        assert_eq!(update[0]["toolCallId"], "tool1");
+        assert_eq!(update[0]["rawInput"]["command"], "true");
     }
 
     #[test]
