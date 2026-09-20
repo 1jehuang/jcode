@@ -8,6 +8,7 @@ import { NdjsonDecoder, encodeFrame } from "./framing.js";
 import { apiSocketPath, transportEndpoint } from "./sockets.js";
 import { launchInstance, type LaunchOptions, type LaunchedInstance } from "./launch.js";
 import { HarnessError } from "./errors.js";
+import { ToolCallbacks, prepareTools, type SessionToolsOptions, type ToolResult } from "./tools.js";
 import {
   assertRetryCount,
   buildStructuredCorrectionPrompt,
@@ -30,6 +31,7 @@ import {
   type RenderedImage,
   type ServerFrame,
   type SessionInfo,
+  type SessionToolDefinition,
   type TextMatch,
 } from "./protocol.js";
 
@@ -145,6 +147,12 @@ export interface ConnectOptions {
   requestTimeoutMs?: number;
 }
 
+export interface CreateSessionOptions {
+  workingDir?: string;
+  /** Configured before createSession resolves, before any model turn starts. */
+  tools?: SessionToolsOptions;
+}
+
 export interface GlobalEventsOptions {
   /** Stop discovery and close every per-session child connection. */
   signal?: AbortSignal;
@@ -188,6 +196,7 @@ interface Pending {
   resolve: (frame: ServerFrame) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
+  onReply?: (frame: ServerFrame) => void;
 }
 
 /**
@@ -207,6 +216,11 @@ export class JcodeClient extends EventEmitter {
   private nextId = 1;
   private closed = false;
   private closeError?: Error;
+  private readonly configuringTools = new Set<string>();
+  private readonly toolCallbacks = new ToolCallbacks(
+    (sessionId, callId, result) => this.submitToolResult(sessionId, callId, result),
+    (error) => this.emitSafe("error", error),
+  );
 
   /** Server identity from the handshake, e.g. "jcode-harness-api-bridge/0.1.0". */
   server = "";
@@ -326,8 +340,15 @@ export class JcodeClient extends EventEmitter {
         const waiter = this.pending.get(replyTo)!;
         this.pending.delete(replyTo);
         if (waiter.timer) clearTimeout(waiter.timer);
+        waiter.onReply?.(frame);
         waiter.resolve(frame);
         continue;
+      }
+      if (frame.ev === "tool_call" && typeof frame.session_id === "string"
+        && typeof frame.call_id === "string" && typeof frame.name === "string") {
+        this.toolCallbacks.dispatch(frame.session_id, frame.call_id, frame.name, frame.input);
+      } else if (frame.ev === "turn_done" && typeof frame.session_id === "string") {
+        this.toolCallbacks.abort(frame.session_id);
       }
       this.emit("event", frame);
       // Unknown kinds still land on `event` so a client can log them, but
@@ -350,6 +371,7 @@ export class JcodeClient extends EventEmitter {
 
   private handleClose(error?: Error): void {
     this.closed = true;
+    this.toolCallbacks.close();
     this.closeError = error ?? new Error("harness connection closed");
     for (const [, waiter] of this.pending) {
       if (waiter.timer) clearTimeout(waiter.timer);
@@ -361,10 +383,14 @@ export class JcodeClient extends EventEmitter {
 
   /** Send a raw request and await its reply frame. */
   request(request: ApiRequest): Promise<ServerFrame> {
+    return this.requestFrame(request);
+  }
+
+  private requestFrame(request: ApiRequest, onReply?: (frame: ServerFrame) => void): Promise<ServerFrame> {
     if (this.closed) return Promise.reject(this.closeError ?? new Error("client closed"));
     const id = this.nextId++;
     return new Promise<ServerFrame>((resolve, reject) => {
-      const entry: Pending = { resolve, reject };
+      const entry: Pending = { resolve, reject, onReply };
       if (this.requestTimeoutMs > 0) {
         entry.timer = setTimeout(() => {
           this.pending.delete(id);
@@ -438,12 +464,67 @@ export class JcodeClient extends EventEmitter {
     await this.requestOk({ req: "set_retention_policy", archive_after_days: archiveAfterDays });
   }
 
-  async createSession(workingDir?: string): Promise<SessionInfo> {
+  async createSession(options?: string | CreateSessionOptions): Promise<SessionInfo> {
+    const { workingDir, tools } = typeof options === "string" ? { workingDir: options } : (options ?? {});
+    if (tools) {
+      this.requireSessionTools();
+      prepareTools(tools);
+    }
     const frame = await this.expectReply(
       { req: "create_session", working_dir: workingDir },
       "attached",
     );
+    if (tools) await this.configureTools(frame.session.session_id, tools);
     return frame.session;
+  }
+
+  private requireSessionTools(): void {
+    if (!this.supports("session_tools")) {
+      throw new HarnessError("unsupported", "This harness does not support session_tools. Update the jcode runtime and API bridge.");
+    }
+  }
+
+  /** Replace the session tool policy while idle. Await before sending another message. */
+  async configureTools(sessionId: string, options: SessionToolsOptions): Promise<void> {
+    this.requireSessionTools();
+    if (this.configuringTools.has(sessionId)) {
+      throw new HarnessError("busy", "A tool configuration request is already in flight for this session");
+    }
+    const prepared = prepareTools(options);
+    this.configuringTools.add(sessionId);
+    try {
+      const frame = await this.requestFrame(
+        { req: "configure_tools", session_id: sessionId, tools: prepared.wire },
+        (reply) => {
+          // Synchronous with ingest: a callback in the same network chunk sees the new table.
+          // Until this ack, an existing turn must continue using the old table.
+          if (reply.ev === "ok") this.toolCallbacks.sessions.set(sessionId, prepared.handlers);
+        },
+      );
+      if (frame.ev === "error") throw new HarnessError(String(frame.code), String(frame.message));
+      if (frame.ev !== "ok") throw new HarnessError("unexpected_reply", `expected ok, got ${frame.ev}`);
+    } catch (error) {
+      // An ambiguous outcome must not pair new remote definitions with old callbacks.
+      if (error instanceof HarnessError && (error.code === "timeout" || error.code === "unexpected_reply")) {
+        void this.close();
+      }
+      throw error;
+    } finally {
+      this.configuringTools.delete(sessionId);
+    }
+  }
+
+  /** Inspect the effective model-visible tool definitions. */
+  async listTools(sessionId: string): Promise<SessionToolDefinition[]> {
+    this.requireSessionTools();
+    return (await this.expectReply({ req: "list_tools", session_id: sessionId }, "tools")).tools;
+  }
+
+  /** Low-level response API for applications handling tool_call events themselves. */
+  async submitToolResult(sessionId: string, callId: string, result: string | ToolResult): Promise<void> {
+    const value = typeof result === "string" ? { output: result } : result;
+    await this.expectReply({ req: "tool_result", session_id: sessionId, call_id: callId,
+      output: value.output, error: value.error }, "ok");
   }
 
   async attachSession(sessionId: string): Promise<SessionInfo> {
@@ -465,6 +546,8 @@ export class JcodeClient extends EventEmitter {
 
   async detachSession(sessionId: string): Promise<void> {
     await this.requestOk({ req: "detach_session", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
+    this.toolCallbacks.sessions.delete(sessionId);
   }
 
   /**
@@ -556,6 +639,7 @@ export class JcodeClient extends EventEmitter {
 
   async cancel(sessionId: string): Promise<void> {
     await this.requestOk({ req: "cancel", session_id: sessionId });
+    this.toolCallbacks.abort(sessionId);
   }
 
   async softInterrupt(sessionId: string, content: string, urgent = false): Promise<void> {
@@ -1190,6 +1274,7 @@ export class JcodeClient extends EventEmitter {
    * plain `connect()` client it resolves immediately and can be ignored.
    */
   close(): Promise<void> {
+    this.toolCallbacks.close();
     this.transport.close();
     const instance = this.instance;
     this.instance = undefined;
