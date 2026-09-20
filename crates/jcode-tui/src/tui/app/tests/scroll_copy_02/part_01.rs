@@ -1007,6 +1007,120 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
 }
 
 #[test]
+fn test_edge_autoscroll_rate_is_proximity_scaled_and_stops_on_release() {
+    // Regression for the reported bug: the drag-edge autoscroll used to be driven
+    // through the mouse-wheel momentum path. Every 60fps tick looked like a hard
+    // flick, so the queue saturated and the view scrolled ~3 lines/frame
+    // (~180 lines/s), then kept gliding after release while the leftover queue
+    // drained. It must now move a small proximity-scaled number of lines per tick
+    // and stop dead on release.
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    let lines = (1..=200)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    // Tall enough that the edge hot zone has more than one tier.
+    let backend = ratatui::backend::TestBackend::new(60, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+    let col = area.x + 1;
+    let boundary_row = area.y;
+    let inner_row = area.y + 1;
+
+    // Anchor mid-viewport, then drag onto the top boundary row: the fastest tier.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row: area.y + area.height / 2,
+        modifiers: KeyModifiers::empty(),
+    });
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: boundary_row,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    let before = app.scroll_offset();
+    assert!(app.progress_copy_selection_edge_autoscroll());
+    let boundary_delta = before.saturating_sub(app.scroll_offset());
+    assert!(
+        (1..=3).contains(&boundary_delta),
+        "one autoscroll tick must move the small proximity tier, not a velocity-scaled wheel \
+         notch (got {boundary_delta})"
+    );
+
+    // Held-still ticks must not accelerate: the rate is the gesture tier, not a
+    // per-frame queue drain.
+    for tick in 0..3 {
+        let prev = app.scroll_offset();
+        assert!(app.progress_copy_selection_edge_autoscroll());
+        assert_eq!(
+            prev.saturating_sub(app.scroll_offset()),
+            boundary_delta,
+            "held tick {tick} changed the rate; the autoscroll must not accelerate while held"
+        );
+    }
+
+    // One row deeper into the hot zone must never be faster than the boundary.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: inner_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    let before_inner = app.scroll_offset();
+    assert!(app.progress_copy_selection_edge_autoscroll());
+    let inner_delta = before_inner.saturating_sub(app.scroll_offset());
+    assert!(
+        (1..=3).contains(&inner_delta) && inner_delta <= boundary_delta,
+        "proximity tier should be slower (or equal) deeper in the zone \
+         (boundary={boundary_delta}, inner={inner_delta})"
+    );
+
+    // Release: the autoscroll stops and nothing glides afterwards.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row: inner_row,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    let settled = app.scroll_offset();
+    for _ in 0..10 {
+        assert!(!app.progress_copy_selection_edge_autoscroll());
+    }
+    assert_eq!(
+        app.scroll_offset(),
+        settled,
+        "the view must not drift after release (no momentum glide)"
+    );
+}
+
+#[test]
 fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
     // Regression: holding the cursor *near* (not exactly on) the top boundary
     // row used to fall outside the edge trigger, which disarmed the continuous

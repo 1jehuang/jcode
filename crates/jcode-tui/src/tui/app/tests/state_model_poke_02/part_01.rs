@@ -313,6 +313,10 @@ fn test_mouse_scroll_help_overlay_updates_help_scroll() {
     let mut app = create_test_app();
     app.help_scroll = Some(5);
 
+    // The wheel notch size scales with the gap since the previous notch, and the
+    // events below are issued back to back. Clear the timestamp so each notch is
+    // measured as a deliberate one at the base tier rather than a flick.
+    app.last_wheel = None;
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: 10,
@@ -326,6 +330,7 @@ fn test_mouse_scroll_help_overlay_updates_help_scroll() {
     );
     assert_eq!(app.help_scroll, Some(8));
 
+    app.last_wheel = None;
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 10,
@@ -342,6 +347,8 @@ fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
     let mut app = create_test_app();
     app.changelog_scroll = Some(2);
 
+    // Pin the base tier; see the help-overlay test above for why.
+    app.last_wheel = None;
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 10,
@@ -355,6 +362,7 @@ fn test_mouse_scroll_changelog_overlay_updates_changelog_scroll() {
     );
     assert_eq!(app.changelog_scroll, Some(0));
 
+    app.last_wheel = None;
     let scroll_only = app.handle_mouse_event(MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: 10,
