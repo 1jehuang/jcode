@@ -636,6 +636,15 @@ impl RemoteConnection {
         Ok(id)
     }
 
+    /// Refresh daemon usage after a client-side banked reset attempt.
+    pub async fn invalidate_openai_usage(&mut self, account_label: Option<String>) -> Result<u64> {
+        let id = self.next_request_id;
+        self.next_request_id += 1;
+        self.send_request(Request::InvalidateOpenAiUsage { id, account_label })
+            .await?;
+        Ok(id)
+    }
+
     /// Re-request the session history payload from the server.
     ///
     /// Used by the client-side history-recovery watchdog: if the bootstrap

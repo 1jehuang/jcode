@@ -158,6 +158,12 @@ soonest-expiring available reset. Nothing is spent until you run
 `/reset usage limits openai confirm`. Use `/reset usage limits openai cancel`
 to dismiss the pending confirmation. API keys cannot redeem these resets.
 
+When the active ChatGPT account is fully limited and has a banked reset, the
+TUI notification line shows `Reset available · /reset usage limits openai`.
+This uses fresh, account-matched quota data and respects OpenAI's `allowed`
+flag rather than suggesting a reset merely because a percentage rounds to 100%.
+Hard quota failures trigger a read-only refresh. The hint never redeems a reset.
+
 The implementation follows [Codex's backend client](https://github.com/openai/codex/blob/5c5308fc9a9ee789049d646ef11e5400384b9c6f/codex-rs/backend-client/src/client/rate_limit_resets.rs):
 
 - Read: `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`

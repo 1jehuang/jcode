@@ -544,6 +544,22 @@ pub(in crate::tui::app) fn handle_server_event(
     event: ServerEvent,
     remote: &mut impl RemoteEventState,
 ) -> bool {
+    if let ServerEvent::Done { id } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.usage_reset.refresh_usage = true;
+        return true;
+    }
+
+    if let ServerEvent::Error { id, message, .. } = &event
+        && app.usage_reset.invalidate_requests.remove(id).is_some()
+    {
+        app.push_display_message(DisplayMessage::error(format!(
+            "Reset result is unchanged, but the daemon usage cache could not be refreshed: {message}. Reconnect to refresh daemon state."
+        )));
+        return true;
+    }
+
     let eager_stream_redraw = !crate::perf::tui_policy().enable_decorative_animations;
     if app.is_processing {
         app.last_stream_activity = Some(Instant::now());
@@ -1236,6 +1252,7 @@ pub(in crate::tui::app) fn handle_server_event(
             retry_after_secs,
             ..
         } => {
+            app.refresh_openai_usage_after_quota_error(&message);
             // The server rejects a Message request with this error while its
             // previous turn is still running. This typically happens when a
             // reload/reconnect raced the turn-end dispatch: the history

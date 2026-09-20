@@ -153,6 +153,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
     RegisteredCommand::public("/info", "Show session info and tokens"),
+    RegisteredCommand::public("/reset", "Review and confirm a banked OpenAI usage reset"),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/productivity",
@@ -530,6 +531,26 @@ impl App {
 
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/reset ") {
+            return self.rank_suggestions(
+                input,
+                vec![
+                    (
+                        "/reset usage limits openai".into(),
+                        "Review an available banked reset (read-only)",
+                    ),
+                    (
+                        "/reset usage limits openai confirm".into(),
+                        "Spend the pending banked reset",
+                    ),
+                    (
+                        "/reset usage limits openai cancel".into(),
+                        "Clear the pending reset confirmation",
+                    ),
+                ],
+            );
+        }
 
         if prefix.starts_with("/model ") || prefix.starts_with("/models ") {
             if let Some(model_spec) = input
@@ -1672,6 +1693,7 @@ impl App {
                 | "/account openai switch"
                 | "/account openai remove"
                 | "/usage"
+                | "/reset"
                 | "/subscription"
                 | "/poke"
                 | "/memory"
