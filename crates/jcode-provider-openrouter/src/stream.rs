@@ -413,10 +413,9 @@ impl OpenRouterStream {
                         if !finish_reason.is_empty() {
                             self.finish_reason = Some(finish_reason.to_string());
                         }
-                        // Emit any pending tool calls.
-                        self.flush_tool_call_accumulators();
-
-                        // Don't emit MessageEnd here - wait for [DONE]
+                        // Some proxies emit a finish reason after every delta, even
+                        // while tool arguments are still streaming (#1326). Keep the
+                        // accumulators until [DONE] or EOF, just like MessageEnd.
                     }
                 }
             }
@@ -785,6 +784,119 @@ mod tests {
             Some(Ok(StreamEvent::MessageEnd { stop_reason: Some(reason) })) if reason == "max_tokens"
         ));
         assert!(futures::executor::block_on(stream.next()).is_none());
+    }
+
+    fn assert_tool_calls_wait_for_stream_end(repeated_stop: bool, done: bool, parallel: bool) {
+        use futures::FutureExt;
+
+        // Keep the transport open between chunks so premature tool completion
+        // cannot be hidden by collecting an already-finished stream.
+        let (sender, receiver) = futures::channel::mpsc::unbounded();
+        let mut stream = OpenRouterStream::new(
+            receiver,
+            "test-model".to_string(),
+            Arc::new(Mutex::new(None)),
+        );
+        let stop = serde_json::json!({
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        });
+        let send = |payload: Value| {
+            sender
+                .unbounded_send(Ok(Bytes::from(format!("data: {payload}\n\n"))))
+                .unwrap();
+        };
+        let calls = if parallel { 2 } else { 1 };
+        // Index-only argument fragments arrive interleaved, after the proxy's
+        // first stop chunk has already followed the id/name-only delta.
+        for arguments in [None, Some("{\"command\":"), Some("\"echo ok\"}")] {
+            for index in 0..calls {
+                let call = match arguments {
+                    None => serde_json::json!({
+                        "index": index,
+                        "id": format!("call_{index}"),
+                        "function": {"name": "bash"}
+                    }),
+                    Some(arguments) => serde_json::json!({
+                        "index": index,
+                        "function": {"arguments": arguments}
+                    }),
+                };
+                send(serde_json::json!({"choices": [{"delta": {"tool_calls": [call]}}]}));
+                if repeated_stop {
+                    send(stop.clone());
+                }
+                assert!(
+                    stream.next().now_or_never().is_none(),
+                    "tool emitted before stream end (repeated_stop={repeated_stop}, done={done}, parallel={parallel})"
+                );
+            }
+        }
+        let reason = if repeated_stop { "stop" } else { "tool_calls" };
+        send(serde_json::json!({
+            "choices": [{"delta": {}, "finish_reason": reason}]
+        }));
+        assert!(stream.next().now_or_never().is_none());
+
+        // Ordinary text remains incremental, even while tools are buffered.
+        send(serde_json::json!({"choices": [{"delta": {"content": "ready"}}]}));
+        assert!(matches!(
+            stream.next().now_or_never(),
+            Some(Some(Ok(StreamEvent::TextDelta(text)))) if text == "ready"
+        ));
+
+        if done {
+            sender
+                .unbounded_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")))
+                .unwrap();
+        } else {
+            sender.close_channel();
+        }
+        // For [DONE], the transport is still open. Completion must not wait for
+        // EOF. For EOF, there is no [DONE] and poll_next must flush the calls.
+        for index in 0..calls {
+            assert!(matches!(
+                stream.next().now_or_never(),
+                Some(Some(Ok(StreamEvent::ToolUseStart { id, name })))
+                    if id == format!("call_{index}") && name == "bash"
+            ));
+            assert!(matches!(
+                stream.next().now_or_never(),
+                Some(Some(Ok(StreamEvent::ToolInputDelta(arguments))))
+                    if arguments == "{\"command\":\"echo ok\"}"
+            ));
+            assert!(matches!(
+                stream.next().now_or_never(),
+                Some(Some(Ok(StreamEvent::ToolUseEnd)))
+            ));
+        }
+        assert!(matches!(
+            stream.next().now_or_never(),
+            Some(Some(Ok(StreamEvent::MessageEnd { stop_reason })))
+                if stop_reason.as_deref() == Some(reason)
+        ));
+        assert!(stream.tool_call_accumulators.is_empty());
+        assert!(stream.pending.is_empty());
+        // Closing the transport after [DONE] must not emit the calls or end twice.
+        sender.close_channel();
+        assert!(matches!(stream.next().now_or_never(), Some(None)));
+    }
+
+    #[test]
+    fn repeated_stop_chunks_preserve_tool_arguments_until_done_or_eof() {
+        for done in [true, false] {
+            for parallel in [false, true] {
+                assert_tool_calls_wait_for_stream_end(true, done, parallel);
+            }
+        }
+    }
+
+    #[test]
+    fn normal_tool_streaming_completes_at_done_or_eof() {
+        for done in [true, false] {
+            for parallel in [false, true] {
+                assert_tool_calls_wait_for_stream_end(false, done, parallel);
+            }
+        }
     }
 
     #[test]
