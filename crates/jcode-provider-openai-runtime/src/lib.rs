@@ -287,6 +287,10 @@ struct PersistentWsState {
     message_count: usize,
     /// Number of items we sent in the last full request (for detecting conversation changes)
     last_input_item_count: usize,
+    /// Fingerprints of the last canonical full input. A larger input can still
+    /// rewrite earlier items (for example, when tool outputs are reordered).
+    /// A count alone is not a safe continuation cursor in that case.
+    last_input_item_hashes: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -404,6 +408,13 @@ fn summarize_ws_input(items: &[Value]) -> WsInputStats {
         }
     }
     stats
+}
+
+fn persistent_ws_input_item_hashes(input: &[Value]) -> Vec<u64> {
+    input
+        .iter()
+        .map(jcode_provider_core::fingerprint::stable_hash_json)
+        .collect()
 }
 
 fn persistent_ws_incremental_items(input: &[Value], start_index: usize) -> (Vec<Value>, usize) {

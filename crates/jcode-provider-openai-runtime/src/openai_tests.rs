@@ -84,6 +84,9 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
     )
@@ -138,6 +141,9 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: 1,
+            last_input_item_hashes: persistent_ws_input_item_hashes(&[
+                serde_json::json!({"role":"user","content":"previous"}),
+            ]),
         },
         server,
         ping_notify,
@@ -355,3 +361,5 @@ fn catalog_credential_identity_survives_token_refresh_but_changes_accounts() {
 }
 
 include!("openai_tests/persistent_terminal.rs");
+
+include!("openai_tests/persistent_prefix.rs");

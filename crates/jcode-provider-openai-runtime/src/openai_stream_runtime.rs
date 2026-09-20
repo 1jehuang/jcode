@@ -570,6 +570,30 @@ async fn continue_persistent_ws_locked(
         return PersistentWsResult::NotAvailable;
     }
 
+    // Canonicalization can move a new tool output before the old cursor, even
+    // when the input grows. Slicing by count would silently omit that output.
+    // Replay the full normalized history unless the prior input is unchanged.
+    let input_item_hashes = persistent_ws_input_item_hashes(input);
+    if state.last_input_item_hashes.len() != state.last_input_item_count
+        || !input_item_hashes.starts_with(&state.last_input_item_hashes)
+    {
+        log_openai_stream_lifecycle(
+            jcode_base::logging::LogLevel::Info,
+            "persistent_state_reset",
+            vec![
+                ("model", request_model.clone()),
+                ("reason", "input_prefix_changed".to_string()),
+                ("input_item_count", input_item_count.to_string()),
+                (
+                    "last_input_item_count",
+                    state.last_input_item_count.to_string(),
+                ),
+            ],
+        );
+        *guard = None;
+        return PersistentWsResult::NotAvailable;
+    }
+
     // Compute incremental items: everything after the last_input_item_count.
     //
     // When continuing with `previous_response_id`, OpenAI already has every
@@ -970,6 +994,7 @@ async fn continue_persistent_ws_locked(
                         let lower = message.to_lowercase();
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -993,6 +1018,7 @@ async fn continue_persistent_ws_locked(
                         let lower = message.to_lowercase();
                         if is_retryable_error(&lower)
                             || lower.contains("previous_response_not_found")
+                            || lower.contains("no tool output found for function call")
                         {
                             return PersistentWsResult::Failed(format!(
                                 "stream error: {}",
@@ -1073,6 +1099,7 @@ async fn continue_persistent_ws_locked(
     if let Some(resp_id) = new_response_id {
         state.last_response_id = resp_id;
         state.last_input_item_count = input_item_count;
+        state.last_input_item_hashes = input_item_hashes;
         state.message_count += 1;
         state.last_activity_at = Instant::now();
         state.last_response_completed_at = Instant::now();
@@ -1217,6 +1244,13 @@ pub(super) async fn stream_response_websocket_persistent(
         }))
         .await;
 
+    let input_item_hashes = persistent_ws_input_item_hashes(
+        request
+            .get("input")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
     let mut request_event = request;
     if !request_event.is_object() {
         return Err(OpenAIStreamFailure::Other(anyhow::anyhow!(
@@ -1528,6 +1562,7 @@ pub(super) async fn stream_response_websocket_persistent(
             last_response_completed_at: Instant::now(),
             message_count: 1,
             last_input_item_count: input_item_count,
+            last_input_item_hashes: input_item_hashes,
         });
         drop(guard);
         spawn_persistent_ws_keepalive(

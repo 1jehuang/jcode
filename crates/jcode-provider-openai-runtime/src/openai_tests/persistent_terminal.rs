@@ -4,6 +4,7 @@ async fn persistent_terminal_public_case(
     error_kind: &str,
     code: Option<&str>,
     next_on_error: bool,
+    missing_output: bool,
 ) {
     let _env_lock = jcode_base::storage::lock_test_env();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -12,7 +13,7 @@ async fn persistent_terminal_public_case(
     let _base = EnvVarGuard::set("JCODE_OPENAI_API_BASE", &format!("http://{addr}/v1"));
     let error_kind = error_kind.to_owned();
     let code = code.map(str::to_owned);
-    let recover = code.as_deref() == Some("previous_response_not_found");
+    let recover = code.as_deref() == Some("previous_response_not_found") || missing_output;
     let messages = vec![
         ChatMessage::user("original"),
         ChatMessage::assistant_text("earlier"),
@@ -28,7 +29,7 @@ async fn persistent_terminal_public_case(
         assert_eq!(delta["previous_response_id"], "resp_stale");
         assert!(delta["input"].as_array().unwrap().len() < expected_input.len());
         let error = serde_json::json!({"type":"invalid_request_error", "code":code,
-            "message": if recover {"Previous response not found."} else {"No tool output found for function call call_fixture."}});
+            "message": if missing_output {"No tool output found for function call call_fixture."} else if recover {"Previous response not found."} else {"Invalid tool schema."}});
         let frame = if error_kind == "response.failed" {
             serde_json::json!({"type":error_kind,"response":{"status":"failed","error":error}})
         } else {
@@ -78,6 +79,7 @@ async fn persistent_terminal_public_case(
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&full_input[..1]),
     });
     let outcome = tokio::time::timeout(Duration::from_secs(2), async {
         let mut stream = provider
@@ -90,7 +92,7 @@ async fn persistent_terminal_public_case(
             match event.unwrap() {
                 StreamEvent::Error { message, .. } => {
                     errors += 1;
-                    assert!(message.contains("No tool output found"), "{message}");
+                    assert!(message.contains("Invalid tool schema"), "{message}");
                     if next_on_error {
                         break;
                     }
@@ -138,17 +140,18 @@ async fn persistent_terminal_public_case(
 
 #[tokio::test]
 async fn persistent_terminal_public_stream_ends() {
-    persistent_terminal_public_case("error", None, false).await;
+    persistent_terminal_public_case("error", None, false, false).await;
 }
 
 #[tokio::test]
 async fn persistent_terminal_public_next_call_not_stalled() {
-    persistent_terminal_public_case("response.failed", None, true).await;
+    persistent_terminal_public_case("response.failed", None, true, false).await;
 }
 
 #[tokio::test]
 async fn persistent_terminal_public_missing_previous_full_replay() {
-    persistent_terminal_public_case("error", Some("previous_response_not_found"), false).await;
+    persistent_terminal_public_case("error", Some("previous_response_not_found"), false, false)
+        .await;
 }
 
 // Synthetic concurrency regression: a mutex waiter is queued before failure,
@@ -188,6 +191,9 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
         last_response_completed_at: Instant::now(),
         message_count: 1,
         last_input_item_count: 1,
+        last_input_item_hashes: persistent_ws_input_item_hashes(&[
+            serde_json::json!({"role":"user","content":"old"}),
+        ]),
     })));
     let state = Arc::clone(&persistent_ws);
     let (tx, mut rx) = mpsc::channel(100);
@@ -229,4 +235,14 @@ async fn persistent_terminal_failure_invalidates_before_mutex_handoff() {
     })
     .await
     .expect("failure should promptly release persistent state");
+}
+
+#[tokio::test]
+async fn persistent_missing_tool_output_recovers_with_full_replay() {
+    persistent_terminal_public_case("error", None, false, true).await;
+}
+
+#[tokio::test]
+async fn persistent_failed_missing_tool_output_recovers_with_full_replay() {
+    persistent_terminal_public_case("response.failed", None, false, true).await;
 }
