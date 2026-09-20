@@ -40,6 +40,8 @@ pub enum ProviderChoice {
     )]
     OpenaiApi,
     Openrouter,
+    #[value(alias = "orca-router")]
+    Orcarouter,
     #[value(alias = "aws-bedrock", alias = "aws_bedrock")]
     Bedrock,
     #[value(alias = "azure-openai", alias = "aoai")]
@@ -154,6 +156,7 @@ impl ProviderChoice {
             Self::Openai => "openai",
             Self::OpenaiApi => "openai-api",
             Self::Openrouter => "openrouter",
+            Self::Orcarouter => "orcarouter",
             Self::Bedrock => "bedrock",
             Self::Azure => "azure",
             Self::Opencode => "opencode",
@@ -234,6 +237,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::Openrouter,
         crate::provider_catalog::OPENROUTER_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Orcarouter,
+        crate::provider_catalog::ORCAROUTER_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::Bedrock,
@@ -1573,6 +1580,7 @@ async fn init_provider_with_options(
         }
         ProviderChoice::Opencode
         | ProviderChoice::OpencodeGo
+        | ProviderChoice::Orcarouter
         | ProviderChoice::Zai
         | ProviderChoice::Ai302
         | ProviderChoice::Baseten
