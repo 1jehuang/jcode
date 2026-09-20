@@ -174,6 +174,9 @@ impl Tool for MemoryTool {
                 // (no path, unreadable span, escape) stores uncited and says
                 // so, so the verification path never covers fuzzy provenance.
                 let mut citation_note = String::new();
+                let source_given = input.source_path.is_some()
+                    || input.source_start_line.is_some()
+                    || input.source_end_line.is_some();
                 if let (Some(path), Some(start), Some(end)) =
                     (input.source_path, input.source_start_line, input.source_end_line)
                 {
@@ -192,6 +195,8 @@ impl Tool for MemoryTool {
                             );
                         }
                     }
+                } else if source_given {
+                    citation_note = " (no citation attached: source details incomplete — need source_path plus source_start_line plus source_end_line)".to_string();
                 }
                 let id = if scope == "global" {
                     manager.remember_global(entry)?
@@ -750,6 +755,30 @@ mod tests {
             .await
             .expect("remember should succeed");
         assert!(!out.output.contains("no citation attached"), "{out:?}");
+
+        #[tokio::test]
+        async fn remember_partial_source_reports_no_citation() {
+            let project = tempfile::TempDir::new().expect("temp project");
+            let tool = MemoryTool::new();
+            let out = tool
+                .execute(
+                    json!({
+                        "action": "remember",
+                        "content": "half cited",
+                        "scope": "project",
+                        "source_path": "src.rs",
+                        "source_start_line": 0
+                    }),
+                    test_ctx(Some(project.path().to_path_buf())),
+                )
+                .await
+                .expect("remember should succeed");
+            assert!(
+                out.output
+                    .contains("no citation attached: source details incomplete"),
+                "{out:?}"
+            );
+        }
 
         // Recall the entry from the store and prove the citation persisted.
         let manager =
