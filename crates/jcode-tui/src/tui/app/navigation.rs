@@ -751,7 +751,7 @@ impl App {
     /// `WHEEL_LINES_MAX`. No queue or glide: each notch lands immediately, so a
     /// programmatic scroll can never be mistaken for a flick.
     pub(super) fn wheel_lines_for_gap(gap: Option<std::time::Duration>) -> i16 {
-        let multiplier = match gap.map(std::time::Duration::as_millis) {
+        let multiplier = match gap.map(|d| d.as_millis()) {
             Some(ms) if ms <= 15 => 3,
             Some(ms) if ms <= 40 => 2,
             _ => 1,

@@ -71,8 +71,9 @@ pub(super) fn draw_changelog_overlay(
         }
     }
 
+    let total_lines = lines.len();
     let (scroll, scroll_info) =
-        overlay_scroll_info(lines.len(), area.height.saturating_sub(2) as usize, scroll);
+        overlay_scroll_info(total_lines, area.height.saturating_sub(2) as usize, scroll);
 
     let title = format!(" Changelog {} ", scroll_info);
     let block = Block::default()
