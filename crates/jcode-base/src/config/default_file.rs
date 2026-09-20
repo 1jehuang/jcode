@@ -275,7 +275,7 @@ prompt_entry_animation = true
 # A `[pricing.providers.<vendor>]` entry either writes rate cards inline or
 # points at a local JSON price file. The vendor key is your own label, not a
 # route: rules are matched by model id, so they price that model no matter which
-# route a call uses. A bare `file` name (`deepseek.json`) resolves under
+# route a call uses. A bare `file` name (`acme.json`) resolves under
 # ~/.jcode/cache/; anything else is a path (`~` expanded). The file is re-read
 # when it changes, so saving it takes effect at the next lookup, and a file that
 # cannot be read (missing, malformed) is skipped, never guessed at. It holds only
@@ -298,8 +298,7 @@ prompt_entry_animation = true
 #
 # `fx_base`/`fx_rates` only matter for a rule written in another currency.
 #
-# The card example below uses DeepSeek peak hours 01:00-04:00 / 06:00-10:00 UTC,
-# Mon-Fri.
+# The card example below uses peak hours 01:00-04:00 / 06:00-10:00 UTC, Mon-Fri.
 [pricing]
 # fx_base = "USD"
 #
@@ -308,23 +307,23 @@ prompt_entry_animation = true
 # EUR = 0.92
 # JPY = 150.0
 #
-# [pricing.providers."deepseek"]
-# file = "deepseek.json"
+# [pricing.providers."acme"]
+# file = "acme.json"
 # currency = "CNY"
 #
-# [pricing.providers."deepseek".models."deepseek-v4-pro"]
+# [pricing.providers."acme".models."acme-large"]
 # cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
 # tariffs = { peak = { multiplier = 2.0 } }
 # effective_until = "2026-12-31T23:59:59Z"
 # on_rule_expiry = "fallback"
 #
-# [[pricing.providers."deepseek".models."deepseek-v4-pro".schedule]]
+# [[pricing.providers."acme".models."acme-large".schedule]]
 # tariff = "peak"
 # utc_offset_minutes = 0
 # weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 # windows = [["01:00", "04:00"], ["06:00", "10:00"]]
 #
-# [[pricing.providers."deepseek".models."deepseek-v4-pro".context_tiers]]
+# [[pricing.providers."acme".models."acme-large".context_tiers]]
 # min_input_tokens = 200_000
 # multiplier = 2.0
 
@@ -448,7 +447,7 @@ cross_provider_failover = "countdown"
 # stay visible. Unset or empty = show everything.
 # model_picker_providers = ["myprofile", "openrouter"]
 # Max seconds to wait for streaming data before timing out a request with no
-# data received. Raise this for slow reasoning models (e.g. DeepSeek) that think
+# data received. Raise this for slow reasoning models that think
 # silently for minutes before emitting tokens. Default: 180.
 # Applies to every streaming provider path (OpenAI native, Anthropic, Copilot,
 # OpenRouter/OpenAI-compatible). The TUI's client-side stall guard also extends
@@ -876,34 +875,34 @@ mod tests {
 
         let parsed: Config =
             toml::from_str(&example).expect("uncommented [pricing] example must parse");
-        let deepseek = parsed
+        let vendor = parsed
             .pricing
             .providers
-            .get("deepseek")
-            .expect("the example configures a deepseek provider");
+            .get("acme")
+            .expect("the example configures the acme vendor");
         assert!(
-            deepseek
+            vendor
                 .models
                 .values()
                 .any(|model| !model.schedule.is_empty()),
-            "the example should demonstrate a schedule rule, got {deepseek:?}"
+            "the example should demonstrate a schedule rule, got {vendor:?}"
         );
         assert!(
-            deepseek
+            vendor
                 .models
                 .values()
                 .any(|model| !model.context_tiers.is_empty()),
-            "the example should demonstrate a long-context tier, got {deepseek:?}"
+            "the example should demonstrate a long-context tier, got {vendor:?}"
         );
         assert_eq!(
-            deepseek.file.as_deref(),
-            Some("deepseek.json"),
-            "the example should demonstrate a vendor price file, got {deepseek:?}"
+            vendor.file.as_deref(),
+            Some("acme.json"),
+            "the example should demonstrate a vendor price file, got {vendor:?}"
         );
         assert_eq!(
-            deepseek.currency.as_deref(),
+            vendor.currency.as_deref(),
             Some("CNY"),
-            "the example should state the file's currency, got {deepseek:?}"
+            "the example should state the file's currency, got {vendor:?}"
         );
 
         // Field placement matters: `effective_until`/`on_rule_expiry` must land
@@ -915,9 +914,9 @@ mod tests {
         let model_rule = parsed
             .pricing
             .providers
-            .get("deepseek")
-            .and_then(|provider| provider.models.get("deepseek-v4-pro"))
-            .expect("the example configures the deepseek-v4-pro model rule");
+            .get("acme")
+            .and_then(|provider| provider.models.get("acme-large"))
+            .expect("the example configures the acme-large model rule");
         assert_eq!(
             model_rule.effective_until.as_deref(),
             Some("2026-12-31T23:59:59Z"),
@@ -933,7 +932,7 @@ mod tests {
 
         let raw: toml::Value =
             toml::from_str(&example).expect("uncommented [pricing] example must parse");
-        let models = &raw["pricing"]["providers"]["deepseek"]["models"]["deepseek-v4-pro"];
+        let models = &raw["pricing"]["providers"]["acme"]["models"]["acme-large"];
         let schedule = &models["schedule"]
             .as_array()
             .expect("the example demonstrates a schedule array")[0];

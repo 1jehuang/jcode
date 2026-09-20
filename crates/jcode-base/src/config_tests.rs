@@ -1763,7 +1763,7 @@ fn documented_pricing_example_prices_as_documented() {
         .split("```toml")
         .skip(1)
         .filter_map(|rest| rest.split("```").next())
-        .find(|block| block.contains("[pricing.providers.deepseek.models.deepseek-flash.cost]"))
+        .find(|block| block.contains("[pricing.providers.acme.models.acme-small.cost]"))
         .expect("the documented CNY inline-card TOML block");
 
     let _guard = crate::storage::lock_test_env();
@@ -1781,11 +1781,10 @@ fn documented_pricing_example_prices_as_documented() {
     // 2030-06-22T02:00:00Z (Saturday) and 2030-06-24T02:00:00Z (Monday, inside
     // the documented 01:00-04:00 UTC weekday peak window).
     let off_peak =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-flash", instant(1_908_324_000))
-            .expect("the documented example prices an off-peak flash call");
-    let peak =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-flash", instant(1_908_496_800))
-            .expect("the documented example prices a peak flash call");
+        crate::model_pricing::effective_cost("acme", "acme-small", instant(1_908_324_000))
+            .expect("the documented example prices an off-peak acme-small call");
+    let peak = crate::model_pricing::effective_cost("acme", "acme-small", instant(1_908_496_800))
+        .expect("the documented example prices a peak acme-small call");
 
     restore_env_var("JCODE_HOME", prev_home);
 
@@ -1829,10 +1828,10 @@ fn documented_vendor_file_example_prices_as_documented() {
         .split("```json")
         .skip(1)
         .filter_map(|rest| rest.split("```").next())
-        .find(|block| block.contains("deepseek-v4-pro"))
+        .find(|block| block.contains("acme-large"))
         .expect("the documented vendor-file JSON block");
     assert!(
-        example.contains("[pricing.providers.deepseek]"),
+        example.contains("[pricing.providers.acme]"),
         "the quick-start file must hang under a vendor key:\n{example}"
     );
     assert!(
@@ -1844,7 +1843,7 @@ fn documented_vendor_file_example_prices_as_documented() {
         "the vendor file must have a top-level `models` map:\n{vendor_file}"
     );
     assert!(
-        !vendor_file.contains("\"deepseek\": {"),
+        !vendor_file.contains("\"acme\": {"),
         "the vendor file must not repeat the vendor as an outer key:\n{vendor_file}"
     );
 
@@ -1867,11 +1866,10 @@ fn documented_vendor_file_example_prices_as_documented() {
     // (Saturday) and 2030-06-24T02:00:00Z (Monday, inside the documented
     // 01:00-04:00 UTC weekday peak window).
     let off_peak =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_324_000))
+        crate::model_pricing::effective_cost("acme", "acme-large", instant(1_908_324_000))
             .expect("the vendor file prices an off-peak call");
-    let peak =
-        crate::model_pricing::effective_cost("deepseek", "deepseek-v4-pro", instant(1_908_496_800))
-            .expect("the vendor file prices a peak call");
+    let peak = crate::model_pricing::effective_cost("acme", "acme-large", instant(1_908_496_800))
+        .expect("the vendor file prices a peak call");
 
     restore_env_var("JCODE_HOME", prev_home);
 

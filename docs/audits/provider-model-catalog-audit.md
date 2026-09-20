@@ -20,7 +20,6 @@ Legend:
 | 302.AI | Official docs contain `Models（列出模型）GET` page | likely OpenAI-compatible data[] | Dedicated list-models page exists. Response body in fetched text was truncated before example. |
 | Baseten | Official docs say public OpenAI-compatible endpoint `https://inference.baseten.co/v1` | supported endpoint, shape not shown | No dedicated `/models` response found. |
 | Cortecs | Official docs overview only plus OpenCode provider entry | catalog/static only | No `/models` endpoint docs found. |
-| DeepSeek | Official `GET /models` docs show `{ object, data[] }` | verified data[] | Covered by parser. |
 | Comtegra | Official docs list supported `/v1/models` linking OpenAI Models API | supported endpoint, shape OpenAI | Covered by parser. |
 | FPT AI Marketplace | Official docs show chat/completions through LiteLLM/OpenAI, no models endpoint | unknown/no evidence | Live `/models` may fail. |
 | Firmware/FrogBot | OpenCode provider docs only | catalog/static only | No direct provider API docs found. |
