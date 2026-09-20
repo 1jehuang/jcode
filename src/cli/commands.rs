@@ -3160,7 +3160,7 @@ fn emit_ndjson_event(
             stdout,
             &serde_json::json!({ "type": "tool_start", "id": id, "name": name }),
         ),
-        ServerEvent::ToolInput { delta } => write_json_line(
+        ServerEvent::ToolInput { delta, .. } => write_json_line(
             stdout,
             &serde_json::json!({ "type": "tool_input", "delta": delta }),
         ),
