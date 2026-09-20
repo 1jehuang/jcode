@@ -476,10 +476,26 @@ impl Agent {
             tool_selection.disabled_tools,
         );
         agent.session.mark_active();
-        if agent.session.provider_key.is_none() {
-            agent.session.provider_key = agent.provider_key_for_new_session();
+        let active_provider_key = agent.provider_key_for_new_session();
+        let provider_route_changed = match (
+            agent.session.provider_key.as_deref(),
+            active_provider_key.as_deref(),
+        ) {
+            (Some(persisted), Some(active)) => !persisted.eq_ignore_ascii_case(active),
+            _ => false,
+        };
+        if agent.session.provider_key.is_none() || provider_route_changed {
+            agent.session.provider_key = active_provider_key;
         }
-        if let Some(model) = agent.session.model.clone() {
+        // A caller may explicitly resume an old session through a different
+        // provider (for example `--provider grok-build --model grok-4.6`). Do
+        // not feed that provider the persisted model from the old route: a
+        // 9router model such as `cx/gpt-5.6-sol` is not a Grok model. Keep the
+        // model already selected on the active provider instead.
+        if provider_route_changed {
+            agent.session.model = Some(agent.provider_model());
+            agent.session.route_api_method = None;
+        } else if let Some(model) = agent.session.model.clone() {
             let model_request =
                 crate::provider::MultiProvider::model_switch_request_for_session_route(
                     &model,

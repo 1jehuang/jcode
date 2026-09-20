@@ -2482,6 +2482,20 @@ pub async fn run_single_message_command(
         agent.mark_closed();
         return Err(error);
     }
+    // Restoring a session also restores its persisted model. An explicit
+    // `jcode run --model ... --resume ...` must win over that historical
+    // value, especially when the caller switched providers (for example from
+    // 9router to Grok Build). Otherwise the new provider receives an invalid
+    // model id from the old route and the turn fails or retries pointlessly.
+    if resume_session.is_some()
+        && let Some(model) = model
+        && let Err(error) = agent.set_model(model)
+    {
+        agent.mark_closed();
+        return Err(anyhow::anyhow!(
+            "Failed to apply explicit model after resuming session: {error}"
+        ));
+    }
 
     run_single_message_with_agent(&mut agent, provider, message, emit_json, emit_ndjson).await
 }

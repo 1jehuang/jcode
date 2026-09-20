@@ -721,7 +721,22 @@ impl Agent {
         let reset_ms = reset_start.elapsed().as_millis();
 
         let model_start = Instant::now();
-        if let Some(model) = self.session.model.clone() {
+        let active_provider_key = self.provider_key_for_new_session();
+        let provider_route_changed = match (
+            self.session.provider_key.as_deref(),
+            active_provider_key.as_deref(),
+        ) {
+            (Some(persisted), Some(active)) => !persisted.eq_ignore_ascii_case(active),
+            _ => false,
+        };
+        if provider_route_changed {
+            // The client may resume an old session after explicitly switching
+            // providers. Never send the persisted model from that old route
+            // (for example 9router's cx/gpt-5.6-sol) to the active provider.
+            self.session.provider_key = active_provider_key;
+            self.session.route_api_method = None;
+            self.session.model = Some(self.provider_model());
+        } else if let Some(model) = self.session.model.clone() {
             let model_request =
                 crate::provider::MultiProvider::model_switch_request_for_session_route(
                     &model,
