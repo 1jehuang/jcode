@@ -82,6 +82,11 @@ fn gemini_config_reload_does_not_export_sticky_environment_overrides() {
     );
 
     cfg.provider.gemini_project = None;
+    // The preserving save keeps keys the serialized struct does not write
+    // (a cleared field serializes as absent; see `merge_table` in
+    // `config_file`), so a programmatic clear must announce its removal or
+    // the previous value stays in the file and reloads as a sticky override.
+    Config::declare_removal("provider.gemini_project");
     cfg.save().unwrap();
     assert_eq!(crate::auth::gemini::cloud_project(), None);
 }
