@@ -3,6 +3,22 @@
 use crate::*;
 
 #[test]
+fn create_session_system_prompt_roundtrip_and_legacy_default() {
+    let legacy = serde_json::json!({"req": "create_session"});
+    let decoded: ApiRequest = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), legacy);
+    for prompt in ["Custom system instructions\nwith unicode: 世界", ""] {
+        let request = ApiRequest::CreateSession {
+            working_dir: None,
+            system_prompt: Some(prompt.into()),
+        };
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["system_prompt"], prompt);
+        assert_eq!(serde_json::from_value::<ApiRequest>(wire).unwrap(), request);
+    }
+}
+
+#[test]
 fn token_usage_preserves_cache_creation_and_accepts_legacy_frames() {
     let legacy = r#"{"v":1,"ev":"token_usage","session_id":"s1","input":10,"output":5,"cache_read_input":2}"#;
     let legacy_frame: ServerFrame = serde_json::from_str(legacy).unwrap();
@@ -168,7 +184,10 @@ fn request_roundtrip() {
         ApiRequest::SetRetentionPolicy {
             archive_after_days: Some(30),
         },
-        ApiRequest::CreateSession { working_dir: None },
+        ApiRequest::CreateSession {
+            working_dir: None,
+            system_prompt: None,
+        },
         ApiRequest::AttachSession {
             session_id: "s1".into(),
         },

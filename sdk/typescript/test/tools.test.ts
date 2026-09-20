@@ -36,9 +36,10 @@ async function fixture(t: any, extra?: (req: any, send: (frame: any) => void) =>
 
 test("createSession configures tools before returning and strips local callbacks from the wire", async (t) => {
   const { client, requests } = await fixture(t);
-  const session = await client.createSession({ workingDir: "/project", tools: { enabled: [], custom: [{ ...definition, execute: () => "ok" }] } });
+  const session = await client.createSession({ workingDir: "/project", systemPrompt: "Use only configured tools.", tools: { enabled: [], custom: [{ ...definition, execute: () => "ok" }] } });
   assert.equal(session.session_id, "s1");
   assert.equal(requests[0].working_dir, "/project");
+  assert.equal(requests[0].system_prompt, "Use only configured tools.");
   assert.deepEqual(requests[1].tools, { enabled: [], disabled: [], custom: [definition] });
   assert.deepEqual(await client.listTools("s1"), [definition]);
 });

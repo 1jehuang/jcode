@@ -514,6 +514,9 @@ impl BridgeState {
                 // the repo without saying so gets an agent that cannot build
                 // the very app it is running in.
                 if req == "create_session" {
+                    if let Some(prompt) = request["system_prompt"].as_str() {
+                        subscribe["system_prompt"] = json!(prompt);
+                    }
                     let working_dir =
                         request["working_dir"]
                             .as_str()

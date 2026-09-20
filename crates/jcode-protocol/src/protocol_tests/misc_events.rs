@@ -339,6 +339,7 @@ fn test_unknown_runtime_key_other_set_route_is_wire_safe() -> Result<()> {
 #[test]
 fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result<()> {
     let req = Request::Subscribe {
+        system_prompt: None,
         supports_pdf_panels: true,
         id: 89,
         working_dir: Some("/tmp/project".to_string()),
@@ -355,6 +356,7 @@ fn test_subscribe_request_roundtrip_preserves_session_takeover_flags() -> Result
     assert!(json.contains("\"type\":\"subscribe\""));
     let decoded = parse_request_json(&json)?;
     let Request::Subscribe {
+        system_prompt: _,
         supports_pdf_panels,
         id,
         working_dir,
@@ -392,6 +394,7 @@ fn test_subscribe_request_defaults_optional_flags() -> Result<()> {
     let json = r#"{"type":"subscribe","id":91}"#;
     let decoded = parse_request_json(json)?;
     let Request::Subscribe {
+        system_prompt: _,
         supports_pdf_panels,
         id,
         working_dir,

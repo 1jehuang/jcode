@@ -118,6 +118,7 @@ fn clone_split_session_uses_persisted_session_state() {
     );
     parent.working_dir = Some("/tmp/jcode-split-test".to_string());
     parent.model = Some("gpt-test".to_string());
+    parent.system_prompt = Some("forked system prompt".into());
     parent.add_message(
         Role::User,
         vec![ContentBlock::Text {
@@ -136,6 +137,7 @@ fn clone_split_session_uses_persisted_session_state() {
 
     let mut unsaved_parent = parent.clone();
     unsaved_parent.model = Some("unsaved-model".into());
+    unsaved_parent.system_prompt = Some("unsaved prompt".into());
     unsaved_parent.add_message(
         Role::Assistant,
         vec![ContentBlock::Text {
@@ -148,6 +150,7 @@ fn clone_split_session_uses_persisted_session_state() {
     let child = crate::session::Session::load(&child_id).expect("load child");
 
     assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    assert_eq!(child.system_prompt, parent.system_prompt);
     assert_eq!(
         child.messages.len(),
         parent.messages.len() + 1,
@@ -357,6 +360,20 @@ fn split_missing_parent_never_uses_another_live_session() {
     let _home = SplitTestHome::new();
     let other = crate::session::Session::create(None, None);
     assert!(clone_split_session("session_missing_parent", Some(&other)).is_err());
+}
+
+#[test]
+fn transfer_preserves_system_prompt_including_empty_override() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = SplitTestHome::new();
+    for prompt in [None, Some(""), Some("custom system prompt")] {
+        let mut parent = crate::session::Session::create(None, None);
+        parent.system_prompt = prompt.map(str::to_string);
+        let (child_id, _) = create_transfer_child_session(&parent.id, &parent, None)
+            .expect("create transfer session");
+        let child = crate::session::Session::load(&child_id).expect("load transfer session");
+        assert_eq!(child.system_prompt, parent.system_prompt);
+    }
 }
 
 #[test]

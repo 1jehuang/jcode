@@ -139,7 +139,7 @@ export type ApiRequest =
   | { req: "archive_session"; session_id: string }
   | { req: "restore_session"; session_id: string }
   | { req: "set_retention_policy"; archive_after_days?: number }
-  | { req: "create_session"; working_dir?: string }
+  | { req: "create_session"; working_dir?: string; system_prompt?: string }
   | { req: "attach_session"; session_id: string }
   | { req: "fork_session"; session_id: string }
   | { req: "detach_session"; session_id: string }

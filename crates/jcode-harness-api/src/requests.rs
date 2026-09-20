@@ -65,6 +65,10 @@ pub enum ApiRequest {
     CreateSession {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
+        /// Replace the complete assembled system prompt for this session.
+        /// An empty string is an explicit empty override.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
     },
 
     /// Attach to an existing session and subscribe to its event stream.

@@ -151,6 +151,9 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Full system prompt override for a new session only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
         /// Opt in to PDF panel payloads. Older clients only accept Markdown.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         supports_pdf_panels: bool,

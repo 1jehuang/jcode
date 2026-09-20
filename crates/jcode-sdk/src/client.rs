@@ -53,6 +53,20 @@ impl Default for ConnectOptions {
     }
 }
 
+/// Options fixed when a session is created.
+#[derive(Clone, Debug, Default)]
+pub struct CreateSessionOptions {
+    /// Working directory for the new session. Omit to use the runtime default.
+    pub working_dir: Option<String>,
+    /// Replace the entire assembled system prompt, not just its base text.
+    ///
+    /// This bypasses the default prompt and assembled instruction/context additions.
+    /// `None` keeps normal prompt assembly. `Some(String::new())` explicitly
+    /// overrides it with an empty prompt. Immutable after creation and persisted
+    /// by the runtime for resume.
+    pub system_prompt: Option<String>,
+}
+
 /// A duplex byte transport. Lets tests and future WebSockets plug in.
 pub trait Transport: Send {
     /// A handle which interrupts both halves after `split`. Custom transports
@@ -746,9 +760,22 @@ impl JcodeClient {
             .map(drop)
     }
 
+    /// Create a session with the normal assembled system prompt.
     pub fn create_session(&self, working_dir: Option<String>) -> Result<SessionInfo> {
+        self.create_session_with_options(CreateSessionOptions {
+            working_dir,
+            ..Default::default()
+        })
+    }
+
+    /// Create a session with optional full system prompt replacement.
+    /// See [`CreateSessionOptions::system_prompt`] for override semantics.
+    pub fn create_session_with_options(&self, options: CreateSessionOptions) -> Result<SessionInfo> {
         match self
-            .request_ok(ApiRequest::CreateSession { working_dir })?
+            .request_ok(ApiRequest::CreateSession {
+                working_dir: options.working_dir,
+                system_prompt: options.system_prompt,
+            })?
             .event
         {
             ApiEvent::Attached { session } => Ok(session),

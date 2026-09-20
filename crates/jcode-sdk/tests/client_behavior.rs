@@ -1125,3 +1125,93 @@ fn session_tool_methods_reject_unexpected_replies() {
     assert!(client.list_tools("s1").is_err());
     assert!(client.submit_tool_result("s1", "call", "", None).is_err());
 }
+
+#[test]
+fn create_session_options_preserve_system_prompt_wire_values() {
+    use jcode_sdk::CreateSessionOptions;
+
+    let (ours, theirs) = UnixStream::pair().expect("socket pair");
+    let (tx, rx) = channel();
+    let server = std::thread::spawn(move || {
+        let mut reader = BufReader::new(theirs.try_clone().expect("clone"));
+        let mut writer = theirs;
+        for index in 0..6 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read frame");
+            let wire: serde_json::Value = serde_json::from_str(&line).expect("JSON frame");
+            let frame: ClientFrame = serde_json::from_value(wire.clone()).expect("client frame");
+            if index == 0 {
+                reply(
+                    &frame,
+                    ApiEvent::HelloOk {
+                        version: API_VERSION_MAJOR,
+                        server: "fake-harness/1.0".into(),
+                        capabilities: vec!["sessions".into()],
+                    },
+                    &mut writer,
+                );
+            } else {
+                tx.send(wire).expect("capture wire");
+                reply(
+                    &frame,
+                    ApiEvent::Attached {
+                        session: session("created"),
+                    },
+                    &mut writer,
+                );
+            }
+        }
+    });
+    let client = JcodeClient::connect_with(
+        Box::new(PairTransport(ours)),
+        ConnectOptions {
+            request_timeout: Some(Duration::from_secs(5)),
+            ensure_runtime: false,
+            ..Default::default()
+        },
+    )
+    .expect("connect");
+
+    for prompt in [
+        None,
+        Some("Review precisely.\nKeep Unicode: λ".to_string()),
+        Some(String::new()),
+    ] {
+        let created = client
+            .create_session_with_options(CreateSessionOptions {
+                working_dir: Some("/project".into()),
+                system_prompt: prompt.clone(),
+            })
+            .expect("create session");
+        assert_eq!(created.session_id, "created");
+        let wire = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("captured frame");
+        assert_eq!(wire["req"], "create_session");
+        assert_eq!(wire["working_dir"], "/project");
+        assert_eq!(
+            wire.get("system_prompt"),
+            prompt
+                .as_ref()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .as_ref()
+        );
+    }
+    client
+        .create_session_with_options(CreateSessionOptions::default())
+        .expect("default options");
+    let wire = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("default frame");
+    assert!(wire.get("system_prompt").is_none());
+    assert!(wire.get("working_dir").is_none());
+    client
+        .create_session(Some("/legacy".into()))
+        .expect("legacy API");
+    let wire = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("legacy frame");
+    assert!(wire.get("system_prompt").is_none());
+    assert_eq!(wire["working_dir"], "/legacy");
+    server.join().expect("server");
+}

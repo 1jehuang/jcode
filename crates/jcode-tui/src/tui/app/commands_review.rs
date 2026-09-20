@@ -658,6 +658,7 @@ fn clone_session_for_prompt(app: &App) -> anyhow::Result<(String, String)> {
     let mut child = Session::create(Some(parent_session_id.clone()), None);
     child.replace_messages(app.session.messages.clone());
     child.compaction = app.session.compaction.clone();
+    child.system_prompt = app.session.system_prompt.clone();
     child.working_dir = app.session.working_dir.clone();
     child.model = app.session.model.clone();
     child.provider_key = app.session.provider_key.clone();

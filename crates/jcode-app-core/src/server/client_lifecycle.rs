@@ -163,6 +163,18 @@ fn validated_subscribe_working_dir(
     Ok(working_dir)
 }
 
+fn new_session_system_prompt<'a>(
+    provisional_session: bool,
+    target_session_id: Option<&str>,
+    system_prompt: Option<&'a str>,
+) -> Option<&'a str> {
+    if provisional_session && target_session_id.is_none() {
+        system_prompt
+    } else {
+        None
+    }
+}
+
 fn initial_subscribe_terminal_env(request: &Request) -> Vec<(String, String)> {
     match request {
         Request::Subscribe { terminal_env, .. } => terminal_env.clone(),
@@ -1603,6 +1615,7 @@ pub(super) async fn handle_client(
 
             Request::Subscribe {
                 id,
+                system_prompt,
                 supports_pdf_panels: requested_pdf_panels,
                 working_dir: subscribe_working_dir,
                 selfdev,
@@ -1625,6 +1638,15 @@ pub(super) async fn handle_client(
                         retry_after_secs: None,
                     });
                     continue;
+                }
+                // Overrides are creation-only. In particular, never apply one to
+                // a target attachment or a repeated Subscribe on this connection.
+                if let Some(prompt) = new_session_system_prompt(
+                    provisional_session,
+                    target_session_id.as_deref(),
+                    system_prompt.as_deref(),
+                ) {
+                    agent.lock().await.set_system_prompt(prompt);
                 }
                 // Every Subscribe carries an authoritative snapshot. An empty
                 // snapshot must clear terminal vars inherited by the daemon

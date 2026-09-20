@@ -190,6 +190,34 @@ fn create_session_maps_to_subscribe() {
     };
     assert_eq!(value["type"], "subscribe");
     assert!(value["working_dir"].is_string());
+    assert!(value.get("system_prompt").is_none());
+}
+
+#[test]
+fn create_session_forwards_full_system_prompt_including_empty() {
+    for prompt in ["You are a helpful tutor.\nAnswer briefly.", ""] {
+        let mut state = BridgeState::default();
+        let out = state.api_request_to_legacy(&json!({
+            "req": "create_session", "id": 1, "system_prompt": prompt,
+        }));
+        let Outbound::Legacy(value) = &out[0] else {
+            panic!("expected legacy outbound");
+        };
+        assert_eq!(value["system_prompt"], prompt);
+    }
+}
+
+#[test]
+fn attach_session_does_not_forward_system_prompt_override() {
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "attach_session", "id": 1, "session_id": "existing",
+        "system_prompt": "must not replace the existing prompt",
+    }));
+    let Outbound::Legacy(value) = &out[0] else {
+        panic!("expected legacy outbound");
+    };
+    assert!(value.get("system_prompt").is_none());
 }
 
 #[test]

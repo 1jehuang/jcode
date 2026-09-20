@@ -765,6 +765,7 @@ impl AcpRuntime {
         let subscribe_id = 1;
         session
             .send(&Request::Subscribe {
+                system_prompt: None,
                 supports_pdf_panels: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,
@@ -819,6 +820,7 @@ impl AcpRuntime {
         let resume_id = 1;
         session
             .send(&Request::Subscribe {
+                system_prompt: None,
                 supports_pdf_panels: false,
                 crash_on_disconnect: false,
                 continue_on_disconnect: false,

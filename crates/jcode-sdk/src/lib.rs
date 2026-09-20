@@ -31,6 +31,26 @@
 //! `TurnDone` before publishing an irreversible final answer. These ids are
 //! connection-local stream correlators, not persisted transcript ids.
 //!
+//! # Full system prompt override
+//!
+//! ```no_run
+//! use jcode_sdk::{ConnectOptions, CreateSessionOptions, JcodeClient};
+//!
+//! let client = JcodeClient::connect(ConnectOptions::default())?;
+//! let session = client.create_session_with_options(CreateSessionOptions {
+//!     working_dir: Some("/path/to/project".into()),
+//!     system_prompt: Some("You are a concise code reviewer.".into()),
+//! })?;
+//! # Ok::<(), jcode_sdk::Error>(())
+//! ```
+//!
+//! `system_prompt` replaces the **entire assembled system prompt**, not just the
+//! base prompt. Default instructions and assembled instruction/context additions
+//! are not appended. The override is immutable after session creation and is
+//! persisted by the runtime for resume. `None` preserves normal prompt assembly,
+//! while `Some(String::new())` explicitly selects an empty system prompt.
+//! Existing `create_session(working_dir)` calls retain their normal behavior.
+//!
 //! # Session tool control
 //!
 //! Tool configuration is memory-only. Reconfigure after reconnecting, daemon
@@ -123,9 +143,9 @@ pub use auth::{
     LoginProvider,
 };
 pub use client::{
-    AssistantTextMessage, ConnectOptions, EventStream, FileContent, FileStatus, GlobalEventStream,
-    GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions, ToolCall,
-    Transport, TurnResult, UnixTransport, Usage,
+    AssistantTextMessage, ConnectOptions, CreateSessionOptions, EventStream, FileContent, FileStatus,
+    GlobalEventStream, GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions,
+    ToolCall, Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};

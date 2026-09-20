@@ -2415,3 +2415,48 @@ async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
         );
     }
 }
+
+#[test]
+fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_system_prompt(prompt);
+        let id = agent.session_id().to_string();
+        let split = agent.build_system_prompt_split(Some("memory must not be appended"));
+        assert_eq!(split.static_part, prompt);
+        assert!(split.dynamic_part.is_empty());
+        assert_eq!(
+            Session::load(&id).unwrap().system_prompt.as_deref(),
+            Some(prompt)
+        );
+
+        agent.clear();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        agent.restore_session(&id).unwrap();
+        assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
+
+        let mut other = Session::create(None, Some("plain session".into()));
+        other.save().unwrap();
+        agent.restore_session(&other.id).unwrap();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        let loaded = Session::load(&id).unwrap();
+        let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
+        assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
+    }
+}

@@ -112,6 +112,23 @@ console.log("tokens:", turn.usage);
 client.close();
 ```
 
+### Full system prompt override
+
+```ts
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  systemPrompt: "You are a concise code reviewer.",
+});
+```
+
+`systemPrompt` is sent as `system_prompt` and replaces the **entire assembled
+system prompt**, not just its base text. Default instructions and assembled
+instruction/context additions are not appended. The override is immutable after
+session creation and is persisted by the runtime for resume. Omit it (or use
+`undefined`) to keep normal prompt assembly. An empty string explicitly replaces
+the system prompt with an empty prompt. Existing `createSession()` and
+`createSession("/path")` calls retain their normal behavior.
+
 ### Controlling tools
 
 Use `createSession({ workingDir, tools })` or `configureTools(sessionId, tools)`
@@ -313,7 +330,7 @@ discovery pass only.
 | `listSessions({ includeArchived? })` | Every persisted session, optionally including archived sessions |
 | `archiveSession(id)` / `restoreSession(id)` | Reversibly hide or restore a session |
 | `setRetentionPolicy(days?)` | Auto-archive inactive sessions, or disable retention |
-| `createSession(workingDir?)` | Create and attach |
+| `createSession(workingDirOrOptions?)` | Create and attach, optionally overriding the full system prompt |
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |
 | `sendMessage(id, content, images?)` | Send a user message (awaits `message_accepted`) |
 | `run(id, content, options?)` | Send and collect one full turn |

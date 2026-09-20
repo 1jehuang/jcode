@@ -149,6 +149,13 @@ export interface ConnectOptions {
 
 export interface CreateSessionOptions {
   workingDir?: string;
+  /**
+   * Replace the entire assembled system prompt, not just its base text.
+   * Default instructions and assembled instruction/context additions are not appended.
+   * Immutable after creation and persisted by the runtime for resume.
+   * Omit for normal prompt assembly. An empty string explicitly overrides with no text.
+   */
+  systemPrompt?: string;
   /** Configured before createSession resolves, before any model turn starts. */
   tools?: SessionToolsOptions;
 }
@@ -469,13 +476,13 @@ export class JcodeClient extends EventEmitter {
   }
 
   async createSession(options?: string | CreateSessionOptions): Promise<SessionInfo> {
-    const { workingDir, tools } = typeof options === "string" ? { workingDir: options } : (options ?? {});
+    const { workingDir, systemPrompt, tools } = typeof options === "string" ? { workingDir: options } : (options ?? {});
     if (tools) {
       this.requireSessionTools();
       prepareTools(tools);
     }
     const frame = await this.expectReply(
-      { req: "create_session", working_dir: workingDir },
+      { req: "create_session", working_dir: workingDir, system_prompt: systemPrompt },
       "attached",
     );
     if (tools) await this.configureTools(frame.session.session_id, tools);

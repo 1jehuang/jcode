@@ -355,6 +355,7 @@ impl RemoteConnection {
             })
             .map(|session_id| session_id.to_string());
         conn.send_request(Request::Subscribe {
+            system_prompt: None,
             supports_pdf_panels: false,
             id: conn.next_request_id,
             working_dir,
