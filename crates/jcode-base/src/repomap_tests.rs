@@ -481,6 +481,47 @@ fn cochange_handles_special_filenames() {
 }
 
 #[test]
+#[cfg(unix)]
+fn cochange_commit_prefixed_filename_pairs_normally() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    // A file literally named "COMMIT:payload.rs" must parse as a path,
+    // not flush the commit and drop the edge.
+    let dir = write_tree(&[
+        ("0-normal.rs", "fn a() {}\n"),
+        ("COMMIT:payload.rs", "fn b() {}\n"),
+    ]);
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    };
+    assert!(run(&["init", "-q"]).status.success());
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "one"]).status.success());
+    std::fs::write(dir.path().join("0-normal.rs"), "fn a() {}\n// two\n").unwrap();
+    std::fs::write(dir.path().join("COMMIT:payload.rs"), "fn b() {}\n// two\n").unwrap();
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "two"]).status.success());
+    let files = vec!["0-normal.rs".to_string(), "COMMIT:payload.rs".to_string()];
+    let mut pairs = cochange_pairs(dir.path(), &files);
+    pairs.sort();
+    assert_eq!(pairs, vec![(0, 1)], "{pairs:?}");
+}
+
+#[test]
 fn cochange_outside_repo_is_empty() {
     let dir = write_tree(&[("a.rs", "fn a() {}\n")]);
     let files = vec!["a.rs".to_string()];

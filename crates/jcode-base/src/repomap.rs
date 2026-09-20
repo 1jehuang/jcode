@@ -429,15 +429,21 @@ fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usi
     let mut in_commit = false;
     for record in text.split('\0') {
         let mut record = record;
-        if let Some(_hash) = record.strip_prefix("COMMIT:") {
+        // Markers have the full hash-and-newline structure
+        // ("COMMIT:<40-hex>\n<file>"): a file literally named "COMMIT:..."
+        // must parse as a path, not flush the commit.
+        if let Some(after) = record.strip_prefix("COMMIT:")
+            && let Some((hash, rest)) = after.split_once('\n')
+            && hash.len() == 40
+            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             if in_commit && !current.is_empty() {
                 commits.push(std::mem::take(&mut current));
             }
             in_commit = true;
-            // The wire glues the first path to the COMMIT record
-            // ("COMMIT:<hash>\n<file>"): skip the hash line, keep parsing
-            // the remainder as a path below.
-            record = record.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+            // The wire glues the first path to the COMMIT record:
+            // keep parsing the remainder as a path below.
+            record = rest;
         }
         if !in_commit || record.is_empty() {
             continue;
