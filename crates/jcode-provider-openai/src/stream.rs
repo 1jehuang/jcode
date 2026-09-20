@@ -222,6 +222,7 @@ struct ResponseSseEvent {
     item: Option<Value>,
     delta: Option<String>,
     item_id: Option<String>,
+    output_index: Option<u64>,
     call_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
@@ -232,6 +233,8 @@ struct ResponseSseEvent {
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamingToolCallState {
+    identities: HashSet<String>,
+    fallback_id: String,
     call_id: Option<String>,
     name: Option<String>,
     arguments: String,
@@ -258,21 +261,60 @@ fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
 fn streaming_tool_item_id(item: &Value) -> Option<String> {
     item.get("id")
         .and_then(|v| v.as_str())
-        .or_else(|| item.get("item_id").and_then(|v| v.as_str()))
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            item.get("item_id")
+                .and_then(|v| v.as_str())
+                .filter(|id| !id.trim().is_empty())
+        })
         .map(|id| id.to_string())
 }
 
 fn tool_call_state<'a>(
     calls: &'a mut HashMap<String, StreamingToolCallState>,
-    item_id: &str,
-) -> &'a mut StreamingToolCallState {
-    let order = calls.values().map(|state| state.order).max().unwrap_or(0) + 1;
-    calls
-        .entry(item_id.to_string())
-        .or_insert_with(|| StreamingToolCallState {
-            order,
-            ..Default::default()
+    completed: &mut HashSet<String>,
+    output_index: Option<u64>,
+    item_id: Option<&str>,
+    call_id: Option<&str>,
+) -> Option<&'a mut StreamingToolCallState> {
+    let item_id = item_id.filter(|id| !id.trim().is_empty());
+    let call_id = call_id.filter(|id| !id.trim().is_empty());
+    // Some Responses-compatible providers regenerate item IDs on every event.
+    // output_index is stable even on argument deltas without a call_id. Keep
+    // aliases so item-only/call-only snapshots still find the same call.
+    // Keep raw item IDs for callers of the public parser's completed-item set,
+    // and namespace synthetic identities away from ordinary provider IDs.
+    let identities: Vec<String> = output_index
+        .map(|index| format!("\0output:{index}"))
+        .into_iter()
+        .chain(item_id.map(str::to_string))
+        .chain(call_id.map(|id| format!("\0call:{id}")))
+        .collect();
+    if identities.iter().any(|id| completed.contains(id)) {
+        completed.extend(identities);
+        return None;
+    }
+    let key = identities
+        .iter()
+        .find_map(|identity| {
+            calls
+                .iter()
+                .find_map(|(key, state)| state.identities.contains(identity).then(|| key.clone()))
         })
+        .or_else(|| identities.first().cloned())?;
+    let order = calls.values().map(|state| state.order).max().unwrap_or(0) + 1;
+    let state = calls.entry(key).or_insert_with(|| StreamingToolCallState {
+        order,
+        fallback_id: item_id.or(call_id).map(str::to_string).unwrap_or_else(|| {
+            format!(
+                "fallback_call_{}",
+                FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+            )
+        }),
+        ..Default::default()
+    });
+    state.identities.extend(identities);
+    Some(state)
 }
 
 fn update_tool_call_from_item(
@@ -280,7 +322,11 @@ fn update_tool_call_from_item(
     item: &Value,
     complete: bool,
 ) -> bool {
-    if let Some(id) = item.get("call_id").and_then(Value::as_str) {
+    if let Some(id) = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
         state.call_id = Some(id.to_string());
     }
     if let Some(name) = item.get("name").and_then(Value::as_str) {
@@ -333,8 +379,8 @@ fn stream_tool_calls(
             let id = state
                 .call_id
                 .as_deref()
-                .filter(|id| !id.is_empty())
-                .unwrap_or(&item_id);
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&state.fallback_id);
             pending.push_back(StreamEvent::ToolUseStart {
                 id: sanitize_tool_id(id),
                 name: state.name.clone().expect("named tool call"),
@@ -357,8 +403,8 @@ fn stream_tool_calls(
             break;
         }
         pending.push_back(StreamEvent::ToolUseEnd);
-        calls.remove(&item_id);
-        completed.insert(item_id);
+        let state = calls.remove(&item_id).expect("completed tool call");
+        completed.extend(state.identities);
     }
     pending.pop_front()
 }
@@ -437,65 +483,76 @@ pub fn parse_openai_response_event(
                 if matches!(
                     item.get("type").and_then(|v| v.as_str()),
                     Some("function_call") | Some("custom_tool_call")
-                ) && let Some(item_id) = streaming_tool_item_id(item)
-                {
-                    if completed_tool_items.contains(&item_id) {
-                        return None;
-                    }
-                    let state = tool_call_state(streaming_tool_calls, &item_id);
+                ) {
+                    let state = tool_call_state(
+                        streaming_tool_calls,
+                        completed_tool_items,
+                        event.output_index,
+                        streaming_tool_item_id(item).as_deref(),
+                        item.get("call_id").and_then(Value::as_str),
+                    )?;
                     update_tool_call_from_item(state, item, false);
                     return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
                 }
             }
         }
         "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
-            if let Some(item_id) = event.item_id {
-                if completed_tool_items.contains(&item_id) {
-                    return None;
-                }
-                let state = tool_call_state(streaming_tool_calls, &item_id);
-                if let Some(call_id) = event.call_id {
-                    state.call_id = Some(call_id);
-                }
-                if let Some(name) = event.name {
-                    state.name = Some(name);
-                }
-                if let Some(delta) = event.delta {
-                    state.arguments.push_str(&delta);
-                }
-                return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
+            let state = tool_call_state(
+                streaming_tool_calls,
+                completed_tool_items,
+                event.output_index,
+                event.item_id.as_deref(),
+                event.call_id.as_deref(),
+            )?;
+            if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
+                state.call_id = Some(call_id);
             }
+            if let Some(name) = event.name {
+                state.name = Some(name);
+            }
+            if let Some(delta) = event.delta {
+                state.arguments.push_str(&delta);
+            }
+            return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
         }
         "response.function_call_arguments.done" | "response.custom_tool_call_input.done" => {
-            if let Some(item_id) = event.item_id {
-                if completed_tool_items.contains(&item_id) {
-                    return None;
-                }
-                let state = tool_call_state(streaming_tool_calls, &item_id);
-                if let Some(call_id) = event.call_id {
-                    state.call_id = Some(call_id);
-                }
-                if let Some(name) = event.name {
-                    state.name = Some(name);
-                }
-                if !complete_tool_arguments(state, event.arguments.or(event.input)) {
-                    return inconsistent_tool_arguments();
-                }
-                return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
+            let state = tool_call_state(
+                streaming_tool_calls,
+                completed_tool_items,
+                event.output_index,
+                event.item_id.as_deref(),
+                event.call_id.as_deref(),
+            )?;
+            if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
+                state.call_id = Some(call_id);
             }
+            if let Some(name) = event.name {
+                state.name = Some(name);
+            }
+            if !complete_tool_arguments(state, event.arguments.or(event.input)) {
+                return inconsistent_tool_arguments();
+            }
+            return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
         }
         "response.output_item.done" => {
             if let Some(item) = event.item {
-                if let Some(item_id) = streaming_tool_item_id(&item)
-                    && matches!(
-                        item.get("type").and_then(|v| v.as_str()),
-                        Some("function_call") | Some("custom_tool_call")
-                    )
+                if matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call") | Some("custom_tool_call")
+                ) && (event.output_index.is_some()
+                    || streaming_tool_item_id(&item).is_some()
+                    || item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty()))
                 {
-                    if completed_tool_items.contains(&item_id) {
-                        return None;
-                    }
-                    let state = tool_call_state(streaming_tool_calls, &item_id);
+                    let state = tool_call_state(
+                        streaming_tool_calls,
+                        completed_tool_items,
+                        event.output_index,
+                        streaming_tool_item_id(&item).as_deref(),
+                        item.get("call_id").and_then(Value::as_str),
+                    )?;
                     if !update_tool_call_from_item(state, &item, true) {
                         return inconsistent_tool_arguments();
                     }
