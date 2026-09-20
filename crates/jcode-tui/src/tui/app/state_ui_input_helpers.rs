@@ -86,6 +86,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     ),
     RegisteredCommand::public("/remote", "Reach this session from another machine"),
     RegisteredCommand::public(
+        "/merge-remote-release",
+        "Merge into main/master, validate, push, and release remotely",
+    ),
+    RegisteredCommand::public(
         "/remote-release",
         "Push the release tag immediately; CI builds and publishes every platform",
     ),

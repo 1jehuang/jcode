@@ -1694,6 +1694,11 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
         return true;
     }
 
+    if trimmed == "/merge-remote-release" {
+        handle_merge_remote_release_command_local(app);
+        return true;
+    }
+
     if trimmed == "/commit-push" || trimmed == "/commit-and-push" {
         handle_commit_push_command_local(app);
         return true;
@@ -2178,6 +2183,25 @@ pub(super) fn build_merge_prompt() -> String {
     )
 }
 
+pub(super) fn build_merge_remote_release_prompt() -> String {
+    format!(
+        "Merge the current branch and then cut a remote release from the destination branch. Execute these two phases in order. \
+        Phase 1 (merge only, no push or release): {} \
+        Gate: proceed to Phase 2 only after Phase 1 successfully merges the source and all post-merge validation passes, \
+        HEAD is attached to the selected destination, the worktree is clean, and the recorded source commit is an ancestor of HEAD. \
+        If Phase 1 stops for any reason (including already being on the destination branch), has conflicts, fails validation, \
+        or needs clarification, stop the entire workflow without pushing, tagging, or releasing. \
+        The no-push rule and nothing-pushed report above apply to Phase 1 only. \
+        Phase 2 (remote release): stay on the verified destination branch and release its merged HEAD, never the original feature branch. \
+        Do not auto-commit any unexpected work that appears between phases. Stop if the destination branch or HEAD changes unexpectedly. \
+        Stop on any push failure before creating a tag or triggering a release. {} \
+        Finally report the merge source and destination, validation results, release version, push result, and remote release status. \
+        Distinguish a triggered remote workflow from a completed publication.",
+        build_merge_prompt(),
+        build_remote_release_prompt(),
+    )
+}
+
 pub(super) fn build_commit_prompt() -> String {
     "Make interactive, logical commits for the current uncommitted work. Inspect the git state first, including unstaged and staged changes. Group related changes into small coherent commits, staging only the files or hunks that belong together. Preserve unrelated user or agent work, do not discard changes, and do not amend existing commits unless clearly necessary. For each commit, use a concise conventional-style message when possible. Validate as appropriate for the changed files before committing, and report the commits created plus any remaining uncommitted changes.".to_string()
 }
@@ -2325,6 +2349,14 @@ pub(super) fn fast_macos_release_launch_notice(interrupted: bool) -> String {
     }
 }
 
+pub(super) fn merge_remote_release_launch_notice(interrupted: bool) -> String {
+    if interrupted {
+        "👉 Interrupting and starting merge + push + remote release...".to_string()
+    } else {
+        "🚀 Starting merge + push + remote release...".to_string()
+    }
+}
+
 pub(super) fn remote_release_launch_notice(interrupted: bool) -> String {
     if interrupted {
         "👉 Interrupting and starting logical commits + push + remote release...".to_string()
@@ -2389,6 +2421,23 @@ fn handle_fast_macos_release_command_local(app: &mut App) {
         );
     } else {
         app.push_display_message(DisplayMessage::system(fast_macos_release_launch_notice(
+            false,
+        )));
+        super::commands_improve::start_synthetic_user_turn(app, prompt);
+    }
+}
+
+fn handle_merge_remote_release_command_local(app: &mut App) {
+    let prompt = build_merge_remote_release_prompt();
+    if app.is_processing {
+        super::commands_improve::interrupt_and_queue_synthetic_message(
+            app,
+            prompt,
+            "Interrupting for /merge-remote-release...",
+            merge_remote_release_launch_notice(true),
+        );
+    } else {
+        app.push_display_message(DisplayMessage::system(merge_remote_release_launch_notice(
             false,
         )));
         super::commands_improve::start_synthetic_user_turn(app, prompt);

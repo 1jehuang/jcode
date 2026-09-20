@@ -67,6 +67,9 @@ impl App {
             "merge" => {
                 "/merge\nAsk the agent to merge the current branch into main/master, then leave HEAD on that destination branch.\n\nRequires a clean worktree and an attached branch. If both main and master exist, use the unambiguous configured remote default or ask. The agent validates the changes, uses a normal merge (fast-forward when possible), and stops on conflicts, aborting its own merge and returning to the source branch when safe. Uncommitted changes are never auto-committed or stashed. Nothing is pushed and no branches are deleted."
             }
+            "merge-remote-release" => {
+                "/merge-remote-release\nSame as /merge, then /remote-release from the destination main/master branch. Leaves HEAD on that branch.\n\nRequires a clean worktree. Stops the entire workflow on conflicts, failed validation, an ambiguous destination, or already being on the destination branch. Uncommitted work is never auto-committed or stashed before merging. After a verified merge, pushes normally and follows the repository's remote release conventions. In Jcode, runs scripts/quick-release.sh --remote so release artifacts are built remotely. Never force-pushes, moves existing tags, deletes branches, or bypasses remote release gates. Reports the merge, validation, version, and remote release status."
+            }
             "commit-push" | "commit-and-push" => {
                 "/commit-push\nSame as /commit, then push the new commits to the remote tracking branch.\n\nThe agent groups related changes into logical commits, preserves unrelated work, then runs git push (using git push -u if the branch has no upstream). It will not force-push or rewrite already-pushed history, and reports the commits created plus the push result."
             }
