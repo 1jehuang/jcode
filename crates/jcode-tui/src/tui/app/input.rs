@@ -1730,8 +1730,13 @@ impl App {
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            let ownership_message =
+                crate::todo::build_todo_ownership_continuation_message(&todos, &goals);
+            // Only a different actionable gap merits another ownership turn.
+            // Reworded evidence, confidence updates and descriptive assessment
+            // changes must not re-arm a nudge the agent already received.
             let ownership_fingerprint =
-                serde_json::to_string(&(&todo_session_id, &todos, &goals)).ok();
+                serde_json::to_string(&(&todo_session_id, &ownership_message)).ok();
             if ownership_needs_followup
                 && ownership_fingerprint.is_some()
                 && self.last_todo_ownership_fingerprint == ownership_fingerprint
@@ -1753,10 +1758,7 @@ impl App {
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
-                self.queued_messages
-                    .push(crate::todo::build_todo_ownership_continuation_message(
-                        &todos, &goals,
-                    ));
+                self.queued_messages.push(ownership_message);
                 self.pending_queued_dispatch = true;
                 return true;
             }

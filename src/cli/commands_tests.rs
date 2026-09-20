@@ -450,7 +450,9 @@ fn run_auto_poke_followup_targets_below_threshold_todos() {
         }) => {
             assert_eq!(total_todos, 2);
             assert!(message.starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE));
-            assert!(message.contains("completion confidence"));
+            assert!(message.contains("Validate further:"));
+            assert!(message.contains("\"todo a\""));
+            assert!(message.contains("\"todo b\""));
             assert!(!message.to_ascii_lowercase().contains("threshold"));
         }
         _ => panic!("expected confidence-summary follow-up"),
@@ -767,13 +769,8 @@ fn run_auto_poke_followup_rechecks_completion_confidence_until_it_passes() {
         Some(ConfidenceState::Plausible),
         Some(ConfidenceState::Verified),
     )];
-    assert!(matches!(
-        build_run_auto_poke_follow_up_from_todos(&validated, false, None),
-        Some(RunAutoPokeFollowUp::ConfidenceSummary {
-            confidence_spike_challenge: true,
-            ..
-        })
-    ));
+    // A normal validation gain is not a reason to spend another model turn.
+    assert!(build_run_auto_poke_follow_up_from_todos(&validated, false, None).is_none());
     assert!(build_run_auto_poke_follow_up_from_todos(&validated, true, None).is_none());
 }
 
