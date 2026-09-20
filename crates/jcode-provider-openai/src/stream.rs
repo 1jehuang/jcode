@@ -173,15 +173,19 @@ fn stream_text_or_recovered_tool_call(
         if !prefix.is_empty() {
             pending.push_back(StreamEvent::TextDelta(prefix));
         }
+        let id = format!(
+            "fallback_text_call_{}",
+            FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         pending.push_back(StreamEvent::ToolUseStart {
-            id: format!(
-                "fallback_text_call_{}",
-                FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ),
+            id: id.clone(),
             name: tool_name,
         });
-        pending.push_back(StreamEvent::ToolInputDelta(arguments));
-        pending.push_back(StreamEvent::ToolUseEnd);
+        pending.push_back(StreamEvent::ToolInputDeltaFor {
+            id: id.clone(),
+            delta: arguments,
+        });
+        pending.push_back(StreamEvent::ToolUseEndFor { id });
         if !suffix.is_empty() {
             pending.push_back(StreamEvent::TextDelta(suffix));
         }
@@ -235,6 +239,7 @@ pub struct StreamingToolCallState {
     call_id: Option<String>,
     name: Option<String>,
     arguments: String,
+    emitted_id: Option<String>,
     started: bool,
     emitted_arguments: usize,
     complete: bool,
@@ -317,26 +322,33 @@ fn stream_tool_calls(
     completed: &mut HashSet<String>,
     pending: &mut VecDeque<StreamEvent>,
 ) -> Option<StreamEvent> {
-    loop {
-        // ToolInputDelta/ToolUseEnd are unkeyed. Keep interleaved provider calls
-        // serialized, but never wait for arguments to start the active call.
-        let next = calls
-            .iter()
-            .filter(|(_, state)| {
-                state.started || state.name.as_ref().is_some_and(|name| !name.is_empty())
-            })
-            .min_by_key(|(_, state)| (!state.started, state.order))
-            .map(|(id, _)| id.clone());
-        let Some(item_id) = next else { break };
+    // Keyed events let every named call advance independently, even when an
+    // earlier call has not supplied any arguments yet.
+    let mut ready: Vec<_> = calls
+        .iter()
+        .filter(|(_, state)| {
+            state.started || state.name.as_ref().is_some_and(|name| !name.is_empty())
+        })
+        .map(|(id, state)| (state.order, id.clone()))
+        .collect();
+    ready.sort_by_key(|(order, _)| *order);
+    for (_, item_id) in ready {
         let state = calls.get_mut(&item_id).expect("selected tool call");
+        let id = state
+            .emitted_id
+            .get_or_insert_with(|| {
+                sanitize_tool_id(
+                    state
+                        .call_id
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .unwrap_or(&item_id),
+                )
+            })
+            .clone();
         if !state.started {
-            let id = state
-                .call_id
-                .as_deref()
-                .filter(|id| !id.is_empty())
-                .unwrap_or(&item_id);
             pending.push_back(StreamEvent::ToolUseStart {
-                id: sanitize_tool_id(id),
+                id: id.clone(),
                 name: state.name.clone().expect("named tool call"),
             });
             state.started = true;
@@ -349,14 +361,17 @@ fn stream_tool_calls(
         if state.complete || !"null".starts_with(state.arguments.trim()) {
             let delta = &state.arguments[state.emitted_arguments..];
             if !delta.is_empty() {
-                pending.push_back(StreamEvent::ToolInputDelta(delta.to_string()));
+                pending.push_back(StreamEvent::ToolInputDeltaFor {
+                    id: id.clone(),
+                    delta: delta.to_string(),
+                });
                 state.emitted_arguments = state.arguments.len();
             }
         }
         if !state.complete {
-            break;
+            continue;
         }
-        pending.push_back(StreamEvent::ToolUseEnd);
+        pending.push_back(StreamEvent::ToolUseEndFor { id });
         calls.remove(&item_id);
         completed.insert(item_id);
     }
@@ -646,8 +661,11 @@ pub fn handle_openai_output_item(
                 id: call_id.clone(),
                 name,
             });
-            pending.push_back(StreamEvent::ToolInputDelta(arguments));
-            pending.push_back(StreamEvent::ToolUseEnd);
+            pending.push_back(StreamEvent::ToolInputDeltaFor {
+                id: call_id.clone(),
+                delta: arguments,
+            });
+            pending.push_back(StreamEvent::ToolUseEndFor { id: call_id });
             return pending.pop_front();
         }
         "image_generation_call" => {
