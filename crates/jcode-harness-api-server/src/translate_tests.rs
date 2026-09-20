@@ -3503,3 +3503,28 @@ fn request_error_does_not_fabricate_a_turn_stop() {
         }]
     ));
 }
+
+#[test]
+fn tool_streaming_forwards_zero_argument_starts_and_keyed_interleaved_input() {
+    let mut state = state_with_session();
+    for id in ["a", "b"] {
+        let frames = state.legacy_event_to_api(&json!({"type":"tool_start","id":id,"name":"bash"}));
+        assert!(matches!(frames.as_slice(), [ServerFrame {
+            event: ApiEvent::ToolStart { call_id, name, .. }, ..
+        }] if call_id == id && name == "bash"));
+    }
+    for (id, delta) in [
+        ("b", "{\"command\":"),
+        ("a", "{\"command\":\"echo a\"}"),
+        ("b", "\"echo b\"}"),
+    ] {
+        let frames = state.legacy_event_to_api(&json!({"type":"tool_input","id":id,"delta":delta}));
+        assert!(matches!(frames.as_slice(), [ServerFrame {
+            event: ApiEvent::ToolInputDelta { call_id, delta: actual, .. }, ..
+        }] if call_id == id && actual == delta));
+    }
+    let legacy = state.legacy_event_to_api(&json!({"type":"tool_input","delta":"{}"}));
+    assert!(matches!(legacy.as_slice(), [ServerFrame {
+        event: ApiEvent::ToolInputDelta { call_id, delta, .. }, ..
+    }] if call_id.is_empty() && delta == "{}"));
+}

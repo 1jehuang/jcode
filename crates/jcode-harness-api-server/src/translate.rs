@@ -1435,7 +1435,7 @@ impl BridgeState {
             })],
             "tool_input" => vec![ServerFrame::event(ApiEvent::ToolInputDelta {
                 session_id: session(self),
-                call_id: String::new(),
+                call_id: event["id"].as_str().unwrap_or("").to_string(),
                 delta: event["delta"].as_str().unwrap_or("").to_string(),
             })],
             "tool_exec" => {

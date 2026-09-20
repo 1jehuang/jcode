@@ -691,12 +691,18 @@ pub enum StreamEvent {
     ToolUseStart { id: String, name: String },
     /// Tool input delta (JSON fragment)
     ToolInputDelta(String),
+    /// Keyed JSON fragment, allowing parallel calls to stream independently.
+    ToolInputDeltaFor { id: String, delta: String },
     /// Tool use complete
     ToolUseEnd,
+    /// Completion of a specific parallel call.
+    ToolUseEndFor { id: String },
     /// Gemini 3 thought signature for the most recent tool call. Emitted right
     /// after the matching `ToolUseStart`/`ToolUseEnd` so the agent loop can
     /// persist it on the `ToolUse` block and replay it on later turns.
     ToolUseSignature(String),
+    /// Thought signature for a specific call, including interleaved calls.
+    ToolUseSignatureFor { id: String, signature: String },
     /// Tool result from provider (provider already executed the tool)
     ToolResult {
         tool_use_id: String,

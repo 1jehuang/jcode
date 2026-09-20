@@ -298,6 +298,7 @@ pub(super) fn handle_run_subagent(
             name: tool_name.clone(),
         });
         let _ = tx.send(ServerEvent::ToolInput {
+            id: Some(tool_call_id.clone()),
             delta: tool_input.to_string(),
         });
         let _ = tx.send(ServerEvent::ToolExec {

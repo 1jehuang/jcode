@@ -93,12 +93,16 @@ pub enum ApiEvent {
         input: serde_json::Value,
     },
 
-    /// Tool call streaming lifecycle.
+    /// A tool name is known, even if no argument bytes have arrived yet.
+    /// Parallel calls may start before earlier calls finish streaming input.
     ToolStart {
         session_id: String,
         call_id: String,
         name: String,
     },
+    /// Incremental, potentially incomplete JSON. A nonempty `call_id` identifies
+    /// the call independently of event interleaving. Empty IDs are legacy input
+    /// for the most recently started call.
     ToolInputDelta {
         session_id: String,
         call_id: String,

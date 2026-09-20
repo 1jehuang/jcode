@@ -539,7 +539,7 @@ fn test_batch_tool_input_preserved() {
 
     // Verify the ToolInput delta contains the batch input
     let input_delta = replay_events.iter().find_map(|(_, e)| match e {
-        ReplayEvent::Server(ServerEvent::ToolInput { delta }) => Some(delta.clone()),
+        ReplayEvent::Server(ServerEvent::ToolInput { delta, .. }) => Some(delta.clone()),
         _ => None,
     });
     assert!(

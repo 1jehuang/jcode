@@ -618,3 +618,22 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn tool_input_optional_id_preserves_legacy_wire_format() -> Result<()> {
+    let legacy = parse_event_json(r#"{"type":"tool_input","delta":"{"}"#)?;
+    assert!(matches!(&legacy, ServerEvent::ToolInput { id: None, delta } if delta == "{"));
+    assert_eq!(
+        serde_json::to_value(legacy)?,
+        serde_json::json!({"type":"tool_input","delta":"{"})
+    );
+    let keyed = parse_event_json(r#"{"type":"tool_input","id":"a","delta":"{}"}"#)?;
+    assert!(
+        matches!(&keyed, ServerEvent::ToolInput { id: Some(id), delta } if id == "a" && delta == "{}")
+    );
+    assert_eq!(
+        serde_json::to_value(keyed)?,
+        serde_json::json!({"type":"tool_input","id":"a","delta":"{}"})
+    );
+    Ok(())
+}

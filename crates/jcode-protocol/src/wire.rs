@@ -867,7 +867,11 @@ pub enum ServerEvent {
 
     /// Tool input delta (streaming JSON)
     #[serde(rename = "tool_input")]
-    ToolInput { delta: String },
+    ToolInput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        delta: String,
+    },
 
     /// Tool call ended, now executing
     #[serde(rename = "tool_exec")]

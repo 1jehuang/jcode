@@ -60,6 +60,9 @@ struct ToolCallAccumulator {
     name: String,
     arguments: String,
     thought_signature: Option<String>,
+    started: bool,
+    emitted_id: String,
+    emitted_arguments: usize,
 }
 
 impl OpenRouterStream {
@@ -156,23 +159,45 @@ impl OpenRouterStream {
             return;
         }
 
-        // Some OpenAI-compatible providers synthesize a positional fallback when
-        // the model omits a call id. Since the position restarts every response,
-        // accepting it verbatim reuses ids across turns (for example `bash:0`).
-        if tc.id == format!("{}:{index}", tc.name) {
-            tc.id = jcode_core::id::new_id("toolu");
-        }
-
-        self.pending.push_back(StreamEvent::ToolUseStart {
-            id: tc.id,
-            name: tc.name,
+        Self::queue_tool_progress(&mut self.pending, index, &mut tc);
+        self.pending.push_back(StreamEvent::ToolUseEndFor {
+            id: tc.emitted_id.clone(),
         });
-        self.pending
-            .push_back(StreamEvent::ToolInputDelta(tc.arguments));
-        self.pending.push_back(StreamEvent::ToolUseEnd);
         if let Some(signature) = tc.thought_signature.filter(|value| !value.is_empty()) {
-            self.pending
-                .push_back(StreamEvent::ToolUseSignature(signature));
+            self.pending.push_back(StreamEvent::ToolUseSignatureFor {
+                id: tc.emitted_id,
+                signature,
+            });
+        }
+    }
+
+    fn queue_tool_progress(
+        pending: &mut VecDeque<StreamEvent>,
+        index: u64,
+        tc: &mut ToolCallAccumulator,
+    ) {
+        if !tc.started {
+            // Positional fallback IDs restart every response. Keep the raw ID
+            // in the accumulator for repeated-provider-ID comparisons.
+            let id = if tc.id == format!("{}:{index}", tc.name) {
+                jcode_core::id::new_id("toolu")
+            } else {
+                tc.id.clone()
+            };
+            tc.emitted_id = id.clone();
+            pending.push_back(StreamEvent::ToolUseStart {
+                id,
+                name: tc.name.clone(),
+            });
+            tc.started = true;
+        }
+        let delta = &tc.arguments[tc.emitted_arguments..];
+        if !delta.is_empty() {
+            pending.push_back(StreamEvent::ToolInputDeltaFor {
+                id: tc.emitted_id.clone(),
+                delta: delta.to_string(),
+            });
+            tc.emitted_arguments = tc.arguments.len();
         }
     }
 
@@ -229,6 +254,9 @@ impl OpenRouterStream {
 
         if let Some(signature) = thought_signature.filter(|value| !value.is_empty()) {
             tc.thought_signature = Some(signature.to_string());
+        }
+        if !tc.id.trim().is_empty() && !tc.name.trim().is_empty() {
+            Self::queue_tool_progress(&mut self.pending, index, tc);
         }
     }
 
@@ -648,7 +676,7 @@ mod tests {
 
         let mut args = String::new();
         while let Some(event) = stream.parse_next_event() {
-            if let StreamEvent::ToolInputDelta(delta) = event {
+            if let StreamEvent::ToolInputDeltaFor { delta, .. } = event {
                 args.push_str(&delta);
             }
         }
@@ -786,7 +814,7 @@ mod tests {
         assert!(futures::executor::block_on(stream.next()).is_none());
     }
 
-    fn assert_tool_calls_wait_for_stream_end(repeated_stop: bool, done: bool, parallel: bool) {
+    fn assert_tool_calls_stream_before_end(repeated_stop: bool, done: bool, parallel: bool) {
         use futures::FutureExt;
 
         // Keep the transport open between chunks so premature tool completion
@@ -825,9 +853,21 @@ mod tests {
                 if repeated_stop {
                     send(stop.clone());
                 }
+                match arguments {
+                    None => assert!(matches!(
+                        stream.next().now_or_never(),
+                        Some(Some(Ok(StreamEvent::ToolUseStart { id, name })))
+                            if id == format!("call_{index}") && name == "bash"
+                    )),
+                    Some(fragment) => assert!(matches!(
+                        stream.next().now_or_never(),
+                        Some(Some(Ok(StreamEvent::ToolInputDeltaFor { id, delta })))
+                            if id == format!("call_{index}") && delta == fragment
+                    )),
+                }
                 assert!(
                     stream.next().now_or_never().is_none(),
-                    "tool emitted before stream end (repeated_stop={repeated_stop}, done={done}, parallel={parallel})"
+                    "must not complete before DONE/EOF"
                 );
             }
         }
@@ -837,7 +877,7 @@ mod tests {
         }));
         assert!(stream.next().now_or_never().is_none());
 
-        // Ordinary text remains incremental, even while tools are buffered.
+        // Ordinary text remains incremental while tools are streaming.
         send(serde_json::json!({"choices": [{"delta": {"content": "ready"}}]}));
         assert!(matches!(
             stream.next().now_or_never(),
@@ -856,17 +896,7 @@ mod tests {
         for index in 0..calls {
             assert!(matches!(
                 stream.next().now_or_never(),
-                Some(Some(Ok(StreamEvent::ToolUseStart { id, name })))
-                    if id == format!("call_{index}") && name == "bash"
-            ));
-            assert!(matches!(
-                stream.next().now_or_never(),
-                Some(Some(Ok(StreamEvent::ToolInputDelta(arguments))))
-                    if arguments == "{\"command\":\"echo ok\"}"
-            ));
-            assert!(matches!(
-                stream.next().now_or_never(),
-                Some(Some(Ok(StreamEvent::ToolUseEnd)))
+                Some(Some(Ok(StreamEvent::ToolUseEndFor { id }))) if id == format!("call_{index}")
             ));
         }
         assert!(matches!(
@@ -885,7 +915,7 @@ mod tests {
     fn repeated_stop_chunks_preserve_tool_arguments_until_done_or_eof() {
         for done in [true, false] {
             for parallel in [false, true] {
-                assert_tool_calls_wait_for_stream_end(true, done, parallel);
+                assert_tool_calls_stream_before_end(true, done, parallel);
             }
         }
     }
@@ -894,7 +924,7 @@ mod tests {
     fn normal_tool_streaming_completes_at_done_or_eof() {
         for done in [true, false] {
             for parallel in [false, true] {
-                assert_tool_calls_wait_for_stream_end(false, done, parallel);
+                assert_tool_calls_stream_before_end(false, done, parallel);
             }
         }
     }
@@ -952,18 +982,21 @@ mod tests {
             }
         }
 
-        assert_eq!(events.len(), 4, "events: {events:?}");
+        assert_eq!(events.len(), 5, "events: {events:?}");
         assert!(matches!(
             &events[0],
             StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "bash"
         ));
         assert!(matches!(
             &events[1],
-            StreamEvent::ToolInputDelta(args) if args == "{\"command\":\"echo ok\"}"
+            StreamEvent::ToolInputDeltaFor { id, delta } if id == "call_1" && delta == "{\"command\""
         ));
-        assert!(matches!(events[2], StreamEvent::ToolUseEnd));
+        assert!(
+            matches!(&events[2], StreamEvent::ToolInputDeltaFor { id, delta } if id == "call_1" && delta == ":\"echo ok\"}")
+        );
+        assert!(matches!(&events[3], StreamEvent::ToolUseEndFor { id } if id == "call_1"));
         assert!(matches!(
-            &events[3],
+            &events[4],
             StreamEvent::MessageEnd { stop_reason } if stop_reason.as_deref() == Some("tool_calls")
         ));
         assert!(stream.tool_call_accumulators.is_empty());
@@ -1000,11 +1033,12 @@ mod tests {
                 &events[..],
                 [
                     StreamEvent::ToolUseStart { id, name },
-                    StreamEvent::ToolInputDelta(arguments),
-                    StreamEvent::ToolUseEnd,
-                    StreamEvent::ToolUseSignature(signature),
+                    StreamEvent::ToolInputDeltaFor { id: input_id, delta: arguments },
+                    StreamEvent::ToolUseEndFor { id: end_id },
+                    StreamEvent::ToolUseSignatureFor { id: signature_id, signature },
                     StreamEvent::MessageEnd { stop_reason: Some(reason) },
                 ] if id == "call_vertex"
+                    && input_id == id && end_id == id && signature_id == id
                     && name == "read"
                     && arguments == "{\"path\":\"README.md\"}"
                     && signature == "AY89a1...verbatim"
@@ -1012,6 +1046,47 @@ mod tests {
             ),
             "events: {events:?}"
         );
+    }
+
+    #[test]
+    fn split_identity_starts_without_waiting_for_arguments() {
+        let mut stream = test_stream();
+        stream.apply_tool_call_delta(0, None, Some("bash"), None, None);
+        assert!(
+            stream.pending.is_empty(),
+            "must await a provider continuation ID"
+        );
+        stream.apply_tool_call_delta(0, Some("late-id"), None, None, None);
+        assert!(
+            matches!(stream.pending.pop_front(), Some(StreamEvent::ToolUseStart { id, name }) if id == "late-id" && name == "bash")
+        );
+        assert!(stream.pending.is_empty());
+        stream.apply_tool_call_delta(0, Some("late-id"), None, Some("{}"), None);
+        assert!(
+            matches!(stream.pending.pop_front(), Some(StreamEvent::ToolInputDeltaFor { id, delta }) if id == "late-id" && delta == "{}")
+        );
+        stream.flush_tool_call_accumulators();
+        assert!(
+            matches!(stream.pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "late-id")
+        );
+        assert!(stream.pending.is_empty());
+    }
+
+    #[test]
+    fn zero_argument_calls_end_once_without_an_empty_delta() {
+        let mut stream = test_stream();
+        stream.apply_tool_call_delta(0, Some("empty"), Some("noop"), None, None);
+        assert!(
+            matches!(stream.pending.pop_front(), Some(StreamEvent::ToolUseStart { id, .. }) if id == "empty")
+        );
+        stream.apply_tool_call_delta(0, Some("empty"), Some("noop"), Some(""), None);
+        assert!(stream.pending.is_empty());
+        stream.flush_tool_call_accumulators();
+        stream.flush_tool_call_accumulators();
+        assert!(
+            matches!(stream.pending.pop_front(), Some(StreamEvent::ToolUseEndFor { id }) if id == "empty")
+        );
+        assert!(stream.pending.is_empty());
     }
 
     #[test]
