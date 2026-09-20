@@ -101,6 +101,82 @@ fn wrapped_row_map_tiles_raw_line_and_skips_repeated_prefix() {
     }
 }
 
+/// Every wrapped row must copy its visible content, without prefix drift.
+#[test]
+fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
+    fn check(prepared: &PreparedMessages) {
+        assert!(prepared.wrapped_lines.len() > 2);
+        for (row, map) in prepared.wrapped_line_map.iter().enumerate() {
+            let displayed = &prepared.wrapped_plain_lines[row];
+            let offset = prepared.wrapped_copy_offsets[row];
+            let visible = ui::display_col_slice(
+                displayed,
+                offset,
+                unicode_width::UnicodeWidthStr::width(displayed.as_str()),
+            );
+            let copied = ui::display_col_slice(
+                &prepared.raw_plain_lines[map.raw_line],
+                map.start_col,
+                map.end_col,
+            );
+            assert_eq!(copied, visible, "row {row}, map {map:?}, offset {offset}");
+        }
+    }
+
+    let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet ".repeat(8);
+    for width in [40, 80, 120] {
+        for prefix in ["1. ", "- ", "> "] {
+            let markdown = format!("{prefix}{text}");
+            let line = markdown::render_markdown_with_width(&markdown, Some(width as usize))
+                .into_iter()
+                .find(|line| line.width() > width as usize)
+                .expect("long source line");
+            check(&wrap_lines(vec![line.clone()], &[], &[], &[], width));
+            check(&wrap_lines_with_map(
+                vec![line],
+                &[],
+                &[],
+                &[],
+                &[],
+                &[],
+                width,
+                &[],
+                &[],
+                &[],
+            ));
+        }
+
+        let mut lines = Vec::new();
+        let mut raws = Vec::new();
+        let mut maps = Vec::new();
+        let mut offsets = Vec::new();
+        let mut users = Vec::new();
+        push_user_prompt_lines(
+            &mut lines,
+            &mut raws,
+            &mut maps,
+            &mut offsets,
+            &mut users,
+            1,
+            user_color(),
+            &text,
+            ratatui::layout::Alignment::Left,
+        );
+        check(&wrap_lines_with_map(
+            lines,
+            &raws,
+            &maps,
+            &offsets,
+            &users,
+            &[],
+            width,
+            &[],
+            &[],
+            &[],
+        ));
+    }
+}
+
 /// Regression coverage for issue #344: loading older compacted history above
 /// an unchanged tail must be detected as a suffix match so scrolling to the
 /// start of a long session reuses the prepared tail instead of re-rendering
