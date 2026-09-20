@@ -166,10 +166,79 @@ pub fn format_reset_time(timestamp: &str) -> String {
     }
 }
 
+/// How much of a rolling quota window has already elapsed, as a percentage.
+///
+/// Derived from the window's reset timestamp and its total length: a window
+/// resetting in 30 minutes with a 5-hour length is 90% elapsed. Returns `None`
+/// when the timestamp cannot be parsed or the window length is unknown, so
+/// callers can fall back to the reset countdown.
+pub fn window_elapsed_percent(resets_at: &str, window_seconds: u64) -> Option<u8> {
+    if window_seconds == 0 {
+        return None;
+    }
+    let reset = parse_reset_timestamp(resets_at)?;
+    let remaining = reset
+        .signed_duration_since(chrono::Utc::now())
+        .num_seconds();
+    if remaining <= 0 {
+        return Some(100);
+    }
+    let remaining = (remaining as u64).min(window_seconds);
+    let elapsed = window_seconds - remaining;
+    // Round to nearest percent without floating point drift.
+    let percent = (elapsed * 100 + window_seconds / 2) / window_seconds;
+    Some(percent.min(100) as u8)
+}
+
 pub fn format_usage_bar(percent: f32, width: usize) -> String {
     let filled = ((percent / 100.0) * width as f32).round() as usize;
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
     let bar: String = "█".repeat(filled) + &"░".repeat(empty);
     format!("{} {:.0}%", bar, percent)
+}
+
+#[cfg(test)]
+mod elapsed_tests {
+    use super::window_elapsed_percent;
+
+    const FIVE_HOURS: u64 = 5 * 60 * 60;
+    const SEVEN_DAYS: u64 = 7 * 24 * 60 * 60;
+
+    fn resets_in(seconds: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339()
+    }
+
+    #[test]
+    fn elapsed_percent_tracks_how_far_the_window_has_run() {
+        let half = window_elapsed_percent(&resets_in(FIVE_HOURS as i64 / 2), FIVE_HOURS)
+            .expect("parsable reset");
+        assert!((49..=51).contains(&half), "expected ~50%, got {half}");
+
+        let nearly_done =
+            window_elapsed_percent(&resets_in(30 * 60), FIVE_HOURS).expect("parsable reset");
+        assert!(
+            (89..=91).contains(&nearly_done),
+            "expected ~90%, got {nearly_done}"
+        );
+
+        let weekly =
+            window_elapsed_percent(&resets_in(32 * 60 * 60), SEVEN_DAYS).expect("parsable reset");
+        assert!((80..=82).contains(&weekly), "expected ~81%, got {weekly}");
+    }
+
+    #[test]
+    fn elapsed_percent_saturates_and_rejects_unusable_input() {
+        assert_eq!(
+            window_elapsed_percent(&resets_in(-60), FIVE_HOURS),
+            Some(100)
+        );
+        // A reset further out than the window itself means it just restarted.
+        assert_eq!(
+            window_elapsed_percent(&resets_in(FIVE_HOURS as i64 * 2), FIVE_HOURS),
+            Some(0)
+        );
+        assert_eq!(window_elapsed_percent("not-a-timestamp", FIVE_HOURS), None);
+        assert_eq!(window_elapsed_percent(&resets_in(60), 0), None);
+    }
 }

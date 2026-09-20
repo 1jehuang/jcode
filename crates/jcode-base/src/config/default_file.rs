@@ -157,7 +157,12 @@ debug_socket = false
 # Set false here or set JCODE_NO_EMOJI=1 for ASCII fallbacks.
 emoji = true
 
-# Usage percentage wording: "left" (default) or "used".
+# Usage percentage wording: "left" (default), "used", or "elapsed".
+#   left    - "57% left · 30m"   (remaining quota, then a reset countdown)
+#   used    - "43% used · 30m"   (consumed quota, then a reset countdown)
+#   elapsed - "43%/91% used / elapsed" (consumed quota against how much of the
+#             window has run, so overspending shows up as the first number
+#             outrunning the second)
 usage_display = "left"
 
 # Show thinking/reasoning content (default: true)

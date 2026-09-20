@@ -119,7 +119,12 @@ pub struct DisplayConfig {
     /// sessions (issue #674).
     #[serde(default = "default_true")]
     pub external_sessions: bool,
-    /// Usage percentage wording: "left" (default) or "used".
+    /// Usage percentage wording: "left" (default), "used", or "elapsed".
+    ///
+    /// `elapsed` renders the consumed quota next to how much of the rolling
+    /// window has already elapsed (`43%/91%`) instead of a reset countdown, so
+    /// the two numbers can be read against each other: burning quota faster
+    /// than the clock shows up as the first number outrunning the second.
     pub usage_display: String,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
@@ -213,6 +218,13 @@ impl DisplayConfig {
 
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
+            || self.usage_display.eq_ignore_ascii_case("elapsed")
+    }
+
+    /// Whether the reset countdown should be replaced by the window's elapsed
+    /// percentage, making consumed-vs-elapsed directly comparable.
+    pub fn usage_display_elapsed(&self) -> bool {
+        self.usage_display.eq_ignore_ascii_case("elapsed")
     }
 }
 
@@ -251,5 +263,21 @@ mod tests {
         let used: DisplayConfig =
             serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
         assert!(used.usage_display_used());
+    }
+
+    #[test]
+    fn usage_percentage_wording_accepts_elapsed_and_implies_used_wording() {
+        let elapsed: DisplayConfig =
+            serde_json::from_str(r#"{"usage_display":"elapsed"}"#).expect("display config");
+
+        assert!(elapsed.usage_display_elapsed());
+        // Elapsed pairs "consumed" against "elapsed", so the quota number must
+        // read as consumed rather than remaining.
+        assert!(elapsed.usage_display_used());
+
+        let used: DisplayConfig =
+            serde_json::from_str(r#"{"usage_display":"used"}"#).expect("display config");
+        assert!(!used.usage_display_elapsed());
+        assert!(!DisplayConfig::default().usage_display_elapsed());
     }
 }
