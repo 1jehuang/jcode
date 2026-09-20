@@ -150,6 +150,30 @@ endpoints from the same base, and also points the `/models` catalog probe at it.
 The override is ignored in ChatGPT/Codex OAuth mode (that backend is fixed), and
 a malformed value is logged and ignored rather than breaking requests.
 
+### Banked Codex usage resets
+
+`/reset usage limits openai` checks the active OpenAI OAuth account's banked
+resets and shows the selected reset, account, and expiry. It selects the
+soonest-expiring available reset. Nothing is spent until you run
+`/reset usage limits openai confirm`. Use `/reset usage limits openai cancel`
+to dismiss the pending confirmation. API keys cannot redeem these resets.
+
+The implementation follows [Codex's backend client](https://github.com/openai/codex/blob/5c5308fc9a9ee789049d646ef11e5400384b9c6f/codex-rs/backend-client/src/client/rate_limit_resets.rs):
+
+- Read: `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
+- Redeem: `POST` to that URL plus `/consume`, with JSON `credit_id` and a UUID
+  `redeem_request_id`.
+- Both requests use the ChatGPT OAuth bearer token and `chatgpt-account-id`
+  when available. This is the Codex backend contract, not a public OpenAI API-key
+  endpoint, and availability depends on the account.
+- Confirmation pins the original account and credit. Retrying a failed or
+  timed-out confirmation reuses the same redemption UUID, since the original
+  request may already have succeeded. Check `/usage` before abandoning an
+  uncertain redemption. Pending confirmations are session-local, not persisted.
+- A reset spends one earned, single-use grant. It does not purchase credits,
+  increase the subscription's limits, or bypass OpenAI's eligibility rules.
+  See [OpenAI's banked reset explanation](https://help.openai.com/en/articles/20001498-how-banked-codex-resets-work).
+
 ### Troubleshooting
 - Claude 401/auth errors: run `jcode login --provider claude`.
 - 401/403: re-run `jcode login --provider openai`.
