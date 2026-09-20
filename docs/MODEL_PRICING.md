@@ -1,7 +1,10 @@
 # Model pricing and costs
 
-jcode can price API calls from **your** price list instead of guessing. The
-model is one idea:
+jcode can price API calls from **your** price list instead of guessing. This is
+the layer for *any* vendor you talk to: the cases it exists for are the ones
+where models.dev has no entry for your model, or lists a price that differs from
+what you actually pay. A file (or card) is grouped per vendor and keyed by model
+id. The model is one idea:
 
 > **`config.toml` names your own vendor rules.** Each `[pricing.providers.
 > <vendor>]` entry either writes rate cards inline or points at a local JSON
@@ -14,11 +17,11 @@ So the answer to "why is it this price?" has **two layers**:
 1. **Your rules.** A `[pricing.providers.<vendor>]` card written inline in
    `config.toml` outranks a rule inside that vendor's `file`, and both outrank
    everything jcode derives itself. Rules are matched by model id, not by route
-   key: a rule for `deepseek-flash` prices that model whether it is reached
-   through `deepseek` or through `openrouter`, which is what you want when
-   models.dev has no entry or has a USD price where your vendor bills CNY. Add
-   an optional `route = [...]` filter when one model id is billed at different
-   prices per route.
+   key: a rule for `acme-small` prices that model whether it is reached directly
+   through your own vendor or through a router/aggregator, which is what you
+   want when models.dev has no entry or has a USD price where your vendor bills
+   CNY. Add an optional `route = [...]` filter when one model id is billed at
+   different prices per route.
 2. **jcode's own chain**, used for anything your rules do not price: the
    curated static tables shipping with jcode, then provider-specific caches
    (OpenRouter endpoints), then the [models.dev](https://models.dev) catalog,
@@ -32,7 +35,7 @@ section existed.
 Two lines in `~/.jcode/config.toml`:
 
 ```toml
-[pricing.providers.deepseek]
+[pricing.providers.acme]
 file = "prices.json"
 currency = "CNY"
 ```
@@ -42,12 +45,12 @@ where this file lives. Any other value is a path (`~` expanded), which is what
 you want for a file you keep elsewhere, e.g. `file = "~/pricing/prices.json"` or
 `file = "/srv/pricing/prices.json"`. The file is a plain JSON document with a
 `models` map at the top level, and **no outer vendor key** (the vendor is
-already the `[pricing.providers.deepseek]` key):
+already the `[pricing.providers.acme]` key):
 
 ```json
 {
   "models": {
-    "deepseek-v4-pro": {
+    "acme-large": {
       "cost": { "input": 4.5, "output": 13.5, "cache_read": 0.15 },
       "tariffs": { "peak": { "multiplier": 2.0 } },
       "schedule": [
@@ -95,12 +98,12 @@ A vendor is **your own label**, not a route identity. It groups a set of rules,
 inline or in a file, and the notes below apply to both.
 
 ```toml
-[pricing.providers.deepseek]
+[pricing.providers.acme]
 file = "prices.json"       # optional: a local JSON file with the rules
 currency = "CNY"           # currency of this vendor's numbers; default USD
 
 # optional: write a rule directly, without a file
-[pricing.providers.deepseek.models."deepseek-flash".cost]
+[pricing.providers.acme.models."acme-small".cost]
 input = 1.0
 output = 4.0
 ```
@@ -112,27 +115,29 @@ output = 4.0
 | `models.<model>` | An inline rule for one model, in the shape of [A model rule](#a-model-rule) below. Outranks the same model in `file`. |
 
 **Rules are matched by model id, not by route**, unless they opt into a
-`route = [...]` filter. `[pricing.providers.deepseek.models."deepseek-flash"]`
-and a `deepseek-flash` entry in that vendor's file both price a call for
-`deepseek-flash`, whichever route reports it. This is deliberate: binding every
+`route = [...]` filter. `[pricing.providers.acme.models."acme-small"]`
+and an `acme-small` entry in that vendor's file both price a call for
+`acme-small`, whichever route reports it. This is deliberate: binding every
 rule to a route would silently fall back to models.dev's USD numbers for the
-exact case the feature exists to fix (a DeepSeek model run through OpenRouter).
+exact case the feature exists to fix (a model from your own vendor run through a
+router/aggregator).
 
-One model id can still cost different amounts per route. Real example: DeepSeek
-bills `deepseek-flash` at $0.15/$0.60, while the same model through OpenRouter
-costs $0.04844/$0.09688. Scope a rule to the route(s) it is true for:
+One model id can still cost different amounts per route. Real example: your
+vendor bills `acme-small` at $0.15/$0.60, while the same model id through a
+router such as OpenRouter costs $0.04844/$0.09688. Scope a rule to the route(s)
+it is true for:
 
 ```toml
-[pricing.providers.openrouter.models.deepseek-flash]
+[pricing.providers.openrouter.models.acme-small]
 route = ["openrouter"]
 cost = { input = 0.04844, output = 0.09688 }
 ```
 
 `route` is a list of **billing identities** — the same spelling as a vendor key
-or activity source key: `"openrouter"`, `"deepseek"`, `"claude:api-key"`,
-`"openai-compatible:deepseek"`. A compatible profile may also be named by its
-short form, so `route = ["deepseek"]` matches both a `deepseek` call and an
-`openai-compatible:deepseek` one. Entries are trimmed, order is kept, and
+or activity source key: `"openrouter"`, `"acme"`, `"acme:api-key"`,
+`"openai-compatible:acme"`. A compatible profile may also be named by its
+short form, so `route = ["acme"]` matches both an `acme` call and an
+`openai-compatible:acme` one. Entries are trimmed, order is kept, and
 duplicates are allowed. An empty entry is rejected with its exact field path.
 
 **An empty `route` applies to every route**, which keeps a rule without the key
@@ -144,11 +149,11 @@ is a fall-through to the next layer, never a misprice.
 
 ```toml
 # The same model at two per-route prices, each rule owning its own route.
-[pricing.providers.deepseek.models.deepseek-flash]
-route = ["deepseek", "openai-compatible:deepseek"]
+[pricing.providers.acme.models.acme-small]
+route = ["acme", "openai-compatible:acme"]
 cost = { input = 0.15, output = 0.60 }
 
-[pricing.providers.openrouter.models.deepseek-flash]
+[pricing.providers.openrouter.models.acme-small]
 route = ["openrouter"]
 cost = { input = 0.04844, output = 0.09688 }
 ```
@@ -173,7 +178,7 @@ accepted shape is a top-level `models` map:
 }
 ```
 
-There is no outer provider key. The old shape `{"deepseek": {"models": { ... }}}`
+There is no outer provider key. The old shape `{"acme": {"models": { ... }}}`
 is rejected with a message naming the key to remove: the vendor is already the
 `[pricing.providers.<vendor>]` config key, so repeating it in the file would be
 ambiguous.
@@ -187,7 +192,7 @@ file rule can carry `route`, `cost`, `tariffs`, `schedule`, `context_tiers`,
 window does not cover the call's instant is skipped, and the next layer prices
 the call. Because the file is your own configuration, that price is marked with
 the vendor name: the cost line shows `(rule expired (pricing.providers
-\`deepseek\` file))`, and `/pricing` prints an `out of effect:` line for the same
+\`acme\` file))`, and `/pricing` prints an `out of effect:` line for the same
 reason. Without this the figure would silently switch from your file to
 models.dev's number.
 
@@ -200,7 +205,7 @@ both before and during the read so an oversized file is never fully buffered.
 An invalid file is not fatal to jcode: the file contributes no rules for that
 lookup and a line naming the problem goes to the log. An invalid `[pricing]`
 field is different — the section is rejected as a whole, `/pricing` and the cost
-display say `invalid [pricing]: pricing.providers.deepseek.file`, and every rule
+display say `invalid [pricing]: pricing.providers.acme.file`, and every rule
 in the section is ignored until you fix it.
 
 **Currency follows the price here too.** A file under a vendor that states
@@ -216,10 +221,10 @@ knowing, because it is the only way to express field-level partial override at
 the *card* layer, and because it outranks the file when both name a model.
 
 ```toml
-[pricing.providers.deepseek]
+[pricing.providers.acme]
 currency = "CNY"
 
-[pricing.providers.deepseek.models."deepseek-flash".cost]
+[pricing.providers.acme.models."acme-small".cost]
 input = 1.0
 ```
 
@@ -233,7 +238,7 @@ any rate field is rejected at load with the field path, for an inline card and
 for a file rule alike: one `NaN` would otherwise poison the session total (it
 renders as `NaN` and never recovers) and a negative rate would read as free.
 
-The full card example — DeepSeek billed in CNY with peak/off-peak hours:
+The full card example — a vendor billed in CNY with peak/off-peak hours:
 
 ```toml
 [pricing]
@@ -242,25 +247,25 @@ fx_base = "USD"
 [pricing.fx_rates]
 CNY = 7.20
 
-[pricing.providers.deepseek]
+[pricing.providers.acme]
 currency = "CNY"
 
-[pricing.providers.deepseek.models.deepseek-flash.cost]
+[pricing.providers.acme.models.acme-small.cost]
 input = 1.0
 output = 4.0
 cache_read = 0.02
 
-[pricing.providers.deepseek.models.deepseek-flash.tariffs.peak]
+[pricing.providers.acme.models.acme-small.tariffs.peak]
 multiplier = 2.0
 
-[[pricing.providers.deepseek.models.deepseek-flash.schedule]]
+[[pricing.providers.acme.models.acme-small.schedule]]
 tariff = "peak"
 utc_offset_minutes = 0
 weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 windows = [["01:00", "04:00"], ["06:00", "10:00"]]
 ```
 
-With this in place a flash call costs ¥1/¥4 per million input/output tokens
+With this in place a call for that model costs ¥1/¥4 per million input/output tokens
 (¥2/¥8 during peak), the widget and `/usage` show the amounts in CNY, and the
 model picker orders this route by its converted cost next to USD-priced models.
 Any model not named here keeps falling through to the layers below.
@@ -276,8 +281,8 @@ The shape below is what `models.<model>` in a card means, and the same keys are
 what a `models.<id>` entry in a vendor file may carry.
 
 ```toml
-[pricing.providers.deepseek.models."deepseek-v4-pro"]
-route = ["deepseek", "openai-compatible:deepseek"]   # optional; omit to match every route
+[pricing.providers.acme.models."acme-mini"]
+route = ["acme", "openai-compatible:acme"]   # optional; omit to match every route
 cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
 default_tariff = "off_peak"
 effective_until = "2026-12-31T23:59:59Z"
@@ -298,7 +303,7 @@ on_rule_expiry = "fallback"
 ### Schedule rules
 
 ```toml
-[[pricing.providers.deepseek.models.deepseek-flash.schedule]]
+[[pricing.providers.acme.models.acme-small.schedule]]
 tariff = "peak"
 utc_offset_minutes = 0
 weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
@@ -323,11 +328,11 @@ Some models charge more once the request is large. Say it with a
 `context_tiers` array:
 
 ```toml
-[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+[[pricing.providers.acme.models."acme-large".context_tiers]]
 min_input_tokens = 200_000
 multiplier = 2.0
 
-[[pricing.providers.deepseek.models."deepseek-v4-pro".context_tiers]]
+[[pricing.providers.acme.models."acme-large".context_tiers]]
 min_input_tokens = 500_000
 input = 9.0
 output = 27.0
