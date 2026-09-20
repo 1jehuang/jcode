@@ -13,6 +13,17 @@ PAGES = {
     "/docs": '<h1>Documentation</h1><p>Choose the Browser controls section.</p><a href="/browser">Browser controls</a><a href="/">Home</a>',
     "/browser": '<h1>Browser controls</h1><p>Fast browser integration verified</p>',
     "/blocked": '<h1>Account verification</h1><label>Verification code <input autocomplete="one-time-code"></label><p>Wait for the user. Do not enter any code.</p>',
+    "/task": '<header><nav>' + ''.join(f'<a href="/noise/{i}">Unrelated link {i}</a> ' for i in range(90)) + '</nav></header>'
+             '<main><h1>Documentation search</h1><form action="/task/results" method="get">'
+             '<label>Search <input id="task-search" type="search" name="q" aria-label="Search"></label>'
+             '<select name="section"><option value="all">All documentation</option></select>'
+             '<button type="submit">Search</button></form></main>',
+    "/task/results": '<main><h1>Search results</h1><a id="documentation" href="/task/docs">Documentation</a></main>',
+    "/task/docs": '<main><h1>Documentation</h1><p>The Browser controls link is at the bottom of the scrollable sections panel.</p>'
+                  '<div id="sections" aria-label="Documentation sections" style="height:200px;overflow-y:auto;border:1px solid">'
+                  '<div style="height:650px">Documentation sections</div>'
+                  '<a id="controls" href="/task/complete">Browser controls</a></div></main>',
+    "/task/complete": '<main><h1>Browser controls</h1><p>Whole browser task verified</p></main>',
 }
 
 

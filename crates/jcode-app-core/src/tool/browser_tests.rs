@@ -291,10 +291,27 @@ fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
             .unwrap()
             .contains("Use handoff by default for browser tasks")
     );
-    assert_eq!(schema["properties"]["max_steps"]["default"], 12);
-    assert_eq!(schema["properties"]["max_steps"]["maximum"], 30);
+    assert_eq!(schema["properties"]["max_steps"]["default"], 40);
+    assert_eq!(schema["properties"]["max_steps"]["maximum"], 100);
     assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
-    for key in ["goal", "candidates", "text_values"] {
+    for key in ["goal", "context", "candidates", "text_values"] {
         assert!(schema["properties"].get(key).is_some());
     }
+}
+
+#[test]
+fn nested_scroll_uses_container_delta_without_escaping_scope() {
+    let input: BrowserInput = serde_json::from_value(json!({
+        "action":"scroll","selector":"#sections","y":600,"tab_id":7,"frame_id":0,"all_frames":false
+    }))
+    .unwrap();
+    let (action, params, _) = bridge_request("scroll", &input).unwrap();
+    assert_eq!(action, "evaluate");
+    assert_eq!(params["tabId"], 7);
+    assert_eq!(params["frameId"], 0);
+    assert_eq!(params["allFrames"], false);
+    let script = params["script"].as_str().unwrap();
+    assert!(script.contains("element.scrollBy"));
+    assert!(script.contains("top:600"));
+    assert!(script.contains("return {scrolled:true"));
 }

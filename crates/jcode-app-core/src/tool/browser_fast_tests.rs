@@ -7,6 +7,8 @@ struct MockBrowser {
     calls: Mutex<Vec<String>>,
     ready: bool,
     fail_action: bool,
+    action_error: Option<String>,
+    action_result: Option<Value>,
 }
 impl MockBrowser {
     fn new(observations: Vec<Value>) -> Self {
@@ -15,6 +17,8 @@ impl MockBrowser {
             calls: Mutex::new(Vec::new()),
             ready: true,
             fail_action: false,
+            action_error: None,
+            action_result: None,
         }
     }
 }
@@ -53,12 +57,19 @@ impl BrowserProvider for MockBrowser {
             } else {
                 values.front().unwrap().clone()
             };
+            if let Some(error) = value["bridge_error"].as_str() {
+                anyhow::bail!("{error}");
+            }
             return Ok(ToolOutput::new("").with_metadata(json!({"result":value})));
+        }
+        if let Some(error) = &self.action_error {
+            anyhow::bail!("{error}");
         }
         if self.fail_action {
             anyhow::bail!("mock failure");
         }
-        Ok(ToolOutput::new("").with_metadata(json!({"ok":true})))
+        Ok(ToolOutput::new("")
+            .with_metadata(self.action_result.clone().unwrap_or(json!({"ok":true}))))
     }
 }
 struct MockTransport {
@@ -205,7 +216,7 @@ async fn validates_inputs_before_browser_calls() {
     for value in [
         json!({"action":"handoff","goal":"x"}),
         json!({"action":"handoff","tab_id":7}),
-        json!({"action":"handoff","tab_id":7,"goal":"x","max_steps":31}),
+        json!({"action":"handoff","tab_id":7,"goal":"x","max_steps":101}),
         json!({"action":"handoff","tab_id":7,"goal":"x","confidence_threshold":-0.1}),
     ] {
         let browser = MockBrowser::new(vec![]);
@@ -347,25 +358,38 @@ async fn timeout_and_cancellation_drop_pending_work() {
 #[test]
 fn observation_script_does_not_read_form_values() {
     assert!(!OBSERVE_SCRIPT.contains("e.value"));
-    assert!(OBSERVE_SCRIPT.contains("e.matches('input,textarea,[contenteditable]')||e.querySelector('input,textarea,[contenteditable]')?''"));
-    assert!(OBSERVE_SCRIPT.contains("document.querySelectorAll(css).length!==1"));
+    assert!(OBSERVE_SCRIPT.contains(
+        "const excluded='input,textarea,select,script,style,noscript,template,[contenteditable]'"
+    ));
+    assert!(OBSERVE_SCRIPT.contains("!unique(css)"));
     assert!(OBSERVE_SCRIPT.contains("o.value.length<=200"));
 }
 
 #[tokio::test]
-async fn stale_dom_never_executes_selected_action() {
-    let browser = MockBrowser::new(vec![page("before"), page("changed while deciding")]);
-    let value = result(&browser, &MockTransport::new(&[("a0", 0.99)]), &input()).await;
-    assert_eq!(value["status"], "hand_back");
-    assert!(value["reason"].as_str().unwrap().contains("DOM changed"));
-    assert_eq!(
-        *browser.calls.lock().unwrap(),
-        vec!["status", "eval", "eval"]
+async fn stale_dom_replans_without_executing_old_target() {
+    let mut before = page("before");
+    before["elements"] = json!([{"identity":1,"tag":"a","text":"Docs","selector":"#docs","href":"https://example.test/docs"}]);
+    let mut after = before.clone();
+    after["elements"][0]["identity"] = json!(2);
+    after["elements"][0]["href"] = json!("https://example.test/changed");
+    let browser = MockBrowser::new(vec![before, after]);
+    let transport = MockTransport::new(&[("a0", 0.99), ("done", 0.99)]);
+    let value = result(&browser, &transport, &input()).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert!(value["action_trace"].as_array().unwrap().is_empty());
+    let seen = transport.observed.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen[1]["controller_note"]
+            .as_str()
+            .unwrap()
+            .contains("Replan")
     );
+    assert!(!browser.calls.lock().unwrap().contains(&"click".into()));
 }
 
 #[tokio::test]
-async fn exact_actions_execute_once_and_results_stay_with_parent() {
+async fn exact_actions_execute_once_and_results_feed_next_decision() {
     let browser = MockBrowser::new(vec![page("before")]);
     let transport = MockTransport::new(&[("a0", 0.99), ("done", 0.99)]);
     let mut input = input();
@@ -377,8 +401,22 @@ async fn exact_actions_execute_once_and_results_stay_with_parent() {
     assert_eq!(value["status"], "done");
     assert_eq!(value["action_trace"][0]["result"]["metadata"]["ok"], true);
     let requests = transport.observed.lock().unwrap();
+    assert_eq!(requests[0]["caller_capabilities"][0]["action_id"], "a0");
+    assert_eq!(
+        requests[0]["caller_capabilities"][0]["source"],
+        "trusted_caller"
+    );
+    assert!(
+        requests[1]["caller_capabilities"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(requests[1]["action_history"][0]["action"], "click");
-    assert!(requests[1]["action_history"][0].get("result").is_none());
+    assert_eq!(
+        requests[1]["action_history"][0]["result"]["metadata"]["ok"],
+        true
+    );
 }
 
 #[test]
@@ -459,7 +497,7 @@ async fn done_checks_latest_dom_and_returns_changed_observation() {
 }
 
 #[tokio::test]
-async fn same_origin_navigation_requires_renewed_exact_actions() {
+async fn navigation_retires_old_exact_actions_but_continues_task() {
     let mut after = page("new page");
     after["url"] = json!("https://example.test/other");
     let browser = MockBrowser::new(vec![page("before"), page("before"), after]);
@@ -472,9 +510,16 @@ async fn same_origin_navigation_requires_renewed_exact_actions() {
         label: "Pending action bound to original page".into(),
         input: json!({"action":"click","selector":"#send"}),
     });
-    let value = result(&browser, &MockTransport::new(&[("a0", 0.99)]), &input).await;
-    assert_eq!(value["status"], "hand_back");
-    assert!(value["reason"].as_str().unwrap().contains("URL changed"));
+    let value = result(
+        &browser,
+        &MockTransport::new(&[("a0", 0.99), ("a0", 0.99), ("done", 0.99)]),
+        &input,
+    )
+    .await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"][0]["action"], "open");
+    assert_eq!(value["action_trace"][1]["action"], "scroll");
+    assert!(!browser.calls.lock().unwrap().contains(&"click".into()));
 }
 
 #[test]
@@ -620,8 +665,8 @@ fn compact_candidates_omit_unavailable_scroll_and_wait() {
 fn observer_filters_viewport_and_tracks_scroll_availability() {
     assert!(OBSERVE_SCRIPT.contains("r.bottom>0&&r.right>0&&r.top<innerHeight&&r.left<innerWidth"));
     assert!(OBSERVE_SCRIPT.contains("range.getClientRects()"));
-    assert!(OBSERVE_SCRIPT.contains("while(p)"));
-    assert!(OBSERVE_SCRIPT.contains("can_down:scrollY+innerHeight<root.scrollHeight-1"));
+    assert!(OBSERVE_SCRIPT.contains("p=p.parentElement"));
+    assert!(OBSERVE_SCRIPT.contains("can_down:e.scrollTop+e.clientHeight<e.scrollHeight-1"));
     assert!(OBSERVE_SCRIPT.contains("ready_state:document.readyState"));
 }
 
@@ -683,27 +728,241 @@ async fn settling_loading_page_times_out_without_model_retry() {
 }
 
 #[test]
-fn cumulative_action_results_are_bounded_without_side_effect_retry_advice() {
-    let mut bytes = 0;
-    let mut results = Vec::new();
-    for _ in 0..30 {
-        results.push(retain_result(
-            json!({"output":"x".repeat(10_000),"metadata":{"ok":true}}),
-            &mut bytes,
-        ));
-    }
-    assert!(bytes <= 32_000);
-    assert_eq!(
-        results
+fn rolling_action_results_keep_newest_and_bound_history() {
+    let mut trace = Vec::new();
+    for index in 0..100 {
+        let result = retain_result(
+            json!({"output":"x".repeat(15_000),"metadata":{"index":index}}),
+            &mut trace,
+        );
+        trace.push(json!({"step":index,"result":result}));
+        let bytes: usize = trace
             .iter()
-            .filter(|value| value.get("output").is_some())
-            .count(),
-        3
+            .map(|entry| entry["result"].to_string().len())
+            .sum();
+        assert!(bytes <= 32_000, "{bytes}");
+        let history = task_history(&trace);
+        assert_eq!(
+            history.last().unwrap()["result"]["metadata"]["index"],
+            index
+        );
+    }
+    assert!(
+        trace[0]["result"]["omitted"]
+            .as_str()
+            .unwrap()
+            .contains("Do not repeat side effects")
     );
-    let encoded = serde_json::to_string(&results).unwrap();
-    assert!(encoded.len() < 40_000);
-    assert!(!encoded.contains("Repeat the direct action"));
-    let guidance = results[3]["omitted"].as_str().unwrap();
-    assert!(guidance.contains("read-only"));
-    assert!(guidance.contains("Do not repeat side effects"));
+    assert_eq!(trace.last().unwrap()["result"]["metadata"]["index"], 99);
+}
+
+#[tokio::test]
+async fn entire_task_keeps_context_and_results_across_three_actions() {
+    let browser = MockBrowser::new(vec![
+        page("start"),
+        page("start"),
+        page("first"),
+        page("first"),
+        page("first"),
+        page("second"),
+        page("second"),
+        page("second"),
+        page("finished"),
+    ]);
+    let transport = MockTransport::new(&[("a0", 0.99), ("a0", 0.99), ("a0", 0.99), ("done", 0.99)]);
+    let mut input = input();
+    input.context = Some("Collect all three sections, not just the first page.".into());
+    let value = result(&browser, &transport, &input).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"].as_array().unwrap().len(), 3);
+    let seen = transport.observed.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    for (index, state) in seen.iter().enumerate() {
+        assert_eq!(state["task_context"], input.context.as_deref().unwrap());
+        assert_eq!(state["action_history"].as_array().unwrap().len(), index);
+        for entry in state["action_history"].as_array().unwrap() {
+            assert_eq!(entry["result"]["metadata"]["ok"], true);
+            assert!(entry["before"]["text"].is_string());
+            assert!(entry["after"]["text"].is_string());
+        }
+    }
+    assert_eq!(seen[3]["action_history"][0]["before"]["text"], "start");
+    assert_eq!(seen[3]["page"]["text"], "finished");
+}
+
+#[tokio::test]
+async fn unrelated_page_changes_do_not_abort_stable_target_action() {
+    let mut before = page("clock: 1");
+    before["elements"] = json!([{"identity":1,"tag":"button","text":"Next","selector":"#next","type":"button","form":false}]);
+    let mut changed = before.clone();
+    changed["text"] = json!("clock: 2");
+    let browser = MockBrowser::new(vec![before, changed, page("completed")]);
+    let value = result(
+        &browser,
+        &MockTransport::new(&[("a0", 0.99), ("done", 0.99)]),
+        &input(),
+    )
+    .await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"][0]["action"], "click");
+}
+
+#[tokio::test]
+async fn navigation_disconnect_is_observed_without_repeating_click() {
+    let mut before = page("start");
+    before["elements"] = json!([{"identity":1,"tag":"a","text":"Docs","selector":"#docs","href":"https://example.test/docs"}]);
+    let mut after = page("completed");
+    after["url"] = json!("https://example.test/docs");
+    let mut browser = MockBrowser::new(vec![
+        before.clone(),
+        before,
+        json!({"bridge_error":"Could not establish connection. Receiving end does not exist."}),
+        after,
+    ]);
+    browser.action_error =
+        Some("Could not establish connection. Receiving end does not exist.".into());
+    let transport = MockTransport::new(&[("a0", 0.99), ("done", 0.99)]);
+    let value = result(&browser, &transport, &input()).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(
+        browser
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| *call == "click")
+            .count(),
+        1
+    );
+    assert_eq!(
+        transport.observed.lock().unwrap()[1]["action_history"][0]["result"]["metadata"]["navigation_observed"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn uncertain_exact_side_effect_is_not_replayed_or_assumed_successful() {
+    let mut browser = MockBrowser::new(vec![page("start")]);
+    browser.action_error = Some("Receiving end does not exist".into());
+    let mut input = input();
+    input.candidates.push(ExactCandidate {
+        label: "Authorized send".into(),
+        input: json!({"action":"click","selector":"#send","url":"https://example.test/sent"}),
+    });
+    let value = result(&browser, &MockTransport::new(&[("a0", 0.99)]), &input).await;
+    assert_eq!(value["status"], "hand_back");
+    assert_eq!(value["action_trace"][0]["status"], "uncertain");
+    assert_eq!(
+        browser
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| *call == "click")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sensitive_action_results_do_not_enter_next_decision() {
+    let mut browser = MockBrowser::new(vec![page("start")]);
+    browser.action_result = Some(json!({"token":"sk-test-secret-123456789"}));
+    let transport = MockTransport::new(&[("a0", 0.99)]);
+    let value = result(&browser, &transport, &input()).await;
+    assert_eq!(value["status"], "hand_back");
+    assert!(!value.to_string().contains("sk-test-secret"));
+    assert_eq!(transport.observed.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn low_confidence_help_still_reports_missing_capability() {
+    let browser = MockBrowser::new(vec![page("needs text")]);
+    let value = result(
+        &browser,
+        &MockTransport::new(&[("text_needed", 0.4)]),
+        &input(),
+    )
+    .await;
+    assert_eq!(value["status"], "hand_back");
+    assert_eq!(value["requested_help"], "text");
+    assert!(value["action_trace"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn structured_credentials_are_redacted_even_in_encoded_results() {
+    let mut result = json!({"metadata":{"password":"opaque-password","access_token":"opaque-token"},"output":"{\"password\":\"encoded-secret\"}"});
+    assert!(redact_credentials(&mut result));
+    for secret in ["opaque-password", "opaque-token", "encoded-secret"] {
+        assert!(!result.to_string().contains(secret));
+    }
+}
+
+#[test]
+fn wait_is_valid_but_same_url_reloaded_document_is_not() {
+    let before = page("same");
+    let choices = candidates(&input(), &before).unwrap();
+    let wait = choices
+        .iter()
+        .find(|choice| choice.input.action == "wait")
+        .unwrap();
+    assert!(action_still_valid(wait, &before, &before));
+    let mut reloaded = before.clone();
+    reloaded["document_id"] = json!("new-document");
+    assert!(!action_still_valid(wait, &before, &reloaded));
+}
+
+#[tokio::test]
+async fn distinct_successful_actions_on_unchanged_page_do_not_stall() {
+    let browser = MockBrowser::new(vec![page("form values intentionally excluded")]);
+    let mut input = input();
+    for index in 0..4 {
+        input.candidates.push(ExactCandidate {
+            label: format!("Fill authorized field {index}"),
+            input: json!({"action":"type","selector":format!("#field-{index}"),"text":"test"}),
+        });
+    }
+    let value = result(
+        &browser,
+        &MockTransport::new(&[
+            ("a0", 0.99),
+            ("a0", 0.99),
+            ("a0", 0.99),
+            ("a0", 0.99),
+            ("done", 0.99),
+        ]),
+        &input,
+    )
+    .await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"].as_array().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn initial_and_predecision_observation_disconnects_are_retried_read_only() {
+    let error = json!({"bridge_error":"Receiving end does not exist"});
+    let browser = MockBrowser::new(vec![
+        error.clone(),
+        page("complete"),
+        error,
+        page("complete"),
+    ]);
+    let value = result(&browser, &MockTransport::new(&[("done", 0.99)]), &input()).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert!(value["action_trace"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn identical_url_and_target_on_new_document_requires_replan() {
+    let mut before = page("same");
+    before["document_id"] = json!("old-document");
+    before["elements"] = json!([{"identity":1,"tag":"a","text":"Docs","selector":"#docs","href":"https://example.test/docs"}]);
+    let mut after = before.clone();
+    after["document_id"] = json!("new-document");
+    let browser = MockBrowser::new(vec![before, after]);
+    let transport = MockTransport::new(&[("a0", 0.99), ("done", 0.99)]);
+    let value = result(&browser, &transport, &input()).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert!(value["action_trace"].as_array().unwrap().is_empty());
+    assert_eq!(transport.observed.lock().unwrap().len(), 2);
 }

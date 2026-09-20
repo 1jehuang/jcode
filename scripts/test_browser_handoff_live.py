@@ -36,7 +36,7 @@ def main():
     # may wait for another build's lock, which is not a live-test timeout.
     print('JCODE_CHECKPOINT {"message":"Compiling live browser test harness once"}', flush=True)
     build = subprocess.run(
-        ["cargo", "test", "-p", "jcode-app-core", "--lib", "--no-run", "--message-format=json"],
+        [str(repo / "scripts/dev_cargo.sh"), "test", "-p", "jcode-app-core", "--lib", "--no-run", "--message-format=json"],
         cwd=repo, env=env, stdout=subprocess.PIPE, text=True, timeout=1800, check=False)
     executables = set()
     for line in build.stdout.splitlines():
@@ -98,6 +98,7 @@ def main():
         tests = [
             ("live_jev_decision_smoke", "/"),
             ("live_browser_handoff_completes_local_navigation", "/"),
+            ("live_browser_handoff_completes_search_and_nested_navigation", "/task"),
             ("live_browser_handoff_requests_script_and_resumes", "/"),
             ("live_browser_handoff_sensitive_fixture_hands_back_without_actions", "/blocked"),
         ]

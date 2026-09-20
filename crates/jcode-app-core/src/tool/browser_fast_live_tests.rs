@@ -156,6 +156,41 @@ async fn live_browser_handoff_completes_local_navigation() {
 }
 
 #[tokio::test]
+#[ignore = "requires Jev credentials, an existing BROWSER_SESSION and a disposable /task loopback fixture tab"]
+async fn live_browser_handoff_completes_search_and_nested_navigation() {
+    let ctx = fixture_context();
+    let tab_id =
+        local_fixture_tab_at_path("JCODE_BROWSER_HANDOFF_TEST_TAB_ID", &ctx, Some("/task")).await;
+    let output = BrowserTool::new().execute(json!({
+        "action":"handoff", "tab_id":tab_id,
+        "goal":"Search for browser controls. Open Documentation from the search results, then find and open Browser controls in its scrollable sections panel. Finish only when the current page says Whole browser task verified. Stay on this local fixture website.",
+        "context":"This is one task, not a request to stop after the search or first link. Ignore unrelated header navigation.",
+        "text_values":["browser controls"], "max_steps":12
+    }), ctx).await.unwrap();
+    let result = output.metadata.unwrap();
+    eprintln!("Whole-task live outcome: {result}");
+    assert_eq!(result["status"], "done", "{result}");
+    assert!(
+        result["final_observation"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Whole browser task verified")
+    );
+    let trace = result["action_trace"].as_array().unwrap();
+    assert!(
+        trace.len() >= 4,
+        "Expected search, two links and nested scrolling"
+    );
+    for action in ["type", "click", "scroll"] {
+        assert!(
+            trace.iter().any(|step| step["action"] == action),
+            "Missing {action}"
+        );
+    }
+    assert!(trace.iter().all(|step| step["status"] == "executed"));
+}
+
+#[tokio::test]
 #[ignore = "requires Jcode subscription or Jev BYOK credentials, an existing BROWSER_SESSION, and a disposable local fixture with visible password/verification controls"]
 async fn live_browser_handoff_sensitive_fixture_hands_back_without_actions() {
     let ctx = fixture_context();
