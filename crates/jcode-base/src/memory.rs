@@ -581,7 +581,8 @@ impl MemoryManager {
     /// `memory_rrf_k` (default 60.0); env `JCODE_MEMORY_RRF_K` wins.
     /// NaN/inf can arrive via TOML (`nan`) since clamp preserves NaN:
     /// fall back to the default instead of poisoning every fused score.
-    pub(crate) fn rrf_k() -> f32 {
+    /// Public so the recall bench fuses with the same k as the runtime.
+    pub fn rrf_k() -> f32 {
         let v = crate::config::config().agents.memory_rrf_k;
         if !v.is_finite() {
             return 60.0;
