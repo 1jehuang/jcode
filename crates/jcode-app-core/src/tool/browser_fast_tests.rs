@@ -75,6 +75,7 @@ impl BrowserProvider for MockBrowser {
 struct MockTransport {
     decisions: Mutex<VecDeque<Decision>>,
     observed: Mutex<Vec<Value>>,
+    requests: Mutex<Vec<Value>>,
 }
 impl MockTransport {
     fn new(choices: &[(&str, f64)]) -> Self {
@@ -90,6 +91,7 @@ impl MockTransport {
                     .collect(),
             ),
             observed: Mutex::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 }
@@ -100,6 +102,10 @@ impl DecisionTransport for MockTransport {
     }
     async fn decide(&self, request: &DecisionRequest) -> Result<Decision> {
         assert!(request.options.len() <= MAX_OPTIONS);
+        self.requests
+            .lock()
+            .unwrap()
+            .push(serde_json::to_value(request).unwrap());
         self.observed
             .lock()
             .unwrap()
@@ -222,6 +228,8 @@ async fn validates_inputs_before_browser_calls() {
         json!({"action":"handoff","goal":"x"}),
         json!({"action":"handoff","tab_id":7}),
         json!({"action":"handoff","tab_id":7,"goal":"x","max_steps":101}),
+        json!({"action":"handoff","tab_id":7,"goal":"x","max_steps":0}),
+        json!({"action":"handoff","tab_id":7,"goal":"x","context":"x".repeat(12_001)}),
         json!({"action":"handoff","tab_id":7,"goal":"x","confidence_threshold":-0.1}),
     ] {
         let browser = MockBrowser::new(vec![]);
@@ -793,6 +801,21 @@ async fn entire_task_keeps_context_and_results_across_three_actions() {
     }
     assert_eq!(seen[3]["action_history"][0]["before"]["text"], "start");
     assert_eq!(seen[3]["page"]["text"], "finished");
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(request["goal"], input.goal.as_deref().unwrap());
+        assert_eq!(request["observation"]["remaining_actions"], 40 - index);
+        let options = request["options"].as_array().unwrap();
+        for id in ["a0", "done", "hand_back", "script_needed", "text_needed"] {
+            assert!(options.iter().any(|option| option["id"] == id));
+        }
+        assert!(
+            options
+                .iter()
+                .all(|option| !option["label"].as_str().unwrap().is_empty())
+        );
+    }
 }
 
 #[tokio::test]
@@ -942,7 +965,8 @@ async fn low_confidence_exact_scroll_and_completion_still_hand_back() {
     });
     for choice in ["a0", "done"] {
         let mut before = page("before");
-        before["elements"] = json!([{"tag":"button","text":"Next","type":"button","form":false,"selector":"#next"}]);
+        before["elements"] =
+            json!([{"tag":"button","text":"Next","type":"button","form":false,"selector":"#next"}]);
         before["ready_state"] = json!("complete");
         before["scroll"] = json!({"can_down":false,"can_up":false});
         let browser = MockBrowser::new(vec![before]);

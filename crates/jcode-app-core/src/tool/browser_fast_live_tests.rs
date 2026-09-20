@@ -167,9 +167,15 @@ async fn live_browser_handoff_completes_search_and_nested_navigation() {
         "context":"This is one task, not a request to stop after the search or first link. Ignore unrelated header navigation.",
         "text_values":["browser controls"], "max_steps":12
     }), ctx).await.unwrap();
+    let body: Value = serde_json::from_str(&output.output).unwrap();
     let result = output.metadata.unwrap();
+    assert_eq!(body, result, "Public text and metadata outcomes must agree");
     eprintln!("Whole-task live outcome: {result}");
     assert_eq!(result["status"], "done", "{result}");
+    assert_eq!(result["model"], "typesafe/jev-1.13");
+    assert!(result["requested_help"].is_null());
+    assert!(!result["reason"].as_str().unwrap().is_empty());
+    assert!(result["decision_provider"].as_str().is_some());
     assert!(
         result["final_observation"]["text"]
             .as_str()
@@ -188,6 +194,12 @@ async fn live_browser_handoff_completes_search_and_nested_navigation() {
         );
     }
     assert!(trace.iter().all(|step| step["status"] == "executed"));
+    for step in trace {
+        assert!(step["before"]["url"].as_str().is_some());
+        assert!(step["after"]["url"].as_str().is_some());
+        assert!(step["result"].is_object());
+        assert!(step["confidence"].as_f64().is_some());
+    }
 }
 
 #[tokio::test]

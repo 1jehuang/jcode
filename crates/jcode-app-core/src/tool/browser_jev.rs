@@ -469,6 +469,7 @@ mod tests {
         let instructions = body["questions"]["action"]["instructions"]
             .as_str()
             .unwrap();
+        assert!(instructions.contains(&req.goal));
         for clause in [
             "entire task over multiple observation/action/results cycles",
             "task_context is trusted caller-supplied",
