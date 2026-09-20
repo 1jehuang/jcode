@@ -1092,14 +1092,12 @@ mod tests {
             .expect("alignment score should describe representation coverage");
         assert!(alignment_description.contains("what the user wants"));
         assert!(alignment_description.contains("when guessing"));
-        // The detailed calibration rubric moved out of the always-on schema
-        // into deferred turn-finish continuation messages, which are paid only
-        // when the completed turn needs another quality pass.
+        // Deferred continuation messages are intentionally concise. Preserve
+        // their actionable guidance without requiring the legacy long rubric.
         for required_concept in [
-            "requirement inventory",
-            "outcomes, deliverables, constraints, prohibited actions",
-            "integration paths, edge cases, and necessary follow-through",
-            "Do not ask the user",
+            "Understand the user's intent better",
+            "Try to avoid asking the user",
+            "Make sure the todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_INTENT_UNDERSTANDING_CONTINUATION_MESSAGE
@@ -1124,9 +1122,9 @@ mod tests {
             "feedback_loop description omitted per-requirement check coverage: {feedback_description}"
         );
         for required_concept in [
-            "reports back on each requirement",
-            "run tests, verify, or review count only",
-            "non-testable requirements",
+            "Your feedback loop isn't good enough",
+            "Think about what feedback loops you need",
+            "Make sure the todo is up to date",
         ] {
             assert!(
                 crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
