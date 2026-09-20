@@ -474,6 +474,7 @@ pub(super) fn parse_kimi_usage_limits(json: &serde_json::Value) -> Vec<UsageLimi
                     name: label,
                     usage_percent,
                     resets_at,
+                    window_seconds: None,
                 });
             }
         }
@@ -526,6 +527,7 @@ fn kimi_parse_row(raw: &serde_json::Value, label: &str) -> Option<UsageLimit> {
         name: label.to_string(),
         usage_percent,
         resets_at,
+        window_seconds: None,
     })
 }
 
@@ -639,6 +641,7 @@ pub(super) fn parse_zai_coding_plan_limits(json: &serde_json::Value) -> Vec<Usag
             name: name.to_string(),
             usage_percent,
             resets_at,
+            window_seconds: None,
         });
     }
 
