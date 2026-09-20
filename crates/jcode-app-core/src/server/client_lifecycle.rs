@@ -681,6 +681,7 @@ pub(super) async fn handle_client(
     );
 
     // Per-client event channel (not shared with other clients)
+    let _sdk_connection_guard = crate::tool::sdk::ConnectionGuard(client_connection_id.clone());
     let (client_event_tx, mut client_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
@@ -1103,6 +1104,41 @@ pub(super) async fn handle_client(
             continue;
         }
 
+        // SDK controls reply only after validation. Callback results must never
+        // wait for the Agent mutex held by the turn awaiting that callback.
+        if matches!(&request, Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. }) {
+            let id = request.id();
+            let response: anyhow::Result<ServerEvent> = match request {
+                Request::ToolResult { call_id, output, error, .. } => {
+                    crate::tool::sdk::complete(&client_connection_id, &client_session_id, &call_id, output, error)
+                        .map(|()| ServerEvent::Ack { id })
+                }
+                Request::ConfigureTools { tools, .. } => {
+                    if client_is_processing || crate::turn_cancel_registry::has_active_turn(&client_session_id) { Err(anyhow::anyhow!("Session is busy")) }
+                    else if let Ok(mut locked) = agent.try_lock() {
+                        let result = crate::tool::sdk::configure(locked.session_id(), &client_connection_id, tools, client_event_tx.clone());
+                        if result.is_ok() {
+                            locked.invalidate_sdk_tools();
+                            // Queue the acknowledgment before releasing the session lock,
+                            // so a second client cannot start a new-policy call first.
+                            let _ = client_event_tx.send(ServerEvent::Ack { id });
+                            continue;
+                        }
+                        result.map(|()| ServerEvent::Ack { id })
+                    } else { Err(anyhow::anyhow!("Session is busy")) }
+                }
+                Request::ListTools { .. } => {
+                    if let Ok(locked) = agent.try_lock() {
+                        Ok(ServerEvent::Tools { id, tools: crate::tool::sdk::wire_definitions(locked.tool_definitions_for_debug().await) })
+                    } else { Err(anyhow::anyhow!("Session is busy")) }
+                }
+                _ => unreachable!(),
+            };
+            let event = response.unwrap_or_else(|error| ServerEvent::Error { id, message: error.to_string(), retry_after_secs: None });
+            let _ = client_event_tx.send(event);
+            continue;
+        }
+
         // Send ack
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
@@ -1179,7 +1215,9 @@ pub(super) async fn handle_client(
             });
             continue;
         }
+        let sdk_session_before_request = client_session_id.clone();
         match request {
+            Request::ConfigureTools { .. } | Request::ListTools { .. } | Request::ToolResult { .. } => unreachable!("SDK controls dispatched before acknowledgment"),
             Request::Message {
                 id,
                 content,
@@ -1532,7 +1570,7 @@ pub(super) async fn handle_client(
             }
 
             Request::Ping { id } => {
-                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1) });
+                let json = encode_event(&ServerEvent::Pong { id, native_ssh_protocol: Some(1), capabilities: vec!["session_tools".into()] });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
                     break;
@@ -1540,6 +1578,7 @@ pub(super) async fn handle_client(
             }
 
             Request::PrepareDisconnect { id } => {
+                drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
                 let json = encode_event(&ServerEvent::Done { id });
                 let mut w = writer.lock().await;
                 if w.write_all(json.as_bytes()).await.is_err() {
@@ -2946,6 +2985,9 @@ pub(super) async fn handle_client(
                 handle_client_debug_response(id, output, &client_debug_response_tx);
             }
         }
+        if sdk_session_before_request != client_session_id {
+            drop(crate::tool::sdk::ConnectionGuard(client_connection_id.clone()));
+        }
         if request_lifecycle_logged {
             log_request_lifecycle_handled(
                 ServerRequestLifecycleFields {
@@ -2968,6 +3010,8 @@ pub(super) async fn handle_client(
 
     Ok(())
     }.await;
+
+    drop(_sdk_connection_guard);
 
     if continue_on_disconnect {
         // Retain the existing turn owner, not the socket. Its JoinHandle and

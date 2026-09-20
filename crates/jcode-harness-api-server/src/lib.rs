@@ -35,6 +35,34 @@ use jcode_transport::{Listener, Stream};
 // connect as a result).
 pub use jcode_harness_api::{api_socket_path, legacy_socket_path};
 
+/// Probe only an old, universally supported control request on a disposable
+/// connection. Older daemons close that connection after ping, and may close
+/// connections receiving unknown requests. Never probe on the session stream.
+async fn daemon_supports_session_tools(socket: &std::path::Path) -> bool {
+    let probe = async {
+        let mut stream = Stream::connect(socket).await.ok()?;
+        write_json_line(&mut stream, &serde_json::json!({"type":"ping", "id":0}))
+            .await
+            .ok()?;
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        read_frame(&mut reader, &mut line).await.ok()?;
+        let reply: Value = serde_json::from_str(&line).ok()?;
+        Some(
+            reply["type"] == "pong"
+                && reply["id"] == 0
+                && reply["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap == "session_tools")),
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_millis(500), probe)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
 /// Largest single request frame accepted from an API client, in bytes.
 ///
 /// `read_line` grows its buffer until it finds a newline, so a client that
@@ -273,6 +301,7 @@ where
     let legacy = Stream::connect(&legacy_socket)
         .await
         .with_context(|| format!("connect legacy socket {}", legacy_socket.display()))?;
+    let session_tools_supported = daemon_supports_session_tools(&legacy_socket).await;
     let hello_ok = ServerFrame::reply(
         reply_to,
         ApiEvent::HelloOk {
@@ -294,6 +323,7 @@ where
             ]
             .into_iter()
             .map(str::to_string)
+            .chain(session_tools_supported.then(|| "session_tools".to_string()))
             .collect(),
         },
     );
@@ -305,6 +335,7 @@ where
 
     let mut state =
         translate::BridgeState::with_crash_on_disconnect(client_name.starts_with("jcode-desktop-"));
+    state.session_tools_supported = session_tools_supported;
 
     // 3. Pump both directions in one select loop so translation state stays
     //    single-threaded.

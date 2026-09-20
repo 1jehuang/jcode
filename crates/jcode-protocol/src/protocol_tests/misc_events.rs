@@ -589,12 +589,14 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         legacy,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: None
+            native_ssh_protocol: None,
+            ..
         }
     ));
     let modern = ServerEvent::Pong {
         id: 7,
         native_ssh_protocol: Some(1),
+        capabilities: vec!["session_tools".into()],
     };
     let json = serde_json::to_value(&modern)?;
     assert_eq!(json["native_ssh_protocol"], 1);
@@ -602,7 +604,8 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
         serde_json::from_value::<ServerEvent>(json)?,
         ServerEvent::Pong {
             id: 7,
-            native_ssh_protocol: Some(1)
+            native_ssh_protocol: Some(1),
+            ..
         }
     ));
     assert!(

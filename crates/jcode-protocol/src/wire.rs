@@ -32,10 +32,41 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// SDK-owned session tool declaration. Parameters is a JSON schema object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Replaces the session SDK overlay. None inherits normal selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionToolConfig {
+    #[serde(default)]
+    pub enabled: Option<Vec<String>>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    #[serde(default)]
+    pub custom: Vec<SessionToolDefinition>,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "configure_tools")]
+    ConfigureTools { id: u64, tools: SessionToolConfig },
+    #[serde(rename = "list_tools")]
+    ListTools { id: u64 },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        id: u64,
+        call_id: String,
+        output: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// Send a message to the agent
     #[serde(rename = "message")]
     Message {
@@ -758,6 +789,18 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "tools")]
+    Tools {
+        id: u64,
+        tools: Vec<SessionToolDefinition>,
+    },
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     /// An autonomous wake was requested. In external wake mode this event is
     /// emitted instead of starting or injecting into a turn.
     #[serde(rename = "wake_requested")]
@@ -1075,6 +1118,8 @@ pub enum ServerEvent {
         /// Omitted by older daemons, which a new SSH bridge must reject.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_ssh_protocol: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
 
     /// Current state (debug)

@@ -1792,3 +1792,6 @@ async fn only_the_known_open_world_tools_are_ineligible_for_openai_strict_mode()
 
 #[path = "tests/mcp_collision.rs"]
 mod mcp_collision;
+
+#[path = "tests/sdk.rs"]
+mod sdk_tests;

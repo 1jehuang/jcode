@@ -169,6 +169,10 @@ await client.configureTools(session.session_id, {});
   before sending a message after reconnecting, reloading a session, restarting
   the daemon, or forking a session. These controls are not an OS sandbox:
   an enabled shell or application callback can still perform arbitrary work.
+  Automatic recovery after a daemon restart uses the daemon's default policy,
+  not the previous SDK selection. Do not treat these live-session controls as
+  a persistent security boundary. Prefer a private ephemeral `JcodeClient.launch()`
+  instance for embedding rather than a shared or automatically resumed session.
 - If a configuration acknowledgement times out, the SDK closes its connection
   rather than risk executing old callbacks against an uncertain new policy.
 

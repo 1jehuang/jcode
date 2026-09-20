@@ -280,6 +280,7 @@ async fn remote_disconnect_turn(end: RemoteTurnEnd) -> Result<()> {
                 ServerEvent::Pong {
                     id: 91,
                     native_ssh_protocol: Some(1),
+                    ..
                 }
             )
         })
@@ -533,7 +534,7 @@ async fn native_ping_ping_subscribe_history_keeps_one_socket() -> Result<()> {
             .await?;
             native_until(&mut reader, |event| {
                 matches!(event,
-                    ServerEvent::Pong {id, native_ssh_protocol: Some(1)} if *id == ping_id
+                    ServerEvent::Pong {id, native_ssh_protocol: Some(1), ..} if *id == ping_id
                 )
             })
             .await?;

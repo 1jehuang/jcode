@@ -340,6 +340,10 @@ export class JcodeClient extends EventEmitter {
         const waiter = this.pending.get(replyTo)!;
         this.pending.delete(replyTo);
         if (waiter.timer) clearTimeout(waiter.timer);
+        if (frame.ev === "attached" || frame.ev === "session_forked") {
+          // One attachment per connection. Old-session callbacks must not survive a switch.
+          this.toolCallbacks.close();
+        }
         waiter.onReply?.(frame);
         waiter.resolve(frame);
         continue;

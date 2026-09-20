@@ -79,6 +79,20 @@ pub enum ApiEvent {
         duration_secs: Option<f64>,
     },
 
+    /// Effective tool inventory, in reply to `ListTools`.
+    Tools {
+        session_id: String,
+        tools: Vec<crate::SessionToolDefinition>,
+    },
+
+    /// Custom tool execution requested from the owning client.
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+
     /// Tool call streaming lifecycle.
     ToolStart {
         session_id: String,

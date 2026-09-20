@@ -154,3 +154,47 @@ test("older runtimes fail before creating an unrestricted session", async (t) =>
   await assert.rejects(client.createSession({ tools: { enabled: [] } }), /session_tools/);
   assert.equal(requests.length, 0);
 });
+
+test("concurrent configuration is rejected without changing the callback table", async (t) => {
+  let release: (() => void) | undefined;
+  const { client, requests, server, result } = await fixture(t, (req, send) => {
+    if (req.req !== "configure_tools") return false;
+    release = () => send({ v: 1, reply_to: req.id, ev: "ok" });
+    return true;
+  });
+  const first = client.configureTools("s1", { custom: [{ ...definition, execute: () => "first" }] });
+  for (let i = 0; i < 100 && !release; i++) await delay(5);
+  assert.ok(release);
+  await assert.rejects(client.configureTools("s1", { custom: [{ ...definition, execute: () => "second" }] }), /already in flight/);
+  release();
+  await first;
+  assert.equal(requests.filter((r) => r.req === "configure_tools").length, 1);
+  server.broadcast(call());
+  assert.equal((await result()).output, "first");
+});
+
+test("ambiguous configuration timeout closes the connection instead of dispatching stale callbacks", async (t) => {
+  const server = await startMockHarness({ capabilities: ["session_tools"] });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath, requestTimeoutMs: 30 });
+  t.after(async () => { await client.close(); await server.close(); });
+  let closed = false;
+  client.on("close", () => { closed = true; });
+  await assert.rejects(client.configureTools("s1", { custom: [{ ...definition, execute: () => "unexpected" }] }), /no reply/);
+  for (let i = 0; i < 100 && !closed; i++) await delay(5);
+  assert.equal(closed, true);
+});
+
+test("switching attachments drops old callbacks before processing subsequent events", async (t) => {
+  let executions = 0;
+  const { client, server } = await fixture(t, (req, send) => {
+    if (req.req !== "attach_session") return false;
+    send({ v: 1, reply_to: req.id, ev: "attached", session: { session_id: "s2" } });
+    send(call("stale", { value: "old" }, "s1"));
+    return true;
+  });
+  await client.configureTools("s1", { custom: [{ ...definition, execute: () => { executions++; return "old"; } }] });
+  await client.attachSession("s2");
+  server.broadcast(call("another", { value: "old" }, "s1"));
+  await delay(20);
+  assert.equal(executions, 0);
+});

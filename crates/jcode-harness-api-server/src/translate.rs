@@ -33,6 +33,10 @@ const PEEK_LIMIT: u64 = 12;
 /// `peek_session` and `list_sessions` are deliberately absent: they are served
 /// from stored records precisely so a client can look around before attaching.
 const REQUIRES_ATTACH: &[&str] = &[
+    "detach_session",
+    "configure_tools",
+    "list_tools",
+    "tool_result",
     "send_message",
     "cancel",
     "soft_interrupt",
@@ -104,6 +108,8 @@ static NEXT_TEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Per-connection translation state.
 #[derive(Debug, Default)]
 pub struct BridgeState {
+    /// Set only after a safe legacy ping capability probe succeeds.
+    pub session_tools_supported: bool,
     /// Whether an unannounced transport loss should crash the attached session.
     pub crash_on_disconnect: bool,
     /// Session id assigned by the daemon for this connection.
@@ -259,6 +265,9 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
 
 #[derive(Debug, Clone, PartialEq)]
 enum SimpleKind {
+    Detach,
+    Tools,
+    ToolControl,
     Ping,
     History,
     Ok,
@@ -362,6 +371,63 @@ impl BridgeState {
                     ),
                 },
             ))];
+        }
+
+        if matches!(req, "configure_tools" | "list_tools" | "tool_result") {
+            // Validate the typed surface even though this bridge accepts raw JSON.
+            // Never coerce a malformed result/configuration into a valid mutation.
+            if let Err(error) =
+                serde_json::from_value::<jcode_harness_api::ApiRequest>(request.clone())
+            {
+                return Self::error_reply(api_id, ErrorCode::InvalidRequest, &error.to_string());
+            }
+            if request["session_id"].as_str().is_none_or(str::is_empty) {
+                return Self::error_reply(
+                    api_id,
+                    ErrorCode::InvalidRequest,
+                    "session_id must not be empty",
+                );
+            }
+            if let Some((_, _, Some(target))) = &self.pending_attach_id
+                && self.session_id.is_none()
+                && request["session_id"].as_str() != Some(target.as_str())
+            {
+                return Self::error_reply(
+                    api_id,
+                    ErrorCode::UnknownSession,
+                    "request does not match the pending attachment",
+                );
+            }
+            if !self.session_tools_supported {
+                return Self::error_reply(
+                    api_id,
+                    ErrorCode::UnknownRequest,
+                    "daemon does not advertise the session_tools capability",
+                );
+            }
+            let id = self.legacy_id();
+            let mut legacy = json!({"type": req, "id": id});
+            match req {
+                "configure_tools" => legacy["tools"] = request["tools"].clone(),
+                "tool_result" => {
+                    legacy["call_id"] = request["call_id"].clone();
+                    legacy["output"] = request["output"].clone();
+                    if let Some(error) = request.get("error") {
+                        legacy["error"] = error.clone();
+                    }
+                }
+                _ => {}
+            }
+            self.pending_simple.push((
+                id,
+                api_id,
+                if req == "list_tools" {
+                    SimpleKind::Tools
+                } else {
+                    SimpleKind::ToolControl
+                },
+            ));
+            return vec![Outbound::Legacy(legacy)];
         }
 
         match req {
@@ -958,10 +1024,12 @@ impl BridgeState {
             }
             "detach_session" => {
                 let id = self.legacy_id();
-                vec![
-                    Outbound::Legacy(json!({"type": "prepare_disconnect", "id": id})),
-                    Outbound::Reply(ServerFrame::reply(api_id, ApiEvent::Ok)),
-                ]
+                // Done is the release barrier. The daemon's initial Ack is
+                // sent before it releases SDK callback ownership.
+                self.pending_simple.push((id, api_id, SimpleKind::Detach));
+                vec![Outbound::Legacy(
+                    json!({"type": "prepare_disconnect", "id": id}),
+                )]
             }
             "permission_response" => {
                 // The legacy protocol does not surface permission prompts on
@@ -1119,11 +1187,18 @@ impl BridgeState {
     /// Translate one legacy server event (raw JSON) into API frames.
     pub fn legacy_event_to_api(&mut self, event: &Value) -> Vec<ServerFrame> {
         let kind = event["type"].as_str().unwrap_or("");
+        // Filter stale owner callbacks before updating any turn/text state.
+        if kind == "tool_call"
+            && (self.session_id.is_none()
+                || event["session_id"].as_str() != self.session_id.as_deref())
+        {
+            return vec![];
+        }
         let session = |state: &Self| state.session_id.clone().unwrap_or_default();
         if self.text_response_ended
             && matches!(
                 kind,
-                "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec"
+                "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec" | "tool_call"
             )
         {
             // A new response or execution commits the previous provider
@@ -1134,13 +1209,55 @@ impl BridgeState {
         }
         if matches!(
             kind,
-            "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec"
+            "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec" | "tool_call"
         ) || (kind == "connection_phase" && event["phase"] == "streaming")
         {
             self.observed_turn_active = true;
             self.activity_version += 1;
         }
         let mut frames = match kind {
+            "tools" => {
+                let id = event["id"].as_u64().unwrap_or(0);
+                let Some(api_id) = self.take_simple(id, SimpleKind::Tools) else {
+                    return vec![];
+                };
+                let reply = match serde_json::from_value(event["tools"].clone()) {
+                    Ok(tools) => ApiEvent::Tools {
+                        session_id: session(self),
+                        tools,
+                    },
+                    Err(error) => ApiEvent::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("invalid daemon tools response: {error}"),
+                    },
+                };
+                vec![ServerFrame::reply(api_id, reply)]
+            }
+            "tool_call" => {
+                // A custom call is an execution request, not a tool-start update.
+                // Do not manufacture empty identifiers from malformed events.
+                let (Some(call_id), Some(name), Some(input), Some(session_id)) = (
+                    event["call_id"].as_str(),
+                    event["name"].as_str(),
+                    event.get("input"),
+                    event["session_id"].as_str(),
+                ) else {
+                    return vec![];
+                };
+                // The callback owner may have switched attachments since this
+                // event was queued. Never run another session's input using
+                // the newly attached session's handler.
+                if self.session_id.as_deref() != Some(session_id) {
+                    return vec![];
+                }
+                vec![ServerFrame::event(ApiEvent::ToolCall {
+                    session_id: session_id.to_string(),
+                    call_id: call_id.to_string(),
+                    name: name.to_string(),
+                    input: input.clone(),
+                })]
+            }
+
             "session" => {
                 let session_id = event["session_id"].as_str().unwrap_or("").to_string();
                 // `session` is a broadcast lifecycle notification. The daemon
@@ -1359,6 +1476,14 @@ impl BridgeState {
             })],
             "done" => {
                 let id = event["id"].as_u64().unwrap_or(0);
+                if let Some(api_id) = self.take_simple(id, SimpleKind::Detach) {
+                    self.pending_control_done_ids.remove(&id);
+                    self.session_id = None;
+                    self.observed_turn_active = false;
+                    self.text_message_id = None;
+                    self.text_attempt.clear();
+                    return vec![ServerFrame::reply(api_id, ApiEvent::Ok)];
+                }
                 // Subscribe and controls also emit `done`. Exclude their ids,
                 // but retain session-scoped completions fanned out by another
                 // attachment or a server-initiated turn (whose id is zero).
@@ -1762,7 +1887,9 @@ impl BridgeState {
                 };
                 let (_, api_id, kind) = self.pending_simple.remove(index);
                 match kind {
-                    SimpleKind::Ok => vec![ServerFrame::reply(api_id, ApiEvent::Ok)],
+                    SimpleKind::Ok | SimpleKind::ToolControl => {
+                        vec![ServerFrame::reply(api_id, ApiEvent::Ok)]
+                    }
                     SimpleKind::Credential {
                         provider,
                         configured,
@@ -1781,6 +1908,26 @@ impl BridgeState {
                 }
             }
             "error" => {
+                // A rejected tool configuration/result is not a failed model
+                // turn. Preserve streaming state and correlate only its request.
+                let id = event["id"].as_u64().unwrap_or(0);
+                if let Some(index) = self
+                    .pending_simple
+                    .iter()
+                    .position(|(pending_id, _, kind)| {
+                        *pending_id == id
+                            && matches!(kind, SimpleKind::Tools | SimpleKind::ToolControl)
+                    })
+                {
+                    let (_, api_id, _) = self.pending_simple.remove(index);
+                    return vec![ServerFrame::reply(
+                        api_id,
+                        ApiEvent::Error {
+                            code: ErrorCode::Internal,
+                            message: event["message"].as_str().unwrap_or_default().to_string(),
+                        },
+                    )];
+                }
                 self.activity_version += 1;
                 self.observed_turn_active = false;
                 let id = event["id"].as_u64().unwrap_or(0);

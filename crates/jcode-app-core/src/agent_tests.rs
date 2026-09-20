@@ -2382,3 +2382,36 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         "{text:?}"
     );
 }
+
+#[tokio::test]
+async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SignatureSessionProvider::default());
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::tool::sdk::configure(
+        agent.session_id(),
+        "cache-owner",
+        crate::protocol::SessionToolConfig {
+            enabled: Some(vec![]),
+            disabled: vec![],
+            custom: vec![crate::protocol::SessionToolDefinition {
+                name: "compile_remote".into(),
+                description: "SDK override".into(),
+                parameters: serde_json::json!({"type":"object", "additionalProperties":false}),
+            }],
+        },
+        tx,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let definitions = agent.tool_definitions().await;
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].description, "SDK override");
+        assert_eq!(
+            definitions[0].input_schema,
+            serde_json::json!({"type":"object", "additionalProperties":false})
+        );
+    }
+}

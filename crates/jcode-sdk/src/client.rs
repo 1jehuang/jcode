@@ -15,8 +15,8 @@ use crate::launch::{LaunchOptions, LaunchedInstance, ensure_runtime, launch_inst
 use crate::ssh::{SshConnectOptions, SshProcess, SshTransport};
 use jcode_harness_api::{
     API_VERSION_MAJOR, ApiEvent, ApiRequest, ClientFrame, HistoryMessage, ModelRouteInfo,
-    PermissionDecision, ServerFrame, SessionInfo, TextMatch, api_socket_path, read_frame,
-    write_frame,
+    PermissionDecision, ServerFrame, SessionInfo, SessionToolDefinition, TextMatch,
+    ToolConfiguration, api_socket_path, read_frame, write_frame,
 };
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -1136,6 +1136,62 @@ impl JcodeClient {
         }
     }
 
+    /// Configure the tools available to a session before starting a turn.
+    ///
+    /// Custom tool invocations arrive as [`ApiEvent::ToolCall`] on [`Self::events`].
+    /// Subscribe before sending a message and answer each invocation with
+    /// [`Self::submit_tool_result`]. The SDK does not execute custom tools itself.
+    pub fn configure_tools(&self, session_id: &str, tools: ToolConfiguration) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::ConfigureTools {
+                session_id: session_id.to_string(),
+                tools,
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
+    /// List the effective tool definitions available to a session.
+    pub fn list_tools(&self, session_id: &str) -> Result<Vec<SessionToolDefinition>> {
+        match self
+            .request_ok(ApiRequest::ListTools {
+                session_id: session_id.to_string(),
+            })?
+            .event
+        {
+            ApiEvent::Tools { tools, .. } => Ok(tools),
+            other => Err(unexpected("tools", &other)),
+        }
+    }
+
+    /// Complete a custom [`ApiEvent::ToolCall`] using its session and call ids.
+    ///
+    /// Pass textual output (serialize structured results as JSON) and `None`
+    /// for success, or `Some(message)` to report a tool execution failure.
+    pub fn submit_tool_result(
+        &self,
+        session_id: &str,
+        call_id: &str,
+        output: &str,
+        error: Option<String>,
+    ) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::ToolResult {
+                session_id: session_id.to_string(),
+                call_id: call_id.to_string(),
+                output: output.to_string(),
+                error,
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
     /// Switch the session to a different model. `model` is an id from
     /// `list_models`.
     pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
@@ -1652,6 +1708,8 @@ fn event_session(event: &ApiEvent) -> Option<&str> {
         | ToolInputDelta { session_id, .. }
         | ToolExec { session_id, .. }
         | ToolDone { session_id, .. }
+        | ToolCall { session_id, .. }
+        | Tools { session_id, .. }
         | SidePanelState { session_id, .. }
         | TokenUsage { session_id, .. }
         | TurnDone { session_id, .. }

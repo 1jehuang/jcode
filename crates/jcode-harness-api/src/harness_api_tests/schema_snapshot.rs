@@ -571,3 +571,58 @@ fn text_framing_is_additive_and_accepts_unframed_legacy_deltas() {
         );
     }
 }
+
+#[test]
+fn session_tool_control_wire_shapes_and_defaults() {
+    use serde_json::json;
+    for tools in [
+        json!({}),
+        json!({"enabled":null}),
+        json!({"enabled":[]}),
+        json!({"enabled":["read"],"disabled":["bash"],"custom":[{"name":"lookup","description":"Look up","parameters":{"type":"object"}}]}),
+    ] {
+        let wire = json!({"v":1,"id":1,"req":"configure_tools","session_id":"s1","tools":tools});
+        let frame: ClientFrame = serde_json::from_value(wire).unwrap();
+        let ApiRequest::ConfigureTools { tools: config, .. } = &frame.request else {
+            panic!()
+        };
+        assert_eq!(
+            config.enabled,
+            tools
+                .get("enabled")
+                .filter(|v| !v.is_null())
+                .map(|v| serde_json::from_value(v.clone()).unwrap())
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientFrame>(serde_json::to_value(&frame).unwrap()).unwrap(),
+            frame
+        );
+    }
+    for wire in [
+        json!({"v":1,"id":2,"req":"list_tools","session_id":"s1"}),
+        json!({"v":1,"id":3,"req":"tool_result","session_id":"s1","call_id":"c1","output":"ok"}),
+        json!({"v":1,"id":4,"req":"tool_result","session_id":"s1","call_id":"c1","output":"","error":"failed"}),
+    ] {
+        let frame: ClientFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    for wire in [
+        json!({"v":1,"reply_to":2,"ev":"tools","session_id":"s1","tools":[{"name":"read","description":"Read file","parameters":{"type":"object"}}]}),
+        json!({"v":1,"ev":"tool_call","session_id":"s1","call_id":"c1","name":"lookup","input":{"key":1}}),
+    ] {
+        let frame: ServerFrame = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+    for parameters in [json!(null), json!([]), json!("object"), json!(42)] {
+        assert!(
+            serde_json::from_value::<SessionToolDefinition>(
+                json!({"name":"bad","description":"bad","parameters":parameters})
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(ToolConfiguration::default()).unwrap(),
+        json!({})
+    );
+}

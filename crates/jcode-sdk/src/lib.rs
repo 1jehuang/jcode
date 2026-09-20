@@ -31,6 +31,66 @@
 //! `TurnDone` before publishing an irreversible final answer. These ids are
 //! connection-local stream correlators, not persisted transcript ids.
 //!
+//! # Session tool control
+//!
+//! Tool configuration is memory-only. Reconfigure after reconnecting, daemon
+//! restart, session resume, or fork, before starting the next turn.
+//! Custom tools run in your application,
+//! not in the SDK: subscribe before sending the message, validate each call's
+//! input, and return a result using the call id. Do not use blocking `run()` on
+//! the same thread unless its `RunOptions::on_event` callback handles tool calls
+//! (a cloned client can submit results from that callback).
+//!
+//! ```no_run
+//! use jcode_sdk::{ApiEvent, ConnectOptions, JcodeClient, SessionToolDefinition,
+//!                 ToolConfiguration};
+//! use serde_json::json;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = JcodeClient::connect(ConnectOptions::default())?;
+//! if !client.supports("session_tools") {
+//!     return Err("This harness does not support session tools".into());
+//! }
+//! let session = client.create_session(None)?;
+//! let id = &session.session_id;
+//! client.configure_tools(id, ToolConfiguration {
+//!     enabled: Some(vec!["greet".into()]),
+//!     disabled: vec![],
+//!     custom: vec![SessionToolDefinition {
+//!         name: "greet".into(),
+//!         description: "Greet a person by name".into(),
+//!         parameters: serde_json::from_value(json!({
+//!             "type": "object", "properties": {"name": {"type": "string"}},
+//!             "required": ["name"], "additionalProperties": false
+//!         }))?,
+//!     }],
+//! })?;
+//! println!("Available tools: {:?}", client.list_tools(id)?);
+//! let events = client.events(Some(id));
+//! client.send_message(id, "Use greet to say hello to Ada", vec![], None)?;
+//! let mut completed = false;
+//! while let Some(event) = events.next() {
+//!     match event {
+//!         ApiEvent::ToolCall { session_id, call_id, name, input } => {
+//!             let (output, error) = match (name.as_str(), input["name"].as_str()) {
+//!                 ("greet", Some(person)) => (format!("Hello, {person}!"), None),
+//!                 _ => (String::new(), Some("Unknown tool or invalid input".into())),
+//!             };
+//!             client.submit_tool_result(&session_id, &call_id, &output, error)?;
+//!         }
+//!         ApiEvent::TextDelta { text, .. } => print!("{text}"),
+//!         ApiEvent::TurnDone { .. } => { completed = true; break; }
+//!         ApiEvent::Error { code, message } => {
+//!             return Err(format!("{code:?}: {message}").into());
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//! if !completed { return Err("Harness disconnected before the turn finished".into()); }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Connect to a remote user's persistent harness through system OpenSSH:
 //! ```no_run
 //! use jcode_sdk::{JcodeClient, SshConnectOptions};
@@ -90,7 +150,8 @@ pub use structured::{
 pub use jcode_harness_api as api;
 pub use jcode_harness_api::{
     ApiEvent, ApiRequest, HistoryMessage, ModelRouteInfo, PermissionDecision, RenderedImage,
-    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SidePanelPage,
-    SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch, api_socket_path,
+    RenderedImageAnchor, RenderedImageSource, ResponseStats, SessionInfo, SessionToolDefinition,
+    SidePanelPage, SidePanelPageFormat, SidePanelPageSource, SidePanelSnapshot, TextMatch,
+    ToolConfiguration, api_socket_path,
 };
 pub use jcode_harness_api::{ModelUsage, compare_model_usage};

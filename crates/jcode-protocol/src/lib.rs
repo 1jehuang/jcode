@@ -178,8 +178,8 @@ impl AuthChanged {
 pub type ReloadRecoverySnapshot = jcode_selfdev_types::ReloadRecoveryDirective;
 
 mod wire;
-pub use wire::TaskGraphNodeSpec;
 pub use wire::{Request, ServerEvent};
+pub use wire::{SessionToolConfig, SessionToolDefinition, TaskGraphNodeSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
@@ -570,6 +570,9 @@ pub struct AwaitedMemberStatus {
 impl Request {
     pub fn id(&self) -> u64 {
         match self {
+            Request::ConfigureTools { id, .. }
+            | Request::ListTools { id }
+            | Request::ToolResult { id, .. } => *id,
             Request::Message { id, .. } => *id,
             Request::Cancel { id } => *id,
             Request::BackgroundTool { id } => *id,
