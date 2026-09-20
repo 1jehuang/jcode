@@ -409,6 +409,15 @@ pub enum Request {
     #[serde(rename = "switch_openai_account")]
     SwitchOpenAiAccount { id: u64, label: String },
 
+    /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
+    /// This never redeems a reset or switches accounts. `None` pins the default
+    /// account scope, not whichever account is active when the request arrives.
+    #[serde(rename = "invalidate_openai_usage")]
+    InvalidateOpenAiUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {

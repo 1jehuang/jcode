@@ -27,6 +27,54 @@ fn test_openai_provider_unavailability_is_scoped_per_account() {
 }
 
 #[test]
+fn test_openai_reset_clears_only_pinned_account_cooldown() {
+    let _guard = crate::storage::lock_test_env();
+    let target = "reset-pinned-target";
+    let other = "reset-pinned-target-other";
+    crate::auth::codex::set_active_account_override(Some(target.to_string()));
+    record_provider_unavailable_for_account("openai", "target quota exhausted");
+    record_model_unavailable_for_account("reset-denied-model", "model access denied");
+
+    crate::auth::codex::set_active_account_override(Some(other.to_string()));
+    record_provider_unavailable_for_account("openai", "other quota exhausted");
+    clear_openai_provider_unavailability_for_account_label(Some(target));
+    // Idempotent retries cannot clear a different account, including a label
+    // that shares the reset target's prefix.
+    clear_openai_provider_unavailability_for_account_label(Some(target));
+    assert!(provider_unavailability_detail_for_account("openai").is_some());
+    assert_eq!(
+        crate::auth::codex::active_account_label().as_deref(),
+        Some(other)
+    );
+
+    crate::auth::codex::set_active_account_override(Some(target.to_string()));
+    assert!(provider_unavailability_detail_for_account("openai").is_none());
+    assert!(
+        model_unavailability_detail_for_account("reset-denied-model")
+            .unwrap_or_default()
+            .contains("model access denied")
+    );
+    clear_model_unavailable_for_account("reset-denied-model");
+    clear_openai_provider_unavailability_for_account_label(Some(other));
+    crate::auth::codex::set_active_account_override(None);
+}
+
+#[test]
+fn test_openai_reset_default_scope_does_not_follow_active_account() {
+    let _guard = crate::storage::lock_test_env();
+    crate::auth::codex::set_active_account_override(Some("default".to_string()));
+    record_provider_unavailable_for_account("openai", "default quota exhausted");
+    crate::auth::codex::set_active_account_override(Some("reset-active-other".to_string()));
+    record_provider_unavailable_for_account("openai", "other quota exhausted");
+    clear_openai_provider_unavailability_for_account_label(None);
+    assert!(provider_unavailability_detail_for_account("openai").is_some());
+    clear_openai_provider_unavailability_for_account_label(Some("reset-active-other"));
+    crate::auth::codex::set_active_account_override(Some("default".to_string()));
+    assert!(provider_unavailability_detail_for_account("openai").is_none());
+    crate::auth::codex::set_active_account_override(None);
+}
+
+#[test]
 fn test_openai_model_catalog_is_scoped_per_account() {
     let _guard = crate::storage::lock_test_env();
     let work_model = "scoped-work-model-123";

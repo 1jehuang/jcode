@@ -1295,6 +1295,18 @@ pub(super) async fn handle_switch_openai_account(
     }
 }
 
+pub(super) async fn handle_invalidate_openai_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Only local state changes here. A retry of this request is harmless and
+    // cannot spend another reset. Acknowledge after invalidation so a following
+    // prompt cannot be rejected by the pre-reset quota cooldown.
+    crate::usage::invalidate_openai_usage_reset_state(account_label.as_deref()).await;
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,

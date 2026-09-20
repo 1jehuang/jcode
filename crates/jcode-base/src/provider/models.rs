@@ -948,6 +948,16 @@ pub fn clear_provider_unavailable_for_account(provider: &str) {
     }
 }
 
+/// Clear the quota cooldown for the exact OpenAI account that was reset, even
+/// if the active account changed while confirmation or redemption was pending.
+/// `None` refers to the default scope, not the current active account.
+pub fn clear_openai_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("openai", account_label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
 /// Clear all runtime model unavailability markers.
 pub fn clear_all_model_unavailability_for_account() {
     let scope = current_openai_account_scope();
