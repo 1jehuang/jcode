@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use super::{
-    NotifySessionContext, clone_split_session, handle_notify_session, handle_rename_session,
-    handle_resume_all_sessions, handle_set_feature, handle_split,
+    NotifySessionContext, clone_split_session, create_transfer_child_session,
+    handle_notify_session, handle_rename_session, handle_resume_all_sessions, handle_set_feature,
+    handle_split,
 };
 use crate::agent::Agent;
 use crate::message::{ContentBlock, Message, Role, StreamEvent, ToolDefinition};
