@@ -163,11 +163,11 @@ fn declared_removal_deletes_a_single_key() {
     );
 }
 
-/// The frozen-sponsors repair happens in memory only, so the save has to be
-/// told the section must vanish; otherwise the preserving save keeps it and the
-/// freeze recurs.
+/// An explicit discovery opt-out is authoritative (upstream chose this over
+/// table-shape repair in #1188): the preserving save must keep the opt-out
+/// instead of resurrecting the default or dropping the section.
 #[test]
-fn sponsors_repair_removes_the_section_from_the_file() {
+fn sponsors_optout_survives_the_preserving_save() {
     let _guard = crate::storage::lock_test_env();
     let home = HomeGuard::new();
     home.write(
@@ -176,13 +176,22 @@ fn sponsors_repair_removes_the_section_from_the_file() {
     );
 
     let loaded = Config::load();
-    assert!(loaded.sponsors.enabled, "the repair must run on load");
+    assert!(
+        !loaded.sponsors.enabled,
+        "the explicit opt-out must be respected on load"
+    );
     loaded.save().expect("save");
 
     let written = home.read();
     assert!(
-        !written.contains("[sponsors]"),
-        "the repaired section must be gone so the freeze cannot recur: {written}"
+        written.contains("[sponsors]") && written.contains("enabled = false"),
+        "the preserving save must keep the explicit opt-out: {written}"
+    );
+
+    let reloaded = Config::load_strict().expect("reload");
+    assert!(
+        !reloaded.sponsors.enabled,
+        "the opt-out must survive a save/reload round trip"
     );
 }
 
