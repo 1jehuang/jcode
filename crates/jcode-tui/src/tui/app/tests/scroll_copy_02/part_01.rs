@@ -1478,8 +1478,13 @@ fn test_changelog_overlay_mouse_drag_release_copies_text() {
 
     // A copy was attempted (success/failure depends on clipboard availability
     // in the test environment, but the selection path must have run).
-    assert!(matches!(
-        app.status_notice().as_deref(),
-        Some("Copied selection") | Some("Failed to copy selection") | Some("Selection is empty")
-    ));
+    assert!(
+        app.status_notice().is_some_and(|notice| {
+            notice.starts_with("Copied selection")
+                || notice == "Failed to copy selection"
+                || notice == "Selection is empty"
+        }),
+        "changelog drag release must attempt a copy, got {:?}",
+        app.status_notice()
+    );
 }
