@@ -1654,6 +1654,8 @@ fn swarm_root_effort_env_overrides_and_shared_resolution() {
     for (key, value) in keys.into_iter().zip(previous) {
         restore_env_var(key, value);
     }
+}
+
 /// A config that stops parsing must be reportable, not only silently replaced
 /// by defaults: the fallback is invisible and every setting stops applying.
 #[test]
