@@ -1,7 +1,7 @@
 use super::*;
 use crate::storage::jcode_dir;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
 /// Dotted config paths that a caller has declared as removals, keyed by the
