@@ -18,7 +18,14 @@ fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
     terminal
         .draw(|frame| input_ui::draw_notification(frame, &state, Rect::new(0, 1, 80, 1)))
         .unwrap();
-    let rows = buffer_rows(&terminal);
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
     assert!(rows[1].contains("Reset available · /reset usage limits openai"));
     assert!(rows[0].trim().is_empty());
     assert!(rows[2].trim().is_empty());
