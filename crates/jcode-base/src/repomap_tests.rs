@@ -482,6 +482,54 @@ fn cochange_handles_special_filenames() {
 
 #[test]
 #[cfg(unix)]
+fn cochange_sha256_repos_pair_normally() {
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let probe = tempfile::TempDir::new().expect("temp");
+    let sha256_ok = std::process::Command::new("git")
+        .args(["init", "-q", "--object-format=sha256"])
+        .current_dir(probe.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !sha256_ok {
+        return;
+    }
+    let dir = probe;
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git")
+    };
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "one"]).status.success());
+    std::fs::write(dir.path().join("a.rs"), "fn a() {}\n// two\n").unwrap();
+    std::fs::write(dir.path().join("b.rs"), "fn b() {}\n// two\n").unwrap();
+    assert!(run(&["add", "."]).status.success());
+    assert!(run(&["commit", "-qm", "two"]).status.success());
+    let files = vec!["a.rs".to_string(), "b.rs".to_string()];
+    let mut pairs = cochange_pairs(dir.path(), &files);
+    pairs.sort();
+    assert_eq!(pairs, vec![(0, 1)], "{pairs:?}");
+}
+
+#[test]
+#[cfg(unix)]
 fn cochange_commit_prefixed_filename_pairs_normally() {
     if std::process::Command::new("git")
         .arg("--version")

@@ -434,7 +434,7 @@ fn cochange_pairs_inner(root: &Path, files: &[String]) -> Option<Vec<(usize, usi
         // must parse as a path, not flush the commit.
         if let Some(after) = record.strip_prefix("COMMIT:")
             && let Some((hash, rest)) = after.split_once('\n')
-            && hash.len() == 40
+            && matches!(hash.len(), 40 | 64)
             && hash.bytes().all(|b| b.is_ascii_hexdigit())
         {
             if in_commit && !current.is_empty() {
