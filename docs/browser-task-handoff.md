@@ -30,6 +30,11 @@ observation, not a free-form research report from Jev.
   Unrelated page changes need not invalidate an unchanged automatic action target.
 - Navigation disconnect recovery retries observations, never the mutation itself.
   An uncertain consequential action is returned to the parent rather than replayed.
+- Automatic scrolling and waiting may gather more evidence at low confidence.
+  An uncertain interaction first narrows the menu to those observation actions,
+  without executing the interaction, then reconsiders after gathering evidence.
+  Interactions, exact caller actions and completion still require the configured
+  confidence threshold. Exploration remains subject to scope, stall and budget limits.
 - Exact caller actions are one-shot and retired on document or URL changes.
 - Passwords, verification flows, credentials, missing text/scripts, persistent stalls,
   insufficient confidence, and exhausted budgets can still cause a handback.

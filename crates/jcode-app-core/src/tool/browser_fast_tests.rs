@@ -165,7 +165,12 @@ async fn invalid_or_uncertain_decisions_never_execute() {
         ("a999", 0.99, "unknown action"),
         ("hand_back", 0.99, "mock decision"),
     ] {
-        let browser = MockBrowser::new(vec![page("before")]);
+        let mut before = page("before");
+        before["elements"] =
+            json!([{"tag":"button","text":"Next","type":"button","form":false,"selector":"#next"}]);
+        before["ready_state"] = json!("complete");
+        before["scroll"] = json!({"can_down":false,"can_up":false});
+        let browser = MockBrowser::new(vec![before]);
         let transport = MockTransport::new(&[(choice, probability)]);
         let result = result(&browser, &transport, &input()).await;
         assert_eq!(result["status"], "hand_back");
@@ -887,6 +892,65 @@ async fn low_confidence_help_still_reports_missing_capability() {
     assert_eq!(value["status"], "hand_back");
     assert_eq!(value["requested_help"], "text");
     assert!(value["action_trace"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn low_confidence_scrolling_gathers_evidence_without_parent_intervention() {
+    let browser = MockBrowser::new(vec![page("before"), page("before"), page("complete")]);
+    let value = result(
+        &browser,
+        &MockTransport::new(&[("a0", 0.34), ("done", 0.99)]),
+        &input(),
+    )
+    .await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"][0]["action"], "scroll");
+    assert_eq!(value["action_trace"][0]["confidence"], 0.34);
+}
+
+#[tokio::test]
+async fn uncertain_click_is_reconsidered_after_safe_exploration() {
+    let mut before = page("before");
+    before["elements"] =
+        json!([{"tag":"button","text":"Next","type":"button","form":false,"selector":"#next"}]);
+    let browser = MockBrowser::new(vec![
+        before.clone(),
+        before.clone(),
+        before,
+        page("complete"),
+    ]);
+    let transport = MockTransport::new(&[("a0", 0.4), ("a0", 0.4), ("done", 0.99)]);
+    let value = result(&browser, &transport, &input()).await;
+    assert_eq!(value["status"], "done", "{value}");
+    assert_eq!(value["action_trace"].as_array().unwrap().len(), 1);
+    assert_eq!(value["action_trace"][0]["action"], "scroll");
+    assert!(!browser.calls.lock().unwrap().contains(&"click".into()));
+    assert!(
+        transport.observed.lock().unwrap()[1]["controller_note"]
+            .as_str()
+            .unwrap()
+            .contains("No interaction was executed")
+    );
+}
+
+#[tokio::test]
+async fn low_confidence_exact_scroll_and_completion_still_hand_back() {
+    let mut input = input();
+    input.candidates.push(ExactCandidate {
+        label: "Caller scroll".into(),
+        input: json!({"action":"scroll","y":600}),
+    });
+    for choice in ["a0", "done"] {
+        let mut before = page("before");
+        before["elements"] = json!([{"tag":"button","text":"Next","type":"button","form":false,"selector":"#next"}]);
+        before["ready_state"] = json!("complete");
+        before["scroll"] = json!({"can_down":false,"can_up":false});
+        let browser = MockBrowser::new(vec![before]);
+        let value = result(&browser, &MockTransport::new(&[(choice, 0.34)]), &input).await;
+        assert_eq!(value["status"], "hand_back");
+        assert!(value["reason"].as_str().unwrap().contains("Low confidence"));
+        assert!(value["action_trace"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]

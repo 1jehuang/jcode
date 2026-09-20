@@ -219,7 +219,7 @@ impl Tool for BrowserTool {
             ),
             (
                 "confidence_threshold",
-                json!({"type":"number", "default":0.8, "minimum":0, "maximum":1}),
+                json!({"type":"number", "default":0.8, "minimum":0, "maximum":1, "description":"Minimum confidence for interactions, exact caller actions and completion. Automatic scrolling/waiting may gather more evidence below this threshold."}),
             ),
             (
                 "text_values",

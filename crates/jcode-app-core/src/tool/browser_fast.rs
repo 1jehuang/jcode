@@ -598,6 +598,7 @@ pub(super) async fn run(
         let mut replans=0;
         let mut initial_observed=false;
         let mut task_note=String::new();
+        let mut explore_only=false;
         loop {
             anyhow::ensure!(tokio::time::Instant::now()<deadline,"Handoff time budget exhausted");
             let observe=scoped(BrowserInput{action:"eval".into(),script:Some(OBSERVE_SCRIPT.into()),..Default::default()},input)?;
@@ -615,7 +616,7 @@ pub(super) async fn run(
             if observation["sensitive"]==true {return Ok(("hand_back","Credential material, password, OTP, CAPTCHA, or account recovery requires the main agent/user. Never reset passwords.".into()));}
             if stale>=3 {return Ok(("hand_back","Browser stalled: repeated unchanged observations".into()));}
             if trace.len()==budget {return Ok(("hand_back","Action step budget exhausted; final action has been observed".into()));}
-            let choices:Vec<_>=candidates(input,&observation)?.into_iter().filter(|c| c.exact_index.is_none_or(|i|!used_exact.contains(&i))).collect();
+            let choices:Vec<_>=candidates(input,&observation)?.into_iter().filter(|c| c.exact_index.is_none_or(|i|!used_exact.contains(&i))).filter(|c|!explore_only || (c.exact_index.is_none() && matches!(c.input.action.as_str(),"scroll"|"wait"))).collect();
             let mut options:Vec<_>=choices.iter().enumerate().map(|(index,c)|DecisionOption{id:format!("a{index}"),label:c.label.clone()}).collect();
             options.push(DecisionOption{id:"done".into(),label:"Finish: the goal is already achieved.".into()});
             options.push(DecisionOption{id:"hand_back".into(),label:"Stop: uncertain, blocked, or needs user authorization.".into()});
@@ -635,7 +636,19 @@ pub(super) async fn run(
                 return Ok(("hand_back",if decision.choice=="script_needed" {"Main agent must supply an exact script/browser action candidate".into()}else{"Main agent must supply the required text_values".into()}));
             }
             if decision.choice=="hand_back" {return Ok(("hand_back",decision.reason));}
-            if decision.confidence<threshold {
+            // Scrolling/waiting only obtains more evidence. Low confidence about
+            // which viewport to inspect is not a reason to abandon the task.
+            // Keep the threshold for interactions, exact caller actions and done.
+            let observation_only=choices.get(index).is_some_and(|choice|choice.exact_index.is_none() && matches!(choice.input.action.as_str(),"scroll"|"wait"));
+            if decision.confidence<threshold && !observation_only {
+                if !explore_only && decision.choice!="done" && choices.iter().any(|choice|choice.exact_index.is_none() && matches!(choice.input.action.as_str(),"scroll"|"wait")) {
+                    // Do not guess a click or ask the parent to micromanage a
+                    // viewport. Let Jev choose only a safe evidence-gathering
+                    // action, then reconsider interactions on the updated page.
+                    explore_only=true;
+                    task_note="No interaction was executed because confidence was insufficient. Gather more page evidence with the offered scrolling/waiting actions before reconsidering interactions.".into();
+                    continue;
+                }
                 let label=&request.options[index].label;
                 return Ok(("hand_back",format!("Low confidence: {:.3} below {threshold:.3}; tentative {}: {label}",decision.confidence,decision.choice)));
             }
@@ -656,6 +669,7 @@ pub(super) async fn run(
             observation=fresh;
             if decision.choice=="done" {requested_help=None;return Ok(("done",decision.reason));}
             replans=0;
+            explore_only=false;
             task_note.clear();
             let chosen=choices.get(index).context("Decision selected invalid action")?;
             if let Some(index)=chosen.exact_index {used_exact.insert(index);}
