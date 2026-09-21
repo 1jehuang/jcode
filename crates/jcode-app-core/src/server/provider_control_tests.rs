@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
