@@ -539,6 +539,7 @@ pub(super) async fn handle_debug_client(
                                             soft_interrupt_queues: Arc::clone(
                                                 &soft_interrupt_queues,
                                             ),
+                                            sessions: Arc::clone(&sessions),
                                         }),
                                     )
                                     .await

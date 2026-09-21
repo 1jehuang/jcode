@@ -30,6 +30,7 @@ use crate::agent::Agent;
 use crate::message::{Message, StreamEvent, ToolDefinition};
 use crate::protocol::ServerEvent;
 use crate::provider::{EventStream, Provider};
+use crate::server::debug_command_exec::{DebugInterruptContext, execute_debug_command};
 use crate::server::live_turn::{LiveTurnSwarmContext, idle_live_agent, spawn_tracked_live_turn};
 use crate::server::state::restore_session_interrupt_delivery;
 use crate::server::swarm_mutation_state::SwarmMutationRuntime;
@@ -580,5 +581,87 @@ async fn stop_timeout_keeps_target_resolvable_and_a_later_retry_can_finish() {
             .await
             .contains_key(&fixture.worker_id)
     );
+    assert!(worker.lock().await.is_closed());
+}
+
+impl StopFixture {
+    fn interrupt_context(&self) -> DebugInterruptContext {
+        DebugInterruptContext {
+            session_id: self.worker_id.clone(),
+            shutdown_signals: Arc::new(RwLock::new(HashMap::new())),
+            soft_interrupt_queues: Arc::clone(&self.soft_interrupt_queues),
+            sessions: Arc::clone(&self.sessions),
+        }
+    }
+}
+
+/// A stop that times out leaves the session resolvable and its Agent unclosed so
+/// a later retry can finish. Interrupt delivery must already be closed at that
+/// point: otherwise the debug `queue_interrupt:` command adds work that survives
+/// the failed-stop interval and can still run if the session is resumed or
+/// reused before the retry.
+#[tokio::test]
+async fn stopped_but_unquiesced_worker_rejects_debug_queued_interrupts() {
+    let _storage_guard = crate::storage::lock_test_env();
+    let (_temp_home, _home) = setup_test_home();
+    let worker = test_agent_with_working_dir("stop-debug-worker", "/tmp/stop-debug-worker").await;
+    let fixture = StopFixture::new("stop-debug-worker", Arc::clone(&worker)).await;
+    let busy_worker = Arc::clone(&worker);
+    let busy = busy_worker.lock_owned().await;
+
+    // The stop cannot quiesce while we hold the Agent, so it times out and
+    // leaves the target in `stopping`.
+    match fixture.stop(23).await {
+        ServerEvent::Error {
+            id: 23, message, ..
+        } => {
+            assert!(message.contains("remains in stopping state"), "{message}");
+        }
+        other => panic!("expected retryable stop timeout, got {other:?}"),
+    }
+
+    // Read the gate state the way the debug path does: a producer must be
+    // refused, independent of the Agent lock this test still holds.
+    assert!(
+        begin_session_interrupt_delivery(&fixture.worker_id).is_none(),
+        "delivery must be closed for a session whose stop has not quiesced"
+    );
+
+    // Bound the call: without the delivery-gate routing this path falls through
+    // to `agent.lock().await`, which the held Agent lock blocks forever, so the
+    // pre-fix behaviour must fail here instead of wedging the suite.
+    let jobs = Arc::new(RwLock::new(HashMap::new()));
+    let queued = tokio::time::timeout(
+        Duration::from_secs(2),
+        execute_debug_command(
+            Arc::clone(&worker),
+            "queue_interrupt:survives-stopping-gate",
+            Arc::clone(&jobs),
+            None,
+            Some(fixture.interrupt_context()),
+        ),
+    )
+    .await
+    .expect("a stopping session must not block a debug-queued interrupt on the busy Agent");
+    assert!(
+        queued.is_err(),
+        "a stopping session must refuse a debug-queued interrupt, got {queued:?}"
+    );
+
+    let pending = fixture.queue.lock().expect("live queue").len();
+    assert_eq!(pending, 0, "no interrupt may survive a failed stop");
+    assert!(
+        crate::soft_interrupt_store::load(&fixture.worker_id)
+            .expect("persisted queue")
+            .is_empty(),
+        "no interrupt may be persisted for a session that is stopping"
+    );
+
+    // Once the Agent is released the retry finishes and the session is gone.
+    drop(busy);
+    assert!(matches!(
+        fixture.stop(24).await,
+        ServerEvent::Done { id: 24 }
+    ));
     assert!(worker.lock().await.is_closed());
 }
