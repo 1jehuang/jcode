@@ -328,11 +328,7 @@ fn resume_invocation_args_omits_blank_socket() {
 /// whether the developer machine has a published local build channel and of
 /// other tests mutating JCODE_HOME in parallel. Returns the guards that keep
 /// the environment pinned for the duration of the test.
-fn pinned_resume_test_home() -> (
-    std::sync::MutexGuard<'static, ()>,
-    tempfile::TempDir,
-    EnvVarGuard,
-) {
+fn pinned_resume_test_home() -> (crate::storage::TestEnvGuard, tempfile::TempDir, EnvVarGuard) {
     let env_lock = crate::storage::lock_test_env();
     let temp = tempfile::tempdir().expect("tempdir");
     let current = temp.path().join("builds").join("current");

@@ -1,5 +1,17 @@
 use super::*;
 
+thread_local! {
+    static CONTENTION_OBSERVER: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn on_env_lock_contention() {
+    let observer = CONTENTION_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer.send(()).expect("signal observed contention");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn harden_secret_file_permissions_sets_owner_only_modes() {
@@ -181,19 +193,62 @@ fn shared_test_env_lock_timeout_defaults_and_parses_override() {
 #[test]
 fn a_contended_env_lock_is_acquired_once_the_holder_releases() {
     let guard = lock_test_env();
+    let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
     let waiter = std::thread::Builder::new()
         .name("storage::tests::env-lock-waiter".to_string())
-        .spawn(|| {
+        .spawn(move || {
+            CONTENTION_OBSERVER.with(|slot| *slot.borrow_mut() = Some(blocked_tx));
             let _inner = lock_test_env();
             7
         })
         .expect("spawn waiter");
 
-    // Let the waiter reach the bounded wait before the holder releases.
-    std::thread::sleep(Duration::from_millis(50));
+    // Release only after the production wait loop actually observes WouldBlock.
+    blocked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter must observe contention while the holder owns the lock");
+    assert!(
+        test_env_lock().try_lock().is_err(),
+        "holder must still own the lock when contention is observed"
+    );
     drop(guard);
 
     assert_eq!(waiter.join().expect("waiter thread"), 7);
+}
+
+/// A released record can still name the waiting thread, but only a live record
+/// on that same thread is evidence of re-entry. No global metadata mutation or
+/// scheduling assumption is needed to exercise this decision.
+#[test]
+fn released_holder_record_is_not_a_reentrant_acquisition() {
+    let mut holder = EnvLockHolder {
+        thread: std::thread::current().id(),
+        label: "released-holder".to_string(),
+        acquired: Instant::now(),
+        held: true,
+    };
+    assert!(holder.is_held_by_current_thread());
+    holder.held = false;
+    assert!(!holder.is_held_by_current_thread());
+
+    holder.held = true;
+    std::thread::spawn(move || assert!(!holder.is_held_by_current_thread()))
+        .join()
+        .expect("different thread is not the recorded holder");
+}
+
+#[test]
+fn dropping_env_guard_marks_the_holder_released() {
+    let guard = lock_test_env();
+    assert!(env_lock_last_holder().unwrap().held);
+    drop(guard);
+
+    // Taking the raw mutex prevents a new owner from changing the record. Any
+    // intervening owner must also have released its record before unlocking.
+    let _raw = test_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(!env_lock_last_holder().unwrap().held);
 }
 
 #[test]

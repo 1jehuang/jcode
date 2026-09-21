@@ -5,9 +5,9 @@ use crate::tool::Registry;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 #[tokio::test]
 async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_cooldown() {
@@ -261,14 +261,14 @@ impl Provider for AuthChangeMockProvider {
 
 /// Shared process-wide lock: env vars are global, so a private mutex here would
 /// race every other env-mutating test (issue #593).
-fn lock_env() -> StdMutexGuard<'static, ()> {
+fn lock_env() -> jcode_base::storage::TestEnvGuard {
     crate::storage::lock_test_env()
 }
 
 struct EnvGuard {
     saved: Vec<(&'static str, Option<String>)>,
     _temp_home: tempfile::TempDir,
-    _lock: StdMutexGuard<'static, ()>,
+    _lock: jcode_base::storage::TestEnvGuard,
 }
 
 impl EnvGuard {
