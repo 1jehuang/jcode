@@ -212,6 +212,26 @@ fn cancelled() -> Error {
     failed("Login cancelled. Already issued credentials are not revoked.")
 }
 
+fn parse_login_response(bytes: &[u8], operation: Operation) -> Result<serde_json::Value> {
+    if let Ok(value) = serde_json::from_slice(bytes) {
+        return Ok(value);
+    }
+    // Older CLIs append a human auth-test report after the authenticated JSON
+    // line. Recover only this known completion shape, never search arbitrary
+    // child output for a success object or expose the trailing report.
+    if matches!(
+        operation,
+        Operation::Callback | Operation::Code | Operation::Complete
+    ) && let Some(newline) = bytes.iter().position(|byte| *byte == b'\n')
+        && bytes[newline + 1..].starts_with(b"=== auth-test: ")
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes[..newline])
+        && value["status"] == "authenticated"
+    {
+        return Ok(value);
+    }
+    Err(failed("Invalid login response. Update Jcode and retry."))
+}
+
 impl AuthFlow {
     pub fn start(&self) -> Result<AuthPrompt> {
         let mut state = self.0.state.lock().unwrap();
@@ -508,8 +528,7 @@ impl FlowInner {
                         .map_err(|_| failed("Could not wait for login process"))?;
                 }
                 if let (Some(bytes), Some(status)) = (&output, status) {
-                    let value: serde_json::Value = serde_json::from_slice(bytes)
-                        .map_err(|_| failed("Invalid login response. Update Jcode and retry."))?;
+                    let value = parse_login_response(bytes, operation)?;
                     if value["provider"].as_str() != Some(self.provider) {
                         return Err(failed("Login provider mismatch"));
                     }

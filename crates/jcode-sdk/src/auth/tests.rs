@@ -58,6 +58,34 @@ fn catalog_is_capability_filtered_and_uses_shared_aliases() {
     assert!(client.begin("jcode", None).is_err());
 }
 
+#[test]
+fn legacy_validation_report_is_only_accepted_after_authenticated_completion() {
+    let success = br#"{"status":"authenticated","provider":"openai"}"#;
+    let mut legacy = success.to_vec();
+    legacy.extend_from_slice(b"\n=== auth-test: OpenAI ===\nresult: PASS\n");
+    for operation in [Operation::Callback, Operation::Code, Operation::Complete] {
+        assert_eq!(
+            parse_login_response(&legacy, operation).unwrap()["status"],
+            "authenticated"
+        );
+    }
+    for operation in [Operation::Begin, Operation::Cancel] {
+        assert!(parse_login_response(&legacy, operation).is_err());
+    }
+    for invalid in [
+        b"banner\n{\"status\":\"authenticated\"}".as_slice(),
+        b"{\"status\":\"pending\"}\n=== auth-test: OpenAI ===\n",
+        b"{\"status\":\"authenticated\"}\n{\"status\":\"failed\"}",
+        b"{\"status\":\"authenticated\"}\nunrecognized private output",
+    ] {
+        let error = parse_login_response(invalid, Operation::Callback).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Invalid login response. Update Jcode and retry."
+        );
+    }
+}
+
 #[cfg(unix)]
 mod processes {
     use super::*;
@@ -103,7 +131,10 @@ payload = sys.stdin.read()
 (home / 'stdin-ok').write_text(str(payload == 'private-fixture-secret'))
 print('private-fixture-secret', file=sys.stderr)
 print(json.dumps(dict(status='authenticated', provider=provider)))
-sys.exit(1 if mode == 'warning' else 0)
+if mode.startswith('legacy-'):
+    print('=== auth-test: Fixture ===')
+    print('result: FAIL' if mode == 'legacy-warning' else 'result: PASS')
+sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
 "#,
         )
         .unwrap();
@@ -173,6 +204,22 @@ sys.exit(1 if mode == 'warning' else 0)
         assert_eq!(request["type"], "notify_auth_changed");
         assert_eq!(request["provider"], "openai");
         assert!(!request.to_string().contains("private-fixture-secret"));
+    }
+
+    #[test]
+    fn legacy_cli_reports_preserve_completion_and_validation_warning() {
+        for (mode, warning) in [("legacy-success", false), ("legacy-warning", true)] {
+            let (_dir, client) = fixture(mode);
+            let flow = client.begin("openai", None).unwrap();
+            flow.start().unwrap();
+            assert_eq!(
+                flow.submit_callback("private-fixture-secret")
+                    .unwrap()
+                    .validation_warning,
+                warning
+            );
+            assert!(flow.submit_callback("private-fixture-secret").is_err());
+        }
     }
 
     #[test]
