@@ -15,8 +15,8 @@
 
 use super::client_lifecycle::process_locked_message_streaming_mpsc;
 use super::{
-    SwarmEvent, SwarmMember, session_event_fanout_sender, truncate_detail, update_member_status,
-    update_member_status_with_report,
+    SwarmEvent, SwarmMember, begin_session_interrupt_delivery, session_event_fanout_sender,
+    truncate_detail, update_member_status, update_member_status_with_report,
 };
 use crate::agent::Agent;
 use crate::protocol::ServerEvent;
@@ -68,6 +68,10 @@ pub(super) async fn idle_live_agent(
     sessions: &SessionAgents,
     swarm_members: &Arc<RwLock<HashMap<String, SwarmMember>>>,
 ) -> Option<OwnedMutexGuard<Agent>> {
+    // Reserve against stop before looking up or locking the Agent. A stop that
+    // starts after this point waits for the reservation to finish, then keeps
+    // re-firing cancellation until the reserved turn registers its signal.
+    let _reservation = begin_session_interrupt_delivery(session_id)?;
     let agent = {
         let guard = sessions.read().await;
         guard.get(session_id).cloned()
@@ -103,6 +107,12 @@ pub(super) async fn spawn_tracked_live_turn(
     status_detail: Option<String>,
     swarm: LiveTurnSwarmContext,
 ) {
+    // Re-check after reservation. Stop can begin after `idle_live_agent`
+    // returns but before this function receives its guard; in that window the
+    // reserved wake must be discarded rather than starting a provider turn.
+    let Some(_delivery) = begin_session_interrupt_delivery(session_id) else {
+        return;
+    };
     update_member_status(
         session_id,
         "running",
