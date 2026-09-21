@@ -80,23 +80,10 @@ async fn apply_remote_effort_direction(
     }
     let current = app.remote_reasoning_effort_hint();
     let current = current.as_deref();
-    let current_index = current
-        .and_then(|c| efforts.iter().position(|e| *e == c))
-        .unwrap_or(efforts.len() - 1);
-    let len = efforts.len();
-    let next_index = if direction > 0 {
-        if current_index + 1 >= len {
-            current_index
-        } else {
-            current_index + 1
-        }
-    } else if current_index == 0 {
-        0
-    } else {
-        current_index - 1
-    };
-    let next_effort = efforts[next_index];
-    if Some(next_effort) == current {
+    let cycled = app_mod::effort_cycling::cycle_effort_index(&efforts, current, direction);
+    let next_effort = cycled.effort;
+
+    if !cycled.changed {
         let label = app_mod::effort_display_label(next_effort);
         app.set_status_notice(format!(
             "Effort: {} (already at {})",
