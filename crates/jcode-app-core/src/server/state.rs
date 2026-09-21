@@ -8,6 +8,7 @@ use jcode_swarm_core::{SwarmLifecycleStatus, SwarmMemberRecord, SwarmRole};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
@@ -29,6 +30,119 @@ use tokio::sync::{RwLock, mpsc};
 /// the existing shutdown-signal lifecycle.
 static BACKGROUND_TOOL_SIGNALS: LazyLock<StdMutex<HashMap<String, InterruptSignal>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+struct SessionInterruptGate {
+    lifecycle: AtomicU8,
+    active_producers: AtomicUsize,
+    producers_drained: tokio::sync::Notify,
+}
+
+const INTERRUPT_DELIVERY_OPEN: u8 = 0;
+const INTERRUPT_DELIVERY_STOPPING: u8 = 1;
+const INTERRUPT_DELIVERY_STOPPED: u8 = 2;
+
+impl Default for SessionInterruptGate {
+    fn default() -> Self {
+        Self {
+            lifecycle: AtomicU8::new(INTERRUPT_DELIVERY_OPEN),
+            active_producers: AtomicUsize::new(0),
+            producers_drained: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+static SESSION_INTERRUPT_GATES: LazyLock<StdMutex<HashMap<String, Arc<SessionInterruptGate>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn session_interrupt_gate(session_id: &str) -> Arc<SessionInterruptGate> {
+    let mut gates = SESSION_INTERRUPT_GATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(
+        gates
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(SessionInterruptGate::default())),
+    )
+}
+
+pub(super) struct SessionInterruptProducerGuard {
+    gate: Arc<SessionInterruptGate>,
+}
+
+impl Drop for SessionInterruptProducerGuard {
+    fn drop(&mut self) {
+        if self.gate.active_producers.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.gate.producers_drained.notify_waiters();
+        }
+    }
+}
+
+pub(super) fn begin_session_interrupt_delivery(
+    session_id: &str,
+) -> Option<SessionInterruptProducerGuard> {
+    let gate = session_interrupt_gate(session_id);
+    if gate.lifecycle.load(Ordering::SeqCst) != INTERRUPT_DELIVERY_OPEN {
+        return None;
+    }
+    gate.active_producers.fetch_add(1, Ordering::SeqCst);
+    if gate.lifecycle.load(Ordering::SeqCst) != INTERRUPT_DELIVERY_OPEN {
+        if gate.active_producers.fetch_sub(1, Ordering::SeqCst) == 1 {
+            gate.producers_drained.notify_waiters();
+        }
+        return None;
+    }
+    Some(SessionInterruptProducerGuard { gate })
+}
+
+pub(super) async fn begin_session_interrupt_stop(session_id: &str) {
+    let gate = session_interrupt_gate(session_id);
+    gate.lifecycle
+        .fetch_max(INTERRUPT_DELIVERY_STOPPING, Ordering::SeqCst);
+    loop {
+        let mut drained = std::pin::pin!(gate.producers_drained.notified());
+        drained.as_mut().enable();
+        if gate.active_producers.load(Ordering::SeqCst) == 0 {
+            return;
+        }
+        drained.await;
+    }
+}
+
+pub(super) fn complete_session_interrupt_stop(session_id: &str) {
+    session_interrupt_gate(session_id)
+        .lifecycle
+        .store(INTERRUPT_DELIVERY_STOPPED, Ordering::SeqCst);
+}
+
+pub(super) fn restore_session_interrupt_delivery(session_id: &str) {
+    let gate = session_interrupt_gate(session_id);
+    match gate.lifecycle.compare_exchange(
+        INTERRUPT_DELIVERY_STOPPED,
+        INTERRUPT_DELIVERY_OPEN,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    ) {
+        Ok(_) | Err(INTERRUPT_DELIVERY_OPEN) => {}
+        Err(_) => {
+            crate::logging::info(&format!(
+                "SESSION_INTERRUPT_RESTORE_DEFERRED session={} reason=session_stopping",
+                session_id
+            ));
+        }
+    }
+}
+
+fn rename_session_interrupt_gate(old_session_id: &str, new_session_id: &str) {
+    if old_session_id == new_session_id {
+        return;
+    }
+    let mut gates = SESSION_INTERRUPT_GATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(gate) = gates.remove(old_session_id) {
+        gates.insert(new_session_id.to_string(), gate);
+    }
+}
 
 /// Register (or replace) the background-tool signal for a session.
 pub(super) fn register_background_tool_signal(session_id: &str, signal: InterruptSignal) {
@@ -569,6 +683,13 @@ impl SessionControlHandle {
         urgent: bool,
         source: SoftInterruptSource,
     ) -> bool {
+        let Some(_producer) = begin_session_interrupt_delivery(&self.session_id) else {
+            crate::logging::info(&format!(
+                "SOFT_INTERRUPT_QUEUE_REJECTED session={} reason=session_stopping",
+                self.session_id
+            ));
+            return false;
+        };
         enqueue_soft_interrupt(&self.soft_interrupt_queue, content, images, urgent, source)
     }
 
@@ -683,6 +804,7 @@ pub(super) async fn register_session_interrupt_queue(
     session_id: &str,
     queue: SoftInterruptQueue,
 ) {
+    restore_session_interrupt_delivery(session_id);
     let mut guard = queues.write().await;
     guard.insert(session_id.to_string(), queue);
 }
@@ -692,6 +814,7 @@ pub(super) async fn rename_session_interrupt_queue(
     old_session_id: &str,
     new_session_id: &str,
 ) {
+    rename_session_interrupt_gate(old_session_id, new_session_id);
     let mut guard = queues.write().await;
     if let Some(queue) = guard.remove(old_session_id) {
         guard.insert(new_session_id.to_string(), queue);
@@ -714,6 +837,13 @@ pub(super) async fn queue_soft_interrupt_for_session(
     queues: &SessionInterruptQueues,
     sessions: &super::SessionAgents,
 ) -> bool {
+    let Some(_producer) = begin_session_interrupt_delivery(session_id) else {
+        crate::logging::info(&format!(
+            "SOFT_INTERRUPT_QUEUE_REJECTED session={} reason=session_stopping",
+            session_id
+        ));
+        return false;
+    };
     if let Some(queue) = queues.read().await.get(session_id).cloned() {
         return enqueue_soft_interrupt(&queue, content, Vec::new(), urgent, source);
     }

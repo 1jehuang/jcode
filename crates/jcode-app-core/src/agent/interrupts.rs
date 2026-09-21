@@ -126,6 +126,13 @@ impl Agent {
         urgent: bool,
         source: SoftInterruptSource,
     ) {
+        if self.is_closed() {
+            logging::info(&format!(
+                "AGENT_SOFT_INTERRUPT_QUEUE_REJECTED session={} reason=session_closed",
+                self.session_id()
+            ));
+            return;
+        }
         let content_bytes = content.len();
         let content_chars = content.chars().count();
         let image_count = images.len();

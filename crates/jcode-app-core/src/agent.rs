@@ -961,6 +961,11 @@ impl Agent {
         &self.session.id
     }
 
+    /// Whether this session was terminally closed (for example by `swarm stop`).
+    pub(crate) fn is_closed(&self) -> bool {
+        matches!(self.session.status, SessionStatus::Closed)
+    }
+
     /// Desktop self-development is selected by the session checkout, including
     /// restored sessions. It must not set the CLI canary/reload flags.
     pub fn is_desktop_selfdev(&self) -> bool {
