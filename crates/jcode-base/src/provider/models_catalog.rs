@@ -138,6 +138,11 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
                     efforts.push(effort.to_string());
                 }
             }
+            // The catalog API does not guarantee ordering; sort into the
+            // canonical low-to-high ladder so effort stepping wraps correctly.
+            efforts.sort_by_key(|effort| {
+                jcode_provider_core::reasoning_effort_rank(effort).unwrap_or(usize::MAX)
+            });
             if !efforts.is_empty() {
                 reasoning_efforts.insert(slug, efforts);
             }
@@ -370,6 +375,28 @@ mod tests {
                 "none".to_string(),
                 "low".to_string(),
                 "xhigh".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn openai_catalog_sorts_unsorted_reasoning_efforts_into_ladder_order() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [
+                {
+                    "slug": "gpt-5.6",
+                    "supported_reasoning_efforts": ["max", "medium", "minimal", "high"]
+                }
+            ]
+        }));
+
+        assert_eq!(
+            catalog.reasoning_efforts.get("gpt-5.6"),
+            Some(&vec![
+                "minimal".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string()
             ])
         );
     }

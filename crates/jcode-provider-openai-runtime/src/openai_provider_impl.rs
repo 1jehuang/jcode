@@ -1004,6 +1004,10 @@ impl Provider for OpenAIProvider {
                 .iter()
                 .filter_map(|effort| jcode_provider_core::canonical_reasoning_effort(effort))
                 .collect();
+            // Catalog order is API-dependent and not guaranteed sorted; keep
+            // the reasoning portion in canonical low-to-high ladder order so
+            // effort stepping wraps correctly.
+            jcode_provider_core::sort_reasoning_efforts(&mut efforts);
             efforts.extend(["swarm", "swarm-deep"]);
             return efforts;
         }
