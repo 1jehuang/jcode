@@ -1562,7 +1562,22 @@ impl BackgroundTaskManager {
             {
                 crate::logging::warn(&format!("background task {pid} TERM failed: {error}"));
             }
-            tokio::time::sleep(_graceful_timeout).await;
+            let grace_sleep = tokio::time::sleep(_graceful_timeout);
+            drop(status_guard);
+            #[cfg(test)]
+            cancel_grace_tests::at_grace_boundary(task_id).await;
+            grace_sleep.await;
+            status_guard = self.status_updates.clone().lock_owned().await;
+            let Some(refreshed) = self.read_status_file(&status_path).await else {
+                return Ok(false);
+            };
+            if refreshed.status != BackgroundTaskStatus::Running
+                || !refreshed.detached
+                || refreshed.pid != Some(pid)
+            {
+                return Ok(false);
+            }
+            status = refreshed;
             if crate::platform::is_process_running(pid)
                 && let Err(error) =
                     crate::platform::signal_detached_process_group(pid, libc::SIGKILL)
@@ -1864,3 +1879,7 @@ mod tests;
 #[cfg(test)]
 #[path = "background/status_write_tests.rs"]
 mod status_write_tests;
+
+#[cfg(test)]
+#[path = "background/cancel_grace_tests.rs"]
+mod cancel_grace_tests;
