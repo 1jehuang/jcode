@@ -83,6 +83,7 @@ pub(super) async fn detach_client_attachment(
     clippy::too_many_arguments,
     reason = "disconnect cleanup updates sessions, swarms, files, channels, debug state, and shutdown signals together"
 )]
+/// Returns the event task when a successor needs this lifecycle to finish its turn.
 pub(super) async fn cleanup_client_connection(
     sessions: &SessionAgents,
     client_session_id: &str,
@@ -107,7 +108,7 @@ pub(super) async fn cleanup_client_connection(
     swarm_event_tx: &broadcast::Sender<SwarmEvent>,
     client_event_tx: &mpsc::UnboundedSender<crate::protocol::ServerEvent>,
     idle_reconnect_grace: Duration,
-) -> Result<()> {
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
     let disposition = disconnect_disposition(disconnected_while_processing(
         client_is_processing,
         processing_task.as_ref(),
@@ -124,14 +125,6 @@ pub(super) async fn cleanup_client_connection(
     } else {
         false
     };
-
-    // A live processing task owns the agent mutex. Abort it before trying to
-    // persist the disconnect disposition; otherwise cleanup waits two seconds,
-    // times out, and leaves the durable session `Active` precisely when an
-    // interrupted desktop turn must become `Crashed`.
-    if let Some(handle) = processing_task.take() {
-        handle.abort();
-    }
 
     detach_client_attachment(
         client_session_id,
@@ -163,7 +156,7 @@ pub(super) async fn cleanup_client_connection(
                     .values()
                     .any(|info| info.session_id == client_session_id)
             {
-                return Ok(());
+                return Ok(None);
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -195,8 +188,23 @@ pub(super) async fn cleanup_client_connection(
             "Skipping destructive disconnect cleanup for {} because another client is still attached",
             client_session_id
         ));
+        // The lifecycle, not the socket, owns completion bookkeeping. Return
+        // its writer handle so it can retain and await the task using the same
+        // continuation path as an explicitly detached remote turn. Merely
+        // dropping the JoinHandle here would lose completion/status handling.
+        if processing_task.is_some() {
+            return Ok(Some(event_handle));
+        }
         event_handle.abort();
-        return Ok(());
+        return Ok(None);
+    }
+
+    // A live processing task owns the agent mutex. Abort it before trying to
+    // persist the disconnect disposition; otherwise cleanup waits two seconds,
+    // times out, and leaves the durable session `Active` precisely when an
+    // interrupted desktop turn must become `Crashed`.
+    if let Some(handle) = processing_task.take() {
+        handle.abort();
     }
 
     {
@@ -346,7 +354,7 @@ pub(super) async fn cleanup_client_connection(
 
     drop(connections);
     event_handle.abort();
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]

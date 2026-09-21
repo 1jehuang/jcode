@@ -576,3 +576,118 @@ async fn native_ping_ping_subscribe_history_keeps_one_socket() -> Result<()> {
     abort_server_and_cleanup(&handle, &socket, &debug_socket);
     result
 }
+
+/// Desktop hot reload attaches the new UI before retiring the old busy bridge.
+/// Neither attachment opts into remote continuation. The original lifecycle must
+/// nevertheless retain its turn and completion receiver for the live successor.
+#[tokio::test]
+async fn desktop_busy_owner_disconnect_with_successor_finishes_original_turn() -> Result<()> {
+    let _env = setup_test_env()?;
+    let runtime = tempfile::tempdir()?;
+    let socket = runtime.path().join("server.sock");
+    let debug_socket = runtime.path().join("debug.sock");
+    let provider = ReconnectProvider::default();
+    let server = server::Server::new_with_paths(
+        Arc::new(provider.clone()),
+        socket.clone(),
+        debug_socket.clone(),
+    );
+    let handle = tokio::spawn(async move { server.run().await });
+    let result =
+        async {
+            wait_for_server_ready(&socket, &debug_socket).await?;
+            let connection = server::connect_socket(&socket).await?;
+            let (reader, mut writer) = connection.into_split();
+            let mut reader = BufReader::new(reader);
+            send_native(
+                &mut writer,
+                serde_json::json!({
+                    "type":"subscribe", "id":1, "working_dir":std::env::current_dir()?,
+                    "crash_on_disconnect":true, "continue_on_disconnect":false,
+                }),
+            )
+            .await?;
+            let events =
+                native_until(&mut reader, |e| matches!(e, ServerEvent::Done { id: 1 })).await?;
+            let session_id = events
+                .iter()
+                .find_map(|e| match e {
+                    ServerEvent::SessionId { session_id } => Some(session_id.clone()),
+                    _ => None,
+                })
+                .context("missing session ID")?;
+            send_native(
+                &mut writer,
+                serde_json::json!({
+                    "type":"message", "id":2, "content":"finish exactly once",
+                }),
+            )
+            .await?;
+            native_until(&mut reader, |e| matches!(e, ServerEvent::TextDelta { .. })).await?;
+
+            let successor = server::connect_socket(&socket).await?;
+            let (next_reader, mut next_writer) = successor.into_split();
+            let mut next_reader = BufReader::new(next_reader);
+            send_native(
+                &mut next_writer,
+                serde_json::json!({
+                    "type":"subscribe", "id":3, "working_dir":std::env::current_dir()?,
+                    "target_session_id":session_id, "continue_on_disconnect":false,
+                    "client_has_local_history":false,
+                }),
+            )
+            .await?;
+            let attached = native_until(&mut next_reader, |e| {
+                matches!(e, ServerEvent::Done { id: 3 })
+            })
+            .await?;
+            anyhow::ensure!(
+                attached.iter().any(|e| matches!(e,
+                    ServerEvent::History { session_id:id, activity:Some(activity), .. }
+                        if id == &session_id && activity.is_processing
+                )),
+                "successor must see the busy original session"
+            );
+            drop((reader, writer));
+            // Keep the provider blocked while the server observes the owner's EOF.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            provider.finish.notify_one();
+            let finished = native_until(&mut next_reader, |e| {
+                matches!(e, ServerEvent::Done { id: 2 })
+            })
+            .await?;
+            anyhow::ensure!(
+                finished.iter().any(|e| matches!(e,
+                    ServerEvent::TextDelta {text} if text == "after reconnect"
+                )),
+                "successor must receive the original stream through Done"
+            );
+            anyhow::ensure!(
+                provider.calls.load(std::sync::atomic::Ordering::SeqCst) == 1,
+                "handoff must not replay the prompt"
+            );
+            send_native(
+                &mut next_writer,
+                serde_json::json!({"type":"get_history", "id":4}),
+            )
+            .await?;
+            let history = native_until(&mut next_reader, |e| {
+                matches!(e, ServerEvent::History { id: 4, .. })
+            })
+            .await?;
+            anyhow::ensure!(history.iter().any(|e| matches!(e,
+            ServerEvent::History {id:4, activity, ..} if activity.as_ref().is_none_or(|a| !a.is_processing)
+        )), "successor must stop reporting an active turn");
+            anyhow::ensure!(
+                !matches!(
+                    Session::load(&session_id)?.status,
+                    SessionStatus::Closed | SessionStatus::Crashed { .. }
+                ),
+                "old owner must not close or crash its successor"
+            );
+            Ok(())
+        }
+        .await;
+    abort_server_and_cleanup(&handle, &socket, &debug_socket);
+    result
+}

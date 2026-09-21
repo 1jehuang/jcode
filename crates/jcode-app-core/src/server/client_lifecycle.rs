@@ -3039,7 +3039,48 @@ pub(super) async fn handle_client(
 
     drop(_sdk_connection_guard);
 
-    if continue_on_disconnect {
+    // Cleanup serializes the successor decision against live attachment claims.
+    // A successor must inherit the active owner, including its completion receiver,
+    // rather than just an Agent whose processing task was already aborted.
+    let event_handle = if !continue_on_disconnect {
+        let retained = crate::hooks::with_client_terminal_env(
+            active_terminal_env.clone(),
+            cleanup_client_connection(
+                &sessions,
+                &client_session_id,
+                client_is_processing,
+                &mut processing_task,
+                event_handle,
+                &swarm_members,
+                &swarms_by_id,
+                &swarm_coordinators,
+                &swarm_plans,
+                &file_touch,
+                &channel_subscriptions,
+                &channel_subscriptions_by_session,
+                &client_debug_state,
+                &client_debug_id,
+                &client_connections,
+                &client_connection_id,
+                &shutdown_signals,
+                &soft_interrupt_queues,
+                &event_history,
+                &event_counter,
+                &swarm_event_tx,
+                &client_event_tx,
+                super::client_disconnect_cleanup::IDLE_RECONNECT_GRACE,
+            ),
+        )
+        .await?;
+        match retained {
+            Some(handle) => handle,
+            None => return connection_result,
+        }
+    } else {
+        event_handle
+    };
+
+    {
         // Retain the existing turn owner, not the socket. Its JoinHandle and
         // completion receiver stay alive so normal finalization still runs and
         // the daemon cannot idle-shutdown midway through remote work. New
@@ -3063,7 +3104,7 @@ pub(super) async fn handle_client(
         stdin_responses.lock().await.clear();
         if let Some(handle) = processing_task.take() {
             crate::logging::info(&format!(
-                "Retaining disconnected remote turn for session {}",
+                "Retaining disconnected turn for session {}",
                 client_session_id
             ));
             let _ = handle.await;
