@@ -32,6 +32,24 @@ use model::{
     progress_event_record, progress_wait_reason, push_task_event, task_dir, terminal_event_record,
 };
 
+/// Write a task status file so concurrent readers never observe a torn file.
+///
+/// `bg status`/`bg wait`, the reconciliation sweeps, and other jcode processes
+/// read these paths while the owning task keeps rewriting them. A plain
+/// truncating write is observable as an empty or partial file, and a reader that
+/// hits that window reports the task as missing (`wait` then returns `None`
+/// instead of a result). Writing a sibling temp file and renaming it into place
+/// makes every read see either the previous file or the complete new one. A
+/// failed publish can leave one uniquely named temp file behind; the reconcile
+/// sweep and `bg cleanup` both key off the `.json` extension, so it is inert.
+fn write_status_file_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    static WRITE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = WRITE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    std::fs::write(&temp, contents)?;
+    std::fs::rename(&temp, path)
+}
+
 /// Manages background task execution
 pub struct BackgroundTaskManager {
     tasks: Arc<RwLock<HashMap<String, RunningTask>>>,
@@ -141,7 +159,7 @@ impl BackgroundTaskManager {
 
     async fn write_status_file(&self, path: &std::path::Path, status: &TaskStatusFile) {
         if let Ok(json) = serde_json::to_string_pretty(status) {
-            let _ = fs::write(path, json).await;
+            let _ = write_status_file_atomic(path, &json);
         }
     }
 
@@ -469,7 +487,7 @@ impl BackgroundTaskManager {
             stall_wake_seconds: None,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
+            let _ = write_status_file_atomic(&status_path, &json);
         }
         Self::publish_task_started_activity(
             &task_id,
@@ -549,7 +567,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                let _ = write_status_file_atomic(&status_path_clone, &json);
             }
 
             // Drop this task from the live map now that its terminal status is
@@ -679,7 +697,7 @@ impl BackgroundTaskManager {
             stall_wake_seconds: None,
         };
         if let Ok(json) = serde_json::to_string_pretty(&initial_status) {
-            let _ = std::fs::write(&status_path, json);
+            let _ = write_status_file_atomic(&status_path, &json);
         }
         Self::publish_task_started_activity(
             &task_id,
@@ -768,7 +786,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(status.clone(), exit_code, error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = tokio::fs::write(&status_path_clone, json).await;
+                let _ = write_status_file_atomic(&status_path_clone, &json);
             }
 
             // Prune the live-map entry only after the terminal status file is
@@ -1362,7 +1380,7 @@ impl BackgroundTaskManager {
                 terminal_event_record(event_status, event_exit_code, event_error.as_deref()),
             );
             if let Ok(json) = serde_json::to_string_pretty(&final_status) {
-                let _ = fs::write(&task.status_path, json).await;
+                let _ = write_status_file_atomic(&task.status_path, &json);
             }
 
             Ok(true)
