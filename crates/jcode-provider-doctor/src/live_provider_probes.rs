@@ -808,6 +808,34 @@ async fn consume_native_stream(
                         tool.thought_signature = Some(signature);
                     }
                 }
+                // Native providers such as Cursor emit a complete tool call in
+                // one event and keep their bidirectional stream open until the
+                // caller sends a result. The production agent loop does that in
+                // app-core; the doctor must do the same at this public boundary
+                // or its live probe will deadlock waiting for MessageEnd.
+                StreamEvent::NativeToolCall {
+                    request_id,
+                    tool_name,
+                    input,
+                } => {
+                    outcome.tool_calls.push(NativeClaudeToolCall {
+                        id: request_id.clone(),
+                        name: tool_name,
+                        input_json: input.to_string(),
+                        thought_signature: None,
+                    });
+                    let sender = provider
+                        .native_result_sender()
+                        .context("native provider emitted a tool call without a result bridge")?;
+                    sender
+                        .send(jcode_base::provider::NativeToolResult::success(
+                            request_id,
+                            "TOOL_RESULT_TOKEN=42. Report this token back to confirm you read it."
+                                .to_string(),
+                        ))
+                        .await
+                        .context("send native provider tool result")?;
+                }
                 StreamEvent::TokenUsage {
                     input_tokens,
                     output_tokens,

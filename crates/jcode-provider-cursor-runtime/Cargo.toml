@@ -2,6 +2,7 @@
 name = "jcode-provider-cursor-runtime"
 version = "0.1.0"
 edition = "2024"
+publish = false
 description = "Cursor provider runtime (direct ChatService streaming) for jcode, kept downstream of jcode-base so provider edits do not rebuild the app spine"
 
 [lib]
@@ -34,5 +35,5 @@ webpki-roots = "1"
 
 [dev-dependencies]
 # The migrated cursor tests use jcode-base's test-env sandbox (lock_test_env).
-jcode-base = { path = "../jcode-base", default-features = false, features = ["test-support"] }
+jcode-base = { path = "../jcode-base", version = "0.1.0", default-features = false, features = ["test-support"] }
 tempfile = "3"

@@ -8,7 +8,7 @@ use crate::util::truncate_str;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -818,9 +818,12 @@ struct BashInput {
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: Option<bool>,
-    #[serde(default = "default_true")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_true_or_null"
+    )]
     notify: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_false_or_null")]
     wake: bool,
     /// For background runs: wake the agent after this many seconds with no
     /// new output and no progress events. Resets on activity.
@@ -833,6 +836,20 @@ struct BashInput {
 
 fn default_true() -> bool {
     true
+}
+
+fn deserialize_true_or_null<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(true))
+}
+
+fn deserialize_false_or_null<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(false))
 }
 
 #[path = "bash_destructive_gate.rs"]
