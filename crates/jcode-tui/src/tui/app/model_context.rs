@@ -1538,6 +1538,7 @@ pub(super) fn handle_model_command(app: &mut App, trimmed: &str) -> bool {
                 let idx = new_effort
                     .as_ref()
                     .and_then(|e| efforts.iter().position(|x| *x == e.as_str()))
+                    .or_else(|| super::effort_cycling::default_effort_index(&efforts))
                     .unwrap_or(0);
                 let bar = effort_bar(idx, efforts.len());
                 app.set_status_notice(format!("Effort: {} {}", label, bar));
