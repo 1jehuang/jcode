@@ -774,7 +774,7 @@ fn test_generated_default_config_has_expected_user_defaults() {
     );
     assert!(
         content.contains("memory_model = \"gpt-5.6-luna\"")
-            && content.contains("reasoning effort \"none\""),
+            && content.contains("JCODE_MEMORY_SIDECAR_ENABLED"),
         "generated default config should document the Luna memory sidecar default"
     );
 
