@@ -2341,6 +2341,23 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
     let _home = EnvVarGuard::set("JCODE_HOME", temp.path());
 
     let reason = "Jcode streaming model response";
+    let pid_identity = format!("pid {}(", std::process::id());
+    let assertion_count = |stdout: &[u8]| {
+        String::from_utf8_lossy(stdout)
+            .lines()
+            .filter(|line| line.contains(&pid_identity) && line.contains(reason))
+            .count()
+    };
+    let baseline_output = std::process::Command::new("pmset")
+        .args(["-g", "assertions"])
+        .output()
+        .expect("baseline pmset -g assertions should run on macOS");
+    assert!(
+        baseline_output.status.success(),
+        "baseline pmset should succeed"
+    );
+    let baseline = assertion_count(&baseline_output.stdout);
+
     {
         let _streaming = StreamingGuard::new("session_power");
 
@@ -2349,10 +2366,10 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
             .output()
             .expect("pmset -g assertions should run on macOS");
         assert!(output.status.success(), "pmset should succeed");
-        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout.contains(reason),
-            "pmset output should show the streaming assertion; output was:\n{stdout}"
+            assertion_count(&output.stdout) > baseline,
+            "pmset should show an added current-process streaming assertion; output was:\n{}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
 
@@ -2360,10 +2377,12 @@ fn streaming_guard_creates_visible_macos_sleep_assertion() {
         .args(["-g", "assertions"])
         .output()
         .expect("pmset -g assertions should run on macOS");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !stdout.contains(reason),
-        "streaming assertion should be released after guard drop; output was:\n{stdout}"
+    assert!(output.status.success(), "final pmset should succeed");
+    assert_eq!(
+        assertion_count(&output.stdout),
+        baseline,
+        "current-process streaming assertion count should return to baseline; output was:\n{}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
