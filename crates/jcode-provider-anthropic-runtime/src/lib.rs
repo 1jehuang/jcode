@@ -909,6 +909,22 @@ impl AnthropicProvider {
         show_thinking: bool,
         resolved_effort: Option<&str>,
     ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
+        Self::build_reasoning_request_parts_for_budget(
+            model,
+            is_oauth,
+            show_thinking,
+            resolved_effort,
+            self.max_tokens_for(model),
+        )
+    }
+
+    fn build_reasoning_request_parts_for_budget(
+        model: &str,
+        is_oauth: bool,
+        show_thinking: bool,
+        resolved_effort: Option<&str>,
+        max_tokens: u32,
+    ) -> (Option<ApiThinking>, Option<ApiOutputConfig>, Option<f32>) {
         let always_on = jcode_provider_core::anthropic::anthropic_thinking_always_on(model);
         // On always-on models `none` means the lowest supported effort, never
         // disabled thinking. Keep progress summaries available even at low effort.
@@ -938,7 +954,7 @@ impl AnthropicProvider {
             // toggle is on.
             effort
                 .or(show_thinking.then_some("low"))
-                .and_then(|effort| Self::manual_thinking_budget(effort, self.max_tokens_for(model)))
+                .and_then(|effort| Self::manual_thinking_budget(effort, max_tokens))
                 .map(|budget_tokens| ApiThinking::Enabled { budget_tokens })
         } else {
             None
@@ -1278,6 +1294,7 @@ impl Provider for AnthropicProvider {
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
+        let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic.
         // This includes forced OAuth refresh on auth failures.
@@ -1302,6 +1319,7 @@ impl Provider for AnthropicProvider {
                 oauth_session_id,
                 model_state,
                 direct_transport,
+                retry_settings,
             )
             .await;
         });
@@ -1641,6 +1659,7 @@ impl Provider for AnthropicProvider {
         let oauth_session_id = self.oauth_session_id.clone();
         let model_state = Arc::clone(&self.model);
         let direct_transport = self.direct_transport.clone();
+        let retry_settings = reasoning_request::RetrySettings::from_provider(self);
 
         // Spawn task to handle streaming with retry logic
         tokio::spawn(async move {
@@ -1664,6 +1683,7 @@ impl Provider for AnthropicProvider {
                 oauth_session_id,
                 model_state,
                 direct_transport,
+                retry_settings,
             )
             .await;
         });
@@ -1687,6 +1707,7 @@ async fn run_stream_with_retries(
     oauth_session_id: String,
     model_state: Arc<std::sync::RwLock<String>>,
     direct_transport: DirectTransportConfig,
+    retry_settings: reasoning_request::RetrySettings,
 ) {
     let mut token = initial_token;
     let mut last_error = None;
@@ -1824,7 +1845,7 @@ async fn run_stream_with_retries(
                             ),
                         }))
                         .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
+                    retry_settings.reshape(&mut request, &fallback, is_oauth);
                     *model_state
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
@@ -1856,7 +1877,7 @@ async fn run_stream_with_retries(
                             ),
                         }))
                         .await;
-                    request.model = strip_1m_suffix(&fallback).to_string();
+                    retry_settings.reshape(&mut request, &fallback, is_oauth);
                     *model_state
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = fallback.clone();
@@ -1870,22 +1891,23 @@ async fn run_stream_with_retries(
                 // thinking capabilities that the live API does not actually
                 // accept: "adaptive thinking is not supported on this model" or
                 // "This model does not support the effort parameter."). Self-heal
-                // once by stripping the reasoning fields (and restoring an OAuth
-                // temperature, which we omit only because thinking was active)
-                // and retrying, so a stale capability table degrades gracefully
-                // instead of hard-failing.
+                // once by stripping optional reasoning fields. Always-on models
+                // only drop effort, preserving summarized adaptive thinking and
+                // binding controls. If those fields are rejected too, surface
+                // the error rather than silently changing conversation semantics.
                 if (request.thinking.is_some() || request.output_config.is_some())
                     && !saw_output
                     && is_reasoning_unsupported_error(&error_str)
+                    && reasoning_request::recover_rejected_reasoning(
+                        &mut request,
+                        &model_name,
+                        is_oauth,
+                    )
                 {
                     jcode_base::logging::warn(&format!(
-                        "Anthropic model '{}' rejected the reasoning request ({}); retrying without thinking/effort",
+                        "Anthropic model '{}' rejected the reasoning request ({}); retrying with compatible reasoning fields",
                         model_name, e
                     ));
-                    request.thinking = None;
-                    request.output_config = None;
-                    request.temperature =
-                        reasoning_request::fallback_temperature(&model_name, is_oauth);
                     last_error = Some(e);
                     continue;
                 }
