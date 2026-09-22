@@ -387,6 +387,16 @@ impl Session {
         // id find no file and silently treat the session as missing.
         // Parent linkage is also explicit state: an empty fork carries only a
         // hidden fork notice but must be loadable when its new client attaches.
+        // The debug and canary flags are explicit state by the same argument
+        // (#1339): `create_headless_session` sets them on a session that has no
+        // messages, title or parent yet, and `Agent::set_debug` saves
+        // immediately, so skipping the write here drops the flag silently - the
+        // save returns `Ok(())`, nothing is logged, and a later load-by-id fails
+        // with ENOENT.
+        // `improve_mode` is explicit state for the same reason and reaches the
+        // same failure: a caller that sets it and saves before the first visible
+        // message gets no file, so its own load-by-id fails
+        // (`test_improve_mode_persists_in_session_file`).
         if !self.persist_state.snapshot_exists
             && !self
                 .messages
@@ -396,6 +406,9 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            && self.improve_mode.is_none()
+            && !self.is_debug
+            && !self.is_canary
         {
             return Ok(());
         }
