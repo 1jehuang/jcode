@@ -215,10 +215,13 @@ impl Provider for GrokBuildProvider {
         system: &str,
         resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        if grok_should_ignore_turn(messages) {
-            // Jcode todo-gates inject `[auto] Continue the work…` after a finished
-            // turn. Skipping them used to fall back to the last real user text
-            // and Grok would redo/restate the same result (panda 339 vs 600).
+        if grok_should_ignore_turn(messages)
+            || (!self.uses_http() && acp_tool_result_echo(messages))
+        {
+            // Todo auto-pokes and ACP tool-result echoes are not new user tasks.
+            // Replaying the previous user text made Grok redo the same command
+            // (print degrees, panda 339 vs 600). HTTP still forwards tool
+            // results because Jcode owns that tool loop.
             return Ok(skipped_auto_followup_stream());
         }
         if self.uses_http() {
@@ -703,12 +706,17 @@ async fn initialize_and_authenticate(
 
 fn resume_session_is_missing(error: &anyhow::Error) -> bool {
     let text = error.to_string();
-    text.contains("FS_NOT_FOUND")
-        || text.contains("Path not found")
-        || text.contains("No such file or directory")
+    // Only a missing Grok session folder may fall through to session/new.
+    // Authentication failures and unrelated IO (CLI binary missing, connection
+    // reset) must fail the turn instead of starting a different conversation.
+    text.contains("session/resume")
+        && (text.contains("FS_NOT_FOUND") || text.contains("Path not found"))
 }
 
 fn grok_sessions_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("GROK_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(root).join("sessions"));
+    }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".grok").join("sessions"))
 }
@@ -1670,6 +1678,27 @@ mod acp_tool_display_tests {
         assert!(resume_session_is_missing(&anyhow!(
             "Grok CLI ACP session/resume failed: Path not found.: {{\"code\":\"FS_NOT_FOUND\"}}"
         )));
+        assert!(resume_session_is_missing(&anyhow!(
+            "Grok CLI ACP session/resume failed: {{\"code\":\"FS_NOT_FOUND\"}}"
+        )));
+        assert!(
+            !resume_session_is_missing(&anyhow!(
+                "Grok CLI ACP session/resume failed: authentication failed"
+            )),
+            "auth failure must not start a new conversation"
+        );
+        assert!(
+            !resume_session_is_missing(&anyhow!(
+                "Grok CLI ACP session/resume failed: connection reset by peer"
+            )),
+            "unrelated transport failure must not start a new conversation"
+        );
+        assert!(
+            !resume_session_is_missing(&anyhow!(
+                "Failed to spawn grok: No such file or directory (os error 2)"
+            )),
+            "a missing CLI binary is not a missing session"
+        );
     }
 
     #[test]
@@ -2099,6 +2128,9 @@ fn mcp_entries_from_file(path: &Path) -> Vec<(String, Option<acp::McpServer>)> {
 }
 
 fn build_prompt(messages: &[Message], resumed: bool) -> Result<String> {
+    if acp_tool_result_echo(messages) {
+        bail!("ACP tool result is not a new user task");
+    }
     let latest_user = latest_user_text(messages)
         .ok_or_else(|| anyhow!("No user prompt found for Grok Build request"))?;
 
@@ -2165,6 +2197,21 @@ fn grok_should_ignore_turn(messages: &[Message]) -> bool {
                 .to_ascii_lowercase()
                 .contains("do not reply or wait for the user")
     })
+}
+
+/// Latest user message is only an ACP `tool_result`, with no new instructions.
+fn acp_tool_result_echo(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .is_some_and(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, JcodeContentBlock::ToolResult { .. }))
+                && user_plain_text(message).is_empty()
+        })
 }
 
 fn user_plain_text(message: &Message) -> String {
@@ -2393,8 +2440,22 @@ mod tests {
                 tool_duration_ms: None,
             },
         ];
-        let prompt = build_prompt(&messages, true).unwrap();
-        assert_eq!(prompt, "print degrees");
+        assert!(
+            acp_tool_result_echo(&messages),
+            "a tool_result with no new user text must not be a prompt"
+        );
+        let error = build_prompt(&messages, true).unwrap_err();
+        let detail = format!("{error:#}");
+        assert!(
+            !detail.contains("print degrees"),
+            "tool completion must not replay the last task: {detail}"
+        );
+        let continued = [messages, vec![Message::user("what is the temperature now")]].concat();
+        assert!(!acp_tool_result_echo(&continued));
+        assert_eq!(
+            build_prompt(&continued, true).unwrap(),
+            "what is the temperature now"
+        );
     }
 
     #[test]

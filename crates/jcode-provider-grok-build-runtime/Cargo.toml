@@ -2,7 +2,7 @@
 name = "jcode-provider-grok-build-runtime"
 version = "0.1.0"
 edition = "2024"
-description = "Grok Build subscription runtime for jcode over the Grok CLI ACP stdio transport"
+description = "Grok Build subscription runtime. OIDC chat uses the CLI HTTP proxy with Jcode-owned tools. Otherwise the Grok CLI ACP stdio backend is used."
 
 [lib]
 name = "jcode_provider_grok_build_runtime"

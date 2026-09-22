@@ -23,6 +23,41 @@ fn response(id: Value, result: Value) {
     send(json!({"jsonrpc":"2.0", "id":id, "result":result}));
 }
 
+fn tool_update(
+    session_update: &str,
+    id: &str,
+    status: &str,
+    old: &str,
+    new: &str,
+    path: Option<&str>,
+) -> Value {
+    json!({
+        "jsonrpc":"2.0",
+        "method":"session/update",
+        "params":{
+            "sessionId":"fake-session-new",
+            "update":{
+                "sessionUpdate": session_update,
+                "toolCallId": id,
+                "status": status,
+                "title": "search_replace",
+                "rawInput":{
+                    "file_path": path.unwrap_or("src/lib.rs"),
+                    "old_string": old,
+                    "new_string": new
+                },
+                "_meta":{
+                    "x.ai/tool":{
+                        "name":"search_replace",
+                        "kind":"edit",
+                        "label":"Edit"
+                    }
+                }
+            }
+        }
+    })
+}
+
 fn main() {
     let stdin = std::io::stdin();
     for line in BufReader::new(stdin.lock()).lines() {
@@ -73,18 +108,44 @@ fn main() {
                     }
                 }),
             ),
-            "session/resume" => response(
-                id,
-                json!({
-                    "models": {
-                        "currentModelId":"grok-code-fast-1",
-                        "availableModels":[
-                            {"modelId":"grok-4.5", "name":"Grok 4.5"},
-                            {"modelId":"grok-code-fast-1", "name":"Grok Code Fast"}
-                        ]
-                    }
-                }),
-            ),
+            "session/resume" => {
+                if let Ok(kind) = std::env::var("JCODE_FAKE_GROK_ACP_RESUME_ERROR") {
+                    let error = match kind.as_str() {
+                        "missing" => json!({
+                            "code": -32000,
+                            "message": "Path not found.",
+                            "data": {
+                                "code": "FS_NOT_FOUND",
+                                "detail": "No such file or directory (os error 2)"
+                            }
+                        }),
+                        "auth" => json!({
+                            "code": -32000,
+                            "message": "authentication failed",
+                            "data": {"code": "UNAUTHENTICATED"}
+                        }),
+                        "transport" => json!({
+                            "code": -32603,
+                            "message": "connection reset by peer"
+                        }),
+                        other => panic!("unknown resume error kind: {other}"),
+                    };
+                    send(json!({"jsonrpc":"2.0", "id": id, "error": error}));
+                    continue;
+                }
+                response(
+                    id,
+                    json!({
+                        "models": {
+                            "currentModelId":"grok-code-fast-1",
+                            "availableModels":[
+                                {"modelId":"grok-4.5", "name":"Grok 4.5"},
+                                {"modelId":"grok-code-fast-1", "name":"Grok Code Fast"}
+                            ]
+                        }
+                    }),
+                );
+            }
             "session/set_model" => response(id, json!({})),
             "session/prompt" => {
                 if std::env::var_os("JCODE_FAKE_GROK_ACP_HANG").is_some() {
@@ -113,32 +174,74 @@ fn main() {
                         }
                     }
                 }));
-                if std::env::var_os("JCODE_FAKE_GROK_ACP_EDIT").is_some() {
+                if std::env::var_os("JCODE_FAKE_GROK_ACP_EDIT_STAGES").is_some() {
+                    send(tool_update(
+                        "tool_call",
+                        "edit-1",
+                        "in_progress",
+                        "fn old() {}\n",
+                        "fn mid() {}\n",
+                        None,
+                    ));
+                    send(tool_update(
+                        "tool_call_update",
+                        "edit-1",
+                        "in_progress",
+                        "fn old() {}\n",
+                        "fn new() {}\n",
+                        None,
+                    ));
+                    send(tool_update(
+                        "tool_call_update",
+                        "edit-1",
+                        "completed",
+                        "fn old() {}\n",
+                        "fn new() {}\n",
+                        None,
+                    ));
+                } else if std::env::var_os("JCODE_FAKE_GROK_ACP_EDIT_FAIL").is_some() {
+                    send(tool_update(
+                        "tool_call",
+                        "edit-fail",
+                        "in_progress",
+                        "fn old() {}\n",
+                        "fn new() {}\n",
+                        None,
+                    ));
                     send(json!({
                         "jsonrpc":"2.0",
                         "method":"session/update",
                         "params":{
                             "sessionId":"fake-session-new",
                             "update":{
-                                "sessionUpdate":"tool_call",
-                                "toolCallId":"edit-1",
-                                "status":"completed",
-                                "title":"search_replace",
-                                "rawInput":{
-                                    "file_path":"src/lib.rs",
-                                    "old_string":"fn old() {}\n",
-                                    "new_string":"fn new() {}\n"
-                                },
-                                "_meta":{
-                                    "x.ai/tool":{
-                                        "name":"search_replace",
-                                        "kind":"edit",
-                                        "label":"Edit"
-                                    }
-                                }
+                                "sessionUpdate":"tool_call_update",
+                                "toolCallId":"edit-fail",
+                                "status":"failed",
+                                "content":[{
+                                    "type":"content",
+                                    "content":{"type":"text", "text":"write failed"}
+                                }]
                             }
                         }
                     }));
+                } else if std::env::var_os("JCODE_FAKE_GROK_ACP_WRITE").is_some() {
+                    send(tool_update(
+                        "tool_call",
+                        "write-1",
+                        "completed",
+                        "",
+                        "fn created() {}\n",
+                        Some("src/new.rs"),
+                    ));
+                } else if std::env::var_os("JCODE_FAKE_GROK_ACP_EDIT").is_some() {
+                    send(tool_update(
+                        "tool_call",
+                        "edit-1",
+                        "completed",
+                        "fn old() {}\n",
+                        "fn new() {}\n",
+                        None,
+                    ));
                 }
                 send(json!({
                     "jsonrpc":"2.0",

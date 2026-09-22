@@ -550,10 +550,13 @@ mod tests {
             Some(500_000)
         );
         assert_eq!(context_limit_for_model("grok-4.5"), Some(500_000));
+        assert_eq!(context_limit_for_model("grok-4-6"), Some(500_000));
         assert_eq!(
-            context_limit_for_model("grok-code-fast-1"),
-            Some(256_000)
+            context_limit_for_model("grok-build:grok-4.5"),
+            Some(500_000)
         );
+        assert_eq!(context_limit_for_model("grok-code-fast-1"), Some(256_000));
+        assert_eq!(context_limit_for_model("grok-build-0.1"), Some(256_000));
     }
 
     #[test]
