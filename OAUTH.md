@@ -55,6 +55,26 @@ Credential discovery order is:
 jcode owns the full runtime path itself: auth, refresh, request shaping, tool
 compatibility, and transport.
 
+#### Anthropic API-key setup
+
+The direct API-key route is separate from both a Claude subscription login and
+OpenRouter. In the TUI, run `/login anthropic-api` and enter your key in the
+login prompt, not in an agent message. The CLI equivalent is
+`jcode login --provider anthropic-api`. You can also configure
+`ANTHROPIC_API_KEY` in the process environment. Login persists the key in
+`anthropic.env` inside jcode's configuration directory.
+
+To explicitly select the direct API route, use
+`/model claude-api:claude-opus-5-5`. The Claude subscription route uses
+`claude-oauth:` instead. These route prefixes avoid accidentally selecting an
+OpenRouter entry for the same model.
+
+Configured direct Anthropic routes discover models from Anthropic's Models API.
+New releases do not require a bundled-list update once the authenticated catalog
+advertises them. API-key and OAuth availability can differ, so a model advertised
+for one route does not establish access on the other. Without credentials, jcode
+can only show its bundled fallback list, not verify account availability.
+
 #### Claude OAuth direct API compatibility
 Claude Code OAuth tokens can be used directly against the Messages API, but only
 if the request matches the Claude Code "OAuth contract". jcode applies this
