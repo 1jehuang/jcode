@@ -1872,6 +1872,13 @@ fn anthropic_fallback_honors_server_recommendation() {
         "claude-opus-4-8"
     );
 
+    let opus_55 = anthropic_recommended_model_from_error("please use opus 5.5. learn more")
+        .expect("decimal release recommendation should resolve");
+    assert_eq!(
+        AnthropicProvider::normalized_model_key(&opus_55),
+        "claude-opus-5-5"
+    );
+
     // A recommendation pointing at a retired model is ignored (falls through to
     // quality ranking).
     let retired_rec = "model x not available. please use mythos 1.";
