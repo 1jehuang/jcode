@@ -489,11 +489,8 @@ impl App {
         }
     }
 
-    /// Advance the drag edge autoscroll by exactly one line, via the same
-    /// per-line primitive the wheel uses. The drag's rate is the tick cadence
-    /// (`REDRAW_COPY_AUTOSCROLL` in `redraw_schedule`), so it must not go through
-    /// `enqueue_mouse_scroll`, which infers a "flick" from tick timing and glides
-    /// afterwards via its momentum queue.
+    /// Step the drag edge autoscroll by exactly one line. The drag's rate is the
+    /// `REDRAW_COPY_AUTOSCROLL` tick, so this must not use the wheel's queue.
     fn step_copy_selection_scroll(
         &mut self,
         pane: crate::tui::CopySelectionPane,

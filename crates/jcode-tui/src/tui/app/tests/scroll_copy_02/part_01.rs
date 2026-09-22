@@ -1064,7 +1064,7 @@ fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
     let interval = crate::tui::redraw_interval_with_policy(&app, &crate::perf::tui_policy());
     assert_eq!(
         interval,
-        crate::tui::REDRAW_COPY_AUTOSCROLL,
+        crate::tui::redraw_schedule::REDRAW_COPY_AUTOSCROLL,
         "drag-edge autoscroll must pin the tick to its own cadence"
     );
 
