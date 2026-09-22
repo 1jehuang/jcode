@@ -22,8 +22,8 @@ pub fn canonical_tool_name(name: &str) -> &str {
     match name {
         "communicate" => "swarm",
         "discover_tools" => "integration_tools",
-        "Write" => "write",
-        "Edit" => "edit",
+        "Write" | "file_write" => "write",
+        "Edit" | "file_edit" | "search_replace" | "str_replace" | "StrReplace" => "edit",
         "MultiEdit" => "multiedit",
         "Patch" => "patch",
         "ApplyPatch" => "apply_patch",
@@ -206,6 +206,10 @@ mod tests {
         assert_eq!(canonical_tool_name("ApplyPatch"), "apply_patch");
         assert!(is_edit_tool_name("MultiEdit"));
         assert!(!is_edit_tool_name("read"));
+        assert_eq!(canonical_tool_name("search_replace"), "edit");
+        assert!(is_edit_tool_name("search_replace"));
+        assert!(is_edit_tool_name("str_replace"));
+        assert!(is_edit_tool_name("file_edit"));
     }
 
     #[test]
