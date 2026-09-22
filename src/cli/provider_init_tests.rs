@@ -1027,6 +1027,22 @@ async fn auto_provider_noninteractive_skips_untrusted_external_auth_instead_of_b
         "auto mode should skip untrusted external auth, not fail with the consent prompt error: {message}"
     );
 
+    // Production `serve` must bind before Desktop can sign in, without a
+    // launcher-specific deferred-auth environment variable.
+    let daemon_provider = init_provider_for_serve(&ProviderChoice::Auto, None)
+        .await
+        .expect("credential-free daemon should support onboarding");
+    let request_error = match daemon_provider.complete(&[], &[], "test", None).await {
+        Ok(_) => panic!("model work must not succeed without credentials"),
+        Err(err) => err.to_string(),
+    };
+    assert!(request_error.contains("not configured"), "{request_error}");
+    assert!(request_error.contains("/login"), "{request_error}");
+
+    // Serve opts in locally, rather than leaking a process-wide exemption.
+    assert!(std::env::var_os("JCODE_DEFERRED_AUTH_BOOTSTRAP").is_none());
+    assert!(init_provider(&ProviderChoice::Auto, None).await.is_err());
+
     for (key, value) in saved {
         if let Some(value) = value {
             crate::env::set_var(&key, value);
