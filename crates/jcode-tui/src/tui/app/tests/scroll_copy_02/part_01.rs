@@ -1007,6 +1007,99 @@ fn test_copy_selection_drag_to_top_edge_auto_scrolls_chat() {
 }
 
 #[test]
+fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
+    // Regression for issue #1332: the drag-edge autoscroll used to be driven
+    // through the mouse-wheel momentum path. Every tick looked like a hard
+    // flick, so the queue saturated and the view scrolled ~3 lines/frame
+    // (~180 lines/s), then kept gliding after release while the leftover queue
+    // drained. It must move exactly one line per tick and stop dead on release.
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    let lines = (1..=200)
+        .map(|idx| format!("line {idx:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.display_messages = vec![DisplayMessage {
+        role: "assistant".to_string(),
+        content: lines,
+        tool_calls: vec![],
+        duration_secs: None,
+        title: None,
+        tool_data: None,
+    }];
+    app.bump_display_messages_version();
+    app.scroll_offset = 0;
+    app.auto_scroll_paused = false;
+    app.is_processing = false;
+    app.streaming.streaming_text.clear();
+    app.status = ProcessingStatus::Idle;
+
+    let backend = ratatui::backend::TestBackend::new(60, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create test terminal");
+    render_and_snap(&app, &mut terminal);
+
+    app.handle_key(KeyCode::Char('y'), KeyModifiers::ALT)
+        .unwrap();
+
+    let layout = crate::tui::ui::last_layout_snapshot().expect("layout snapshot");
+    let area = layout.messages_area;
+    let col = area.x + 1;
+
+    // Anchor mid-viewport, then drag onto the top boundary row.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row: area.y + area.height / 2,
+        modifiers: KeyModifiers::empty(),
+    });
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: col,
+        row: area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+
+    // The rate must follow the tick cadence, not the display refresh rate.
+    let interval = crate::tui::redraw_interval_with_policy(&app, &crate::perf::tui_policy());
+    assert_eq!(
+        interval,
+        crate::tui::REDRAW_COPY_AUTOSCROLL,
+        "drag-edge autoscroll must pin the tick to its own cadence"
+    );
+
+    // Held-still ticks move exactly one line each: never a velocity-scaled
+    // wheel notch (~3 lines/frame before the fix), and never accelerating.
+    for tick in 0..5 {
+        let before = app.scroll_offset();
+        assert!(app.progress_copy_selection_edge_autoscroll());
+        assert_eq!(
+            before.saturating_sub(app.scroll_offset()),
+            1,
+            "held tick {tick} must move exactly one line"
+        );
+    }
+
+    // Release: the autoscroll stops and nothing glides afterwards.
+    app.handle_mouse_event(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: col,
+        row: area.y,
+        modifiers: KeyModifiers::empty(),
+    });
+    assert!(!app.progress_copy_selection_edge_autoscroll());
+    let settled = app.scroll_offset();
+    for _ in 0..10 {
+        assert!(!app.progress_copy_selection_edge_autoscroll());
+    }
+    assert_eq!(
+        app.scroll_offset(),
+        settled,
+        "the view must not drift after release (no momentum glide)"
+    );
+}
+
+#[test]
 fn test_copy_selection_drag_near_top_edge_keeps_auto_scrolling() {
     // Regression: holding the cursor *near* (not exactly on) the top boundary
     // row used to fall outside the edge trigger, which disarmed the continuous
