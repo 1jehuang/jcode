@@ -75,21 +75,7 @@ pub fn apply_oauth_attribution_headers(
 }
 
 /// Available models
-pub const AVAILABLE_MODELS: &[&str] = &[
-    "claude-opus-5",
-    "claude-fable-5-1",
-    "claude-fable-5",
-    "claude-opus-4-8",
-    "claude-opus-4-6",
-    "claude-opus-4-6[1m]",
-    "claude-sonnet-5",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-6[1m]",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-20250514",
-];
+pub const AVAILABLE_MODELS: &[&str] = jcode_provider_core::ALL_CLAUDE_MODELS;
 
 pub fn load_anthropic_api_key() -> Result<String> {
     if std::env::var("JCODE_ANTHROPIC_AUTH")
