@@ -1137,8 +1137,8 @@ mod tests {
         let offered: Vec<_> = (0..20)
             .map(|index| SessionCandidate {
                 id: format!("private-session-{index}"),
-                title: format!("Conversation {index}"),
-                working_dir: None,
+                title: format!("Investigate voice routing request budgets and preserve classification safety for recent conversation {index}: compare candidate metadata, JSON escaping, provider transport limits, and regression coverage"),
+                working_dir: Some(r#"C:\Users\example\projects\jcode\"voice routing""#.into()),
             })
             .collect();
         let transcript = "Open conversation 19";
@@ -1207,7 +1207,12 @@ mod tests {
                 let bodies: Vec<Value> = requests
                     .iter()
                     .filter(|r| r.starts_with("POST "))
-                    .map(|r| serde_json::from_str(r.split_once("\r\n\r\n").unwrap().1).unwrap())
+                    .map(|r| {
+                        let wire = r.split_once("\r\n\r\n").unwrap().1;
+                        assert!(wire.len() <= MAX_REQUEST_BYTES);
+                        assert!(wire.len() < 32 * 1024, "voice batch bytes: {}", wire.len());
+                        serde_json::from_str(wire).unwrap()
+                    })
                     .collect();
                 assert_eq!(bodies.len(), 2);
                 assert_eq!(bodies[0]["state"], bodies[1]["state"]);
@@ -1218,6 +1223,22 @@ mod tests {
                 };
                 assert_eq!(state["candidates"].as_object().unwrap().len(), 20);
                 assert_eq!(state["transcript"], transcript);
+                assert!(
+                    state["policy"]
+                        .as_str()
+                        .unwrap()
+                        .contains("untrusted evidence")
+                );
+                for (index, candidate) in offered.iter().enumerate() {
+                    assert_eq!(
+                        state["candidates"][format!("candidate_{index}")]["title"],
+                        candidate.title
+                    );
+                    assert_eq!(
+                        state["candidates"][format!("candidate_{index}")]["working_dir"],
+                        candidate.working_dir.as_deref().unwrap()
+                    );
+                }
                 assert!(!state.to_string().contains("private-session"));
                 for (body, expected) in bodies.iter().zip(questions.chunks(MAX_QUESTIONS)) {
                     let sent = body["questions"].as_object().unwrap();
