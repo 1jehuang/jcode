@@ -1410,12 +1410,20 @@ mod tests {
 
     #[test]
     fn simplified_anthropic_routes_preserve_oauth_vs_api_key_state_space() {
-        for (has_oauth, has_api_key, expected_methods) in [
-            (true, false, vec!["claude-oauth"]),
-            (false, true, vec!["claude-api"]),
-            (true, true, vec!["claude-oauth", "claude-api"]),
-            (false, false, vec!["claude-oauth"]),
+        let mut guard = EnvGuard::new();
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "JCODE_ANTHROPIC_AUTH",
+            "JCODE_ANTHROPIC_API_KEY_NAME",
+            "JCODE_ANTHROPIC_ENV_FILE",
         ] {
+            guard.vars.push((key, std::env::var_os(key)));
+            crate::env::remove_var(key);
+        }
+        super::super::models::reset_model_catalog_services_for_tests();
+        for (has_oauth, has_api_key) in [(true, false), (false, true), (true, true), (false, false)]
+        {
             let auth = AuthStatus {
                 anthropic: ProviderAuth {
                     state: if has_oauth || has_api_key {
@@ -1437,7 +1445,9 @@ mod tests {
 
             append_simplified_anthropic_model_routes(
                 &mut routes,
-                "claude-opus-4-6".to_string(),
+                // Test credential state independently of Opus subscription
+                // policy and optional long-context extra-usage requirements.
+                "claude-sonnet-4-6".to_string(),
                 &auth,
             );
 
@@ -1446,15 +1456,23 @@ mod tests {
                 .map(|route| route.api_method.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(
-                methods, expected_methods,
+                methods,
+                vec!["claude-api", "claude-oauth"],
                 "oauth={has_oauth} api={has_api_key}"
             );
             assert!(routes.iter().all(|route| route.provider == "Anthropic"));
+            assert_eq!(routes[0].available, has_api_key);
+            assert_eq!(routes[1].available, has_oauth);
             assert_eq!(
-                routes.iter().all(|route| route.available),
-                has_oauth || has_api_key
+                routes[0].detail,
+                if has_api_key { "" } else { "no API key" }
+            );
+            assert_eq!(
+                routes[1].detail,
+                if has_oauth { "" } else { "no Claude login" }
             );
         }
+        super::super::models::reset_model_catalog_services_for_tests();
     }
 
     /// Issue #694 through the real path a user hits: a custom
