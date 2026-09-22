@@ -6,12 +6,13 @@
 //!    (`user_color()`, `ai_color()`, ...).
 //! 2. Hundreds of ad hoc `rgb(r, g, b)` literals scattered across widgets.
 //!
-//! Both funnel through this module. Roles resolve against the active
-//! [`Palette`], and every literal passes through [`remap_literal`], which
-//! snaps a literal onto the nearest configured role color when the user has
-//! overridden it. That makes *every* color in the TUI configurable without
-//! touching each of the ~250 distinct literal call sites, while an unconfigured
-//! palette is byte-identical to the historical hard-coded look.
+//! Both funnel through this module. Once per frame,
+//! [`crate::theme_mode::adapt_buffer_for_display`] rewrites any buffer color
+//! that is exactly a role's default onto that role's configured color, and maps
+//! ratatui's named colors to the role they conventionally stand for. Ad hoc
+//! `rgb(...)` literals carry no role, so they are not configurable: give a shade
+//! a role if it needs to follow `/colors`. An unconfigured palette is
+//! byte-identical to the historical hard-coded look.
 //!
 //! Configuration lives in `~/.jcode/config.toml`:
 //!
@@ -294,7 +295,7 @@ pub fn to_hex((r, g, b): (u8, u8, u8)) -> String {
 
 static ACTIVE: RwLock<Option<Palette>> = RwLock::new(None);
 
-/// Lock-free fast path for `remap_literal`, which sits on the per-cell render
+/// Lock-free fast path for the per-cell substitution, which sits on the render
 /// hot path. Palettes without overrides (the default) must not pay a lock.
 static HAS_OVERRIDES: AtomicBool = AtomicBool::new(false);
 
@@ -334,8 +335,13 @@ pub(crate) fn configured_palette() -> Option<Palette> {
 
 /// Resolve an override from the original, native-palette color, before light
 /// contrast repair can collapse two distinct muted roles to the same ink.
+///
+/// A color is attributed only when it *is* a role's default (or a named color
+/// with a role), so an override can never recolor a color some other role
+/// carries. Ad hoc `rgb(...)` literals are unattributed and returned as-is:
+/// give a shade a role if it should follow `/colors`.
 pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option<Color> {
-    let source = match color {
+    let rgb = match color {
         Color::Reset => return None,
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(index) => crate::color::indexed_to_rgb(index),
@@ -344,8 +350,13 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
             return (mapped != named).then_some(mapped);
         }
     };
-    remap_literal_using(palette, source, Role::default_rgb)
-        .map(|(r, g, b)| crate::color::rgb(r, g, b))
+    // Only the role whose own default this is may claim it.
+    let role = ALL_ROLES
+        .iter()
+        .copied()
+        .find(|role| role.default_rgb() == rgb && palette.is_overridden(*role))?;
+    let (r, g, b) = palette.rgb(role);
+    Some(crate::color::rgb(r, g, b))
 }
 
 /// Resolve a role to a renderable color.
@@ -361,97 +372,13 @@ pub fn role_color(role: Role) -> Color {
     crate::color::rgb(r, g, b)
 }
 
-/// Apply the configured palette to a fully rendered frame buffer.
-///
-/// Every color in the TUI reaches the terminal through a buffer cell, so
-/// rewriting cells here makes *all* colors configurable, including the
-/// hundreds of ad hoc `rgb(...)` literals and ratatui's named colors, without
-/// editing each call site. No-op when nothing is configured.
-///
-/// Legacy palette-only adapter for colors that have only had their luminance
-/// flipped. Role defaults are pre-flipped the same way before comparison.
-///
-/// Production rendering should use
-/// [`crate::theme_mode::adapt_buffer_for_display`] instead. It attributes roles
-/// from native colors before contrast repair can collapse distinct muted colors
-/// to the same output, and preserves explicit user colors without inversion.
-pub fn adapt_buffer_for_palette(buf: &mut ratatui::buffer::Buffer) {
-    if !HAS_OVERRIDES.load(Ordering::Relaxed) {
-        return;
-    }
-    let palette = palette();
-    // A frame holds few distinct colors; memoize the substitution per color.
-    let mut cache: std::collections::HashMap<Color, Color> = std::collections::HashMap::new();
-    let mut adapt = |color: Color| -> Color {
-        if color == Color::Reset {
-            return color;
-        }
-        *cache
-            .entry(color)
-            .or_insert_with(|| adapt_color(&palette, color))
-    };
-    for cell in buf.content.iter_mut() {
-        cell.fg = adapt(cell.fg);
-        cell.bg = adapt(cell.bg);
-        cell.underline_color = adapt(cell.underline_color);
-    }
-}
-
-/// The RGB a role's default renders as in the *current* theme.
-///
-/// Literals arriving at substitution have already been through the light-theme
-/// flip, so they must be matched against equally flipped defaults. On dark
-/// themes this is the identity.
-fn match_target(role: Role) -> (u8, u8, u8) {
-    let (r, g, b) = role.default_rgb();
-    match crate::theme_mode::adapt_color_for_theme(Color::Rgb(r, g, b)) {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(index) => crate::color::indexed_to_rgb(index),
-        _ => (r, g, b),
-    }
-}
-
-/// Substitute one rendered color using `palette`.
-pub fn adapt_color(palette: &Palette, color: Color) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => {
-            let (r, g, b) = remap_literal_with(palette, (r, g, b));
-            crate::color::rgb(r, g, b)
-        }
-        Color::Indexed(index) => {
-            // 256-color terminals: map through the same logic in RGB space.
-            let (r, g, b) = remap_literal_with(palette, crate::color::indexed_to_rgb(index));
-            crate::color::rgb(r, g, b)
-        }
-        named => remap_named_with(palette, named),
-    }
-}
-
-/// Remap an ad hoc literal color onto the configured palette.
-///
-/// Widgets call `rgb(...)` with hundreds of one-off shades. When the user
-/// overrides a role, any literal that sits perceptually near that role's
-/// *default* is re-expressed relative to the new role color, preserving the
-/// literal's own lightness offset (so a "dimmer variant of the warning color"
-/// stays a dimmer variant). Literals far from every overridden role are left
-/// untouched.
-///
-/// With no overrides this is the identity function.
-#[inline]
-pub fn remap_literal(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
-    if !HAS_OVERRIDES.load(Ordering::Relaxed) {
-        return rgb;
-    }
-    remap_literal_with(&palette(), rgb)
-}
-
 /// Map a terminal-named color (`Color::White`, `Color::Red`, ...) onto the
 /// configured palette.
 ///
-/// Widgets also use ratatui's named colors, which carry no RGB literal for
-/// `remap_literal` to catch. Named colors are mapped to the semantic role they
-/// conventionally stand for, and left untouched when that role is not
-/// configured, so default behavior is unchanged.
+/// Widgets also use ratatui's named colors, which carry no RGB for literal
+/// matching. Named colors are mapped to the semantic role they conventionally
+/// stand for, and left untouched when that role is not configured, so default
+/// behavior is unchanged.
 pub fn remap_named_with(palette: &Palette, color: Color) -> Color {
     let role = match color {
         Color::Red | Color::LightRed => Role::Error,
@@ -475,18 +402,18 @@ pub fn remap_named_with(palette: &Palette, color: Color) -> Color {
     crate::color::rgb(r, g, b)
 }
 
-/// Maximum perceptual distance (in oklab units) at which a literal is
-/// considered "an instance of" a role color. Roughly a same-hue family match;
-/// beyond this the literal is a genuinely different color and is left alone.
+/// Maximum perceptual distance (in oklab units) at which a rendered color is
+/// considered "an instance of" a role color, for the measurement helper
+/// [`role_for_rendered`]. Roughly a same-hue family match.
 const FAMILY_RADIUS: f32 = 0.16;
 
 /// Which role a rendered color belongs to, if any.
 ///
-/// This is the same family match [`remap_literal_with`] uses, exposed so tooling
-/// can attribute *rendered frames* back to roles. Measuring which roles actually
-/// cover and touch each other on screen is what
-/// [`crate::harmony::graph`] needs, and hard-coding that layout by hand would
-/// encode an assumption about the UI instead of an observation of it.
+/// Measurement only, for tooling that attributes *rendered frames* back to
+/// roles. Measuring which roles actually cover and touch each other on screen is
+/// what [`crate::harmony::graph`] needs, and hard-coding that layout by hand
+/// would encode an assumption about the UI instead of an observation of it. It
+/// is not on the render path and never applies an override.
 pub fn role_for_rendered(color: Color) -> Option<Role> {
     let rgb = match color {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -502,47 +429,6 @@ pub fn role_for_rendered(color: Color) -> Option<Role> {
         }
     }
     best.map(|(_, role)| role)
-}
-
-/// Palette-explicit variant of [`remap_literal`], for tests and tooling.
-pub fn remap_literal_with(palette: &Palette, rgb: (u8, u8, u8)) -> (u8, u8, u8) {
-    remap_literal_using(palette, rgb, match_target).unwrap_or(rgb)
-}
-
-fn remap_literal_using(
-    palette: &Palette,
-    rgb: (u8, u8, u8),
-    target_default: fn(Role) -> (u8, u8, u8),
-) -> Option<(u8, u8, u8)> {
-    let source = crate::harmony::Oklab::from_rgb(rgb);
-    let mut best: Option<(f32, Role)> = None;
-    for role in ALL_ROLES.iter().copied() {
-        if !palette.is_overridden(role) {
-            continue;
-        }
-        let default = crate::harmony::Oklab::from_rgb(target_default(role));
-        let distance = source.distance(default);
-        if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
-            best = Some((distance, role));
-        }
-    }
-
-    let (_, role) = best?;
-
-    // Re-express the literal relative to the new role color, keeping its
-    // lightness/chroma offset from the role default. The configured color is
-    // used exactly as given: the user picked it for their own terminal, so it
-    // must not be luminance-flipped.
-    let default = crate::harmony::Oklab::from_rgb(target_default(role));
-    let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
-    Some(
-        crate::harmony::Oklab {
-            l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
-            a: target.a + (source.a - default.a),
-            b: target.b + (source.b - default.b),
-        }
-        .to_rgb(),
-    )
 }
 
 #[cfg(test)]
@@ -590,41 +476,29 @@ mod tests {
         assert!(!palette.has_overrides());
     }
 
+    /// The contract, in one place: only a color that *is* a role's default is
+    /// attributed to that role. Ad hoc shades carry no role and are left alone,
+    /// which is the trade this design makes: configurable means role-tagged.
     #[test]
-    fn unconfigured_palette_leaves_literals_untouched() {
-        let palette = Palette::default();
-        for literal in [(255, 200, 100), (35, 40, 50), (7, 7, 7)] {
-            assert_eq!(remap_literal_with(&palette, literal), literal);
-        }
-    }
-
-    #[test]
-    fn overriding_a_role_retargets_nearby_literals() {
+    fn only_exact_role_defaults_follow_an_override() {
         let mut palette = Palette::default();
-        // Make the warning role green instead of amber.
         palette.set(Role::Warning, (80, 220, 120));
-        // A literal that *is* the warning default should land on the new color.
-        let remapped = remap_literal_with(&palette, Role::Warning.default_rgb());
-        assert_eq!(remapped, (80, 220, 120));
-
-        // A near-variant of amber should also move toward green, keeping its
-        // relative darkness.
-        let variant = (200, 150, 70);
-        let moved = remap_literal_with(&palette, variant);
-        assert_ne!(moved, variant, "amber variant should follow the role");
-        assert!(
-            moved.1 > moved.0,
-            "retargeted variant should be green-dominant, got {moved:?}"
+        let (r, g, b) = Role::Warning.default_rgb();
+        assert_eq!(
+            configured_native_color(&palette, Color::Rgb(r, g, b)),
+            Some(crate::color::rgb(80, 220, 120))
         );
-    }
-
-    #[test]
-    fn distant_literals_are_not_captured_by_an_override() {
-        let mut palette = Palette::default();
-        palette.set(Role::Warning, (80, 220, 120));
-        // A blue is nowhere near amber and must be left alone.
-        let blue = (60, 90, 220);
-        assert_eq!(remap_literal_with(&palette, blue), blue);
+        // An amber shade near the warning default is a plain literal, not the role.
+        assert_eq!(
+            configured_native_color(&palette, Color::Rgb(200, 150, 70)),
+            None
+        );
+        // An unconfigured palette attributes nothing, so the default frame is
+        // untouched.
+        assert_eq!(
+            configured_native_color(&Palette::default(), Color::Rgb(r, g, b)),
+            None
+        );
     }
 
     #[test]
@@ -643,6 +517,7 @@ mod tests {
 #[cfg(test)]
 mod buffer_tests {
     use super::*;
+    use crate::theme_mode::{ThemeMode, adapt_buffer_for_display};
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -679,6 +554,7 @@ mod buffer_tests {
     #[test]
     fn default_palette_leaves_the_frame_untouched() {
         with_palette(Palette::default(), || {
+            crate::theme_mode::set_theme_mode(ThemeMode::Dark);
             let original = buffer_with(&[
                 Color::Rgb(255, 200, 100),
                 Color::White,
@@ -686,56 +562,48 @@ mod buffer_tests {
                 Color::Reset,
             ]);
             let mut adapted = original.clone();
-            adapt_buffer_for_palette(&mut adapted);
+            adapt_buffer_for_display(&mut adapted);
             assert_eq!(adapted, original);
         });
     }
 
     #[test]
-    fn configured_role_recolors_matching_cells_and_named_colors() {
+    fn configured_role_recolors_role_cells_and_named_colors_only() {
         let mut palette = Palette::default();
         palette.set(Role::Error, (10, 80, 240));
         with_palette(palette, || {
+            crate::theme_mode::set_theme_mode(ThemeMode::Dark);
             let mut buf = buffer_with(&[
-                Color::Rgb(255, 100, 100), // the error default
-                Color::Red,                // the named stand-in for error
-                Color::Rgb(40, 200, 90),   // unrelated green
+                role_color(Role::Error), // the role's own output
+                Color::Red,              // the named stand-in for error
+                Color::Rgb(40, 200, 90), // unrelated green, no role
                 Color::Reset,
             ]);
-            adapt_buffer_for_palette(&mut buf);
+            adapt_buffer_for_display(&mut buf);
 
-            let as_rgb = |color: Color| match color {
-                Color::Rgb(r, g, b) => (r, g, b),
-                Color::Indexed(index) => crate::color::indexed_to_rgb(index),
-                // Named colors carry no RGB; treat them as unset so a failure
-                // reports the assertion rather than a panic in the helper.
-                _ => (0, 0, 0),
-            };
-            let literal = as_rgb(buf.content[0].fg);
-            assert!(
-                literal.2 > literal.0,
-                "error literal should become blue-dominant, got {literal:?}"
-            );
-            let named = as_rgb(buf.content[1].fg);
-            assert!(
-                named.2 > named.0,
-                "Color::Red should follow the error role, got {named:?}"
+            assert_eq!(buf.content[0].fg, crate::color::rgb(10, 80, 240));
+            assert_eq!(buf.content[1].fg, crate::color::rgb(10, 80, 240));
+            assert_eq!(
+                buf.content[2].fg,
+                crate::color::rgb(40, 200, 90),
+                "an untagged literal must not follow any role"
             );
             assert_eq!(buf.content[3].fg, Color::Reset, "Reset must be preserved");
         });
     }
 
     // Applying the pass twice must be a no-op beyond the first, otherwise a
-    // double-render path would compound hue shifts.
+    // double-render path would compound shifts.
     #[test]
     fn palette_substitution_is_idempotent() {
         let mut palette = Palette::default();
         palette.set(Role::Warning, (90, 220, 130));
         with_palette(palette, || {
-            let mut once = buffer_with(&[Color::Rgb(255, 200, 100)]);
-            adapt_buffer_for_palette(&mut once);
+            crate::theme_mode::set_theme_mode(ThemeMode::Dark);
+            let mut once = buffer_with(&[role_color(Role::Warning)]);
+            adapt_buffer_for_display(&mut once);
             let mut twice = once.clone();
-            adapt_buffer_for_palette(&mut twice);
+            adapt_buffer_for_display(&mut twice);
             assert_eq!(
                 once, twice,
                 "a second palette pass must not shift colors again"
@@ -770,8 +638,8 @@ mod light_theme_interaction {
             }
         }
         let _restore = Restore;
-        // `match_target` reads the global theme mode, so set it to match the
-        // buffer pass being exercised.
+        // The buffer pass reads the global theme mode, so set it to the mode
+        // being exercised.
         crate::theme_mode::set_theme_mode(ThemeMode::Light);
 
         // A dark red: exactly what a user would pick for errors on white.
@@ -821,88 +689,6 @@ mod light_theme_interaction {
                     assert_eq!(cell.bg, crate::color::rgb(232, 235, 238));
                 }
             }
-        }
-    }
-}
-
-#[cfg(test)]
-mod coverage {
-    use super::*;
-
-    /// Every distinct `rgb(...)` literal the TUI renders, extracted from the
-    /// source at the time this test was written.
-    ///
-    /// The claim this feature makes is "every color is configurable", and that
-    /// claim is only true if each literal is actually claimed by some role.
-    /// Sampling the real literal set is the only way to check that: an
-    /// implementation can look complete while leaving whole families of shades
-    /// unreachable, and no other test in this crate would notice.
-    const TUI_LITERALS: &[(u8, u8, u8)] = &include!("palette_literals.rs");
-
-    /// Which role, if any, claims `literal` when every role is overridden.
-    fn claiming_role(literal: (u8, u8, u8)) -> Option<Role> {
-        let source = crate::harmony::Oklab::from_rgb(literal);
-        let mut best: Option<(f32, Role)> = None;
-        for role in ALL_ROLES.iter().copied() {
-            let distance = source.distance(crate::harmony::Oklab::from_rgb(role.default_rgb()));
-            if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
-                best = Some((distance, role));
-            }
-        }
-        best.map(|(_, role)| role)
-    }
-
-    #[test]
-    fn most_tui_literals_are_reachable_from_some_role() {
-        let unclaimed: Vec<(u8, u8, u8)> = TUI_LITERALS
-            .iter()
-            .copied()
-            .filter(|literal| claiming_role(*literal).is_none())
-            .collect();
-
-        let claimed = TUI_LITERALS.len() - unclaimed.len();
-        let ratio = claimed as f32 / TUI_LITERALS.len() as f32;
-        // Measured at 222/222 when written. Held at 100% rather than a softer
-        // ratio because "every color is configurable" is the literal claim: any
-        // unclaimed literal is a color a user cannot change.
-        assert!(
-            ratio >= 1.0,
-            "only {claimed}/{} literals ({:.0}%) are reachable from a role; unclaimed: {:?}",
-            TUI_LITERALS.len(),
-            ratio * 100.0,
-            unclaimed
-        );
-    }
-
-    /// Report which roles do the work, so a role that claims nothing (dead
-    /// weight) or claims everything (too coarse) is visible.
-    /// Every role must claim at least one literal the TUI really renders, and
-    /// none may claim most of them. A role that claims nothing is dead weight in
-    /// the `/colors` listing; a role that claims everything means the family
-    /// radius is too coarse to tell roles apart.
-    #[test]
-    fn no_single_role_dominates_the_literal_space() {
-        let mut counts = std::collections::BTreeMap::new();
-        for literal in TUI_LITERALS.iter().copied() {
-            if let Some(role) = claiming_role(literal) {
-                *counts.entry(role.key()).or_insert(0usize) += 1;
-            }
-        }
-        let total: usize = counts.values().sum();
-        for role in ALL_ROLES.iter().copied() {
-            assert!(
-                counts.contains_key(role.key()),
-                "{} claims no literal the TUI renders; either it is unused or its \
-                 default does not match the shades its call sites use",
-                role.key()
-            );
-        }
-        for (role, count) in &counts {
-            assert!(
-                *count * 2 <= total,
-                "{role} claims {count}/{total} literals, which means the family radius is too \
-                 coarse to distinguish roles"
-            );
         }
     }
 }
@@ -964,7 +750,6 @@ mod named_colors {
             palette.set(role, (1, 2, 3));
         }
         assert_eq!(remap_named_with(&palette, Color::Reset), Color::Reset);
-        assert_eq!(adapt_color(&palette, Color::Reset), Color::Reset);
     }
 }
 

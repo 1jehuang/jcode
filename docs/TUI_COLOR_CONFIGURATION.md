@@ -87,11 +87,12 @@ Three consequences worth knowing:
   the role's *default* color, not the configured one. If it returned the
   configured color, a cell would be remapped twice (once by the accessor, once
   by the buffer pass) and the hue/lightness offsets would compound.
-- **Ad hoc literals follow their role.** A literal within a small perceptual
-  radius of a role's default is re-expressed relative to the new role color,
-  preserving its own lightness and chroma offset. So a "slightly dimmer variant
-  of the warning color" stays a slightly dimmer variant after you recolor
-  `warning`. Literals far from every configured role are left alone.
+- **Only role-tagged colors are configurable.** A buffer color that *is* a
+  role's default is replaced by that role's configured color, and ratatui's
+  named colors map to the role they conventionally stand for. An ad hoc
+  `rgb(...)` literal carries no role, so recoloring a role leaves it alone: give
+  a shade a role if it should follow `/colors`. There is no guessing by color
+  proximity, so an override can never bleed into another role's output.
 
 - **Configured colors are used exactly as given**, on light and dark terminals
   alike, so what you put in the config is what the terminal receives.
@@ -99,23 +100,13 @@ Three consequences worth knowing:
 An unconfigured palette is a byte-identical no-op, guarded by tests, so existing
 users see no change.
 
-### Is it really *every* color?
+### Which colors are configurable?
 
-That claim is checked rather than asserted. `palette_literals.rs` holds every
-distinct `rgb(...)` literal the TUI crates render (222 of them), and a test
-requires **all** of them to be reachable from some role: an unclaimed literal is
-a color a user cannot change. A second test requires every one of the 22 roles to
-claim at least one real literal (so no role is dead weight in `/colors`) and none
-to claim more than half (so the family radius still tells roles apart). The
-current spread runs from 2 literals (`header_session`) to 28 (`warning`).
-
-Ratatui's named colors are covered separately, since they carry no RGB for
-literal matching to work with. A test enumerates every named color the TUI
-actually uses and requires each to map to a role. `Color::Black` was unreachable
-until that test existed. `Color::Reset` is deliberately never substituted: it is
-how the terminal's own background shows through.
-
-Regenerate `palette_literals.rs` when adding widgets that introduce new shades.
+Every role, plus every ratatui named color the TUI uses. Named colors are mapped
+explicitly and a test requires each used one to map to a role; `Color::Reset` is
+never substituted, since it is how the terminal's own background shows through.
+`palette_literals.rs` is a corpus for the light-contrast tests, not a
+configurability claim; regenerate it when adding widgets with new shades.
 
 ## Measuring harmony
 
