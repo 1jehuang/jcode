@@ -2714,7 +2714,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            (self.auth)?(),
+            (self.auth)()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2726,7 +2726,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            (self.auth)?(),
+            (self.auth)()?,
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2764,7 +2764,7 @@ impl OpenRouterProvider {
 
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)?
+        let response = (self.auth)()?
             .apply(self.client.get(&url))
             .await?
             .send()
@@ -2818,7 +2818,7 @@ impl OpenRouterProvider {
             .unwrap_or(0);
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = (self.auth)?
+        let response = (self.auth)()?
             .apply(self.client.get(&url))
             .await?
             .send()
