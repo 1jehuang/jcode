@@ -1424,6 +1424,7 @@ async fn wait_for_model_changed(session: &DaemonSession, request_id: u64) -> Res
                 model,
                 provider_name,
                 error,
+                ..
             } if id == request_id => {
                 if let Some(error) = error {
                     anyhow::bail!(error);

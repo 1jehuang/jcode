@@ -383,12 +383,16 @@ fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
 
 fn send_model_changed_result(
     id: u64,
-    result: anyhow::Result<(String, String)>,
+    result: anyhow::Result<(
+        String,
+        String,
+        Option<jcode_provider_core::ResolvedCredential>,
+    )>,
     fallback_model: String,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
-        Ok((updated, provider_name)) => {
+        Ok((updated, provider_name, resolved_credential)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -403,6 +407,7 @@ fn send_model_changed_result(
                 model: updated,
                 provider_name: Some(provider_name),
                 error: None,
+                resolved_credential,
             });
         }
         Err(error) => {
@@ -419,6 +424,7 @@ fn send_model_changed_result(
                 model: fallback_model,
                 provider_name: None,
                 error: Some(error.to_string()),
+                resolved_credential: None,
             });
         }
     }
@@ -437,6 +443,7 @@ fn apply_cycle_model(
             model: agent.provider_model(),
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
         });
         return;
     }
@@ -465,7 +472,13 @@ fn apply_cycle_model(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -574,6 +587,7 @@ fn apply_set_model(
             model: current,
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
         });
         return;
     }
@@ -584,7 +598,13 @@ fn apply_set_model(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -622,6 +642,7 @@ fn apply_set_route(
             model: current,
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
         });
         return;
     }
@@ -632,7 +653,13 @@ fn apply_set_route(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -1584,6 +1611,7 @@ mod tests {
                 model,
                 provider_name: Some(provider_name),
                 error: None,
+                ..
             }) if model == "test-model-b" && provider_name == "test-effort"
         ));
     }

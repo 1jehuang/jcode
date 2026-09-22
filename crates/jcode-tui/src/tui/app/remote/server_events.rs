@@ -2300,6 +2300,7 @@ pub(in crate::tui::app) fn handle_server_event(
             model,
             provider_name,
             error,
+            resolved_credential,
             ..
         } => {
             app.remote_model_switch_in_flight = false;
@@ -2328,6 +2329,9 @@ pub(in crate::tui::app) fn handle_server_event(
                 if let Some(ref pname) = provider_name {
                     app.remote_provider_name = Some(pname.clone());
                 }
+                // Always replace: a switch to a provider with no OAuth/API
+                // distinction must clear the previous route's credential too.
+                app.remote_resolved_credential = resolved_credential;
                 app.invalidate_model_picker_cache();
                 if !app.auth_catalog_refresh_pending {
                     app.push_display_message(DisplayMessage::system(format!(

@@ -1339,6 +1339,10 @@ pub enum ServerEvent {
         provider_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Credential the switched-to route will bill against (OAuth vs API
+        /// key). Lets clients update the auth badge on an OAuth<->API switch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)
