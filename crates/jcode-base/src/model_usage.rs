@@ -125,6 +125,24 @@ fn legacy() -> HashMap<RouteKey, ModelUsage> {
         .unwrap_or_default()
 }
 
+/// Recorded response-bearing turns grouped by stable authentication/runtime method.
+/// A turn using several models through one method is counted once. This read-only
+/// view never initializes tracking, reads transcripts, or exposes credential data.
+/// Errors (including absent tracking) mean usage is unknown, not measured zero.
+pub fn method_usage_counts() -> Result<HashMap<String, u64>> {
+    method_usage_counts_at(&path()?)
+}
+
+fn method_usage_counts_at(path: &Path) -> Result<HashMap<String, u64>> {
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(Duration::from_secs(2))?;
+    let mut query =
+        db.prepare("SELECT api_method, COUNT(DISTINCT turn_id) FROM turns GROUP BY api_method")?;
+    Ok(query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<HashMap<String, u64>>>()?)
+}
+
 /// Add local usage to provider-owned catalog rows. Failure leaves usage unknown,
 /// never fabricated zero. No transcript loading or historical inference occurs.
 pub fn enrich_routes(routes: &mut [ModelRoute]) {
@@ -341,5 +359,41 @@ mod tests {
             key("m", "NIM", "openai-compatible:nim"),
             key("m", "NIM", "openai-compatible:other")
         );
+    }
+}
+
+#[cfg(test)]
+mod method_usage_tests {
+    use super::*;
+
+    #[test]
+    fn method_counts_deduplicate_turns_across_models_and_keep_auth_routes_separate() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("usage.sqlite3");
+        let db = open(&path, 123).unwrap();
+        for (turn, model, method) in [
+            ("turn1", "model-a", "openai-oauth"),
+            ("turn1", "model-b", "openai-oauth"),
+            ("turn2", "model-a", "openai-oauth"),
+            ("turn1", "model-a", "openai-api-key"),
+        ] {
+            db.execute(
+                "INSERT INTO turns VALUES(?1, ?2, 'openai', ?3, 123)",
+                params![turn, model, method],
+            )
+            .unwrap();
+        }
+        let counts = method_usage_counts_at(&path).unwrap();
+        assert_eq!(counts["openai-oauth"], 2);
+        assert_eq!(counts["openai-api-key"], 1);
+        assert_eq!(counts.len(), 2);
+    }
+
+    #[test]
+    fn missing_usage_remains_unknown_and_is_not_created() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("absent.sqlite3");
+        assert!(method_usage_counts_at(&path).is_err());
+        assert!(!path.exists());
     }
 }
