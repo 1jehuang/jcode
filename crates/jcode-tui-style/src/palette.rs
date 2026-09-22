@@ -436,6 +436,9 @@ pub fn adapt_color(palette: &Palette, color: Color) -> Color {
 /// stays a dimmer variant). Literals far from every overridden role are left
 /// untouched.
 ///
+/// A literal that is exactly a role's default is that role's own output and is
+/// owned solely by it, so one override cannot recolor another role's cells.
+///
 /// With no overrides this is the identity function.
 #[inline]
 pub fn remap_literal(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
@@ -514,27 +517,42 @@ fn remap_literal_using(
     rgb: (u8, u8, u8),
     target_default: fn(Role) -> (u8, u8, u8),
 ) -> Option<(u8, u8, u8)> {
+    // A literal that is exactly a role's default *is* that role's output, so
+    // only that role's override may recolor it. Matching against only the
+    // overridden roles let a single override claim every nearby role:
+    // `/colors dim` repainted tool, border, and even backgrounds, because the
+    // roles that actually owned those colors were not candidates.
+    let owner = match ALL_ROLES
+        .iter()
+        .copied()
+        .find(|role| target_default(*role) == rgb)
+    {
+        Some(role) if palette.is_overridden(role) => role,
+        Some(_) => return None,
+        // Not a role's own output: a raw literal variant. Keep the historical
+        // nearest-overridden-role match so a dimmer amber still follows Warning.
+        None => {
+            let source = crate::harmony::Oklab::from_rgb(rgb);
+            let mut best: Option<(f32, Role)> = None;
+            for role in ALL_ROLES.iter().copied() {
+                if !palette.is_overridden(role) {
+                    continue;
+                }
+                let default = crate::harmony::Oklab::from_rgb(target_default(role));
+                let distance = source.distance(default);
+                if distance <= FAMILY_RADIUS
+                    && best.is_none_or(|(previous, _)| distance < previous)
+                {
+                    best = Some((distance, role));
+                }
+            }
+            best?.1
+        }
+    };
+
     let source = crate::harmony::Oklab::from_rgb(rgb);
-    let mut best: Option<(f32, Role)> = None;
-    for role in ALL_ROLES.iter().copied() {
-        if !palette.is_overridden(role) {
-            continue;
-        }
-        let default = crate::harmony::Oklab::from_rgb(target_default(role));
-        let distance = source.distance(default);
-        if distance <= FAMILY_RADIUS && best.is_none_or(|(previous, _)| distance < previous) {
-            best = Some((distance, role));
-        }
-    }
-
-    let (_, role) = best?;
-
-    // Re-express the literal relative to the new role color, keeping its
-    // lightness/chroma offset from the role default. The configured color is
-    // used exactly as given: the user picked it for their own terminal, so it
-    // must not be luminance-flipped.
-    let default = crate::harmony::Oklab::from_rgb(target_default(role));
-    let target = crate::harmony::Oklab::from_rgb(palette.rgb(role));
+    let default = crate::harmony::Oklab::from_rgb(target_default(owner));
+    let target = crate::harmony::Oklab::from_rgb(palette.rgb(owner));
     Some(
         crate::harmony::Oklab {
             l: (target.l + (source.l - default.l)).clamp(0.0, 1.0),
@@ -625,6 +643,33 @@ mod tests {
         // A blue is nowhere near amber and must be left alone.
         let blue = (60, 90, 220);
         assert_eq!(remap_literal_with(&palette, blue), blue);
+    }
+
+    /// A role override must only recolor colors that role actually owns.
+    ///
+    /// Regression: attribution matched only the overridden roles, so a single
+    /// override claimed every nearby role - `/colors dim` repainted tool,
+    /// border, and the panel backgrounds.
+    #[test]
+    fn an_override_does_not_recolor_other_roles_output() {
+        let mut palette = Palette::default();
+        palette.set(Role::Dim, (255, 0, 0));
+        for other in [
+            Role::Tool,
+            Role::Border,
+            Role::Pending,
+            Role::UserBg,
+            Role::SelectionBg,
+        ] {
+            assert_eq!(
+                remap_literal_with(&palette, other.default_rgb()),
+                other.default_rgb(),
+                "overriding dim must not recolor {}",
+                other.key()
+            );
+        }
+        // A raw literal near dim (not an exact role default) still follows it.
+        assert_ne!(remap_literal_with(&palette, (100, 100, 100)), (100, 100, 100));
     }
 
     #[test]
