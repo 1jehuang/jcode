@@ -632,30 +632,42 @@ impl AutoProviderAvailability {
     }
 }
 
-fn maybe_enable_config_default_provider_for_auto() -> Result<bool> {
+fn maybe_enable_compat_provider_for_auto() -> Result<bool> {
     let cfg = crate::config::config();
-    let Some(default_provider) = cfg
+    if let Some(default_provider) = cfg
         .provider
         .default_provider
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    else {
-        return Ok(false);
-    };
-
-    if let Some(profile) =
-        crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
     {
-        apply_openai_compatible_profile_env(Some(profile));
-        return Ok(provider::openrouter::has_credentials());
+        if let Some(profile) =
+            crate::provider_catalog::resolve_openai_compatible_profile_selection(default_provider)
+        {
+            apply_openai_compatible_profile_env(Some(profile));
+            return Ok(provider::openrouter::has_credentials());
+        }
+
+        if cfg.providers.contains_key(default_provider) {
+            crate::provider_catalog::apply_named_provider_profile_env_from_config(
+                default_provider,
+                cfg,
+            )?;
+            return Ok(provider::openrouter::has_credentials());
+        }
     }
 
-    if cfg.providers.contains_key(default_provider) {
-        crate::provider_catalog::apply_named_provider_profile_env_from_config(
-            default_provider,
-            cfg,
-        )?;
+    // No usable [provider] default: enable the first configured OpenAI-compatible
+    // profile (deepseek, xiaomi-mimo, ...) so `--provider auto` notices direct
+    // compat credentials instead of booting an empty deferred-auth MultiProvider.
+    if let Some(profile) = crate::provider_catalog::openai_compatible_profiles()
+        .iter()
+        .copied()
+        .find(|profile| {
+            crate::provider_catalog::openai_compatible_profile_is_configured(*profile)
+        })
+    {
+        apply_openai_compatible_profile_env(Some(profile));
         return Ok(provider::openrouter::has_credentials());
     }
 
@@ -1762,7 +1774,7 @@ async fn init_provider_with_options(
                 }
 
                 if !has_openrouter {
-                    has_openrouter = maybe_enable_config_default_provider_for_auto()?;
+                    has_openrouter = maybe_enable_compat_provider_for_auto()?;
                 }
 
                 has_other_provider = has_openai
