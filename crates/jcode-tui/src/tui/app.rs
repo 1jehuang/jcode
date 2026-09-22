@@ -968,6 +968,9 @@ pub struct App {
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,
+    /// Todo state at the final-response handoff. Unchanged finished work must
+    /// not re-enter quality gates on later turn-end or timer callbacks.
+    final_response_todo_fingerprint: Option<String>,
     /// Exact continuation sent for the last incomplete todo state. An unchanged
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
