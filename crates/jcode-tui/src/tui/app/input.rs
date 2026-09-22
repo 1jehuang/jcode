@@ -1373,6 +1373,11 @@ pub(super) fn handle_prompt_history_navigation(
                 return history
                     .last()
                     .map(|prompt| {
+                        // An unsubmitted draft is not in history, so this jump
+                        // replaces user-authored text with a recalled prompt.
+                        // Snapshot it first: history recall must not be a
+                        // one-keystroke, unrecoverable loss of the draft.
+                        app.remember_input_undo_state();
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();

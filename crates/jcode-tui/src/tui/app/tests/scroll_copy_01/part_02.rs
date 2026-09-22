@@ -196,6 +196,54 @@ fn test_ctrl_up_down_always_browses_prompt_history() {
 }
 
 #[test]
+fn test_ctrl_up_mid_draft_keeps_the_draft_recoverable() {
+    let mut app = create_test_app();
+    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.bump_display_messages_version();
+    app.input = "unfinished\ndraft".to_string();
+    app.cursor_pos = "unfinished\ndr".len();
+    app.clear_input_undo_history();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "previous prompt");
+
+    // History recall replaces the draft, so the draft must be on the undo
+    // stack: one keystroke on a navigation binding must not destroy
+    // user-authored text irrecoverably (issue #1361).
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "unfinished\ndraft");
+    assert_eq!(app.cursor_pos, "unfinished\ndr".len());
+}
+
+#[test]
+fn test_ctrl_up_repeated_recall_still_restores_the_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.bump_display_messages_version();
+    app.input = "draft".to_string();
+    app.cursor_pos = app.input.len();
+    app.clear_input_undo_history();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "newer prompt");
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "older prompt");
+
+    // Only entering history from a draft replaces text the user typed, so that
+    // is the one step that snapshots; walking within history must not bury the
+    // draft under recalled prompts.
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.cursor_pos, "draft".len());
+}
+
+#[test]
 fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
