@@ -8,9 +8,10 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 ///
 /// NOTE: The Mythos preview family was retired by Anthropic and 404s, so it is
 /// intentionally NOT listed here. `claude-fable-5` was briefly retired but is
-/// live again. `claude-fable-5-1` went live 2026-08-28. The list is curated best-first; position 0 is the flagship
-/// used for post-login default selection.
+/// live again. Opus 5.5 launched 2026-09-22. The list is curated best-first;
+/// position 0 is the flagship used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
+    "claude-opus-5-5",
     DEFAULT_CLAUDE_MODEL,
     "claude-fable-5-1",
     "claude-fable-5",
@@ -517,10 +518,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quality_first_defaults_are_first_in_curated_model_orders() {
+    fn newest_claude_is_listed_without_changing_existing_default() {
+        assert_eq!(ALL_CLAUDE_MODELS.first().copied(), Some("claude-opus-5-5"));
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-opus-5");
+        assert!(ALL_CLAUDE_MODELS.contains(&DEFAULT_CLAUDE_MODEL));
+        assert!(!ALL_CLAUDE_MODELS.contains(&"claude-opus-5-5[1m]"));
         assert_eq!(
-            ALL_CLAUDE_MODELS.first().copied(),
-            Some(DEFAULT_CLAUDE_MODEL)
+            context_limit_for_model_with_provider("claude-opus-5-5", Some("claude")),
+            Some(1_000_000)
         );
         assert_eq!(
             ALL_OPENAI_MODELS.first().copied(),

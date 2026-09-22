@@ -591,10 +591,19 @@ pub enum ApiThinking {
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_binding: Option<ApiThinkingBlockBinding>,
     },
     Enabled {
         budget_tokens: u32,
     },
+}
+
+/// Permit the API to discard stale signed reasoning after compaction or a
+/// changed system prompt/tool schema instead of rejecting the whole request.
+#[derive(Serialize, Clone)]
+pub struct ApiThinkingBlockBinding {
+    pub prefix_mismatch_behavior: &'static str,
 }
 
 #[derive(Serialize, Clone)]
