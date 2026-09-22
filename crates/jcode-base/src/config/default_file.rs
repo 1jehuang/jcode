@@ -123,6 +123,10 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
+# Extra names or terms to help built-in voice transcription recognize them.
+# Jcode's own product names are always included.
+# vocabulary = ["Kubernetes", "Alice Zhang"]
+
 [display]
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"

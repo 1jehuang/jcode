@@ -11,7 +11,10 @@ use serde::Deserialize;
 use std::{fmt, time::Duration};
 
 mod nari;
-pub use nari::{NARI_PCM_CHUNK_SAMPLES, NariEvent, NariSession, nari_api_key, nari_pcm_channel};
+pub use nari::{
+    NARI_PCM_CHUNK_SAMPLES, NariEvent, NariSession, nari_api_key, nari_pcm_channel,
+    recognition_prompt,
+};
 #[cfg(any(feature = "voice-capture", test))]
 mod resample;
 #[cfg(feature = "voice-capture")]

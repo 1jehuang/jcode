@@ -35,6 +35,63 @@ pub enum NariEvent {
     Finished(Result<String, VoiceError>),
 }
 
+/// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
+const BUILTIN_VOCABULARY: &[&str] = &[
+    "Jcode",
+    "Jcode Desktop",
+    "Jev",
+    "Handterm",
+    "Nari",
+    "TypeSafe",
+    "GPUI",
+    "Wayland",
+    "niri",
+    "Copilot",
+    "swarm",
+    "hot reload",
+    "Claude",
+    "Codex",
+    "OpenAI",
+    "Anthropic",
+];
+/// Conservative bound on the recognition context sent per session.
+const MAX_PROMPT_CHARS: usize = 1000;
+
+/// Recognition context: built-in names plus `[dictation] vocabulary`,
+/// deduplicated case-insensitively and bounded without splitting a term.
+pub fn recognition_prompt() -> String {
+    build_prompt(&crate::config::config().dictation.vocabulary)
+}
+
+fn build_prompt(extra: &[String]) -> String {
+    let mut seen = HashSet::new();
+    let mut prompt = String::new();
+    let terms = BUILTIN_VOCABULARY
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str));
+    for term in terms {
+        if term.chars().any(char::is_control) {
+            continue;
+        }
+        let term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        let term = term.trim_matches(',').trim();
+        if term.is_empty() {
+            continue;
+        }
+        if !seen.insert(term.to_lowercase()) {
+            continue;
+        }
+        let sep = if prompt.is_empty() { "" } else { ", " };
+        if prompt.chars().count() + sep.len() + term.chars().count() > MAX_PROMPT_CHARS {
+            break;
+        }
+        prompt.push_str(sep);
+        prompt.push_str(term);
+    }
+    prompt
+}
+
 pub fn nari_api_key() -> Option<String> {
     crate::provider_catalog::load_api_key_from_env_or_config("NARI_API_KEY", "nari.env")
         .filter(|key| !key.trim().is_empty())
@@ -71,6 +128,14 @@ impl NariSession {
         key: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
+        Self::connect_with_prompt(url, key, &recognition_prompt(), cancel).await
+    }
+    pub(super) async fn connect_with_prompt(
+        url: &str,
+        key: &str,
+        prompt: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
@@ -96,7 +161,7 @@ impl NariSession {
                 tokio_tungstenite::connect_async_with_config(request, Some(config), false)
                     .await
                     .map_err(handshake_error)?;
-            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en"}})).await?;
+            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
                 let event = receive(&mut socket).await?;
                 match event["type"].as_str() {
@@ -335,6 +400,26 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prompt_merges_user_terms_dedupes_and_stays_bounded() {
+        let prompt = build_prompt(&[
+            "  Alice   Zhang ".into(),
+            "jcode".into(),
+            "".into(),
+            "bad\nterm".into(),
+            ",Kubernetes,".into(),
+        ]);
+        assert!(prompt.starts_with("Jcode, Jcode Desktop, Jev, Handterm"));
+        assert!(prompt.ends_with(", Alice Zhang, Kubernetes"));
+        assert_eq!(prompt.matches("code").count(), 2, "jcode deduped: {prompt}");
+        assert!(!prompt.contains("bad"));
+        let long = build_prompt(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
+        assert!(long.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(
+            long.split(", ")
+                .all(|t| t.starts_with("term") || BUILTIN_VOCABULARY.contains(&t))
+        );
+    }
     async fn server(events: Vec<Value>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -345,6 +430,12 @@ mod tests {
                 serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
             assert_eq!(config["type"], "session.configure");
             assert_eq!(config["session"]["model"], "qwen3-asr-fast");
+            assert!(
+                config["session"]["prompt"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Jcode, ")
+            );
             ws.send(Message::Text(
                 json!({"type":"session.configured"}).to_string(),
             ))
