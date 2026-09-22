@@ -115,6 +115,10 @@ fn tui_openai_compatible_key_save_persists_key_for_current_session() -> anyhow::
             .as_deref(),
             Some("sk-test-tui-login")
         );
+        assert!(
+            std::env::var_os(&resolved.api_key_env).is_none(),
+            "saving must not poison the process env (issue #1386)"
+        );
         Ok(())
     })
 }
