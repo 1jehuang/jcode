@@ -538,7 +538,9 @@ impl App {
 
         if prefix.starts_with("/reset ") {
             return self.rank_suggestions(
-                input,
+                // Keep the read-only command first even after a trailing space.
+                // Enter must not silently turn review into cancel or confirm.
+                input.trim_end(),
                 vec![
                     (
                         "/reset usage limits openai".into(),

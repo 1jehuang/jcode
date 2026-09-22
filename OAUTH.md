@@ -172,14 +172,17 @@ a malformed value is logged and ignored rather than breaking requests.
 
 ### Banked Codex usage resets
 
-`/reset usage limits openai` checks the active OpenAI OAuth account's banked
+`/reset` (or `/reset usage limits openai`) checks the active OpenAI OAuth account's banked
 resets and shows the selected reset, account, and expiry. It selects the
 soonest-expiring available reset. Nothing is spent until you run
 `/reset usage limits openai confirm`. Use `/reset usage limits openai cancel`
 to dismiss the pending confirmation. API keys cannot redeem these resets.
 
 When the active ChatGPT account is fully limited and has a banked reset, the
-TUI notification line shows `Reset available · /reset usage limits openai`.
+TUI notification shows the reset count and each known expiry in UTC, followed by
+`/reset usage limits openai`. The hint wraps on narrow terminals. Expiries that
+cannot be retrieved are explicitly marked unknown. Credit details are fetched
+read-only alongside usage data and are also listed in the confirmation review.
 This uses fresh, account-matched quota data and respects OpenAI's `allowed`
 flag rather than suggesting a reset merely because a percentage rounds to 100%.
 Hard quota failures trigger a read-only refresh. The hint never redeems a reset.

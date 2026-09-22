@@ -4,7 +4,9 @@ fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
     let mut state = TestState {
         display_messages: vec![DisplayMessage::system("seed")],
         time_since_activity: Some(crate::tui::REDRAW_DEEP_IDLE_AFTER + Duration::from_secs(1)),
-        openai_reset_hint: Some("Reset available · /reset usage limits openai"),
+        openai_reset_hint: Some(
+            "2 resets available · expiry unknown (2 resets) · /reset usage limits openai",
+        ),
         ..Default::default()
     };
     assert!(crate::tui::TuiState::has_notification(&state));
@@ -26,7 +28,11 @@ fn test_reset_available_hint_renders_and_keeps_redrawing_at_deep_idle() {
                 .collect()
         })
         .collect();
-    assert!(rows[1].contains("Reset available · /reset usage limits openai"));
+    assert!(
+        rows[1].contains(
+            "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
+        )
+    );
     assert!(rows[0].trim().is_empty());
     assert!(rows[2].trim().is_empty());
 
@@ -1102,5 +1108,67 @@ fn test_cache_explicit_ttls_keep_expiry_notifications() {
                 .collect::<String>();
             assert!(text.contains(expected), "{text}");
         }
+    }
+}
+
+#[test]
+fn test_reset_expiry_notification_wraps_without_losing_details() {
+    let _lock = viewport_snapshot_test_lock();
+    let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
+    for width in [30, 47, 80, 160] {
+        let state = TestState {
+            openai_reset_hint: Some(hint),
+            ..Default::default()
+        };
+        let height = input_ui::notification_height(&state, width);
+        assert!(height > 0);
+        if width < 100 {
+            assert!(height > 1);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                input_ui::draw_notification(frame, &state, Rect::new(0, 0, width, height))
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        // Whitespace may change at wrap boundaries, but no content may disappear.
+        assert_eq!(
+            rendered.split_whitespace().collect::<String>(),
+            hint.split_whitespace().collect::<String>()
+        );
+    }
+}
+
+#[test]
+fn test_reset_expiry_notification_full_frame_reserves_wrapped_height() {
+    let _lock = viewport_snapshot_test_lock();
+    let hint = "2 resets available · expires 2099-05-01 00:00 UTC, expires 2099-06-01 00:00 UTC · /reset usage limits openai";
+    for width in [30, 47, 80] {
+        clear_flicker_frame_history_for_tests();
+        let state = TestState {
+            display_messages: vec![DisplayMessage::assistant("quota exhausted")],
+            messages_version: 1,
+            openai_reset_hint: Some(hint),
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::draw(frame, &state))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rendered: String = (0..24)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .map(|cell| buffer[cell].symbol())
+            .collect();
+        let compact = rendered.split_whitespace().collect::<String>();
+        assert!(
+            compact.contains(&hint.split_whitespace().collect::<String>()),
+            "reset details clipped at width {width}: {rendered}"
+        );
     }
 }

@@ -498,8 +498,8 @@ impl crate::tui::TuiState for TestState {
         self.cache_ttl_status.clone()
     }
 
-    fn openai_reset_hint(&self) -> Option<&'static str> {
-        self.openai_reset_hint
+    fn openai_reset_hint(&self) -> Option<String> {
+        self.openai_reset_hint.map(str::to_owned)
     }
     fn chat_native_scrollbar(&self) -> bool {
         self.chat_native_scrollbar

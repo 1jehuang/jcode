@@ -23,6 +23,51 @@ struct ResetCredit {
     description: Option<String>,
 }
 
+/// Only reads credit metadata. This path never prepares or redeems a reset.
+pub(super) async fn fetch_available_expirations(
+    client: &reqwest::Client,
+    credentials: &auth::codex::CodexCredentials,
+) -> Result<Vec<Option<String>>> {
+    fetch_available_expirations_at(client, RESET_CREDITS_URL, credentials).await
+}
+
+async fn fetch_available_expirations_at(
+    client: &reqwest::Client,
+    url: &str,
+    credentials: &auth::codex::CodexCredentials,
+) -> Result<Vec<Option<String>>> {
+    let response = authorize(client.get(url), credentials)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+    let credits: ResetCredits = decode_response(response).await?;
+    Ok(available_expirations(&credits, chrono::Utc::now()))
+}
+
+fn available_expirations(
+    credits: &ResetCredits,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Option<String>> {
+    credits
+        .credits
+        .iter()
+        .filter(|credit| credit.status == "available" && !credit.id.is_empty())
+        .filter(|credit| {
+            credit.expires_at.as_deref().is_none_or(|expiry| {
+                chrono::DateTime::parse_from_rfc3339(expiry).map_or(true, |expiry| expiry > now)
+            })
+        })
+        .take(credits.available_count.try_into().unwrap_or(usize::MAX))
+        .map(|credit| {
+            credit
+                .expires_at
+                .as_deref()
+                .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
+                .map(|expiry| expiry.to_rfc3339())
+        })
+        .collect()
+}
+
 /// A confirmation pins the account, credit and idempotency key. In particular,
 /// switching accounts while the prompt is visible cannot spend a different reset.
 #[derive(Clone)]
@@ -35,6 +80,7 @@ pub struct PendingOpenAiUsageReset {
     description: Option<String>,
     expires_at: Option<String>,
     available_count: u64,
+    available_expirations: Vec<Option<String>>,
     redeem_request_id: String,
 }
 
@@ -58,6 +104,19 @@ impl PendingOpenAiUsageReset {
             "OpenAI account: {}\n{} banked usage reset(s) available.\nSelected: {}",
             self.account_display, self.available_count, self.title,
         );
+        for (index, expiry) in self.available_expirations.iter().enumerate() {
+            let expiry = expiry
+                .as_deref()
+                .map(display_text)
+                .unwrap_or_else(|| "unknown".into());
+            message.push_str(&format!("\nReset {} expires: {}", index + 1, expiry));
+        }
+        let missing = self
+            .available_count
+            .saturating_sub(self.available_expirations.len() as u64);
+        if missing > 0 {
+            message.push_str(&format!("\nExpiry unknown for {missing} other reset(s)"));
+        }
         if let Some(description) = &self.description {
             message.push_str(&format!("\n{}", display_text(description)));
         }
@@ -242,6 +301,7 @@ async fn prepare_with_credentials(
         return Ok(None);
     }
     let now = chrono::Utc::now();
+    let available_expirations = available_expirations(&credits, now);
     let credit = credits
         .credits
         .into_iter()
@@ -274,6 +334,7 @@ async fn prepare_with_credentials(
         description: credit.description,
         expires_at: credit.expires_at,
         available_count: credits.available_count,
+        available_expirations,
         redeem_request_id: uuid::Uuid::new_v4().to_string(),
     }))
 }

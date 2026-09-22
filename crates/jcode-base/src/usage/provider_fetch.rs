@@ -264,6 +264,15 @@ pub(super) async fn fetch_openai_usage_for_account(
 
     let parsed = parse_openai_usage_payload(&json);
 
+    // Read-only detail lookup. Failure must not hide otherwise valid usage.
+    let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {
+        super::openai_reset::fetch_available_expirations(&client, &creds)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let report = ProviderUsage {
         provider_name: display_name,
         limits: parsed.limits,
@@ -272,6 +281,7 @@ pub(super) async fn fetch_openai_usage_for_account(
         openai_reset_credits: parsed.available_reset_count.map(|available_count| {
             jcode_usage_types::OpenAiResetCredits {
                 available_count,
+                available_expirations,
                 account_label: account_label.map(str::to_string),
                 ordinary_usage_allowed: parsed.ordinary_usage_allowed,
             }

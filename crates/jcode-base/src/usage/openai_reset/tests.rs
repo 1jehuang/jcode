@@ -103,6 +103,9 @@ async fn preparation_is_read_only_and_selects_earliest_expiring_available_credit
     let message = pending.confirmation_message();
     assert!(message.contains("openai-test"));
     assert!(message.contains("3 banked"));
+    assert!(message.contains("Reset 1 expires: unknown"));
+    assert!(message.contains("Reset 2 expires: 2099-06-01"));
+    assert!(message.contains("Reset 3 expires: 2099-05-01"));
     assert!(message.contains("cannot be undone"));
     assert!(message.contains("/reset usage limits openai confirm"));
     assert!(!message.contains("secret"));
@@ -280,6 +283,7 @@ fn reset_metadata_survives_cache_roundtrip_but_not_errors() {
         provider_name: "OpenAI (ChatGPT)".into(),
         openai_reset_credits: Some(OpenAiResetCredits {
             available_count: 3,
+            available_expirations: vec![Some("2099-06-01T00:00:00Z".into()), None],
             account_label: Some("openai-test".into()),
             ordinary_usage_allowed: Some(false),
         }),
@@ -332,4 +336,44 @@ async fn live_openai_banked_reset_availability_read_only() {
             "Banked reset API accepted OAuth credentials: no resets available (not consumed)."
         ),
     }
+}
+
+#[tokio::test]
+async fn expiry_metadata_lookup_is_read_only_and_filters_unavailable_credits() {
+    let (url, task) = server(vec![(
+        200,
+        json!({"available_count": 4, "credits": [
+            credit("known", Some("2099-05-01T00:00:00Z"), "available"),
+            credit("expired", Some("2000-01-01T00:00:00Z"), "available"),
+            credit("spent", Some("2099-05-01T00:00:00Z"), "redeemed"),
+            credit("", Some("2099-05-01T00:00:00Z"), "available"),
+            credit("unknown", None, "available"),
+            credit("invalid", Some("not-a-date"), "available")
+        ]}),
+    )])
+    .await;
+    let expiries = fetch_available_expirations_at(&reset_client().unwrap(), &url, &credentials())
+        .await
+        .unwrap();
+    assert_eq!(
+        expiries,
+        vec![Some("2099-05-01T00:00:00+00:00".into()), None, None]
+    );
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /wham/rate-limit-reset-credits HTTP/1.1"));
+    assert!(requests[0].contains("chatgpt-account-id: pinned-account"));
+}
+
+#[tokio::test]
+async fn expiry_metadata_lookup_failure_is_reported_without_redemption() {
+    let (url, task) = server(vec![(503, json!({"error": "unavailable"}))]).await;
+    assert!(
+        fetch_available_expirations_at(&reset_client().unwrap(), &url, &credentials())
+            .await
+            .is_err()
+    );
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET "));
 }

@@ -1143,6 +1143,7 @@ mod tests {
         let mut usage = crate::usage::OpenAIUsageData {
             openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
                 available_count: 2,
+                available_expirations: Vec::new(),
                 account_label: Some("work".into()),
                 ordinary_usage_allowed: Some(false),
             }),
@@ -1151,7 +1152,10 @@ mod tests {
         };
         assert_eq!(
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
-            Some("Reset available · /reset usage limits openai")
+            Some(
+                "2 resets available · expiry unknown (2 resets) · /reset usage limits openai"
+                    .to_owned()
+            )
         );
         for auth in [
             AuthMethod::OpenAIApiKey,
@@ -1183,6 +1187,38 @@ mod tests {
             openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, Some("work")),
             None
         );
+    }
+
+    #[test]
+    fn reset_status_hint_lists_each_expiry_and_marks_missing_metadata() {
+        use crate::tui::info_widget::AuthMethod;
+        let mut usage = crate::usage::OpenAIUsageData {
+            openai_reset_credits: Some(crate::usage::OpenAiResetCredits {
+                available_count: 4,
+                available_expirations: vec![
+                    Some("2099-05-01T03:30:00+03:00".into()),
+                    Some("2099-06-01T00:00:00Z".into()),
+                    Some("not-a-date".into()),
+                ],
+                account_label: None,
+                ordinary_usage_allowed: Some(false),
+            }),
+            fetched_at: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
+            "4 resets available · expires 2099-05-01 00:30 UTC, expires 2099-06-01 00:00 UTC, expiry unknown (2 resets) · /reset usage limits openai"
+        );
+        let credits = usage.openai_reset_credits.as_mut().unwrap();
+        credits.available_count = 1;
+        credits.available_expirations = vec![None];
+        assert_eq!(
+            openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).unwrap(),
+            "1 reset available · expiry unknown (1 reset) · /reset usage limits openai"
+        );
+        usage.openai_reset_credits.as_mut().unwrap().available_count = 0;
+        assert!(openai_reset_status_hint(AuthMethod::OpenAIOAuth, &usage, None).is_none());
     }
 
     #[test]
@@ -1986,24 +2022,84 @@ pub(crate) fn openai_reset_status_hint(
     auth_method: super::info_widget::AuthMethod,
     usage: &crate::usage::OpenAIUsageData,
     account_label: Option<&str>,
-) -> Option<&'static str> {
-    (auth_method == super::info_widget::AuthMethod::OpenAIOAuth
-        && usage.banked_reset_available_for_account(account_label))
-    .then_some("Reset available · /reset usage limits openai")
+) -> Option<String> {
+    if auth_method != super::info_widget::AuthMethod::OpenAIOAuth
+        || !usage.banked_reset_available_for_account(account_label)
+    {
+        return None;
+    }
+    let credits = usage.openai_reset_credits.as_ref()?;
+    let count = credits.available_count;
+    let noun = if count == 1 { "reset" } else { "resets" };
+    let mut details = Vec::new();
+    let mut unknown = count;
+    for expiry in credits
+        .available_expirations
+        .iter()
+        .take(count.try_into().unwrap_or(usize::MAX))
+    {
+        if let Some(expiry) = expiry
+            .as_deref()
+            .and_then(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
+        {
+            details.push(format!(
+                "expires {}",
+                expiry
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%d %H:%M UTC")
+            ));
+            unknown -= 1;
+        }
+    }
+    if unknown > 0 {
+        details.push(format!(
+            "expiry unknown ({unknown} {})",
+            if unknown == 1 { "reset" } else { "resets" }
+        ));
+    }
+    Some(format!(
+        "{count} {noun} available · {} · /reset usage limits openai",
+        details.join(", ")
+    ))
+}
+
+fn notification_lines(app: &dyn TuiState, width: u16) -> Vec<Line<'static>> {
+    let spans = build_notification_spans(app);
+    if spans.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    let line = Line::from(spans);
+    // Keep existing one-line notices unchanged, but never clip reset expiries.
+    let lines = if app.openai_reset_hint().is_some() {
+        super::markdown::wrap_line(line, usize::from(width))
+    } else {
+        vec![line]
+    };
+    lines
+        .into_iter()
+        .map(|line| {
+            if app.centered_mode() {
+                line.alignment(Alignment::Center)
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+pub(super) fn notification_height(app: &dyn TuiState, width: u16) -> u16 {
+    if app.openai_reset_hint().is_some() {
+        notification_lines(app, width)
+            .len()
+            .try_into()
+            .unwrap_or(u16::MAX)
+    } else {
+        u16::from(app.has_notification())
+    }
 }
 
 pub(super) fn draw_notification(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
-    let spans = build_notification_spans(app);
-    if spans.is_empty() {
-        return;
-    }
-    let line = Line::from(spans);
-    let aligned_line = if app.centered_mode() {
-        line.alignment(Alignment::Center)
-    } else {
-        line
-    };
-    frame.render_widget(Paragraph::new(aligned_line), area);
+    frame.render_widget(Paragraph::new(notification_lines(app, area.width)), area);
 }
 
 /// Draw the elastic overscroll status line, revealed below the input when the

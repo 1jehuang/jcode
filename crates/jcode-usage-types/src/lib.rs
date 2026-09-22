@@ -3,6 +3,8 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiResetCredits {
     pub available_count: u64,
+    /// One expiry per available reset, in RFC3339. Missing entries are unknown.
+    pub available_expirations: Vec<Option<String>>,
     pub account_label: Option<String>,
     pub ordinary_usage_allowed: Option<bool>,
 }

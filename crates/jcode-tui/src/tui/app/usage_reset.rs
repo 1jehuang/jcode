@@ -20,6 +20,9 @@ fn parse(input: &str) -> Option<Action> {
         return None;
     }
     Some(match words.as_slice() {
+        // The command palette offers /reset itself. It must open the read-only
+        // review, not leave the user in a usage/confirm-without-pending loop.
+        ["/reset"] => Action::Prepare,
         ["/reset", "usage", "limits", "openai"] => Action::Prepare,
         ["/reset", "usage", "limits", "openai", "confirm"] => Action::Confirm,
         ["/reset", "usage", "limits", "openai", "cancel"] => Action::Cancel,
@@ -242,13 +245,13 @@ mod tests {
     #[test]
     fn usage_reset_parser_claims_malformed_commands() {
         for input in [
-            "/reset",
             "/reset usage",
             "/reset usage limits claude",
             "/reset usage limits openai confirm extra",
         ] {
             assert_eq!(parse(input), Some(Action::Invalid));
         }
+        assert_eq!(parse("/reset"), Some(Action::Prepare));
         assert_eq!(parse("/reset usage limits openai"), Some(Action::Prepare));
         assert_eq!(
             parse("/reset usage limits openai confirm"),
@@ -380,6 +383,40 @@ mod tests {
                 .iter()
                 .any(|(command, _)| command.ends_with(" cancel"))
         );
+    }
+
+    #[test]
+    fn usage_reset_palette_command_opens_read_only_review() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        app.input = "/rese".into();
+        assert!(app.accept_selected_command_suggestion());
+        assert_eq!(app.input, "/reset");
+        assert!(!app.accept_selected_command_suggestion());
+        assert_eq!(parse(&app.input), Some(Action::Prepare));
+        // Without a runtime this exercises dispatch without any network I/O.
+        assert!(super::super::commands_dispatch::dispatch_local_command(
+            &mut app,
+            "/reset"
+        ));
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("active async runtime")
+        );
+        assert!(app.usage_reset.receiver.is_none());
+        assert!(!app.usage_reset.redeeming);
+    }
+
+    #[test]
+    fn usage_reset_enter_preserves_review_with_trailing_whitespace() {
+        let mut app = crate::tui::app::tests::create_test_app();
+        for input in ["/reset usage limits openai", "/reset usage limits openai "] {
+            app.input = input.into();
+            assert!(!app.accept_selected_command_suggestion());
+            assert_eq!(parse(&app.input), Some(Action::Prepare));
+        }
     }
 
     #[test]

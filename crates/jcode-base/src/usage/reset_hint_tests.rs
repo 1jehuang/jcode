@@ -7,6 +7,7 @@ fn reset_usage() -> OpenAIUsageData {
     OpenAIUsageData {
         openai_reset_credits: Some(OpenAiResetCredits {
             available_count: 3,
+            available_expirations: Vec::new(),
             account_label: Some("work".into()),
             ordinary_usage_allowed: Some(false),
         }),
