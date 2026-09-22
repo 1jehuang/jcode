@@ -982,6 +982,27 @@ impl KittyViewportCache {
         Some((unique_id, pending))
     }
 
+    /// Like `take_pending_transmit`, but also returns the fitted cell geometry
+    /// and the cell pixel size the state was built with, so a caller that
+    /// re-displays through a real kitty placement can size and crop it without
+    /// touching the global picker.
+    fn take_pending_transmit_with_geometry(
+        &mut self,
+        hash: u64,
+    ) -> Option<(u32, u16, u16, (u16, u16), Option<String>)> {
+        let state = self.get_mut(hash)?;
+        let unique_id = state.unique_id;
+        let full_cols = state.full_cols;
+        let full_rows = state.full_rows;
+        let font_size = state.font_size;
+        let pending = state.pending_transmit.take();
+        let pending_bytes = std::mem::take(&mut state.pending_transmit_bytes);
+        self.total_pending_transmit_bytes = self
+            .total_pending_transmit_bytes
+            .saturating_sub(pending_bytes);
+        Some((unique_id, full_cols, full_rows, font_size, pending))
+    }
+
     #[cfg(feature = "renderer")]
     fn remove(&mut self, hash: &u64) {
         if let Some(state) = self.entries.remove(hash) {

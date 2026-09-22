@@ -450,8 +450,42 @@ pub(super) fn render_kitty_virtual_viewport(
     visible_width: u16,
     visible_height: u16,
 ) -> bool {
+    render_kitty_virtual_viewport_for(
+        hash,
+        area,
+        buf,
+        scroll_x,
+        scroll_y,
+        visible_width,
+        visible_height,
+        runtime::detected_multiplexer() == runtime::Multiplexer::Luvus,
+    )
+}
+
+fn render_kitty_virtual_viewport_for(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll_x: u16,
+    scroll_y: u16,
+    visible_width: u16,
+    visible_height: u16,
+    multiplexed: bool,
+) -> bool {
     if visible_width == 0 || visible_height == 0 {
         return true;
+    }
+
+    if multiplexed {
+        return render_kitty_real_placement(
+            hash,
+            area,
+            buf,
+            scroll_x,
+            scroll_y,
+            visible_width,
+            visible_height,
+        );
     }
 
     let mut cache = match KITTY_VIEWPORT_STATE.lock() {
@@ -514,6 +548,99 @@ pub(super) fn render_kitty_virtual_viewport(
             }
         }
         symbol.push_str(&format!("\x1b[u\x1b[{right}C\x1b[{down}B"));
+        if let Some(cell) = buf.cell_mut((area.left(), y)) {
+            cell.set_symbol(&symbol);
+        }
+    }
+
+    true
+}
+
+/// Multiplexed-terminal display for an image whose pixels are already retained
+/// in the outer terminal: the `a=T,U=1` transmission above creates a virtual
+/// placement, which per the kitty graphics protocol is an invisible prototype
+/// and draws nothing by itself.
+///
+/// Unicode placeholders are unusable under a grid multiplexer: the image id
+/// travels in a fg-color escape (`ESC[38;2;…m`) that fires in the
+/// multiplexer's own cell-grid parser, so the forwarded placeholder carries no
+/// id and the outer terminal resolves it to an earlier image. A real
+/// placement (`a=p`) displays from the retained pixels with no styling side
+/// channel; the source-rectangle keys (`x,y,w,h`) crop to the visible window
+/// when the image is only partially visible. One small APC per render
+/// re-paints after the multiplexer's text cells erase the previous placement.
+fn render_kitty_real_placement(
+    hash: u64,
+    area: Rect,
+    buf: &mut Buffer,
+    scroll_x: u16,
+    scroll_y: u16,
+    visible_width: u16,
+    visible_height: u16,
+) -> bool {
+    let mut cache = match KITTY_VIEWPORT_STATE.lock() {
+        Ok(cache) => cache,
+        Err(_) => return false,
+    };
+    let Some((unique_id, full_cols, full_rows, font_size, mut pending_transmit)) =
+        cache.take_pending_transmit_with_geometry(hash)
+    else {
+        return false;
+    };
+    drop(cache);
+    let mut pending_deletes = Some(take_kitty_delete_payloads());
+
+    if pending_transmit.is_none()
+        && let Ok(mut dbg) = MERMAID_DEBUG.lock()
+    {
+        dbg.stats.viewport_state_reuse_hits += 1;
+    }
+
+    let (cell_w, cell_h) = font_size;
+    let crop = visible_width < full_cols || visible_height < full_rows;
+    let source_rect = if crop {
+        format!(
+            ",x={},y={},w={},h={}",
+            u32::from(scroll_x) * u32::from(cell_w),
+            u32::from(scroll_y) * u32::from(cell_h),
+            u32::from(visible_width) * u32::from(cell_w),
+            u32::from(visible_height) * u32::from(cell_h),
+        )
+    } else {
+        String::new()
+    };
+    let placement = format!(
+        "\x1b_Gq=2,C=1,a=p,i={unique_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
+    );
+
+    for row in 0..area.height {
+        let y = area.top() + row;
+        if row >= visible_height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell_mut((area.left() + x, y)) {
+                    cell.set_symbol(" ");
+                    cell.set_skip(false);
+                }
+            }
+            continue;
+        }
+
+        let symbol = if row == 0 {
+            let mut symbol = pending_deletes.take().unwrap_or_default();
+            if let Some(transmit) = pending_transmit.take() {
+                symbol.push_str(&transmit);
+            }
+            symbol.push_str(&placement);
+            symbol
+        } else {
+            String::new()
+        };
+        for x in 1..area.width {
+            if let Some(cell) = buf.cell_mut((area.left() + x, y)) {
+                cell.set_symbol(" ");
+                cell.set_skip(false);
+            }
+        }
         if let Some(cell) = buf.cell_mut((area.left(), y)) {
             cell.set_symbol(&symbol);
         }
@@ -1931,7 +2058,7 @@ mod kitty_viewport_leak_tests {
                 height: visible_height,
             };
 
-            let ok = render_kitty_virtual_viewport(
+            let ok = render_kitty_virtual_viewport_for(
                 hash,
                 image_area,
                 &mut buf,
@@ -1939,6 +2066,7 @@ mod kitty_viewport_leak_tests {
                 skip_rows,
                 full_cols.min(image_area.width),
                 visible_height,
+                false,
             );
             assert!(ok, "viewport render failed for skip_rows={skip_rows}");
 
@@ -1967,5 +2095,134 @@ mod kitty_viewport_leak_tests {
                 "expected placeholders on first image row (skip_rows={skip_rows})"
             );
         }
+    }
+
+    /// Extract the row-0 lead cell symbol (the one carrying the APC payloads).
+    fn row_lead_symbol(buf: &Buffer, x: u16, y: u16) -> String {
+        buf.cell((x, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn multiplexed_render_uses_real_placement_without_placeholders() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let hash = 0x5AFE_F00D_u64;
+        seed_state(hash, 20, 30);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 34));
+        let image_area = Rect::new(1, 2, 20, 30);
+        let ok = render_kitty_virtual_viewport_for(
+            hash,
+            image_area,
+            &mut buf,
+            0,
+            0,
+            20,
+            30,
+            true,
+        );
+        assert!(ok, "multiplexed viewport render failed");
+
+        // No placeholder may appear anywhere in the image area.
+        for y in image_area.y..image_area.bottom() {
+            assert!(
+                !row_has_placeholder(&buf, y),
+                "placeholder leaked into multiplexed render at row {y}"
+            );
+        }
+        // The row-0 lead cell must carry the transmit and a real placement.
+        let lead = row_lead_symbol(&buf, image_area.x, image_area.y);
+        assert!(lead.contains("\x1b_Gtransmit"), "missing transmit: {lead:?}");
+        assert!(
+            lead.contains("a=p,i="),
+            "missing real placement APC: {lead:?}"
+        );
+        assert!(
+            lead.contains("\x1b_Gq=2,C=1,a=p,i="),
+            "placement must be quiet with stable cursor: {lead:?}"
+        );
+        // Fully visible: no source-rect crop keys.
+        assert!(
+            !lead.contains(",x="),
+            "unexpected crop on fully-visible image: {lead:?}"
+        );
+    }
+
+    #[test]
+    fn multiplexed_partial_visibility_adds_source_rect_crop() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let hash = 0x5AFE_F00E_u64;
+        // seed_state uses font_size (8, 16) per cell.
+        let full_cols = 20;
+        let full_rows = 30;
+        seed_state(hash, full_cols, full_rows);
+
+        let skip_rows = 10u16;
+        let visible_height = full_rows - skip_rows;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 40));
+        let image_area = Rect::new(1, 3, full_cols, visible_height);
+        let ok = render_kitty_virtual_viewport_for(
+            hash,
+            image_area,
+            &mut buf,
+            0,
+            skip_rows,
+            full_cols.min(image_area.width),
+            visible_height,
+            true,
+        );
+        assert!(ok, "multiplexed partial render failed");
+
+        let lead = row_lead_symbol(&buf, image_area.x, image_area.y);
+        // Crop offsets come from the state's cell size (8x16 px): y = 10*16.
+        assert!(
+            lead.contains(",x=0,y=160,w=160,h=320,")
+                || lead.contains(",x=0,y=160,w=160,h=320\x1b"),
+            "missing/incorrect source rect (expected y=160,h=320): {lead:?}"
+        );
+    }
+
+    #[test]
+    fn multiplexed_steady_state_repeats_placement_without_retransmit() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let hash = 0x5AFE_F00F_u64;
+        seed_state(hash, 20, 30);
+        // Consume the pending transmit with a first render.
+        let mut first = Buffer::empty(Rect::new(0, 0, 24, 34));
+        let first_area = Rect::new(1, 2, 20, 30);
+        assert!(render_kitty_virtual_viewport_for(
+            hash,
+            first_area,
+            &mut first,
+            0,
+            0,
+            20,
+            30,
+            true,
+        ));
+
+        // Second render: pending_transmit is gone; only the placement repeats.
+        let mut second = Buffer::empty(Rect::new(0, 0, 24, 34));
+        let ok = render_kitty_virtual_viewport_for(
+            hash,
+            first_area,
+            &mut second,
+            0,
+            0,
+            20,
+            30,
+            true,
+        );
+        assert!(ok);
+        let lead = row_lead_symbol(&second, first_area.x, first_area.y);
+        assert!(!lead.contains("\x1b_Gtransmit"), "unexpected retransmit");
+        assert!(lead.contains("a=p,i="), "missing steady-state placement");
     }
 }
