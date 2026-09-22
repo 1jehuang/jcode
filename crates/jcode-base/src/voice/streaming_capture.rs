@@ -5,7 +5,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc,
     },
     thread,
@@ -14,6 +14,7 @@ use std::{
 /// Native mono 16k PCM capture. Stop is a signal, EOF follows buffered chunks.
 /// Dropping an unfinished handle cancels, never blocks the UI on native teardown.
 pub struct PcmRecording {
+    level: Arc<AtomicU32>,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<Result<(), VoiceError>>>,
@@ -36,11 +37,13 @@ impl PcmRecording {
         let (tx, rx) = nari_pcm_channel();
         let (ready, started) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
+        let level = Arc::new(AtomicU32::new(0));
+        let worker_level = level.clone();
         let (c, s) = (cancel.clone(), stop.clone());
         let worker = thread::Builder::new()
             .name("voice-pcm".into())
             .spawn(move || {
-                let result = capture(tx, &ready, c, s);
+                let result = capture(tx, &ready, c, s, worker_level);
                 if let Err(e) = &result {
                     let _ = ready.try_send(Err(e.clone()));
                 }
@@ -50,6 +53,7 @@ impl PcmRecording {
         match wait_started(&started, &cancel) {
             Ok(Ok(())) => Ok((
                 Self {
+                    level,
                     stop,
                     cancel,
                     worker: Some(worker),
@@ -106,6 +110,7 @@ fn wait_started(
 }
 
 struct Chunker {
+    level: Arc<AtomicU32>,
     resampler: Resampler,
     chunk: Vec<i16>,
     tx: tokio::sync::mpsc::Sender<Vec<i16>>,
@@ -121,15 +126,26 @@ impl Chunker {
         if self.failed {
             return;
         }
+        let mut energy = 0.0f64;
+        let mut frames = 0usize;
         for frame in data.chunks_exact(channels) {
             if self.samples >= 16000 * MAX_RECORDING_DURATION.as_secs() as usize {
-                return;
+                break;
             }
             let mono = frame
                 .iter()
-                .map(|s| <f32 as cpal::FromSample<T>>::from_sample_(*s))
+                .map(|s| {
+                    let sample = <f32 as cpal::FromSample<T>>::from_sample_(*s);
+                    if sample.is_finite() {
+                        sample.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
+                    }
+                })
                 .sum::<f32>()
                 / channels as f32;
+            energy += f64::from(mono).powi(2);
+            frames += 1;
             let before = self.chunk.len();
             self.resampler.push(mono, &mut self.chunk);
             // Upsampling can emit two output samples for one native frame.
@@ -140,10 +156,17 @@ impl Chunker {
             if self.chunk.len() >= 1600 {
                 self.flush();
                 if self.failed {
-                    return;
+                    break;
                 }
             }
         }
+        let rms = if frames == 0 {
+            0.0
+        } else {
+            (energy / frames as f64).sqrt() as f32
+        };
+        self.level
+            .store(rms.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
     fn finish(&mut self, limit: usize) {
         let remaining = limit.saturating_sub(self.samples);
@@ -196,7 +219,16 @@ fn capture(
     ready: &mpsc::SyncSender<Result<(), VoiceError>>,
     cancel: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
+    level: Arc<AtomicU32>,
 ) -> Result<(), VoiceError> {
+    // Declared before the stream so teardown completes before the final reset.
+    struct ResetLevel(Arc<AtomicU32>);
+    impl Drop for ResetLevel {
+        fn drop(&mut self) {
+            self.0.store(0, Ordering::Relaxed);
+        }
+    }
+    let _reset_level = ResetLevel(level.clone());
     if cancel.load(Ordering::SeqCst) {
         return Err(VoiceError::Cancelled);
     }
@@ -212,6 +244,7 @@ fn capture(
         return Err(VoiceError::MicrophoneUnavailable);
     }
     let state = Arc::new(Mutex::new(Chunker {
+        level,
         resampler: Resampler::new(config.sample_rate.0)?,
         chunk: Vec::with_capacity(1602),
         tx,
@@ -300,6 +333,7 @@ pub struct NariRecording {
     stop: Arc<AtomicBool>,
     events: Arc<Mutex<Events>>,
     worker: thread::JoinHandle<()>,
+    level: Arc<AtomicU32>,
 }
 impl NariRecording {
     pub fn start_cancellable(cancel: Arc<AtomicBool>, key: &str) -> Result<Self, VoiceError> {
@@ -330,6 +364,7 @@ impl NariRecording {
         let events = Arc::new(Mutex::new(Events::default()));
         let stop = Arc::new(AtomicBool::new(false));
         let (ready, started) = mpsc::sync_channel(1);
+        let (level_tx, level_rx) = mpsc::sync_channel(1);
         let (c, s, e) = (cancel.clone(), stop.clone(), events.clone());
         let worker = thread::Builder::new()
             .name("voice-nari".into())
@@ -350,6 +385,7 @@ impl NariRecording {
                             error = session.wait_for_error() => { setup_cancel.store(true, Ordering::SeqCst); return Err(error); },
                             result = tokio::task::spawn_blocking(move || factory(factory_cancel)) => result.map_err(|_|VoiceError::CaptureFailed)??,
                         };
+                        let _ = level_tx.send(mic.level.clone());
                         let _ = ready.send(Ok(()));
                         let mic_stop = mic.stop.clone();
                         let forward_stop = async {
@@ -398,6 +434,7 @@ impl NariRecording {
                 stop,
                 events,
                 worker,
+                level: level_rx.recv().map_err(|_| VoiceError::CaptureFailed)?,
             }),
             Ok(Err(e)) => Err(e),
             _ => Err(VoiceError::CaptureFailed),
@@ -405,6 +442,20 @@ impl NariRecording {
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+    /// Latest microphone callback's linear RMS of the downmixed mono signal,
+    /// before resampling, normalized to `0.0..=1.0` (not decibels).
+    /// Silence is zero. No smoothing or artificial animation is applied.
+    /// Returns zero after stop, cancellation, or completion. Polling is lock-free
+    /// and does not consume events or audio. Requires the `voice-capture` feature.
+    pub fn audio_level(&self) -> f32 {
+        if self.stop.load(Ordering::SeqCst)
+            || self.cancel.load(Ordering::SeqCst)
+            || self.is_finished()
+        {
+            return 0.0;
+        }
+        f32::from_bits(self.level.load(Ordering::Relaxed))
     }
     pub fn try_event(&self) -> Option<NariEvent> {
         self.events.lock().ok()?.queue.pop_front()
@@ -425,6 +476,89 @@ impl Drop for NariRecording {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn level_chunker() -> Chunker {
+        let (tx, _rx) = nari_pcm_channel();
+        Chunker {
+            level: Arc::new(AtomicU32::new(0)),
+            resampler: Resampler::new(48000).unwrap(),
+            chunk: Vec::new(),
+            tx,
+            failed: false,
+            samples: 0,
+        }
+    }
+    fn level(c: &Chunker) -> f32 {
+        f32::from_bits(c.level.load(Ordering::Relaxed))
+    }
+    #[test]
+    fn callback_level_is_latest_rms_not_peak_or_signed_average() {
+        let mut c = level_chunker();
+        assert_eq!(level(&c), 0.0);
+        c.push(&[0.5f32, -0.5, 0.5, -0.5], 1);
+        assert_eq!(level(&c), 0.5);
+        c.push(&[1.0f32, 0.0, -1.0, 0.0], 1);
+        assert!((level(&c) - 0.5f32.sqrt()).abs() < 1e-6);
+        c.push(&[0.0f32; 4], 1);
+        assert_eq!(level(&c), 0.0);
+        c.push::<f32>(&[], 1);
+        assert_eq!(level(&c), 0.0);
+    }
+    #[test]
+    fn callback_level_downmixes_and_normalizes_native_formats() {
+        let mut c = level_chunker();
+        c.push(&[0.75f32, 0.25, -0.75, -0.25], 2);
+        assert_eq!(level(&c), 0.5);
+        c.push(&[1.0f32, -1.0], 2);
+        assert_eq!(level(&c), 0.0);
+        c.push(&[16384i16, -16384], 1);
+        assert_eq!(level(&c), 0.5);
+        c.push(&[32768u16; 2], 1);
+        assert_eq!(level(&c), 0.0);
+        c.push(&[49152u16, 16384], 1);
+        assert_eq!(level(&c), 0.5);
+        c.push(&[0.25f64, -0.25], 1);
+        assert_eq!(level(&c), 0.25);
+    }
+    #[test]
+    fn callback_level_is_finite_and_bounded_for_invalid_float_samples() {
+        let mut c = level_chunker();
+        c.push(&[2.0f32, -2.0], 1);
+        assert_eq!(level(&c), 1.0);
+        c.push(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY], 1);
+        assert_eq!(level(&c), 0.0);
+    }
+    #[test]
+    fn recording_level_reads_callback_atomic_without_consuming_events() {
+        let mut c = level_chunker();
+        let (release, wait) = mpsc::channel();
+        let recording = NariRecording {
+            cancel: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(AtomicBool::new(false)),
+            level: c.level.clone(),
+            events: Arc::new(Mutex::new(Events::default())),
+            worker: thread::spawn(move || {
+                wait.recv().unwrap();
+            }),
+        };
+        recording.events.lock().unwrap().push(NariEvent::Started);
+        thread::spawn(move || c.push(&[0.5f32; 100], 1))
+            .join()
+            .unwrap();
+        assert_eq!(recording.audio_level(), 0.5);
+        assert_eq!(recording.audio_level(), 0.5);
+        assert!(matches!(recording.try_event(), Some(NariEvent::Started)));
+        recording.cancel.store(true, Ordering::SeqCst);
+        assert_eq!(recording.audio_level(), 0.0);
+        recording.cancel.store(false, Ordering::SeqCst);
+        recording.stop();
+        assert_eq!(recording.audio_level(), 0.0);
+        recording.stop.store(false, Ordering::SeqCst);
+        release.send(()).unwrap();
+        while !recording.is_finished() {
+            thread::yield_now();
+        }
+        assert_eq!(recording.audio_level(), 0.0);
+    }
     #[test]
     fn cancelled_constructors_never_open_microphone() {
         let cancel = Arc::new(AtomicBool::new(true));
@@ -441,6 +575,7 @@ mod tests {
     fn bounded_chunks_downmix_and_fail_on_backpressure() {
         let (tx, mut rx) = nari_pcm_channel();
         let mut c = Chunker {
+            level: Arc::new(AtomicU32::new(0)),
             resampler: Resampler::new(48000).unwrap(),
             chunk: Vec::new(),
             tx,
@@ -483,6 +618,7 @@ mod tests {
             Ok(())
         });
         let recording = PcmRecording {
+            level: Arc::new(AtomicU32::new(0)),
             cancel: cancel.clone(),
             stop,
             worker: Some(worker),
@@ -498,6 +634,7 @@ mod tests {
             Ok(())
         });
         drop(PcmRecording {
+            level: Arc::new(AtomicU32::new(0)),
             cancel: cancel.clone(),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Some(worker),
@@ -522,6 +659,7 @@ mod tests {
         });
         (
             PcmRecording {
+                level: Arc::new(AtomicU32::new(0)),
                 stop,
                 cancel,
                 worker: Some(worker),
@@ -546,7 +684,9 @@ mod tests {
                 &url,
                 move |cancel| {
                     o.store(true, Ordering::SeqCst);
-                    Ok(fake_capture(cancel, r))
+                    let capture = fake_capture(cancel, r);
+                    capture.0.level.store(0.375f32.to_bits(), Ordering::Relaxed);
+                    Ok(capture)
                 },
             )
         });
@@ -562,6 +702,7 @@ mod tests {
         .unwrap();
         let recording = starting.await.unwrap().unwrap();
         assert!(opened.load(Ordering::SeqCst));
+        assert_eq!(recording.audio_level(), 0.375);
         ws.send(Message::Text(
             serde_json::json!({"type":"error","error":{"message":"never expose this"}}).to_string(),
         ))
@@ -575,6 +716,7 @@ mod tests {
         .await
         .unwrap();
         assert!(released.load(Ordering::SeqCst));
+        assert_eq!(recording.audio_level(), 0.0);
         let mut finished = 0;
         while let Some(event) = recording.try_event() {
             if let NariEvent::Finished(result) = event {
@@ -613,6 +755,7 @@ mod tests {
         for rate in [8000, 16000, 44100, 48000, 96000, 192000] {
             let (tx, mut rx) = nari_pcm_channel();
             let mut c = Chunker {
+                level: Arc::new(AtomicU32::new(0)),
                 resampler: Resampler::new(rate).unwrap(),
                 chunk: Vec::new(),
                 tx,
@@ -636,6 +779,7 @@ mod tests {
         let (tx, _rx) = nari_pcm_channel();
         let cap = 16000 * MAX_RECORDING_DURATION.as_secs() as usize;
         let mut c = Chunker {
+            level: Arc::new(AtomicU32::new(0)),
             resampler: Resampler::new(11025).unwrap(),
             chunk: Vec::new(),
             tx,
