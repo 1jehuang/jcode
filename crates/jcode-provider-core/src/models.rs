@@ -354,7 +354,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
     }
 
     // --- DeepSeek (check V4 before V3 so the more specific match wins) ---
-    if m.contains("deepseek-v4") {
+    // DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash` (the versioned id
+    // still works as a hidden alias upstream but is no longer listed by
+    // /v1/models). `deepseek-v4-pro` kept its name. Match the renamed Flash id
+    // too, otherwise it silently dropped to the generic 200K default.
+    if m.contains("deepseek-v4") || m.contains("deepseek-flash") {
         return Some(1_000_000);
     }
     if m.contains("deepseek-v3.2") || m.contains("deepseek-v3p2") || m.contains("deepseek-v3-2") {
