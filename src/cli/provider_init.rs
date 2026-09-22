@@ -8,8 +8,7 @@ use crate::provider::Provider;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile,
     apply_openai_compatible_profile_env, force_apply_openai_compatible_profile_env,
-    resolve_login_selection,
-    resolve_openai_compatible_profile,
+    resolve_login_selection, resolve_openai_compatible_profile,
 };
 use crate::tool;
 
