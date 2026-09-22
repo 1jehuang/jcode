@@ -17,6 +17,11 @@ pub(crate) const REDRAW_IDLE: Duration = Duration::from_millis(250);
 pub(crate) const REDRAW_DEEP_IDLE: Duration = Duration::from_millis(5000);
 pub(crate) const REDRAW_REMOTE_STARTUP: Duration = Duration::from_millis(1000);
 pub(crate) const REDRAW_PASSIVE_LIVENESS: Duration = Duration::from_millis(1000);
+/// Tick cadence while a drag-held edge autoscroll runs. The autoscroll advances
+/// exactly one line per tick, so pacing the tick here rather than at
+/// `redraw_fps` makes the scroll speed a property of the gesture instead of the
+/// display refresh rate.
+pub(crate) const REDRAW_COPY_AUTOSCROLL: Duration = Duration::from_millis(30);
 pub(crate) const REDRAW_DEEP_IDLE_AFTER: Duration = Duration::from_secs(30);
 
 /// Whether this session has been left alone long enough to be treated as
@@ -418,6 +423,14 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
             crate::perf::PerformanceTier::Minimal => fast_interval,
             _ => animation_interval,
         };
+    }
+
+    // A drag held at a pane edge scrolls one line per tick, so cap the tick at
+    // the scroll period: speed follows the gesture, not the refresh rate. This
+    // precedes the live-output branches so a drag stays on this cadence even
+    // while the transcript streams.
+    if state.copy_selection_edge_autoscroll_active() {
+        return REDRAW_COPY_AUTOSCROLL;
     }
 
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
