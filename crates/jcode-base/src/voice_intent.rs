@@ -66,6 +66,57 @@ pub enum VoiceIntent {
     Uncertain,
 }
 
+/// An exact typed Noul question sent to Jev. IDs also identify report answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceQuestion {
+    pub id: String,
+    pub instructions: String,
+    pub yes: String,
+    pub no: String,
+}
+
+/// A validated probability for one requested question.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceAnswer {
+    pub id: String,
+    pub probability: f64,
+}
+
+/// Classification and all validated answers, never a partial batch result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceClassification {
+    pub intent: VoiceIntent,
+    pub answers: Vec<VoiceAnswer>,
+}
+
+/// Describe the exact questions without credentials or network access.
+/// Applies the same input and aggregate request bounds as classification.
+/// Questions and report answers use the same deterministic ID order.
+pub fn describe_questions(
+    transcript: &str,
+    candidates: &[SessionCandidate],
+) -> Result<Vec<VoiceQuestion>> {
+    let (_, questions) = build_request(transcript, candidates)?;
+    Ok(questions
+        .into_iter()
+        .map(|(id, question)| VoiceQuestion {
+            id,
+            instructions: question["instructions"]
+                .as_str()
+                .expect("built text instructions")
+                .into(),
+            yes: question["criteria"]["true"]
+                .as_str()
+                .expect("built true criterion")
+                .into(),
+            no: question["criteria"]["false"]
+                .as_str()
+                .expect("built false criterion")
+                .into(),
+        })
+        .collect())
+}
+
 /// Classify voice input without performing any action.
 ///
 /// Supply candidates newest-first. Lower indices are more recent, allowing
@@ -80,14 +131,63 @@ pub enum VoiceIntent {
 /// Confident coding-agent intent takes precedence, including mixed requests.
 /// Quick actions do not require candidates. Callers must check UI availability.
 pub async fn classify(transcript: &str, candidates: &[SessionCandidate]) -> Result<VoiceIntent> {
-    let (state, questions) = build_request(transcript, candidates)?;
+    Ok(classify_with_report(transcript, candidates).await?.intent)
+}
+
+/// Classify with every validated question probability for a caller's results UI.
+/// Empty input returns `Uncertain` and no answers without accessing credentials.
+/// Independent bounded batches all receive the identical full state, including
+/// every candidate. No intent or partial report is returned if any batch fails.
+/// This preserves the safety gates across ALL answers, not just one batch.
+pub async fn classify_with_report(
+    transcript: &str,
+    candidates: &[SessionCandidate],
+) -> Result<VoiceClassification> {
+    build_request(transcript, candidates)?;
     if transcript.trim().is_empty() {
-        return Ok(VoiceIntent::Uncertain);
+        return Ok(VoiceClassification {
+            intent: VoiceIntent::Uncertain,
+            answers: vec![],
+        });
     }
-    let response = crate::jev::JevClient::new()?
-        .evaluate(state, questions.clone())
-        .await?;
-    parse_response(&response, &questions, candidates)
+    classify_with_client(transcript, candidates, &crate::jev::JevClient::new()?).await
+}
+
+pub(crate) async fn classify_with_client(
+    transcript: &str,
+    candidates: &[SessionCandidate],
+    client: &crate::jev::JevClient,
+) -> Result<VoiceClassification> {
+    let (state, questions) = build_request(transcript, candidates)?;
+    let entries: Vec<_> = questions.iter().collect();
+    let mut answers = Map::new();
+    for chunk in entries.chunks(crate::jev::MAX_QUESTIONS) {
+        let batch = chunk
+            .iter()
+            .map(|(id, value)| ((*id).clone(), (*value).clone()))
+            .collect();
+        // evaluate validates the exact batch IDs and typed probabilities before
+        // anything is merged. Never feed previous answers into subsequent state.
+        let response = client.evaluate(state.clone(), batch).await?;
+        answers.extend(
+            response["answers"]
+                .as_object()
+                .context("Voice intent response has no typed answers")?
+                .clone(),
+        );
+    }
+    let response = json!({"answers": answers});
+    let intent = parse_response(&response, &questions, candidates)?;
+    let answers = questions
+        .keys()
+        .map(|id| VoiceAnswer {
+            id: id.clone(),
+            probability: response["answers"][id]["noul"]
+                .as_f64()
+                .expect("validated probability"),
+        })
+        .collect();
+    Ok(VoiceClassification { intent, answers })
 }
 
 const POLICY: &str = "Classify state.transcript as Desktop voice input. \
@@ -542,12 +642,67 @@ mod tests {
     #[tokio::test]
     async fn empty_input_is_uncertain_and_invalid_inputs_fail_before_auth() {
         assert_eq!(classify(" \n", &[]).await.unwrap(), VoiceIntent::Uncertain);
+        assert_eq!(
+            classify_with_report(" \n", &[]).await.unwrap(),
+            VoiceClassification {
+                intent: VoiceIntent::Uncertain,
+                answers: vec![],
+            }
+        );
         assert!(
             classify("open a conversation", &candidates(21))
                 .await
                 .is_err()
         );
         assert!(classify("", &candidates(21)).await.is_err());
+    }
+
+    #[test]
+    fn question_description_uses_classification_validation() {
+        assert!(describe_questions("hello", &candidates(21)).is_err());
+        assert!(describe_questions(&"x".repeat(MAX_TRANSCRIPT_BYTES + 1), &[]).is_err());
+        assert_eq!(
+            describe_questions("hello", &candidates(20)).unwrap().len(),
+            27
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "live Jev fixture: requires configured credentials and sends tiny paid inference requests"]
+    async fn live_twenty_candidate_voice_report() {
+        let client = crate::jev::JevClient::new().expect("configured Jev provider required");
+        eprintln!(
+            "Live voice provider: {} model: {}",
+            client.provider_name(),
+            client.model_id()
+        );
+        let mut offered = candidates(20);
+        offered[19].title = "Orchid greenhouse irrigation planning".into();
+        for (transcript, expected) in [
+            (
+                "Open my existing Jcode conversation about orchid greenhouse irrigation planning",
+                VoiceIntent::OpenSession(offered[19].id.clone()),
+            ),
+            (
+                "Start a new Jcode conversation",
+                VoiceIntent::QuickAction(QuickAction::NewSession),
+            ),
+            (
+                "Open a new session and implement login",
+                VoiceIntent::CodingAgent,
+            ),
+        ] {
+            let report = classify_with_client(transcript, &offered, &client)
+                .await
+                .unwrap();
+            eprintln!(
+                "Live 20-candidate fixture: {transcript:?} => {:?}, {} validated answers",
+                report.intent,
+                report.answers.len()
+            );
+            assert_eq!(report.answers.len(), 27);
+            assert_eq!(report.intent, expected, "{transcript}");
+        }
     }
 
     #[tokio::test]

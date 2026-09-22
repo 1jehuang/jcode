@@ -14,7 +14,7 @@ const BROWSER_PROVIDER_ENV: &str = "JCODE_BROWSER_JEV_PROVIDER";
 const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
-const MAX_QUESTIONS: usize = 24;
+pub(crate) const MAX_QUESTIONS: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JevPurpose {
@@ -877,6 +877,161 @@ mod tests {
             api_key: "test-route-secret".into(),
             endpoint: format!("{base}/v1/decisions"),
             me_endpoint: (provider == JevProvider::Jcode).then(|| format!("{base}/v1/me")),
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_twenty_candidates_cross_real_transport_in_bounded_same_state_batches() {
+        use crate::voice_intent::{
+            SessionCandidate, VoiceIntent, classify_with_client, describe_questions,
+        };
+        let offered: Vec<_> = (0..20)
+            .map(|index| SessionCandidate {
+                id: format!("private-session-{index}"),
+                title: format!("Conversation {index}"),
+                working_dir: None,
+            })
+            .collect();
+        let transcript = "Open conversation 19";
+        let questions = describe_questions(transcript, &offered).unwrap();
+        assert_eq!(questions.len(), 27);
+        // Exercise both object-state and string-state providers, including the
+        // gateway's real entitlement preflight on every bounded evaluation.
+        for provider in [
+            JevProvider::TypeSafe,
+            JevProvider::OpenRouter,
+            JevProvider::Aimlapi,
+            JevProvider::Jcode,
+        ] {
+            // Later competing confidence must veto an otherwise valid action.
+            for competing in [0.01, 0.9] {
+                let mut replies = Vec::new();
+                for batch in questions.chunks(MAX_QUESTIONS) {
+                    if provider == JevProvider::Jcode {
+                        replies.push((
+                            200,
+                            json!({"capabilities": {"memory_jev": true}}).to_string(),
+                            vec![],
+                        ));
+                    }
+                    let answers: Map<String, Value> = batch
+                        .iter()
+                        .map(|q| {
+                            let probability = match q.id.as_str() {
+                                "navigation" | "candidate_19" => 0.99,
+                                "uncertain" => competing,
+                                _ => 0.01,
+                            };
+                            (q.id.clone(), json!({"type": "noul", "noul": probability}))
+                        })
+                        .collect();
+                    replies.push((200, json!({"answers": answers}).to_string(), vec![]));
+                }
+                let (base, worker) = mock_server(replies);
+                let result =
+                    classify_with_client(transcript, &offered, &mock_client(&base, provider))
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    result.intent,
+                    if competing < 0.2 {
+                        VoiceIntent::OpenSession(offered[19].id.clone())
+                    } else {
+                        VoiceIntent::Uncertain
+                    }
+                );
+                assert_eq!(result.answers.len(), 27);
+                assert_eq!(
+                    result.answers.iter().map(|a| &a.id).collect::<Vec<_>>(),
+                    questions.iter().map(|q| &q.id).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    result
+                        .answers
+                        .iter()
+                        .find(|a| a.id == "candidate_19")
+                        .unwrap()
+                        .probability,
+                    0.99
+                );
+                let requests = worker.join().unwrap();
+                let bodies: Vec<Value> = requests
+                    .iter()
+                    .filter(|r| r.starts_with("POST "))
+                    .map(|r| serde_json::from_str(r.split_once("\r\n\r\n").unwrap().1).unwrap())
+                    .collect();
+                assert_eq!(bodies.len(), 2);
+                assert_eq!(bodies[0]["state"], bodies[1]["state"]);
+                let state = if let Some(text) = bodies[0]["state"].as_str() {
+                    serde_json::from_str::<Value>(text).unwrap()
+                } else {
+                    bodies[0]["state"].clone()
+                };
+                assert_eq!(state["candidates"].as_object().unwrap().len(), 20);
+                assert_eq!(state["transcript"], transcript);
+                assert!(!state.to_string().contains("private-session"));
+                for (body, expected) in bodies.iter().zip(questions.chunks(MAX_QUESTIONS)) {
+                    let sent = body["questions"].as_object().unwrap();
+                    assert_eq!(sent.len(), expected.len());
+                    assert!(sent.len() <= 24);
+                    for question in expected {
+                        assert_eq!(sent[&question.id]["instructions"], question.instructions);
+                        assert_eq!(sent[&question.id]["criteria"]["true"], question.yes);
+                        assert_eq!(sent[&question.id]["criteria"]["false"], question.no);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_later_batch_errors_never_return_partial_classification() {
+        use crate::voice_intent::{SessionCandidate, classify_with_client, describe_questions};
+        let offered: Vec<_> = (0..20)
+            .map(|index| SessionCandidate {
+                id: format!("session-{index}"),
+                title: format!("Conversation {index}"),
+                working_dir: None,
+            })
+            .collect();
+        let questions = describe_questions("next conversation", &offered).unwrap();
+        let first: Map<String, Value> = questions[..MAX_QUESTIONS].iter().map(|q| (q.id.clone(), json!({"type": "noul", "noul": if q.id == "coding_agent" { 0.99 } else { 0.01 }}))).collect();
+        let last: Map<String, Value> = questions[MAX_QUESTIONS..]
+            .iter()
+            .map(|q| (q.id.clone(), json!({"type": "noul", "noul": 0.01})))
+            .collect();
+        let mut failures = vec![
+            (503, "{}".into(), vec![]),
+            (200, json!({"answers": {}}).to_string(), vec![]),
+        ];
+        for invalid in [
+            json!({"type": "noul", "noul": 1.1}),
+            json!({"type": "noul", "noul": "0.99"}),
+            json!({"type": "choice", "choice": "yes"}),
+        ] {
+            let mut bad = last.clone();
+            bad.insert(questions[MAX_QUESTIONS].id.clone(), invalid);
+            failures.push((200, json!({"answers": bad}).to_string(), vec![]));
+        }
+        let mut wrong_ids = last.clone();
+        wrong_ids.remove(&questions[MAX_QUESTIONS].id);
+        wrong_ids.insert("invented".into(), json!({"type": "noul", "noul": 0.99}));
+        failures.push((200, json!({"answers": wrong_ids}).to_string(), vec![]));
+        for failure in failures {
+            let (base, worker) = mock_server(vec![
+                (200, json!({"answers": first}).to_string(), vec![]),
+                failure,
+            ]);
+            assert!(
+                classify_with_client(
+                    "next conversation",
+                    &offered,
+                    &mock_client(&base, JevProvider::OpenRouter)
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(worker.join().unwrap().len(), 2);
         }
     }
 
