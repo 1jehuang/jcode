@@ -342,6 +342,13 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
+            // Prioritize images over text to match Claude Code behavior.
+            // When you copy an image, macOS clipboard often contains both the
+            // image data and text (like a file path), but users expect the
+            // image to be pasted.
+            if let Some((media_type, base64_data)) = read_image() {
+                return image_content(media_type, base64_data);
+            }
             // Only treat the clipboard as text when it has *non-empty* text.
             // Image-only clipboards (especially on Wayland/arboard) frequently
             // expose an empty text target, which previously short-circuited the
@@ -353,9 +360,6 @@ where
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
-            }
-            if let Some((media_type, base64_data)) = read_image() {
-                return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
@@ -456,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn smart_paste_prefers_normal_text_when_clipboard_has_text() {
+    fn smart_paste_prefers_image_when_clipboard_has_both() {
         let content = read_clipboard_for_paste_with(
             &ClipboardPasteKind::Smart,
             || Some("plain text".to_string()),
@@ -465,8 +469,14 @@ mod tests {
         );
 
         match content {
-            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
-            other => panic!("expected text paste, got {other:?}"),
+            ClipboardPasteContent::Image {
+                media_type,
+                base64_data,
+            } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(base64_data, "base64");
+            }
+            other => panic!("expected image paste, got {other:?}"),
         }
     }
 
@@ -488,6 +498,21 @@ mod tests {
                 assert_eq!(base64_data, "base64");
             }
             other => panic!("expected image paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn smart_paste_uses_text_when_no_image_is_available() {
+        let content = read_clipboard_for_paste_with(
+            &ClipboardPasteKind::Smart,
+            || Some("plain text".to_string()),
+            || None,
+            |_| None,
+        );
+
+        match content {
+            ClipboardPasteContent::Text(text) => assert_eq!(text, "plain text"),
+            other => panic!("expected text paste, got {other:?}"),
         }
     }
 
