@@ -3528,3 +3528,71 @@ fn tool_streaming_forwards_zero_argument_starts_and_keyed_interleaved_input() {
         event: ApiEvent::ToolInputDelta { call_id, delta, .. }, ..
     }] if call_id.is_empty() && delta == "{}"));
 }
+
+#[test]
+fn pre_stream_activity_invalidates_older_idle_history() {
+    for phase in [
+        None,
+        Some("authenticating"),
+        Some("connecting"),
+        Some("sending request"),
+        Some("waiting for response"),
+        Some("streaming"),
+        Some("retrying (2/4)"),
+    ] {
+        let mut state = state_with_session();
+        let history =
+            state.api_request_to_legacy(&json!({"req":"get_history", "id":22, "session_id":"s1"}));
+        let Outbound::Legacy(probe) = &history[0] else {
+            panic!()
+        };
+        match phase {
+            Some(phase) => {
+                state.legacy_event_to_api(&json!({"type":"connection_phase", "phase":phase}));
+            }
+            None => {
+                let send = state.api_request_to_legacy(
+                    &json!({"req":"send_message", "id":23, "session_id":"s1", "content":"hi"}),
+                );
+                let Outbound::Legacy(message) = &send[0] else {
+                    panic!()
+                };
+                state.legacy_event_to_api(&json!({"type":"ack", "id":message["id"]}));
+            }
+        }
+        let frames = state.legacy_event_to_api(&json!({
+            "type":"history", "id":probe["id"], "session_id":"s1",
+            "messages":[], "activity":{"is_processing":false}
+        }));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !matches!(frame.event, ApiEvent::SessionStatus { .. })),
+            "{phase:?}"
+        );
+        assert!(state.observed_turn_active, "{phase:?}");
+        // Observer turns can end before any text, including provider retries.
+        let done = state.legacy_event_to_api(&json!({"type":"done", "id":0}));
+        assert!(
+            matches!(
+                done.last().map(|frame| &frame.event),
+                Some(ApiEvent::TurnDone { .. })
+            ),
+            "{phase:?}"
+        );
+        assert!(!state.observed_turn_active);
+    }
+}
+
+#[test]
+fn transport_bookkeeping_does_not_start_a_turn() {
+    let mut state = state_with_session();
+    for phase in ["connected", "", "unknown"] {
+        state.legacy_event_to_api(&json!({"type":"connection_phase", "phase":phase}));
+        assert!(!state.observed_turn_active);
+        assert_eq!(state.activity_version, 0);
+    }
+    state.legacy_event_to_api(&json!({"type":"ack", "id":999999}));
+    assert!(!state.observed_turn_active);
+    assert_eq!(state.activity_version, 0);
+}

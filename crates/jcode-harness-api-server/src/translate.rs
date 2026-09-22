@@ -1215,7 +1215,17 @@ impl BridgeState {
         if matches!(
             kind,
             "text_delta" | "reasoning_delta" | "tool_start" | "tool_exec" | "tool_call"
-        ) || (kind == "connection_phase" && event["phase"] == "streaming")
+        ) || (kind == "connection_phase"
+            && event["phase"].as_str().is_some_and(|phase| {
+                matches!(
+                    phase,
+                    "authenticating"
+                        | "connecting"
+                        | "sending request"
+                        | "waiting for response"
+                        | "streaming"
+                ) || phase.starts_with("retrying (")
+            }))
         {
             self.observed_turn_active = true;
             self.activity_version += 1;
@@ -1919,6 +1929,10 @@ impl BridgeState {
                 // can move a message from "sent" to "acknowledged" without
                 // waiting for the first token of the reply.
                 if self.pending_message_id == Some(id) {
+                    // Acceptance starts a turn before any provider output. An
+                    // older idle snapshot must not stop this pre-stream turn.
+                    self.observed_turn_active = true;
+                    self.activity_version += 1;
                     return vec![ServerFrame::event(ApiEvent::MessageAccepted {
                         session_id: session(self),
                     })];
