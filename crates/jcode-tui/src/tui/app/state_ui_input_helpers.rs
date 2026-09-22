@@ -1626,6 +1626,7 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
