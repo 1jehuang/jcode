@@ -417,13 +417,203 @@ fn test_subscription_filters_do_not_activate_from_saved_credentials_alone() {
 
     assert!(ensure_model_allowed_for_subscription("gpt-5.4").is_ok());
     assert_eq!(
-        filtered_display_models(vec![
-            "gpt-5.4".to_string(),
-            "claude-opus-4-8".to_string(),
-        ]),
+        filtered_display_models(vec!["gpt-5.4".to_string(), "claude-opus-4-8".to_string(),]),
         vec!["gpt-5.4".to_string(), "claude-opus-4-8".to_string()]
     );
 
     crate::env::remove_var(crate::subscription_catalog::JCODE_API_KEY_ENV);
     crate::subscription_catalog::clear_runtime_env();
+}
+
+#[test]
+fn test_anthropic_catalog_scopes_isolate_routes_accounts_and_api_keys() {
+    with_clean_provider_test_env(|| {
+        crate::env::set_var("ANTHROPIC_API_KEY", "catalog-key-a");
+        crate::auth::claude::set_active_account_override(Some("catalog-oauth-a".into()));
+        let api = anthropic_catalog_scope_for_route(false);
+        let oauth = anthropic_catalog_scope_for_route(true);
+        assert_ne!(api, oauth);
+        assert!(!api.contains("catalog-key-a"));
+        populate_anthropic_models_for_scope(&api, vec!["claude-api-exclusive".into()]);
+        populate_anthropic_models_for_scope(&oauth, vec!["claude-oauth-exclusive".into()]);
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(&api).unwrap(),
+            vec!["claude-api-exclusive"]
+        );
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(&oauth).unwrap(),
+            vec!["claude-oauth-exclusive"]
+        );
+        assert!(!anthropic_oauth_route_availability("claude-api-exclusive").0);
+        assert!(!anthropic_api_key_route_availability("claude-oauth-exclusive").0);
+        assert!(anthropic_api_key_route_availability("claude-api-exclusive").0);
+        assert!(anthropic_oauth_route_availability("claude-oauth-exclusive").0);
+
+        crate::env::set_var("ANTHROPIC_API_KEY", "catalog-key-b");
+        assert_ne!(anthropic_catalog_scope_for_route(false), api);
+        assert!(
+            cached_anthropic_model_ids_for_scope(&anthropic_catalog_scope_for_route(false))
+                .is_none()
+        );
+        assert_eq!(anthropic_catalog_scope_for_route(true), oauth);
+        crate::auth::claude::set_active_account_override(Some("catalog-oauth-b".into()));
+        assert_ne!(anthropic_catalog_scope_for_route(true), oauth);
+        crate::env::set_var("ANTHROPIC_AUTH_TOKEN", "catalog-auth-token");
+        let token_scope = anthropic_catalog_scope_for_route(false);
+        crate::env::set_var("ANTHROPIC_API_KEY", "catalog-key-c");
+        assert_eq!(anthropic_catalog_scope_for_route(false), token_scope);
+    });
+}
+
+#[test]
+fn test_anthropic_catalog_refresh_scopes_retry_and_empty_retention() {
+    with_clean_provider_test_env(|| {
+        let api = "api-key::refresh-test";
+        let oauth = "oauth::refresh-test";
+        assert!(begin_anthropic_model_catalog_refresh_for_scope(api));
+        assert!(!begin_anthropic_model_catalog_refresh_for_scope(api));
+        assert!(begin_anthropic_model_catalog_refresh_for_scope(oauth));
+        finish_anthropic_model_catalog_refresh_for_scope(api);
+        // A failed fetch releases in-flight but remains retry-throttled.
+        assert!(!begin_anthropic_model_catalog_refresh_for_scope(api));
+        populate_anthropic_models_for_scope(oauth, vec!["claude-cached-success".into()]);
+        finish_anthropic_model_catalog_refresh_for_scope(oauth);
+        assert!(!should_refresh_anthropic_model_catalog_for_scope(oauth));
+        // Empty or failed discovery must not erase a previously useful snapshot.
+        populate_anthropic_models_for_scope(oauth, Vec::new());
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(oauth).unwrap(),
+            vec!["claude-cached-success"]
+        );
+        assert!(begin_anthropic_model_catalog_refresh_for_scope(
+            "oauth::different-account"
+        ));
+    });
+}
+
+#[test]
+fn test_anthropic_catalog_scoped_persistence_ttl_and_models_updated() {
+    with_clean_provider_test_env(|| {
+        let api = "api-key::disk-scoped-test";
+        let oauth = "oauth::disk-scoped-test";
+        let catalog = |model: &str| AnthropicModelCatalog {
+            available_models: vec![model.into()],
+            context_limits: Default::default(),
+        };
+        persist_anthropic_model_catalog_for_scope(api, &catalog("claude-disk-api"));
+        persist_anthropic_model_catalog_for_scope(oauth, &catalog("claude-disk-oauth"));
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(api).unwrap(),
+            vec!["claude-disk-api"]
+        );
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(oauth).unwrap(),
+            vec!["claude-disk-oauth"]
+        );
+        assert!(!begin_anthropic_model_catalog_refresh_for_scope(api));
+        assert!(!begin_anthropic_model_catalog_refresh_for_scope(oauth));
+
+        // Backdate only API's persisted observation beyond the 30-minute TTL.
+        let path = crate::storage::app_config_dir()
+            .unwrap()
+            .join("anthropic_model_catalog_cache.json");
+        let mut store: serde_json::Value = crate::storage::read_json(&path).unwrap();
+        store["scopes"][api]["observed_at_unix_secs"] = serde_json::json!(1);
+        crate::storage::write_json(&path, &store).unwrap();
+        models::reset_model_catalog_services_for_tests();
+        assert!(begin_anthropic_model_catalog_refresh_for_scope(api));
+        assert!(!begin_anthropic_model_catalog_refresh_for_scope(oauth));
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(api).unwrap(),
+            vec!["claude-disk-api"]
+        );
+        finish_anthropic_model_catalog_refresh_for_scope(api);
+
+        crate::bus::reset_models_updated_publish_state_for_tests();
+        let mut events = crate::bus::Bus::global().subscribe();
+        populate_anthropic_models_for_scope(api, vec!["claude-newly-discovered".into()]);
+        assert!(matches!(
+            events.try_recv(),
+            Ok(crate::bus::BusEvent::ModelsUpdated)
+        ));
+        assert_eq!(
+            cached_anthropic_model_ids_for_scope(oauth).unwrap(),
+            vec!["claude-disk-oauth"]
+        );
+    });
+}
+
+#[test]
+fn test_anthropic_simplified_routes_are_api_first_and_scope_aware() {
+    with_clean_provider_test_env(|| {
+        let mut auth = crate::auth::AuthStatus::default();
+        let mut routes = Vec::new();
+        append_simplified_anthropic_model_routes(&mut routes, "claude-future", &auth);
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].api_method, "claude-api");
+        assert_eq!(routes[0].detail, "no API key");
+        assert_eq!(routes[1].detail, "no Claude login");
+        assert!(routes.iter().all(|route| !route.available));
+        auth.anthropic.has_api_key = true;
+        auth.anthropic.has_oauth = true;
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(false),
+            vec!["claude-future".into()],
+        );
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec!["claude-other".into()],
+        );
+        routes.clear();
+        append_simplified_anthropic_model_routes(&mut routes, "claude-future", &auth);
+        assert!(routes[0].available);
+        assert!(!routes[1].available);
+        assert_eq!(routes[1].detail, "not in OAuth model catalog");
+    });
+}
+
+#[test]
+fn test_anthropic_api_long_context_not_gated_by_oauth_extra_usage() {
+    with_clean_provider_test_env(|| {
+        assert_eq!(
+            anthropic_api_key_route_availability("claude-opus-4-6[1m]"),
+            (true, String::new())
+        );
+    });
+}
+
+#[test]
+fn test_anthropic_full_routes_use_each_routes_own_catalog() {
+    with_clean_provider_test_env(|| {
+        let provider = test_multi_provider_with_cursor();
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(false),
+            vec!["claude-api-only".into()],
+        );
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec!["claude-oauth-only".into()],
+        );
+        let mut routes = Vec::new();
+        catalog_routes::append_anthropic_routes(&provider, &mut routes, true, true);
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].model, "claude-api-only");
+        assert_eq!(routes[0].api_method, "claude-api");
+        assert_eq!(routes[1].model, "claude-oauth-only");
+        assert_eq!(routes[1].api_method, "claude-oauth");
+        assert!(routes.iter().all(|route| route.available));
+    });
+}
+
+#[test]
+fn test_anthropic_api_discovery_does_not_advertise_unverified_oauth_model() {
+    with_clean_provider_test_env(|| {
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(false),
+            vec!["claude-future-api-only".into()],
+        );
+        assert!(anthropic_api_key_route_availability("claude-future-api-only").0);
+        // No OAuth snapshot at all is not permission to borrow API IDs.
+        assert!(!anthropic_oauth_route_availability("claude-future-api-only").0);
+    });
 }

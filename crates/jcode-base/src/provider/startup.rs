@@ -435,26 +435,28 @@ impl MultiProvider {
     }
 
     pub(super) fn spawn_anthropic_catalog_refresh_if_needed(&self) {
-        let provider: Arc<dyn Provider> = if let Some(anthropic) = self.anthropic_provider() {
-            anthropic
-        } else if let Some(claude) = self.claude_provider() {
-            claude
-        } else {
+        let api_stale = anthropic::load_anthropic_api_key().is_ok()
+            && should_refresh_anthropic_model_catalog_for_scope(
+                &anthropic_catalog_scope_for_route(false),
+            );
+        let oauth_stale = auth::claude::load_credentials().is_ok()
+            && should_refresh_anthropic_model_catalog_for_scope(
+                &anthropic_catalog_scope_for_route(true),
+            );
+        if !api_stale && !oauth_stale {
+            return;
+        }
+        let Some(provider) = self.anthropic_provider().or_else(|| self.claude_provider()) else {
             return;
         };
-
-        let Some(scope) = begin_anthropic_model_catalog_refresh() else {
-            return;
-        };
-
+        // The direct runtime multiplexes API key and OAuth. Its prefetch owns
+        // independent scoped refresh guards, including when invoked elsewhere.
         tokio::spawn(async move {
             if let Err(err) = provider.prefetch_models().await {
                 crate::logging::info(&format!(
-                    "Failed to refresh Anthropic model catalog from provider bootstrap: {}",
-                    err
+                    "Failed to refresh Anthropic model catalogs: {err}"
                 ));
             }
-            finish_anthropic_model_catalog_refresh_for_scope(&scope);
         });
     }
 

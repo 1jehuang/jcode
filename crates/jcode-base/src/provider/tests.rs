@@ -34,6 +34,7 @@ fn with_clean_provider_test_env<T>(f: impl FnOnce() -> T) -> T {
         "OPENAI_COMPAT_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "JCODE_RUNTIME_PROVIDER",
         "JCODE_ACTIVE_PROVIDER",
         "JCODE_INITIAL_PROVIDER_EXPLICIT",
