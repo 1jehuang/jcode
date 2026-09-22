@@ -818,9 +818,12 @@ struct BashInput {
     timeout: Option<u64>,
     #[serde(default)]
     run_in_background: Option<bool>,
-    #[serde(default = "default_true")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_bool_or_default::<_, true>"
+    )]
     notify: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bool_or_default::<_, false>")]
     wake: bool,
     /// For background runs: wake the agent after this many seconds with no
     /// new output and no progress events. Resets on activity.
@@ -833,6 +836,18 @@ struct BashInput {
 
 fn default_true() -> bool {
     true
+}
+
+// OpenAI strict schemas represent omitted optional arguments as explicit null.
+// Serde's `default` only handles missing keys, so accept null separately while
+// retaining the same defaults and rejecting non-boolean values.
+fn deserialize_bool_or_default<'de, D, const DEFAULT: bool>(
+    deserializer: D,
+) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<bool>::deserialize(deserializer)?.unwrap_or(DEFAULT))
 }
 
 #[path = "bash_destructive_gate.rs"]
