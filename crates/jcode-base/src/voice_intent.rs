@@ -17,8 +17,6 @@ const MAX_ID_BYTES: usize = 512;
 const MAX_TITLE_BYTES: usize = 1024;
 const MAX_WORKING_DIR_BYTES: usize = 4096;
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
-const CONFIDENCE: f64 = 0.8;
-const MAX_COMPETING_CONFIDENCE: f64 = 0.2;
 
 /// An existing, caller-authorized Jcode conversation. Metadata is untrusted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,9 +126,12 @@ pub fn describe_questions(
 /// Empty input returns `Uncertain` without network access. Invalid provider
 /// responses and transport/auth failures return errors, never navigation.
 /// Callers must preserve input and avoid navigation on errors or `Uncertain`.
-/// Immediate actions need confidence >= 0.8 and every competing outcome <= 0.2,
-/// plus an independent explicit-request score >= 0.8 for their action family.
-/// Confident coding-agent intent takes precedence, including mixed requests.
+/// Selects the highest-scoring concrete outcome without confidence thresholds.
+/// Exact ties prefer uncertain, coding_agent, new_session, next_session,
+/// previous_session, then candidates in caller order (newest first).
+/// The navigation and quick_action family scores are validated and reported,
+/// but neither gate nor compete with concrete outcomes. Mixed requests are
+/// described as coding_agent in the policy, not overridden during selection.
 /// Quick actions do not require candidates. Callers must check UI availability.
 pub async fn classify(transcript: &str, candidates: &[SessionCandidate]) -> Result<VoiceIntent> {
     Ok(classify_with_report(transcript, candidates).await?.intent)
@@ -140,7 +141,7 @@ pub async fn classify(transcript: &str, candidates: &[SessionCandidate]) -> Resu
 /// Empty input returns `Uncertain` and no answers without accessing credentials.
 /// Independent bounded batches all receive the identical full state, including
 /// every candidate. No intent or partial report is returned if any batch fails.
-/// This preserves the safety gates across ALL answers, not just one batch.
+/// This preserves validation across ALL answers, not just one batch.
 pub async fn classify_with_report(
     transcript: &str,
     candidates: &[SessionCandidate],
@@ -332,33 +333,28 @@ fn parse_response(
         scores.insert(id.clone(), json!(probability));
     }
     let score = |id: &str| scores[id].as_f64().expect("validated probability");
-    let alternatives_low = |selected: &str, gate: &str| {
-        questions
-            .keys()
-            .filter(|id| id.as_str() != gate && id.as_str() != selected)
-            .all(|id| score(id) <= MAX_COMPETING_CONFIDENCE)
+    // Strictly greater comparisons keep the first outcome on exact ties.
+    // Family scores describe intent but are not executable outcomes or gates.
+    let mut best_score = score("uncertain");
+    let mut best = VoiceIntent::Uncertain;
+    let mut consider = |id: &str, intent: VoiceIntent| {
+        let probability = score(id);
+        if probability > best_score {
+            best_score = probability;
+            best = intent;
+        }
     };
-    // Coding-agent routing cannot execute a UI action. Prefer it whenever the
-    // model confidently detects work, even if it also scores a command fragment.
-    if score("coding_agent") >= CONFIDENCE {
-        return Ok(VoiceIntent::CodingAgent);
+    consider("coding_agent", VoiceIntent::CodingAgent);
+    for (id, action, _) in QUICK_ACTIONS {
+        consider(id, VoiceIntent::QuickAction(action));
     }
-    if score("quick_action") >= CONFIDENCE {
-        for (id, action, _) in QUICK_ACTIONS {
-            if score(id) >= CONFIDENCE && alternatives_low(id, "quick_action") {
-                return Ok(VoiceIntent::QuickAction(action));
-            }
-        }
+    for (index, candidate) in candidates.iter().enumerate() {
+        consider(
+            &format!("candidate_{index}"),
+            VoiceIntent::OpenSession(candidate.id.clone()),
+        );
     }
-    if score("navigation") >= CONFIDENCE {
-        for (index, candidate) in candidates.iter().enumerate() {
-            let id = format!("candidate_{index}");
-            if score(&id) >= CONFIDENCE && alternatives_low(&id, "navigation") {
-                return Ok(VoiceIntent::OpenSession(candidate.id.clone()));
-            }
-        }
-    }
-    Ok(VoiceIntent::Uncertain)
+    Ok(best)
 }
 
 #[cfg(test)]
@@ -443,55 +439,39 @@ mod tests {
     }
 
     #[test]
-    fn safe_results_and_exact_confidence_boundary() {
+    fn highest_concrete_score_wins_without_thresholds_or_family_gates() {
         let offered = candidates(2);
         let (_, questions) = build_request("input", &offered).unwrap();
         for (scores, expected) in [
-            (vec![("coding_agent", 0.8)], VoiceIntent::CodingAgent),
+            (vec![("coding_agent", 0.02)], VoiceIntent::CodingAgent),
             (
-                vec![("navigation", 0.8), ("candidate_1", 0.8)],
+                vec![("candidate_1", 0.02)],
                 VoiceIntent::OpenSession(offered[1].id.clone()),
             ),
-            (vec![("navigation", 0.99)], VoiceIntent::Uncertain),
-            (
-                vec![("navigation", 0.799), ("candidate_0", 0.99)],
-                VoiceIntent::Uncertain,
-            ),
-            (
-                vec![("navigation", 0.99), ("candidate_0", 0.799)],
-                VoiceIntent::Uncertain,
-            ),
-            (vec![("candidate_0", 0.99)], VoiceIntent::Uncertain),
-            (vec![("coding_agent", 0.799)], VoiceIntent::Uncertain),
             (
                 vec![
-                    ("navigation", 0.99),
-                    ("candidate_0", 0.99),
+                    ("candidate_0", 0.799),
                     ("candidate_1", 0.7),
+                    ("uncertain", 0.6),
                 ],
-                VoiceIntent::Uncertain,
+                VoiceIntent::OpenSession(offered[0].id.clone()),
+            ),
+            (
+                vec![("coding_agent", 0.9), ("new_session", 0.99)],
+                VoiceIntent::QuickAction(QuickAction::NewSession),
             ),
             (
                 vec![
-                    ("navigation", 0.99),
-                    ("candidate_0", 0.99),
-                    ("uncertain", 0.9),
-                ],
-                VoiceIntent::Uncertain,
-            ),
-            (
-                vec![
-                    ("navigation", 0.99),
-                    ("candidate_0", 0.99),
-                    ("coding_agent", 0.9),
+                    ("navigation", 1.0),
+                    ("quick_action", 1.0),
+                    ("coding_agent", 0.02),
                 ],
                 VoiceIntent::CodingAgent,
             ),
             (
-                vec![("coding_agent", 0.99), ("navigation", 0.4)],
-                VoiceIntent::CodingAgent,
+                vec![("uncertain", 0.99), ("candidate_0", 0.98)],
+                VoiceIntent::Uncertain,
             ),
-            (vec![("uncertain", 0.99)], VoiceIntent::Uncertain),
             (vec![], VoiceIntent::Uncertain),
         ] {
             assert_eq!(
@@ -500,84 +480,58 @@ mod tests {
                 "{scores:?}"
             );
         }
-    }
-
-    #[test]
-    fn quick_actions_require_explicit_intent_and_exclusive_confidence() {
         for offered in [vec![], candidates(2)] {
-            let (_, questions) = build_request("next conversation", &offered).unwrap();
+            let (_, questions) = build_request("input", &offered).unwrap();
             for (id, action, _) in QUICK_ACTIONS {
-                let mut scores = vec![("quick_action", 0.8), (id, 0.8)];
-                assert_eq!(
-                    parse_response(&response(&questions, &scores), &questions, &offered).unwrap(),
-                    VoiceIntent::QuickAction(action)
-                );
-                for (gate, target) in [(0.799, 0.99), (0.99, 0.799), (0.01, 0.99)] {
-                    scores = vec![("quick_action", gate), (id, target)];
+                for probability in [0.02, 0.201, 0.799, 0.8, 1.0] {
                     assert_eq!(
-                        parse_response(&response(&questions, &scores), &questions, &offered)
-                            .unwrap(),
-                        VoiceIntent::Uncertain
+                        parse_response(
+                            &response(&questions, &[(id, probability)]),
+                            &questions,
+                            &offered,
+                        )
+                        .unwrap(),
+                        VoiceIntent::QuickAction(action)
                     );
-                }
-                for competitor in questions
-                    .keys()
-                    .filter(|key| key.as_str() != id && key.as_str() != "quick_action")
-                {
-                    for (confidence, expected) in [
-                        (0.2, VoiceIntent::QuickAction(action)),
-                        (0.201, VoiceIntent::Uncertain),
-                    ] {
-                        scores = vec![("quick_action", 0.99), (id, 0.99), (competitor, confidence)];
-                        assert_eq!(
-                            parse_response(&response(&questions, &scores), &questions, &offered)
-                                .unwrap(),
-                            expected,
-                            "{id}: {competitor}={confidence}"
-                        );
-                    }
                 }
             }
         }
     }
 
     #[test]
-    fn coding_agent_wins_mixed_requests_without_executing_actions() {
-        let offered = candidates(1);
-        let (_, questions) =
-            build_request("open a new session and implement login", &offered).unwrap();
-        for (id, _, _) in QUICK_ACTIONS {
-            let scores = [("coding_agent", 0.8), ("quick_action", 0.99), (id, 0.99)];
-            assert_eq!(
-                parse_response(&response(&questions, &scores), &questions, &offered).unwrap(),
-                VoiceIntent::CodingAgent
-            );
-        }
-        assert!(
-            questions["coding_agent"]["instructions"]
-                .as_str()
-                .unwrap()
-                .contains("Mixed coding/reasoning plus navigation ALWAYS means coding_agent")
-        );
-        assert!(!questions.contains_key("dictation"));
-    }
-
-    #[test]
-    fn quick_action_family_blocks_existing_session_navigation() {
-        let offered = candidates(1);
+    fn ties_follow_documented_order_not_question_map_order() {
+        let offered = candidates(12);
         let (_, questions) = build_request("input", &offered).unwrap();
-        for competitor in [
-            "quick_action",
-            "new_session",
-            "next_session",
-            "previous_session",
-            "coding_agent",
-        ] {
-            let scores = [
-                ("navigation", 0.99),
-                ("candidate_0", 0.99),
-                (competitor, 0.201),
-            ];
+        let mut outcomes = vec![
+            ("uncertain".to_string(), VoiceIntent::Uncertain),
+            ("coding_agent".to_string(), VoiceIntent::CodingAgent),
+        ];
+        outcomes.extend(
+            QUICK_ACTIONS
+                .iter()
+                .map(|(id, action, _)| ((*id).to_string(), VoiceIntent::QuickAction(*action))),
+        );
+        outcomes.extend(offered.iter().enumerate().map(|(index, candidate)| {
+            (
+                format!("candidate_{index}"),
+                VoiceIntent::OpenSession(candidate.id.clone()),
+            )
+        }));
+        for (index, (id, expected)) in outcomes.iter().enumerate() {
+            for (other, _) in &outcomes[index + 1..] {
+                let scores = [(id.as_str(), 0.5), (other.as_str(), 0.5)];
+                assert_eq!(
+                    parse_response(&response(&questions, &scores), &questions, &offered).unwrap(),
+                    *expected,
+                    "{id} tied with {other}"
+                );
+            }
+        }
+        for probability in [0.0, 1.0] {
+            let scores: Vec<_> = questions
+                .keys()
+                .map(|id| (id.as_str(), probability))
+                .collect();
             assert_eq!(
                 parse_response(&response(&questions, &scores), &questions, &offered).unwrap(),
                 VoiceIntent::Uncertain
@@ -614,7 +568,18 @@ mod tests {
         let (_, questions) = build_request("input", &offered).unwrap();
         let good = response(&questions, &[("coding_agent", 0.99)]);
         let mut bad = vec![Value::Null, json!({"answers": {}})];
-        for invalid in [json!(-0.1), json!(1.1), json!("0.9"), Value::Null] {
+        for invalid in [
+            json!(-0.1),
+            json!(1.1),
+            json!("0.9"),
+            json!(true),
+            json!({}),
+            json!([]),
+            json!(f64::NAN),
+            json!(f64::INFINITY),
+            json!(f64::NEG_INFINITY),
+            Value::Null,
+        ] {
             let mut value = good.clone();
             value["answers"]["candidate_0"]["noul"] = invalid;
             bad.push(value);
@@ -682,9 +647,6 @@ mod tests {
         let uncertain = questions["uncertain"]["instructions"].as_str().unwrap();
         assert!(uncertain.contains("other unrelated candidates does not create ambiguity"));
         assert!(uncertain.contains("no unique offered match"));
-        // Prompt clarification must not weaken the deterministic safety gates.
-        assert_eq!(CONFIDENCE, 0.8);
-        assert_eq!(MAX_COMPETING_CONFIDENCE, 0.2);
     }
 
     #[tokio::test]

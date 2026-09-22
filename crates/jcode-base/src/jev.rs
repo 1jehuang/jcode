@@ -1152,8 +1152,8 @@ mod tests {
             JevProvider::Aimlapi,
             JevProvider::Jcode,
         ] {
-            // Later competing confidence must veto an otherwise valid action.
-            for competing in [0.01, 0.9] {
+            // All batches participate in ranking, with no competing-score veto.
+            for competing in [0.01, 0.9, 0.99, 1.0] {
                 let mut replies = Vec::new();
                 for batch in questions.chunks(MAX_QUESTIONS) {
                     if provider == JevProvider::Jcode {
@@ -1183,7 +1183,7 @@ mod tests {
                         .unwrap();
                 assert_eq!(
                     result.intent,
-                    if competing < 0.2 {
+                    if competing < 0.99 {
                         VoiceIntent::OpenSession(offered[19].id.clone())
                     } else {
                         VoiceIntent::Uncertain
