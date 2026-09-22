@@ -4,7 +4,15 @@ pub(crate) fn anthropic_oauth_route_availability(model: &str) -> (bool, String) 
     }
     if model.ends_with("[1m]") && !crate::usage::has_extra_usage() {
         (false, "requires extra usage".to_string())
-    } else if model.contains("opus") && !crate::auth::claude::is_max_subscription() {
+    } else if model.contains("opus")
+        && super::cached_anthropic_model_ids_for_scope(&super::anthropic_catalog_scope_for_route(
+            true,
+        ))
+        .is_none()
+        && !crate::auth::claude::is_max_subscription()
+    {
+        // Account-scoped OAuth discovery outranks the legacy plan-name
+        // heuristic. Keep that heuristic only for the bundled fallback list.
         (false, "requires Max subscription".to_string())
     } else {
         (true, String::new())

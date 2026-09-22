@@ -569,3 +569,152 @@ fn test_anthropic_api_discovery_does_not_advertise_unverified_oauth_model() {
         assert!(!anthropic_oauth_route_availability("claude-future-api-only").0);
     });
 }
+
+fn configure_catalog_pro_account() {
+    let label = "claude-otter";
+    let mut auth = crate::auth::claude::JcodeAuthFile::default();
+    auth.anthropic_accounts = vec![crate::auth::claude::AnthropicAccount {
+        label: label.into(),
+        access: "catalog-test-access".into(),
+        refresh: "catalog-test-refresh".into(),
+        expires: 4_102_444_800_000,
+        email: None,
+        subscription_type: Some("pro".into()),
+        scopes: vec![],
+    }];
+    auth.active_anthropic_account = Some(label.into());
+    crate::auth::claude::save_auth_file(&auth).unwrap();
+    crate::auth::claude::set_active_account_override(Some(label.into()));
+    assert!(!crate::auth::claude::is_max_subscription());
+}
+
+#[test]
+fn test_anthropic_pro_explicit_oauth_catalog_wins_in_both_pickers() {
+    with_clean_provider_test_env(|| {
+        configure_catalog_pro_account();
+        let model = "claude-opus-5-5";
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec![model.into()],
+        );
+        let mut auth = crate::auth::AuthStatus::default();
+        auth.anthropic.has_oauth = true;
+        let mut simplified = Vec::new();
+        append_simplified_anthropic_model_routes(&mut simplified, model, &auth);
+        let oauth = simplified
+            .iter()
+            .find(|r| r.api_method == "claude-oauth")
+            .unwrap();
+        assert!(oauth.available);
+        assert!(oauth.detail.is_empty());
+        let provider = test_multi_provider_with_cursor();
+        let mut full = Vec::new();
+        catalog_routes::append_anthropic_routes(&provider, &mut full, true, false);
+        assert!(
+            full.iter()
+                .any(|r| r.model == model && r.api_method == "claude-oauth" && r.available)
+        );
+    });
+}
+
+#[test]
+fn test_anthropic_pro_api_catalog_cannot_override_oauth_absence() {
+    with_clean_provider_test_env(|| {
+        configure_catalog_pro_account();
+        let model = "claude-opus-5-5";
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(false),
+            vec![model.into()],
+        );
+        // API discovery must not bypass the no-OAuth-cache legacy heuristic.
+        assert_eq!(
+            anthropic_oauth_route_availability(model),
+            (false, "requires Max subscription".into())
+        );
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec!["claude-sonnet-4-6".into()],
+        );
+        assert_eq!(
+            anthropic_oauth_route_availability(model),
+            (false, "not in OAuth model catalog".into())
+        );
+        assert!(anthropic_api_key_route_availability(model).0);
+        let mut auth = crate::auth::AuthStatus::default();
+        auth.anthropic.has_api_key = true;
+        auth.anthropic.has_oauth = true;
+        let mut routes = Vec::new();
+        append_simplified_anthropic_model_routes(&mut routes, model, &auth);
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.api_method == "claude-api" && r.available)
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.api_method == "claude-oauth" && !r.available)
+        );
+        let provider = test_multi_provider_with_cursor();
+        routes.clear();
+        catalog_routes::append_anthropic_routes(&provider, &mut routes, true, true);
+        assert!(
+            !routes
+                .iter()
+                .any(|r| r.model == model && r.api_method == "claude-oauth")
+        );
+    });
+}
+
+#[test]
+fn test_anthropic_discovered_oauth_model_still_requires_login_in_both_pickers() {
+    with_clean_provider_test_env(|| {
+        let model = "claude-opus-5-5";
+        populate_anthropic_models_for_scope(
+            &anthropic_catalog_scope_for_route(true),
+            vec![model.into()],
+        );
+        let mut routes = Vec::new();
+        append_simplified_anthropic_model_routes(
+            &mut routes,
+            model,
+            &crate::auth::AuthStatus::default(),
+        );
+        let oauth = routes
+            .iter()
+            .find(|r| r.api_method == "claude-oauth")
+            .unwrap();
+        assert!(!oauth.available);
+        assert_eq!(oauth.detail, "no Claude login");
+        let provider = test_multi_provider_with_cursor();
+        routes.clear();
+        catalog_routes::append_anthropic_routes(&provider, &mut routes, false, false);
+        let oauth = routes
+            .iter()
+            .find(|r| r.model == model && r.api_method == "claude-oauth")
+            .unwrap();
+        assert!(!oauth.available);
+        assert_eq!(oauth.detail, "no Claude login");
+    });
+}
+
+#[test]
+fn test_anthropic_pro_no_catalog_and_explicit_long_context_keep_legacy_gates() {
+    with_clean_provider_test_env(|| {
+        configure_catalog_pro_account();
+        let scope = anthropic_catalog_scope_for_route(true);
+        assert!(cached_anthropic_model_ids_for_scope(&scope).is_none());
+        assert_eq!(
+            anthropic_oauth_route_availability("claude-opus-5-5"),
+            (false, "requires Max subscription".into())
+        );
+        let model = "claude-opus-4-6[1m]";
+        populate_anthropic_models_for_scope(&scope, vec![model.into()]);
+        let expected = if crate::usage::has_extra_usage() {
+            (true, String::new())
+        } else {
+            (false, "requires extra usage".into())
+        };
+        assert_eq!(anthropic_oauth_route_availability(model), expected);
+    });
+}
