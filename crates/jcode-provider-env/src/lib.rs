@@ -231,6 +231,24 @@ pub fn save_env_value_to_env_file(
     Ok(())
 }
 
+/// Persist a named API key to its provider env file, file-only.
+///
+/// Deliberately unlike [`save_env_value_to_env_file`]: no process env write.
+/// Env wins over file in [`load_api_key_from_env_or_config`], so a `set_var`
+/// here would shadow later file edits until restart (issue #1386).
+pub fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> anyhow::Result<()> {
+    if !is_safe_env_key_name(key_name) {
+        anyhow::bail!("Invalid API key variable name: {}", key_name);
+    }
+    if !is_safe_env_file_name(env_file) {
+        anyhow::bail!("Invalid env file name: {}", env_file);
+    }
+
+    let file_path = jcode_storage::app_config_dir()?.join(env_file);
+    jcode_storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +361,25 @@ mod tests {
         assert_eq!(
             load_api_key_from_env_or_config("ZHIPU_API_KEY", "zai.env").as_deref(),
             Some("legacy-zai-key")
+        );
+    }
+
+    #[test]
+    fn save_named_api_key_writes_file_without_poisoning_process_env() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(&["JCODE_HOME", "TEST_NAMED_API_KEY"]);
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        save_named_api_key("test-named.env", "TEST_NAMED_API_KEY", "sk-live").expect("save key");
+
+        assert_eq!(
+            load_api_key_from_env_or_config("TEST_NAMED_API_KEY", "test-named.env").as_deref(),
+            Some("sk-live"),
+            "the env file must be the source of truth"
+        );
+        assert!(
+            std::env::var_os("TEST_NAMED_API_KEY").is_none(),
+            "saving must not poison the process env"
         );
     }
 

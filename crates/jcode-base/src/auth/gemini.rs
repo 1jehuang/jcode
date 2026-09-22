@@ -86,10 +86,10 @@ pub fn save_api_key(key: &str) -> Result<()> {
     if key.is_empty() {
         anyhow::bail!("Gemini API key cannot be empty");
     }
-    crate::provider_catalog::save_env_value_to_env_file(
-        GEMINI_API_KEY_ENV_VARS[0],
+    crate::provider_catalog::save_named_api_key(
         GEMINI_API_KEY_ENV_FILE,
-        Some(key),
+        GEMINI_API_KEY_ENV_VARS[0],
+        key,
     )?;
     super::AuthStatus::invalidate_cache();
     Ok(())

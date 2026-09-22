@@ -414,8 +414,8 @@ pub fn persist_account_credentials(
         anyhow::bail!("refusing to persist an empty jcode account API key");
     }
 
+    provider_catalog::save_named_api_key(JCODE_ENV_FILE, JCODE_API_KEY_ENV, api_key)?;
     for (key, value) in [
-        (JCODE_API_KEY_ENV, Some(api_key)),
         (JCODE_ACCOUNT_ID_ENV, nonempty(account_id)),
         (JCODE_ACCOUNT_EMAIL_ENV, nonempty(email)),
         (JCODE_TIER_ENV, nonempty(tier)),

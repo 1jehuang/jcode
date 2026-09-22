@@ -899,12 +899,16 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
     true
 }
 
+/// Per-instance credential resolver: constructed once, invoked at every use so
+/// env-file edits take effect without a process restart (issue #1386).
+type AuthResolver = Arc<dyn Fn() -> anyhow::Result<ProviderAuth> + Send + Sync>;
+
 pub struct OpenRouterProvider {
     client: Client,
     model: Arc<RwLock<String>>,
     reasoning_effort: Arc<RwLock<Option<String>>>,
     api_base: String,
-    auth: ProviderAuth,
+    auth: AuthResolver,
     supports_provider_features: bool,
     supports_model_catalog: bool,
     profile_id: Option<String>,
@@ -1370,10 +1374,12 @@ impl OpenRouterProvider {
         !self.supports_provider_features
             && self.api_base.trim_end_matches('/')
                 == jcode_base::subscription_catalog::DEFAULT_JCODE_API_BASE.trim_end_matches('/')
-            && self
-                .auth
-                .label()
-                .eq_ignore_ascii_case(jcode_base::subscription_catalog::JCODE_API_KEY_ENV)
+            && (self.auth)()
+                .map(|auth| {
+                    auth.label()
+                        .eq_ignore_ascii_case(jcode_base::subscription_catalog::JCODE_API_KEY_ENV)
+                })
+                .unwrap_or(false)
     }
 
     pub fn new_named_openai_compatible(
@@ -1389,37 +1395,44 @@ impl OpenRouterProvider {
         let api_base = normalize_api_base(&profile.base_url).ok_or_else(|| {
             anyhow::anyhow!("Provider profile '{}' has invalid base_url", profile_name)
         })?;
-        let key_env = profile
-            .api_key_env
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty());
-        let key_label = key_env.unwrap_or("inline api_key").to_string();
-        let key = key_env
-            .and_then(|name| load_named_profile_api_key(name, profile))
-            .or_else(|| profile.api_key.clone());
-        let auth = match profile.auth {
-            jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
-                label: "local endpoint (no auth)".to_string(),
-            },
-            jcode_base::config::NamedProviderAuth::Bearer => ProviderAuth::AuthorizationBearer {
-                token: key
-                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
-                label: key_label,
-            },
-            jcode_base::config::NamedProviderAuth::Header => ProviderAuth::HeaderValue {
-                header_name: HeaderName::from_bytes(
-                    profile
-                        .auth_header
-                        .as_deref()
-                        .unwrap_or("api-key")
-                        .as_bytes(),
-                )?,
-                value: key
-                    .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
-                label: key_label,
-            },
-        };
+        let auth_profile = profile.clone();
+        let auth: AuthResolver = Arc::new(move || {
+            let key_env = auth_profile
+                .api_key_env
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty());
+            let key_label = key_env.unwrap_or("inline api_key").to_string();
+            let key = key_env
+                .and_then(|name| load_named_profile_api_key(name, &auth_profile))
+                .or_else(|| auth_profile.api_key.clone());
+            Ok(match auth_profile.auth {
+                jcode_base::config::NamedProviderAuth::None => ProviderAuth::None {
+                    label: "local endpoint (no auth)".to_string(),
+                },
+                jcode_base::config::NamedProviderAuth::Bearer => {
+                    ProviderAuth::AuthorizationBearer {
+                        token: key.ok_or_else(|| {
+                            anyhow::anyhow!("{} not found in environment", key_label)
+                        })?,
+                        label: key_label,
+                    }
+                }
+                jcode_base::config::NamedProviderAuth::Header => ProviderAuth::HeaderValue {
+                    header_name: HeaderName::from_bytes(
+                        auth_profile
+                            .auth_header
+                            .as_deref()
+                            .unwrap_or("api-key")
+                            .as_bytes(),
+                    )?,
+                    value: key
+                        .ok_or_else(|| anyhow::anyhow!("{} not found in environment", key_label))?,
+                    label: key_label,
+                },
+            })
+        });
+        auth()?;
         let model = profile
             .default_model
             .clone()
@@ -1630,7 +1643,8 @@ impl OpenRouterProvider {
         let supports_provider_features = provider_features_enabled(&api_base);
         let supports_model_catalog = model_catalog_enabled();
         let send_openrouter_headers = supports_provider_features;
-        let auth = Self::resolve_auth()?;
+        let auth: AuthResolver = Arc::new(|| Self::resolve_auth());
+        auth()?;
         let profile_id = std::env::var("JCODE_OPENROUTER_CACHE_NAMESPACE")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -1724,8 +1738,9 @@ impl OpenRouterProvider {
     }
 
     pub fn new_openrouter_api_key_runtime() -> Result<Self> {
-        let api_key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
-            .ok_or_else(|| {
+        let auth: AuthResolver = Arc::new(|| {
+            let api_key = load_api_key_from_env_or_config(DEFAULT_API_KEY_NAME, DEFAULT_ENV_FILE)
+                .ok_or_else(|| {
                 let path = jcode_base::storage::app_config_dir()
                     .map(|dir| dir.join(DEFAULT_ENV_FILE).display().to_string())
                     .unwrap_or_else(|_| DEFAULT_ENV_FILE.to_string());
@@ -1735,16 +1750,19 @@ impl OpenRouterProvider {
                     path
                 )
             })?;
+            Ok(ProviderAuth::AuthorizationBearer {
+                token: api_key,
+                label: DEFAULT_API_KEY_NAME.to_string(),
+            })
+        });
+        auth()?;
 
         Ok(Self {
             client: jcode_provider_core::shared_http_client(),
             model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
             reasoning_effort: Arc::new(RwLock::new(None)),
             api_base: DEFAULT_API_BASE.to_string(),
-            auth: ProviderAuth::AuthorizationBearer {
-                token: api_key,
-                label: DEFAULT_API_KEY_NAME.to_string(),
-            },
+            auth,
             supports_provider_features: true,
             supports_model_catalog: true,
             profile_id: None,
@@ -1778,28 +1796,36 @@ impl OpenRouterProvider {
                 resolved.api_base
             )
         })?;
-        let auth = match load_api_key_from_env_or_config(&resolved.api_key_env, &resolved.env_file)
-        {
-            Some(token) => ProviderAuth::AuthorizationBearer {
-                token,
-                label: resolved.api_key_env.clone(),
-            },
-            None if !resolved.requires_api_key => ProviderAuth::None {
-                label: "local endpoint (no auth)".to_string(),
-            },
-            None => {
-                let path = jcode_base::storage::app_config_dir()
-                    .map(|dir| dir.join(&resolved.env_file).display().to_string())
-                    .unwrap_or_else(|_| resolved.env_file.clone());
-                anyhow::bail!(
-                    "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
-                    resolved.display_name,
-                    resolved.api_key_env,
-                    path,
-                    resolved.id,
-                );
-            }
-        };
+        let resolver_profile = resolved.clone();
+        let auth: AuthResolver = Arc::new(move || {
+            Ok(
+                match load_api_key_from_env_or_config(
+                    &resolver_profile.api_key_env,
+                    &resolver_profile.env_file,
+                ) {
+                    Some(token) => ProviderAuth::AuthorizationBearer {
+                        token,
+                        label: resolver_profile.api_key_env.clone(),
+                    },
+                    None if !resolver_profile.requires_api_key => ProviderAuth::None {
+                        label: "local endpoint (no auth)".to_string(),
+                    },
+                    None => {
+                        let path = jcode_base::storage::app_config_dir()
+                            .map(|dir| dir.join(&resolver_profile.env_file).display().to_string())
+                            .unwrap_or_else(|_| resolver_profile.env_file.clone());
+                        anyhow::bail!(
+                            "{} credentials not available. {} not found in environment or {}. Run `jcode login --provider {}` first.",
+                            resolver_profile.display_name,
+                            resolver_profile.api_key_env,
+                            path,
+                            resolver_profile.id,
+                        );
+                    }
+                },
+            )
+        });
+        auth()?;
 
         let static_context_limits = openai_compatible_profile_static_context_limits(profile);
         let static_models = openai_compatible_profile_static_models(profile);
@@ -2095,7 +2121,10 @@ impl OpenRouterProvider {
 
         let client = self.client.clone();
         let api_base = self.api_base.clone();
-        let auth = self.auth.clone();
+        let Ok(auth) = (self.auth)() else {
+            Self::finish_background_model_catalog_refresh(&self.model_catalog_refresh);
+            return;
+        };
         let models_cache = Arc::clone(&self.models_cache);
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
@@ -2578,7 +2607,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            self.auth.clone(),
+            (self.auth)?(),
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2590,7 +2619,7 @@ impl OpenRouterProvider {
         fetch_models_from_api(
             self.client.clone(),
             self.api_base.clone(),
-            self.auth.clone(),
+            (self.auth)?(),
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
         )
@@ -2628,8 +2657,7 @@ impl OpenRouterProvider {
 
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = self
-            .auth
+        let response = (self.auth)?
             .apply(self.client.get(&url))
             .await?
             .send()
@@ -2683,8 +2711,7 @@ impl OpenRouterProvider {
             .unwrap_or(0);
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = self
-            .auth
+        let response = (self.auth)?
             .apply(self.client.get(&url))
             .await?
             .send()

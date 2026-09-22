@@ -8,7 +8,7 @@ use crate::provider::Provider;
 use crate::provider_catalog::{
     LoginProviderDescriptor, LoginProviderTarget, OpenAiCompatibleProfile,
     apply_openai_compatible_profile_env, force_apply_openai_compatible_profile_env,
-    is_safe_env_file_name, is_safe_env_key_name, resolve_login_selection,
+    resolve_login_selection,
     resolve_openai_compatible_profile,
 };
 use crate::tool;
@@ -1385,22 +1385,6 @@ pub async fn login_and_bootstrap_provider(
     };
 
     Ok(runtime)
-}
-
-pub fn save_named_api_key(env_file: &str, key_name: &str, key: &str) -> Result<()> {
-    if !is_safe_env_key_name(key_name) {
-        anyhow::bail!("Invalid API key variable name: {}", key_name);
-    }
-    if !is_safe_env_file_name(env_file) {
-        anyhow::bail!("Invalid env file name: {}", env_file);
-    }
-
-    let config_dir = crate::storage::app_config_dir()?;
-    let file_path = config_dir.join(env_file);
-    crate::storage::upsert_env_file_value(&file_path, key_name, Some(key))?;
-
-    crate::env::set_var(key_name, key);
-    Ok(())
 }
 
 pub async fn init_provider(
