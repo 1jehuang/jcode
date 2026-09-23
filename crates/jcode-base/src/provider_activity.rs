@@ -63,23 +63,24 @@ const LAST_USED_WRITE_THROTTLE_SECS: u64 = 30;
 ///
 /// # Rollback support (F14)
 ///
-/// Every window also carries a `*_usd` mirror: the naive sum of that window's
-/// buckets, written on every update. The fork and upstream jcode share
+/// Every window also carries a `*_usd` mirror: the USD bucket's value, written
+/// on every update. The fork and upstream jcode share
 /// `~/.jcode/provider_activity.json`, and an older binary only knows those
 /// figures, so serde drops the maps it does not understand when it writes the
 /// file back. Without the mirror that single write would silently zero the
-/// whole ledger; with it the old reader still sees the totals, and the next
+/// whole ledger; with it the old reader still sees the USD totals, and the next
 /// read by this build migrates the mirror back into a `USD` bucket (see
 /// `ProviderSpend::migrate_legacy_usd_figures`).
 ///
-/// A summed mirror can only be exact when a window holds one currency. With
-/// mixed currencies it is an *approximation*: it is not a converted total, so a
-/// rollback does more than lose the split — it re-labels the amounts. After an
-/// older binary writes the file back, `{CNY 30, USD 5}` comes back as a single
-/// `USD 35` bucket: money spent in CNY is then shown as USD, which is the one
-/// thing this ledger promises never to do. That is inherent to keeping the file
-/// readable by a USD-only reader, and it is why the buckets, not the mirror, are
-/// the written source of truth.
+/// The mirror is deliberately the USD bucket only, never a cross-currency sum.
+/// A sum of mixed currencies is an *approximation*: it is not a converted total,
+/// so a rollback does more than lose the split — it re-labels the amounts. After
+/// an older binary writes the file back, `{CNY 30, USD 5}` summed into a single
+/// `USD 35` would show money spent in CNY as USD, which is the one thing this
+/// ledger promises never to do. With the USD-only mirror, a rollback simply
+/// drops the non-USD amounts from the older binary's view (they are absent,
+/// not relabelled), which is the lesser of the two losses. The buckets, not the
+/// mirror, remain the written source of truth.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderSpend {
     /// `YYYY-MM-DD` the `day` buckets belong to.
@@ -88,7 +89,7 @@ pub struct ProviderSpend {
     /// Per-currency spend for `day_date`.
     #[serde(default)]
     pub day: BTreeMap<Currency, f64>,
-    /// Sum of `day`; see the rollback note on this type.
+    /// The USD bucket of `day`; see the rollback note on this type.
     #[serde(default)]
     pub day_usd: f64,
     /// `YYYY-MM` the month buckets belong to.
@@ -102,13 +103,13 @@ pub struct ProviderSpend {
     /// exists to protect.
     #[serde(default)]
     pub month_spend: BTreeMap<Currency, f64>,
-    /// Sum of `month_spend`; see the rollback note on this type.
+    /// The USD bucket of `month_spend`; see the rollback note on this type.
     #[serde(default)]
     pub month_usd: f64,
     /// Per-currency spend since the ledger was created.
     #[serde(default)]
     pub all_time: BTreeMap<Currency, f64>,
-    /// Sum of `all_time`; see the rollback note on this type.
+    /// The USD bucket of `all_time`; see the rollback note on this type.
     #[serde(default)]
     pub all_time_usd: f64,
 }
@@ -122,11 +123,22 @@ impl ProviderSpend {
         self.refresh_usd_mirrors();
     }
 
-    /// Rewrite each `*_usd` mirror as the sum of its buckets.
+    /// Rewrite each `*_usd` mirror from its USD bucket only.
+    ///
+    /// The mirror must never hold a cross-currency sum: an older binary that
+    /// writes the file back drops the bucket maps and keeps only the mirror,
+    /// and the migration below (see
+    /// [`ProviderSpend::migrate_legacy_usd_figures`]) re-labels a non-zero
+    /// mirror next to an empty bucket map as USD. Summing `{CNY 30, USD 5}`
+    /// into `35` would therefore turn CNY spend into "USD 35", the one thing
+    /// this ledger promises never to do. Writing only the USD bucket means a
+    /// rollback loses the non-USD amounts from the older binary's point of view
+    /// (they are simply absent) instead of mislabelling them, which is the
+    /// lesser of the two losses.
     fn refresh_usd_mirrors(&mut self) {
-        self.day_usd = self.day.values().sum();
-        self.month_usd = self.month_spend.values().sum();
-        self.all_time_usd = self.all_time.values().sum();
+        self.day_usd = self.day.get(&Currency::usd()).copied().unwrap_or(0.0);
+        self.month_usd = self.month_spend.get(&Currency::usd()).copied().unwrap_or(0.0);
+        self.all_time_usd = self.all_time.get(&Currency::usd()).copied().unwrap_or(0.0);
     }
 
     /// Seed the `USD` buckets from the legacy `*_usd` figures.
@@ -301,9 +313,9 @@ pub fn record_use(source_key: &str) {
 ///
 /// `amount` is in `currency`, and it stays in that currency: the ledger keeps
 /// one bucket per currency and never converts, so a non-USD call must not be
-/// written into — or approximated by — a USD figure. The `*_usd` mirrors are
-/// the one exception, and they are explicitly an approximation (see
-/// [`ProviderSpend`]).
+/// written into — or approximated by — a USD figure. The `*_usd` mirrors hold
+/// only the USD bucket's value (see [`ProviderSpend`]), so a non-USD amount
+/// never reaches them at all.
 pub fn record_spend(source_key: &str, amount: f64, currency: &Currency) {
     let source_key = source_key.trim();
     if source_key.is_empty() || !amount.is_finite() || amount <= 0.0 {
@@ -712,7 +724,7 @@ mod tests {
         let entry = &written["entries"]["claude:api-key"]["spend"];
         assert_eq!(written["schema_version"], 2);
         assert_eq!(entry["day"], serde_json::json!({"CNY": 3.0, "USD": 12.0}));
-        assert_eq!(entry["day_usd"], 15.0);
+        assert_eq!(entry["day_usd"], 12.0);
 
         // Re-reading the migrated file must not seed the bucket again: the
         // legacy figure is already inside `day`.
@@ -725,13 +737,15 @@ mod tests {
                 (Currency::usd(), 12.0),
             ])
         );
-        assert!((spend.day_usd - 15.0).abs() < 1e-9);
+        assert!((spend.day_usd - 12.0).abs() < 1e-9);
     }
 
     #[test]
-    fn usd_mirror_tracks_bucket_sum() {
-        // F14, write direction: the mirror is rewritten from the buckets on
-        // every write, so an older binary still reads a total instead of 0.
+    fn usd_mirror_tracks_only_the_usd_bucket() {
+        // F14, write direction: the mirror is rewritten from the USD bucket on
+        // every write, so an older binary still reads the USD total instead of
+        // 0. A mixed-currency window must NOT sum its buckets into the mirror:
+        // that would re-label the CNY amount as USD after a rollback.
         let _env_lock = lock_env();
         clear_ledger_cache();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -749,19 +763,55 @@ mod tests {
             ]),
             "each currency keeps its own bucket, normalized"
         );
-        // Mixed-currency windows make the mirror an approximation: it is the
-        // naive sum of the buckets, never a converted total.
-        assert!((spend.day_usd - 35.0).abs() < 1e-9);
-        assert!((spend.month_usd - 35.0).abs() < 1e-9);
-        assert!((spend.all_time_usd - 35.0).abs() < 1e-9);
+        // The mirror is the USD bucket only, never a cross-currency sum.
+        assert!((spend.day_usd - 5.0).abs() < 1e-9);
+        assert!((spend.month_usd - 5.0).abs() < 1e-9);
+        assert!((spend.all_time_usd - 5.0).abs() < 1e-9);
 
         // The mirror is written, not just computed in memory.
         clear_ledger_cache();
         let entry = read_ledger_json()["entries"]["openai:api-key"]["spend"].clone();
-        assert_eq!(entry["day_usd"], 35.0);
-        assert_eq!(entry["month_usd"], 35.0);
-        assert_eq!(entry["all_time_usd"], 35.0);
+        assert_eq!(entry["day_usd"], 5.0);
+        assert_eq!(entry["month_usd"], 5.0);
+        assert_eq!(entry["all_time_usd"], 5.0);
         assert_eq!(entry["day"], serde_json::json!({"CNY": 30.0, "USD": 5.0}));
+    }
+
+    #[test]
+    fn a_cny_only_window_keeps_a_zero_usd_mirror() {
+        // A window with only a non-USD bucket must leave its mirror at zero:
+        // the mirror is the USD bucket's value, and migration only seeds a USD
+        // bucket when the bucket map is *empty* next to a non-zero mirror. A
+        // non-zero mirror here would re-label the CNY amount as USD.
+        let _env_lock = lock_env();
+        clear_ledger_cache();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = EnvVarGuard::set("JCODE_HOME", temp.path().as_os_str());
+
+        record_spend("openai-compatible:deepseek", 30.0, &Currency::new("CNY"));
+
+        let spend = spend_snapshot("openai-compatible:deepseek").expect("spend recorded");
+        assert_eq!(
+            spend.day,
+            std::collections::BTreeMap::from([(Currency::new("CNY"), 30.0)]),
+            "the CNY bucket holds the spend"
+        );
+        assert_eq!(spend.day_usd, 0.0, "the mirror must be zero, not 30");
+        assert_eq!(spend.month_usd, 0.0);
+        assert_eq!(spend.all_time_usd, 0.0);
+
+        // On disk too, and a reload must not seed a USD bucket from a zero
+        // mirror (migration requires a non-zero mirror next to an empty map).
+        clear_ledger_cache();
+        let entry = read_ledger_json()["entries"]["openai-compatible:deepseek"]["spend"].clone();
+        assert_eq!(entry["day_usd"], 0.0);
+        clear_ledger_cache();
+        let reloaded = spend_snapshot("openai-compatible:deepseek").expect("reload");
+        assert!(
+            !reloaded.day.contains_key(&Currency::usd()),
+            "no USD bucket may be seeded from a zero mirror: {reloaded:?}"
+        );
+        assert_eq!(reloaded.day[&Currency::new("CNY")], 30.0);
     }
 
     #[test]
@@ -783,7 +833,7 @@ mod tests {
         assert_eq!(spend.day, expected, "same-currency calls add up");
         assert_eq!(spend.month_spend, expected);
         assert_eq!(spend.all_time, expected);
-        assert!((spend.day_usd - 37.0).abs() < 1e-9);
+        assert!((spend.day_usd - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -850,7 +900,7 @@ mod tests {
             BTreeMap::from([(Currency::new("CNY"), 42.0), (Currency::usd(), 1.0)]),
             "all-time keeps the rolled-away money and adds to it"
         );
-        assert!((spend.all_time_usd - 43.0).abs() < 1e-9);
+        assert!((spend.all_time_usd - 1.0).abs() < 1e-9);
 
         // ...and that is what lands on disk, mirror included.
         clear_ledger_cache();
@@ -863,7 +913,7 @@ mod tests {
             entry["all_time"],
             serde_json::json!({"CNY": 42.0, "USD": 1.0})
         );
-        assert_eq!(entry["all_time_usd"], 43.0);
+        assert_eq!(entry["all_time_usd"], 1.0);
 
         // A reload must not resurrect the cleared windows: the migration gate
         // sees non-empty maps (and zeroed-out mirrors), never a stale figure.
@@ -913,10 +963,13 @@ mod tests {
     }
 
     #[test]
-    fn rollback_roundtrip_keeps_buckets() {
+    fn rollback_roundtrip_keeps_the_usd_bucket_and_never_relabels() {
         // F14 acceptance core. The fork and upstream jcode share
         // `~/.jcode/provider_activity.json`, so a user who falls back to an
-        // older binary must not lose their spend history.
+        // older binary must not lose their USD spend history. A non-USD amount
+        // is deliberately NOT written into the mirror (see `refresh_usd_mirrors`),
+        // so a rollback drops it from the older binary's view rather than
+        // re-labelling it as USD - the accepted trade-off over mislabelling.
         let _env_lock = lock_env();
         clear_ledger_cache();
         let temp = tempfile::tempdir().expect("tempdir");
@@ -946,14 +999,15 @@ mod tests {
             .and_then(|entry| entry.spend.as_ref())
             .expect("old reader sees the entry");
         // Without the mirror the old reader would see 0 here and zero the
-        // ledger on write-back.
+        // ledger on write-back. The mirror carries only the USD bucket, so the
+        // CNY amount is simply absent (never re-labelled as USD).
         assert!(
-            (legacy_spend.day_usd - 35.0).abs() < 1e-9,
-            "old reader must see the day total, saw {}",
+            (legacy_spend.day_usd - 5.0).abs() < 1e-9,
+            "old reader must see the USD total, saw {}",
             legacy_spend.day_usd
         );
-        assert!((legacy_spend.month_usd - 35.0).abs() < 1e-9);
-        assert!((legacy_spend.all_time_usd - 35.0).abs() < 1e-9);
+        assert!((legacy_spend.month_usd - 5.0).abs() < 1e-9);
+        assert!((legacy_spend.all_time_usd - 5.0).abs() < 1e-9);
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&legacy).expect("old reader serializes"),
@@ -961,24 +1015,24 @@ mod tests {
         .expect("old reader writes back");
         clear_ledger_cache();
 
-        // New binary again: no window is lost. The mirror is a plain sum, so
-        // what survives a rollback is the totals (as USD buckets), not the
-        // per-currency split.
+        // New binary again: the USD bucket survives. The CNY amount is not
+        // re-labelled as USD - it is simply gone from the older binary's view,
+        // which is the accepted trade-off over mislabelling it.
         let spend = spend_snapshot(key).expect("entry survives the rollback roundtrip");
         assert_eq!(
             spend.day,
-            std::collections::BTreeMap::from([(Currency::usd(), 35.0)]),
-            "day bucket survives"
+            std::collections::BTreeMap::from([(Currency::usd(), 5.0)]),
+            "the USD day bucket survives"
         );
         assert_eq!(
             spend.month_spend,
-            std::collections::BTreeMap::from([(Currency::usd(), 35.0)]),
-            "month bucket survives"
+            std::collections::BTreeMap::from([(Currency::usd(), 5.0)]),
+            "the USD month bucket survives"
         );
         assert_eq!(
             spend.all_time,
-            std::collections::BTreeMap::from([(Currency::usd(), 35.0)]),
-            "all_time bucket survives"
+            std::collections::BTreeMap::from([(Currency::usd(), 5.0)]),
+            "the USD all_time bucket survives"
         );
 
         // ...and the ledger is writable again after the rollback: new spend
@@ -989,7 +1043,7 @@ mod tests {
             spend.all_time,
             std::collections::BTreeMap::from([
                 (Currency::new("CNY"), 4.0),
-                (Currency::usd(), 35.0),
+                (Currency::usd(), 5.0),
             ])
         );
     }
