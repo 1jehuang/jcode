@@ -1955,135 +1955,91 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     }
     let data = app.info_widget_data();
 
-    let sep = || Span::styled(" · ", Style::default().fg(rgb(100, 100, 110)));
-
     // The countdown is the priority affordance: it explains the line exists and
     // is going away. Build it first so it always gets space on the right edge.
-    let countdown: Option<Span> = app.chat_overscroll_remaining().map(|secs| {
-        Span::styled(
-            format!("(overscroll {:.1})", secs.max(0.0)),
-            Style::default().fg(rgb(150, 150, 165)).italic(),
-        )
-    });
+    let countdown_secs: Option<f32> = app.chat_overscroll_remaining().map(|secs| secs.max(0.0));
 
-    let mut spans: Vec<Span> = Vec::new();
-
-    // Model
     let model = data
         .model
         .clone()
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| app.provider_model());
-    if !model.is_empty() && !overscroll_is_placeholder(&model) {
-        spans.push(Span::styled(
-            session_facts::pretty_model(&model),
-            Style::default().fg(rgb(255, 150, 200)).bold(),
-        ));
-        // Reasoning level shown inline next to the model, e.g. " high".
-        if let Some(effort) = data
-            .reasoning_effort
-            .as_deref()
-            .and_then(overscroll_short_reasoning)
-        {
-            spans.push(Span::styled(
-                format!(" {}", effort),
-                Style::default().fg(rgb(140, 140, 150)),
-            ));
-        }
-    }
-
-    // Provider
     let provider = data
         .provider_name
         .clone()
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
-    if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
-            overscroll_provider_display(&provider),
-            Style::default().fg(rgb(140, 180, 255)),
-        ));
-    }
-
-    // Access method (auth)
-    if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(label.to_string(), Style::default().fg(color)));
-    }
-
-    // Context usage as a rounded bar
-    if let Some((used, limit)) = overscroll_context_usage(&data) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
-            format!(
-                "{}/{} ",
-                overscroll_format_tokens(used),
-                overscroll_format_tokens(limit)
-            ),
-            Style::default().fg(rgb(140, 140, 150)),
-        ));
-        spans.extend(overscroll_context_bar(used, limit, 10));
-    }
-
-    // Working directory last, shown as a home-relative path, with the git
-    // branch alongside when available.
-    if let Some(dir) = app.working_dir().and_then(|d| overscroll_dir_label(&d)) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
-        spans.push(Span::styled(dir, Style::default().fg(rgb(140, 140, 150))));
-        if let Some(branch) = overscroll_git_branch(&data) {
-            spans.push(Span::styled(
-                format!("  {branch}"),
-                Style::default().fg(rgb(150, 170, 140)),
-            ));
-        }
-    }
+    let facts = OverscrollFacts {
+        dir: app.working_dir().and_then(|d| overscroll_dir_label(&d)),
+        branch: overscroll_git_branch(&data),
+        git: data.git_info.clone(),
+        context: overscroll_context_usage(&data),
+        auth: overscroll_auth_label(data.auth_method),
+        provider: (!provider.is_empty() && !overscroll_is_runtime_placeholder(&provider))
+            .then(|| overscroll_provider_display(&provider)),
+        model: (!model.is_empty() && !overscroll_is_placeholder(&model))
+            .then(|| session_facts::pretty_model(&model)),
+        effort: data
+            .reasoning_effort
+            .as_deref()
+            .and_then(overscroll_short_reasoning)
+            .map(str::to_string),
+    };
 
     let total_width = area.width as usize;
+    let alignment = if app.centered_mode() {
+        Alignment::Center
+    } else {
+        Alignment::Right
+    };
 
-    // No countdown active: just render the info line (centered or not) as before.
-    let Some(countdown) = countdown else {
+    // Pinned mode (no countdown): the info line owns the whole row.
+    let Some(secs) = countdown_secs else {
+        let (spans, _) = overscroll_fit_facts(&facts, total_width);
         if spans.is_empty() {
             return;
         }
-        let line = Line::from(overscroll_truncate_spans(spans, total_width));
-        let aligned_line = if app.centered_mode() {
-            line.alignment(Alignment::Center)
-        } else {
-            line
-        };
-        frame.render_widget(Paragraph::new(aligned_line), area);
+        let line = Line::from(spans).alignment(alignment);
+        frame.render_widget(Paragraph::new(line), area);
         return;
     };
 
-    let countdown_width = countdown.content.chars().count();
+    // Elastic mode: reserve the countdown on the right. Prefer the full
+    // "(overscroll x.x)" label, but fall back to a compact "(x.x)" when the
+    // facts would otherwise need to be cut.
+    let countdown_style = Style::default().fg(rgb(150, 150, 165)).italic();
+    let full_countdown = format!("(overscroll {:.1})", secs);
+    let compact_countdown = format!("({:.1})", secs);
+    let fit_with = |label: &str| {
+        let right_w = label.chars().count();
+        let left_w = total_width.saturating_sub(right_w + 1);
+        (overscroll_fit_facts(&facts, left_w), right_w)
+    };
+    let ((spans, fits), right_w, label) = {
+        let (fit, w) = fit_with(&full_countdown);
+        if fit.1 {
+            (fit, w, full_countdown)
+        } else {
+            let (fit, w) = fit_with(&compact_countdown);
+            (fit, w, compact_countdown)
+        }
+    };
+    let _ = fits;
 
-    // Tight width: if there is not even room for the countdown plus a single
-    // space of breathing room, drop the info entirely and just show the
-    // countdown (truncated as a last resort). The affordance survives.
-    if total_width <= countdown_width + 1 {
-        let countdown_line = Line::from(overscroll_truncate_spans(vec![countdown], total_width))
-            .alignment(Alignment::Right);
+    if total_width <= right_w + 1 {
+        let countdown_line = Line::from(overscroll_truncate_spans(
+            vec![Span::styled(label, countdown_style)],
+            total_width,
+        ))
+        .alignment(Alignment::Right);
         frame.render_widget(Paragraph::new(countdown_line), area);
         return;
     }
 
-    // Reserve the countdown on the right; the info line gets the rest and is
-    // truncated to fit so the two never collide.
-    let gap = 1u16;
-    let right_w = countdown_width as u16;
+    let right_w = right_w as u16;
     let left_w = area.width.saturating_sub(right_w);
     let left_area = Rect {
-        width: left_w.saturating_sub(gap),
+        width: left_w.saturating_sub(1),
         ..area
     };
     let right_area = Rect {
@@ -2091,20 +2047,214 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         width: right_w,
         ..area
     };
-
     if !spans.is_empty() {
-        let avail = left_area.width as usize;
-        let info_line = Line::from(overscroll_truncate_spans(spans, avail));
-        let info_line = if app.centered_mode() {
-            info_line.alignment(Alignment::Center)
-        } else {
-            info_line
-        };
+        let info_line = Line::from(spans).alignment(alignment);
         frame.render_widget(Paragraph::new(info_line), left_area);
     }
-
-    let countdown_line = Line::from(vec![countdown]).alignment(Alignment::Right);
+    let countdown_line =
+        Line::from(vec![Span::styled(label, countdown_style)]).alignment(Alignment::Right);
     frame.render_widget(Paragraph::new(countdown_line), right_area);
+}
+
+/// Raw facts for the overscroll status line, before width fitting.
+struct OverscrollFacts {
+    dir: Option<String>,
+    branch: Option<String>,
+    git: Option<crate::tui::info_widget::GitInfo>,
+    context: Option<(usize, usize)>,
+    auth: Option<(&'static str, Color)>,
+    provider: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+/// Per-fact detail level. 0 is the fullest form. Higher levels are more
+/// compact, and the last level of each optional fact hides it.
+#[derive(Clone, Copy, Default)]
+struct OverscrollLevels {
+    dir: u8,
+    branch: u8,
+    git: u8,
+    context: u8,
+    auth: u8,
+    provider: u8,
+    model: u8,
+    tight_separators: bool,
+}
+
+/// Compaction ladder, applied one step at a time until the line fits.
+///
+/// Priority (most to least important): directory, model, context usage,
+/// git branch, git status, provider, auth. Low-value facts are shortened or
+/// hidden first. The directory, model, and context usage are never hidden,
+/// only shortened, so the line always answers "where am I, what am I running,
+/// how full is the context".
+const OVERSCROLL_LADDER: &[fn(&mut OverscrollLevels)] = &[
+    |l| l.auth = 1,                // hide auth ("OAuth"/"API key")
+    |l| l.git = 1,                 // "~3 +1 ?2 ↑1" -> "±6 ↑1"
+    |l| l.context = 1,             // "74k/256k ▰▰▰▱▱▱▱▱▱▱ 29%" -> "▰▱▱▱ 29%"
+    |l| l.branch = 1,              // long branch -> 12 chars
+    |l| l.provider = 1,            // hide provider
+    |l| l.context = 2,             // "▰▱▱▱ 29%" -> "29%"
+    |l| l.git = 2,                 // hide git status
+    |l| l.branch = 2,              // hide branch
+    |l| l.tight_separators = true, // " · " -> " "
+    |l| l.model = 1,               // drop reasoning effort
+    |l| l.dir = 1,                 // "~/…/jcode" -> "jcode"
+];
+
+fn overscroll_fact_spans(
+    facts: &OverscrollFacts,
+    levels: OverscrollLevels,
+) -> Vec<Vec<Span<'static>>> {
+    let muted = Style::default().fg(rgb(140, 140, 150));
+    let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+
+    if let Some(dir) = &facts.dir {
+        let label = if levels.dir == 0 {
+            dir.clone()
+        } else {
+            dir.rsplit('/')
+                .find(|seg| !seg.is_empty())
+                .unwrap_or(dir)
+                .to_string()
+        };
+        out.push(vec![
+            Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
+            Span::styled(label, muted),
+        ]);
+    }
+
+    if let Some(branch) = &facts.branch {
+        let label = match levels.branch {
+            0 => Some(branch.clone()),
+            1 => Some(overscroll_truncate_label(branch, 12)),
+            _ => None,
+        };
+        if let Some(label) = label {
+            out.push(vec![Span::styled(
+                format!(" {label}"),
+                Style::default().fg(rgb(150, 170, 140)),
+            )]);
+        }
+    }
+
+    if let Some(git) = &facts.git
+        && let Some(spans) = overscroll_git_status_spans(git, levels.git)
+    {
+        out.push(spans);
+    }
+
+    if let Some((used, limit)) = facts.context {
+        match levels.context {
+            // Roomy: token counts plus the full-width bar.
+            0 => {
+                let mut group = vec![Span::styled(
+                    format!(
+                        "{}/{} ",
+                        overscroll_format_tokens(used),
+                        overscroll_format_tokens(limit)
+                    ),
+                    muted,
+                )];
+                group.extend(overscroll_context_bar(
+                    used,
+                    limit,
+                    OVERSCROLL_CONTEXT_CELLS_FULL,
+                ));
+                out.push(group);
+            }
+            // Compact bar plus percentage.
+            1 => out.push(overscroll_context_bar(
+                used,
+                limit,
+                OVERSCROLL_CONTEXT_CELLS_COMPACT,
+            )),
+            // Percentage only (the colored last span of the bar).
+            _ => out.push(
+                overscroll_context_bar(used, limit, 0)
+                    .into_iter()
+                    .last()
+                    .map(|span| Span::styled(span.content.trim_start().to_string(), span.style))
+                    .into_iter()
+                    .collect(),
+            ),
+        }
+    }
+
+    if levels.auth == 0
+        && let Some((label, color)) = facts.auth
+    {
+        out.push(vec![Span::styled(
+            label.to_string(),
+            Style::default().fg(color),
+        )]);
+    }
+
+    if levels.provider == 0
+        && let Some(provider) = &facts.provider
+    {
+        out.push(vec![Span::styled(provider.clone(), muted)]);
+    }
+
+    if let Some(model) = &facts.model {
+        let mut group = vec![Span::styled(
+            model.clone(),
+            Style::default().fg(rgb(190, 190, 200)).bold(),
+        )];
+        if levels.model == 0
+            && let Some(effort) = &facts.effort
+        {
+            group.push(Span::styled(format!(" {effort}"), muted));
+        }
+        out.push(group);
+    }
+
+    out
+}
+
+/// Fit the facts into `max_width` by walking the compaction ladder. Returns
+/// the spans and whether they fit without last-resort character truncation.
+fn overscroll_fit_facts(facts: &OverscrollFacts, max_width: usize) -> (Vec<Span<'static>>, bool) {
+    use unicode_width::UnicodeWidthStr;
+    let render = |levels: OverscrollLevels| {
+        let sep_text = if levels.tight_separators { " " } else { " · " };
+        let mut out: Vec<Span<'static>> = Vec::new();
+        for group in overscroll_fact_spans(facts, levels) {
+            if !out.is_empty() {
+                out.push(Span::styled(
+                    sep_text,
+                    Style::default().fg(rgb(100, 100, 110)),
+                ));
+            }
+            out.extend(group);
+        }
+        out
+    };
+    let width = |spans: &[Span<'static>]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+
+    let mut levels = OverscrollLevels::default();
+    let mut spans = render(levels);
+    for step in OVERSCROLL_LADDER {
+        if width(&spans) <= max_width {
+            return (spans, true);
+        }
+        step(&mut levels);
+        spans = render(levels);
+    }
+    if width(&spans) <= max_width {
+        return (spans, true);
+    }
+    (overscroll_truncate_spans(spans, max_width), false)
+}
+
+fn overscroll_truncate_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let mut out: String = label.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a
@@ -2165,6 +2315,49 @@ fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Opti
         label.push('…');
     }
     Some(label)
+}
+
+/// Git status counts using the git widget palette. Level 0 is the full
+/// `~modified +staged ?untracked ↑ahead ↓behind` form, level 1 collapses the
+/// local changes into a single `±N` count, and level 2 hides it. `None` when
+/// the tree is clean and in sync.
+fn overscroll_git_status_spans(
+    info: &crate::tui::info_widget::GitInfo,
+    level: u8,
+) -> Option<Vec<Span<'static>>> {
+    let parts: Vec<(usize, &str, Color)> = match level {
+        0 => vec![
+            (info.modified, "~", rgb(240, 200, 80)),
+            (info.staged, "+", rgb(100, 200, 100)),
+            (info.untracked, "?", rgb(140, 140, 150)),
+            (info.ahead, "↑", rgb(100, 200, 100)),
+            (info.behind, "↓", rgb(255, 140, 100)),
+        ],
+        1 => vec![
+            (
+                info.modified + info.staged + info.untracked,
+                "±",
+                rgb(240, 200, 80),
+            ),
+            (info.ahead, "↑", rgb(100, 200, 100)),
+            (info.behind, "↓", rgb(255, 140, 100)),
+        ],
+        _ => return None,
+    };
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (count, symbol, color) in parts {
+        if count == 0 {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("{symbol}{count}"),
+            Style::default().fg(color),
+        ));
+    }
+    (!spans.is_empty()).then_some(spans)
 }
 
 fn overscroll_dir_label(path: &str) -> Option<String> {
@@ -2314,6 +2507,10 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
     spans
 }
 
+/// Context bar widths in the overscroll status line: full when there is room,
+/// compact when the directory and model need the space.
+const OVERSCROLL_CONTEXT_CELLS_FULL: usize = 10;
+const OVERSCROLL_CONTEXT_CELLS_COMPACT: usize = 4;
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
 const RIGHT_FACT_GAP: u16 = 2;
 const RIGHT_FACT_PAD: u16 = 1;

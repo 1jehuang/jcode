@@ -217,10 +217,10 @@ prompt_entry_animation = true
 # external_sessions = true
 
 # Overscroll status line (model/provider/context info below the input):
-#   "overscroll" - elastic reveal when scrolling past the bottom (default)
-#   "on"         - always visible
+#   "on"         - always visible (default)
+#   "overscroll" - elastic reveal when scrolling past the bottom
 #   "off"        - never shown
-# overscroll_status = "overscroll"
+# overscroll_status = "on"
 
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
