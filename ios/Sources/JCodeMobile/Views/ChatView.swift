@@ -48,6 +48,7 @@ struct ChatView: View {
             TranscriptView(
                 entries: model.session.transcript,
                 isReasoning: model.session.isReasoning,
+                isProcessing: model.session.isProcessing,
                 onSuggestion: { model.draft = $0 }
             )
             .readableColumn()
@@ -72,6 +73,9 @@ struct ChatView: View {
             )
             .readableColumn()
         }
+        // The conversation is Desktop's raised page (PANEL_BG); sheets and
+        // pairing sit on the canvas tone behind it.
+        .background(Theme.surface.ignoresSafeArea())
         .sheet(isPresented: $showSessions) {
             SessionsView()
         }
@@ -117,9 +121,8 @@ struct ChatView: View {
                     .font(.body.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                     .frame(width: 36, height: 36)
-                    .background(Theme.surface)
+                    .background(Theme.surfaceElevated)
                     .clipShape(Circle())
-                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
@@ -134,7 +137,7 @@ struct ChatView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(model.session.sessionTitle ?? model.activeServer?.serverName ?? "jcode")
-                        .font(Theme.mono(15, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
                     HStack(spacing: 4) {
@@ -144,7 +147,7 @@ struct ChatView: View {
                             .lineLimit(1)
                             .truncationMode(.head)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 8, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .foregroundStyle(Theme.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -163,12 +166,8 @@ struct ChatView: View {
         .padding(.vertical, 6)
         .padding(.top, edgePads.top)
         .background(alignment: .bottom) {
-            ZStack(alignment: .bottom) {
-                Theme.background
-                Theme.chrome
-                Hairline()
-            }
-            .ignoresSafeArea(edges: .top)
+            Theme.surface
+                .ignoresSafeArea(edges: .top)
         }
     }
 

@@ -44,7 +44,7 @@ struct SettingsView: View {
                         if isActive {
                             Image(systemName: "checkmark")
                                 .font(.caption)
-                                .foregroundStyle(Theme.mint)
+                                .foregroundStyle(Theme.accent)
                                 .accessibilityHidden(true)
                         }
                     }

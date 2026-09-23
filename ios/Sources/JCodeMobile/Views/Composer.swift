@@ -38,13 +38,14 @@ struct Composer: View {
                 draft = ComposerRules.normalize(newValue)
                 submit()
             }
+            .tint(Theme.textPrimary)
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous))
+            .padding(.vertical, 10)
+            .background(Theme.background)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.bubble, style: .continuous)
-                    .stroke(isFocused ? Theme.mint.opacity(0.45) : Theme.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
+                    .stroke(isFocused ? Theme.borderFocus : Theme.border, lineWidth: 1)
             )
             .animation(.easeOut(duration: 0.15), value: isFocused)
 
@@ -69,7 +70,10 @@ struct Composer: View {
             Button(action: submit) {
                 Image(systemName: "arrow.up")
                     .font(.body.weight(.bold))
-                    .foregroundStyle(isConnected ? .black : Theme.textSecondary)
+                    .foregroundStyle(canSend ? Theme.onAccent : Theme.textTertiary)
+                    .frame(width: 36, height: 36)
+                    .background(canSend ? Theme.accent : Theme.surfaceElevated)
+                    .clipShape(Circle())
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
@@ -82,11 +86,8 @@ struct Composer: View {
         .padding(.vertical, 10)
         .padding(.bottom, edgePads.bottom)
         .background(alignment: .top) {
-            ZStack(alignment: .top) {
-                Theme.background
-                Hairline()
-            }
-            .ignoresSafeArea(edges: .bottom)
+            Theme.surface
+                .ignoresSafeArea(edges: .bottom)
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isProcessing)
     }

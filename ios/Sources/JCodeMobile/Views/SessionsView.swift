@@ -62,7 +62,7 @@ struct SessionsView: View {
                 dismiss()
             } label: {
                 Label("New session", systemImage: "plus")
-                    .foregroundStyle(Theme.mint)
+                    .foregroundStyle(Theme.accent)
             }
             .listRowBackground(Theme.surface)
             .accessibilityHint("Clears the conversation and starts fresh")
@@ -131,7 +131,7 @@ struct SessionsView: View {
                 if isActive {
                     Image(systemName: "checkmark")
                         .font(.caption)
-                        .foregroundStyle(Theme.mint)
+                        .foregroundStyle(Theme.accent)
                         .accessibilityHidden(true)
                 }
             }

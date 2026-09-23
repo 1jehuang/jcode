@@ -1,47 +1,53 @@
 import SwiftUI
 
-/// Design tokens. Dark, calm, terminal-native; mint accent for live state.
+/// Design tokens, mirrored from Jcode Desktop's default "Warm neutral" theme
+/// (`jcode-desktop-ui/src/theme.rs`): charcoal and stone surfaces, ivory type,
+/// restrained sandstone focus. Keep role names aligned with Desktop so the two
+/// clients read as one product.
 enum Theme {
-    static let background = Color(hex: 0x0F0F14)
-    static let surface = Color(hex: 0x1A1A1F)
-    static let surfaceElevated = Color(hex: 0x242429)
-    static let border = Color.white.opacity(0.08)
-    static let borderStrong = Color.white.opacity(0.14)
-    static let mint = Color(hex: 0x4DD9A6)
-    static let mintTint = Color(hex: 0x4DD9A6).opacity(0.15)
-    static let textPrimary = Color.white.opacity(0.92)
-    static let textSecondary = Color.white.opacity(0.55)
-    static let textTertiary = Color.white.opacity(0.35)
-    static let warning = Color(hex: 0xF59E0B)
-    static let error = Color(hex: 0xD94D59)
+    /// Desktop `BG`: the canvas behind every page (sheets, pairing).
+    static let background = Color(hex: 0x1C1A18)
+    /// Desktop `PANEL_BG`: the raised page a conversation lives on.
+    static let surface = Color(hex: 0x25221F)
+    /// Desktop `HEADER_BG` / `USER_BG`: backing behind the page, prompt cards.
+    static let surfaceElevated = Color(hex: 0x302B27)
+    /// Desktop `CODE_BG`: code blocks and expanded tool output.
+    static let codeBackground = Color(hex: 0x1C1A18)
+    /// Desktop `PANEL_BORDER` / `TOOL_BORDER`.
+    static let border = Color(hex: 0x403A34)
+    /// Desktop `PANEL_BORDER_FOCUS`: focused input outline.
+    static let borderFocus = Color(hex: 0x87796B)
+    /// Desktop `ACCENT`: sandstone. Used sparingly for primary actions.
+    static let accent = Color(hex: 0xB6A08A)
+    /// Ink placed on an accent fill.
+    static let onAccent = Color(hex: 0x1C1A18)
+    static let link = Color(hex: 0xC6B5A2)
+    /// Desktop `TEXT` / `TEXT_DIM` / `TEXT_FAINT`.
+    static let textPrimary = Color(hex: 0xE4DDD3)
+    static let textSecondary = Color(hex: 0xA79D91)
+    static let textTertiary = Color(hex: 0x9B9084)
+    /// Desktop `OK` / `WARN` / `ERROR` semantic states.
+    static let ok = Color(hex: 0xA6B68E)
+    static let warning = Color(hex: 0xD0B17D)
+    static let error = Color(hex: 0xE18C85)
 
-    /// Accent fill for primary actions; a touch of depth without a rainbow.
-    static let mintGradient = LinearGradient(
-        colors: [Color(hex: 0x5FE3B3), Color(hex: 0x36C08D)],
-        startPoint: .top,
-        endPoint: .bottom
-    )
+    /// Desktop's prompt wash: the CLI prompt-number rainbow in reverse hue
+    /// order. The newest prompt is violet; older prompts step toward red while
+    /// the tint fades exponentially back into plain card paper.
+    static func promptBackground(distance: Int) -> Color {
+        let rainbow: [UInt32] = [0xFF5050, 0xFFA050, 0xFFE650, 0x50DC64, 0x50C8DC, 0x648CFF, 0xB464FF]
+        let d = max(0, distance)
+        let tint = rainbow[rainbow.count - 1 - min(d, rainbow.count - 1)]
+        let strength = 0.05 * exp(-0.4 * Double(d))
+        return Color(hex: 0x302B27, blending: tint, amount: strength)
+    }
 
-    /// Fill for the user's own message bubbles.
-    static let userBubble = LinearGradient(
-        colors: [Color(hex: 0x4DD9A6).opacity(0.22), Color(hex: 0x4DD9A6).opacity(0.12)],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
-    /// Very subtle top-lit sheen for chrome surfaces (header, composer).
-    static let chrome = LinearGradient(
-        colors: [Color.white.opacity(0.05), Color.white.opacity(0.0)],
-        startPoint: .top,
-        endPoint: .bottom
-    )
-
-    /// Corner radius scale.
+    /// Corner radius scale (Desktop: 8px controls, 12px prompt cards).
     enum Radius {
-        static let small: CGFloat = 10
-        static let medium: CGFloat = 14
-        static let large: CGFloat = 18
-        static let bubble: CGFloat = 20
+        static let small: CGFloat = 8
+        static let medium: CGFloat = 12
+        static let large: CGFloat = 14
+        static let bubble: CGFloat = 12
     }
 
     static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
@@ -61,6 +67,17 @@ extension Color {
             green: Double((hex >> 8) & 0xFF) / 255.0,
             blue: Double(hex & 0xFF) / 255.0
         )
+    }
+
+    /// `base` with `tint` composited over it at `amount` opacity (opaque result).
+    init(hex base: UInt32, blending tint: UInt32, amount: Double) {
+        func channel(_ value: UInt32, _ shift: UInt32) -> Double {
+            Double((value >> shift) & 0xFF) / 255.0
+        }
+        func mix(_ shift: UInt32) -> Double {
+            channel(base, shift) * (1 - amount) + channel(tint, shift) * amount
+        }
+        self.init(red: mix(16), green: mix(8), blue: mix(0))
     }
 }
 
@@ -208,5 +225,18 @@ struct PressableButtonStyle: ButtonStyle {
             .scaleEffect(configuration.isPressed ? scale : 1)
             .opacity(configuration.isPressed ? 0.85 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+/// The canonical Jcode halftone donut, shared with Desktop and the website.
+struct BrandMark: View {
+    var size: CGFloat = 40
+
+    var body: some View {
+        Image("BrandMark")
+            .resizable()
+            .interpolation(.high)
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }

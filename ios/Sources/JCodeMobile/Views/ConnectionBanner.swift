@@ -16,7 +16,7 @@ struct ConnectionBanner: View {
             message: label,
             lineLimit: 2
         ) {
-            InlineActionButton(title: "Retry", tint: Theme.mint, action: onRetry)
+            InlineActionButton(title: "Retry", tint: Theme.accent, action: onRetry)
                 .accessibilityLabel("Retry connection")
                 .accessibilityHint("Reconnects to the server now")
         }
@@ -45,11 +45,11 @@ struct DemoBanner: View {
     var body: some View {
         BannerStrip(
             icon: "play.circle.fill",
-            tint: Theme.mint,
+            tint: Theme.accent,
             message: "Demo mode: scripted replies, no server connected",
             lineLimit: 2
         ) {
-            InlineActionButton(title: "Pair", tint: Theme.mint, action: onExit)
+            InlineActionButton(title: "Pair", tint: Theme.accent, action: onExit)
                 .accessibilityLabel("Exit demo and pair a server")
                 .accessibilityHint("Leaves the demo and opens pairing")
         }
@@ -66,7 +66,7 @@ struct QueuedInterruptChip: View {
     var body: some View {
         BannerStrip(
             icon: "clock",
-            tint: Theme.mint,
+            tint: Theme.accent,
             message: count == 1 ? "1 message queued" : "\(count) messages queued",
             lineLimit: 1
         ) {

@@ -27,7 +27,7 @@ struct SettingsServersSection: View {
                         Spacer()
                         if isActive {
                             Circle()
-                                .fill(Theme.mint)
+                                .fill(Theme.ok)
                                 .frame(width: 8, height: 8)
                                 .accessibilityHidden(true)
                         }
@@ -50,7 +50,7 @@ struct SettingsServersSection: View {
                 showPairNew = true
             } label: {
                 Label("Pair new server", systemImage: "plus")
-                    .foregroundStyle(Theme.mint)
+                    .foregroundStyle(Theme.accent)
             }
             .listRowBackground(Theme.surface)
             .accessibilityHint("Opens pairing to add a server")

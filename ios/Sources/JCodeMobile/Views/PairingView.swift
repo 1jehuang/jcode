@@ -46,7 +46,7 @@ struct PairingView: View {
                 Button(action: pair) {
                     HStack(spacing: 8) {
                         if isPairing && !reduceMotion {
-                            ProgressView().tint(.black).controlSize(.small)
+                            ProgressView().tint(Theme.onAccent).controlSize(.small)
                         }
                         Text(isPairing ? "Pairing..." : "Pair")
                             .font(.headline)
@@ -56,13 +56,13 @@ struct PairingView: View {
                     .background {
                         if canPair {
                             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
-                                .fill(Theme.mintGradient)
+                                .fill(Theme.accent)
                         } else {
                             RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous)
                                 .fill(Theme.surfaceElevated)
                         }
                     }
-                    .foregroundStyle(canPair ? Color.black : Theme.textTertiary)
+                    .foregroundStyle(canPair ? Theme.onAccent : Theme.textTertiary)
                 }
                 .buttonStyle(PressableButtonStyle(scale: 0.98))
                 .disabled(!canPair || isPairing)
@@ -129,7 +129,7 @@ struct PairingView: View {
                     .font(.subheadline.weight(.medium))
                     .multilineTextAlignment(.leading)
             }
-            .foregroundStyle(Theme.mint)
+            .foregroundStyle(Theme.accent)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -149,19 +149,9 @@ struct PairingView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: "terminal.fill")
-                    .font(Theme.icon(20, weight: .semibold))
-                    .foregroundStyle(Theme.mint)
-                    .frame(width: 40, height: 40)
-                    .background(Theme.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Theme.border, lineWidth: 1)
-                    )
-                    .accessibilityHidden(true)
+                BrandMark(size: 40)
                 Text("jcode")
-                    .font(Theme.mono(32, weight: .bold))
+                    .font(.largeTitle.weight(.semibold))
                     .foregroundStyle(Theme.textPrimary)
             }
             Text("Pair with a server on your tailnet")
@@ -187,7 +177,7 @@ struct PairingView: View {
             TextField(placeholder, text: text)
                 .font(Theme.mono(16))
                 .foregroundStyle(Theme.textPrimary)
-                .tint(Theme.mint)
+                .tint(Theme.accent)
                 .padding(12)
                 .background(Theme.surfaceElevated)
                 .clipShape(

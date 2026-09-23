@@ -75,7 +75,7 @@ if [[ -n "$QUICK" ]]; then
 else
   MATRIX_ARGS=()
 fi
-python3 "$HARNESS/ui_matrix.py" "${MATRIX_ARGS[@]}" --out "$SCRATCH/shots" --json \
+python3 "$HARNESS/ui_matrix.py" ${MATRIX_ARGS[@]+"${MATRIX_ARGS[@]}"} --out "$SCRATCH/shots" --json \
   >"$MATRIX_JSON" 2>"$SCRATCH/matrix.log"
 ( cd "$HARNESS" && python3 -m reward.aggregate --matrix-json "$MATRIX_JSON" \
     --out-json "$REWARD_JSON" >"$SCRATCH/reward.log" 2>&1 )

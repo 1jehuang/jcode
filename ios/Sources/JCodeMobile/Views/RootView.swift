@@ -35,8 +35,21 @@ struct RootView: View {
                     for _ in 0..<50 where !model.isConnected {
                         try? await Task.sleep(nanoseconds: 100_000_000)
                     }
-                    model.draft = prompt
-                    model.sendDraft()
+                    // "a || b" sends several prompts in turn, each after the
+                    // previous reply finishes, for multi-turn screenshots.
+                    let prompts = prompt.components(separatedBy: "||")
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { !$0.isEmpty }
+                    for (index, next) in prompts.enumerated() {
+                        if index > 0 {
+                            for _ in 0..<200 where model.session.isProcessing {
+                                try? await Task.sleep(nanoseconds: 100_000_000)
+                            }
+                        }
+                        model.draft = next
+                        model.sendDraft()
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                    }
                 }
                 return
             }
@@ -113,7 +126,7 @@ struct StatusPill: View {
 
     private var color: Color {
         switch phase {
-        case .connected: Theme.mint
+        case .connected: Theme.ok
         case .connecting, .reconnecting: Theme.warning
         case .disconnected, .failed: Theme.error
         }
@@ -197,7 +210,7 @@ private struct NoticeRow: View {
     private var tint: Color {
         switch notice.kind {
         case .info: Theme.textSecondary
-        case .notification: Theme.mint
+        case .notification: Theme.accent
         case .compaction: Theme.warning
         }
     }

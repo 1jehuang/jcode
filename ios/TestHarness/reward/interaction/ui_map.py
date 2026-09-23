@@ -485,8 +485,8 @@ def assumptions() -> dict[str, str]:
 # Clearly separated from the source-based map above.
 # ---------------------------------------------------------------------------
 
-# Theme.mint = 0x4DD9A6 -> the dominant accent for the send button (and checks).
-_MINT_RGB: tuple[int, int, int] = (0x4D, 0xD9, 0xA6)
+# Theme.accent = 0xB6A08A (Desktop sandstone ACCENT) -> the send button fill.
+_MINT_RGB: tuple[int, int, int] = (0xB6, 0xA0, 0x8A)
 
 
 def _largest_color_component(mask) -> tuple[int, int, int, int] | None:
