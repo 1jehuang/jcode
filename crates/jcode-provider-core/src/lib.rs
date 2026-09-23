@@ -861,8 +861,8 @@ impl RouteSelection {
 }
 
 /// Grok Build routing spec: `grok-4.6` and `grok-build:grok-4.6` both become
-/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the ACP
-/// runtime instead of treating the bare id as the active provider's model.
+/// `grok-build:grok-4.6` so `MultiProvider::set_model` dispatches to the Grok
+/// Build runtime instead of treating the bare id as the active provider's model.
 pub fn grok_build_model_spec(model: &str) -> String {
     let bare = model.strip_prefix("grok-build:").unwrap_or(model).trim();
     format!("grok-build:{bare}")

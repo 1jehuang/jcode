@@ -58,13 +58,6 @@ pub(crate) fn tool_smoke_skip_detail_for_choice(
         );
     }
 
-    if matches!(choice, super::provider_init::ProviderChoice::GrokBuild) {
-        return Some(
-            "Skipped: Grok Build executes its isolated ACP coding-tool loop internally; it does not expose Jcode tool calls for the outer auth-test harness. Basic provider smoke validates the subscription transport."
-                .to_string(),
-        );
-    }
-
     if matches!(choice, super::provider_init::ProviderChoice::Fpt) {
         let model = effective_openai_compatible_auth_test_model(
             crate::provider_catalog::FPT_PROFILE,
@@ -342,7 +335,9 @@ fn validate_auth_test_tool_smoke_transcript(
     for message in messages {
         for block in &message.content {
             match block {
-                crate::message::ContentBlock::ToolUse { id, name, input, .. } => {
+                crate::message::ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     tool_uses.push((id.as_str(), name.as_str(), input));
                 }
                 crate::message::ContentBlock::ToolResult {
@@ -366,7 +361,9 @@ fn validate_auth_test_tool_smoke_transcript(
         id: tool_id.to_string(),
         name: tool_name.to_string(),
         input: input.clone(),
-        intent: None, thought_signature: None, };
+        intent: None,
+        thought_signature: None,
+    };
     if let Some(error) = tool_call.validation_error() {
         anyhow::bail!("tool smoke emitted invalid tool call: {error}");
     }
@@ -615,7 +612,9 @@ mod auth_tool_smoke_tests {
                 vec![crate::message::ContentBlock::ToolUse {
                     id: "call_1".to_string(),
                     name: AUTH_TEST_TOOL_NAME.to_string(),
-                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}), thought_signature: None, }],
+                    input: serde_json::json!({"command": AUTH_TEST_TOOL_COMMAND}),
+                    thought_signature: None,
+                }],
             ),
             stored_message(
                 crate::message::Role::User,

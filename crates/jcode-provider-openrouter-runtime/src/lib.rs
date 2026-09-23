@@ -463,6 +463,30 @@ fn apply_opencode_session_header(
 
 pub(crate) const OPENCODE_SESSION_HEADER: &str = "x-opencode-session";
 
+/// Models the Grok CLI chat proxy serves to Grok Build subscribers.
+pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
+const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
+
+/// Per-turn Grok CLI sampler headers (model override, conversation/request ids).
+fn apply_grok_cli_turn_headers(
+    mut req: reqwest::RequestBuilder,
+    auth: &ProviderAuth,
+    model: &str,
+    conversation_id: &str,
+) -> reqwest::RequestBuilder {
+    if matches!(auth, ProviderAuth::GrokCli { .. }) {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        for (name, value) in jcode_base::auth::grok_build::chat_proxy_turn_headers(
+            model,
+            conversation_id,
+            &request_id,
+        ) {
+            req = req.header(name, value);
+        }
+    }
+    req
+}
+
 #[derive(Debug, Clone)]
 enum ProviderAuth {
     AuthorizationBearer {
@@ -475,6 +499,12 @@ enum ProviderAuth {
         label: String,
     },
     AzureEntra {
+        label: String,
+    },
+    /// Grok Build subscription: the Grok CLI OIDC session from
+    /// `~/.grok/auth.json`, resolved (and refreshed when expired) per request,
+    /// plus the Grok CLI identity headers the chat proxy requires.
+    GrokCli {
         label: String,
     },
     None {
@@ -493,6 +523,14 @@ impl ProviderAuth {
                 let token = jcode_base::auth::azure::get_bearer_token().await?;
                 Ok(req.bearer_auth(token))
             }
+            Self::GrokCli { .. } => {
+                let token = jcode_base::auth::grok_build::bearer_token(false).await?;
+                let mut req = req.bearer_auth(token);
+                for (name, value) in jcode_base::auth::grok_build::chat_proxy_identity_headers() {
+                    req = req.header(name, value);
+                }
+                Ok(req)
+            }
             Self::None { .. } => Ok(req),
         }
     }
@@ -502,6 +540,7 @@ impl ProviderAuth {
             Self::AuthorizationBearer { label, .. } => label,
             Self::HeaderValue { label, .. } => label,
             Self::AzureEntra { label } => label,
+            Self::GrokCli { label } => label,
             Self::None { label } => label,
         }
     }
@@ -1723,6 +1762,60 @@ impl OpenRouterProvider {
             endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
             endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
         })
+    }
+
+    /// Grok Build subscription over the Grok CLI chat proxy
+    /// (`https://cli-chat-proxy.grok.com/v1`, OpenAI-compatible).
+    ///
+    /// Auth is the Grok CLI OIDC session, not `XAI_API_KEY`. The token is read
+    /// from `auth.json` for every request so refreshes (by Jcode or the Grok
+    /// CLI) are picked up without rebuilding the provider. Jcode owns tools.
+    pub fn new_grok_build_subscription(model: &str) -> Self {
+        let static_models = GROK_BUILD_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect::<Vec<_>>();
+        let static_context_limits = GROK_BUILD_MODELS
+            .iter()
+            .map(|model| {
+                let limit = if model.contains("grok-code-fast") {
+                    256_000
+                } else {
+                    500_000
+                };
+                (model.to_string(), limit)
+            })
+            .collect();
+        Self {
+            client: jcode_provider_core::shared_http_client(),
+            model: Arc::new(RwLock::new(model.to_string())),
+            reasoning_effort: Arc::new(RwLock::new(None)),
+            api_base: jcode_base::auth::grok_build::chat_proxy_base_url(),
+            auth: ProviderAuth::GrokCli {
+                label: GROK_BUILD_AUTH_LABEL.to_string(),
+            },
+            supports_provider_features: false,
+            // The proxy's `/models` shape is not a documented catalog; keep the
+            // curated list so `/model` works offline and before first request.
+            supports_model_catalog: false,
+            profile_id: Some("grok-build".to_string()),
+            reasoning_effort_support: Some(false),
+            disable_reasoning_heuristics: true,
+            static_reasoning_config: HashMap::new(),
+            max_tokens: Self::configured_max_tokens(None),
+            extra_body: None,
+            static_models,
+            static_context_limits,
+            static_image_input_support: HashMap::new(),
+            send_openrouter_headers: false,
+            conversation_id: new_conversation_id(),
+            models_cache: Arc::new(RwLock::new(ModelsCache::default())),
+            model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
+            provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
+            provider_pin: Arc::new(Mutex::new(None)),
+            endpoints_cache: Arc::new(RwLock::new(HashMap::new())),
+            endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
+        }
     }
 
     pub fn new_openrouter_api_key_runtime() -> Result<Self> {

@@ -3825,3 +3825,74 @@ fn configured_swarm_root_effort_reads_real_config() {
         assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
     }
 }
+
+/// Grok Build: a real chat/completions request built by the Grok Build
+/// subscription runtime carries the OIDC bearer from `$GROK_HOME/auth.json`
+/// and the Grok CLI identity headers the chat proxy requires, plus Jcode's
+/// tools in OpenAI format (Jcode owns tool execution).
+#[test]
+fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
+    let _lock = ENV_LOCK.lock();
+    let grok_home = TempDir::new().expect("grok home");
+    std::fs::write(
+        grok_home.path().join("auth.json"),
+        format!(
+            r#"{{"https://auth.x.ai::{}": {{"key":"oidc-access","auth_mode":"oidc","expires_at":"2999-01-01T00:00:00Z"}}}}"#,
+            jcode_base::auth::grok_build::OAUTH_CLIENT_ID
+        ),
+    )
+    .expect("auth.json");
+    let _home = EnvVarGuard::set("GROK_HOME", grok_home.path());
+    let _deploy = EnvVarGuard::remove("GROK_DEPLOYMENT_KEY");
+    let _version = EnvVarGuard::set("JCODE_GROK_CLI_VERSION", "9.8.7");
+    let (addr, rx) = spawn_header_capturing_server();
+    let _base = EnvVarGuard::set(
+        "GROK_CLI_CHAT_PROXY_BASE_URL",
+        format!("http://127.0.0.1:{}/v1", addr.port()),
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let raw = rt.block_on(async {
+        let provider = OpenRouterProvider::new_grok_build_subscription("grok-4.6");
+        assert_eq!(provider.context_window(), 500_000);
+        let tools = vec![ToolDefinition {
+            name: "bash".to_string(),
+            description: "run".to_string(),
+            input_schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"}}}),
+        }];
+        let mut stream = provider
+            .complete(&[Message::user("hello")], &tools, "sys", None)
+            .await
+            .expect("stream");
+        while stream.next().await.is_some() {}
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("server captured request")
+    });
+    let lower = raw.to_ascii_lowercase();
+    assert!(lower.starts_with("post /v1/chat/completions "), "{raw}");
+    for expected in [
+        "authorization: bearer oidc-access",
+        "user-agent: grok-cli/9.8.7",
+        "x-xai-token-auth: xai-grok-cli",
+        "x-grok-client-version: 9.8.7",
+        "x-grok-client-identifier: grok-shell",
+        "x-grok-client-surface: cli",
+        "x-grok-model-override: grok-4.6",
+        "x-grok-conv-id: ",
+        "x-grok-req-id: ",
+    ] {
+        assert!(lower.contains(expected), "missing `{expected}` in:\n{raw}");
+    }
+    assert!(!lower.contains("user-agent: jcode"), "{raw}");
+    assert!(!lower.contains("http-referer"), "{raw}");
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).expect("body")).expect("json body");
+    assert_eq!(body["model"], "grok-4.6");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["tools"][0]["function"]["name"], "bash");
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert!(body.get("reasoning_effort").is_none());
+}

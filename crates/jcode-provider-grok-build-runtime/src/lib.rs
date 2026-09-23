@@ -1,117 +1,57 @@
-//! Grok Build subscription provider over Jcode's managed ACP backend.
+//! Grok Build (Grok CLI subscription) provider over direct HTTPS.
 //!
-//! This runtime deliberately has no xAI HTTP or API-key path. Authentication is
-//! delegated to the official Grok Build ACP implementation provisioned by
-//! Jcode, which consumes its cached login after `initialize` advertises it.
+//! Requests go straight to the Grok CLI chat proxy
+//! (`https://cli-chat-proxy.grok.com/v1`, OpenAI-compatible chat completions)
+//! using the Grok CLI OIDC session from `$GROK_HOME/auth.json` /
+//! `~/.grok/auth.json`, presenting the official Grok CLI client identity (see
+//! `jcode_base::auth::grok_build`). No `grok` subprocess is ever launched.
+//!
+//! Streaming, request building, and SSE parsing reuse the OpenAI-compatible
+//! runtime. Jcode owns tool execution. This wrapper adds the Grok Build route
+//! identity, model selection, and a single refresh-and-retry on HTTP 401.
 
-use acp::Agent as _;
-use agent_client_protocol as acp;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
-use futures::Stream;
-use jcode_message_types::{
-    ContentBlock as JcodeContentBlock, Message, Role, StreamEvent, ToolDefinition,
-};
+use futures::{Stream, StreamExt};
+use jcode_message_types::{Message, StreamEvent, ToolDefinition};
 use jcode_provider_core::{EventStream, ModelRoute, Provider};
-use serde_json::{Map, Value};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use jcode_provider_openrouter_runtime::{GROK_BUILD_MODELS, OpenRouterProvider};
+use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-const DEFAULT_MODEL: &str = "grok-4.5";
-const ACP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const ACP_PROMPT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
-const STDERR_LIMIT: usize = 64 * 1024;
-
-#[derive(Clone, Debug)]
-pub struct GrokBuildProcess {
-    pub command: PathBuf,
-    pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
-}
-
-impl GrokBuildProcess {
-    pub fn from_env() -> Self {
-        let command = std::env::var_os("JCODE_GROK_CLI_PATH")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("grok"));
-        Self {
-            command,
-            args: vec!["agent".to_string(), "stdio".to_string()],
-            env: BTreeMap::new(),
-        }
-    }
-}
+pub const DEFAULT_MODEL: &str = "grok-4.6";
+const ROUTE_PREFIX: &str = "grok-build:";
+/// Stable route api_method (kept for saved sessions and `/model` routing).
+pub const ROUTE_API_METHOD: &str = "grok-build-acp";
 
 #[derive(Clone)]
 pub struct GrokBuildProvider {
-    process: GrokBuildProcess,
-    model: Arc<RwLock<String>>,
-    models: Arc<RwLock<Vec<String>>>,
-    model_selected: Arc<AtomicBool>,
+    inner: Arc<OpenRouterProvider>,
 }
 
 impl GrokBuildProvider {
     pub fn new() -> Self {
-        Self::with_process(GrokBuildProcess::from_env())
+        Self::with_model(DEFAULT_MODEL)
     }
 
-    pub fn with_process(process: GrokBuildProcess) -> Self {
+    pub fn with_model(model: &str) -> Self {
         Self {
-            process,
-            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
-            models: Arc::new(RwLock::new(Vec::new())),
-            model_selected: Arc::new(AtomicBool::new(false)),
+            inner: Arc::new(OpenRouterProvider::new_grok_build_subscription(
+                normalize_model(model).unwrap_or(DEFAULT_MODEL),
+            )),
         }
     }
 
-    /// Verify that the CLI can initialize and authenticate with its own cached
-    /// subscription credential. This never reads or forwards credential data.
-    pub async fn authenticate_cached_cli(&self) -> Result<()> {
-        let process = self.process.clone();
-        run_on_acp_thread_with_process(process, move |connection| {
-            Box::pin(async move {
-                let initialized = initialize_and_authenticate(&connection).await?;
-                Ok::<_, anyhow::Error>(models_from_initialize(&initialized))
-            })
-        })
-        .await
-        .map(|_| ())
-        .with_context(|| cached_login_hint("Grok Build authentication failed"))
-    }
-
-    fn update_models(&self, discovered: DiscoveredModels) {
-        if !discovered.available.is_empty() {
-            *self
-                .models
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = discovered.available;
-        }
-        if let Some(current) = discovered.current.filter(|model| !model.trim().is_empty()) {
-            let mut selected = self
-                .model
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if selected.as_str() == DEFAULT_MODEL
-                || !self
-                    .models
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .contains(&*selected)
-            {
-                *selected = current;
-            }
-        }
+    async fn complete_once(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system: &str,
+    ) -> Result<EventStream> {
+        // The chat proxy is stateless per request: always send full history.
+        self.inner.complete(messages, tools, system, None).await
     }
 }
 
@@ -121,48 +61,122 @@ impl Default for GrokBuildProvider {
     }
 }
 
+fn normalize_model(model: &str) -> Option<&str> {
+    let model = model.trim();
+    let model = model.strip_prefix(ROUTE_PREFIX).unwrap_or(model).trim();
+    (!model.is_empty()).then_some(model)
+}
+
+/// Whether an error from the chat proxy means the bearer token was rejected.
+fn is_unauthorized_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("status: 401")
+        || (text.contains("401")
+            && (text.contains("unauthorized")
+                || text.contains("invalid or expired credentials")
+                || text.contains("unauthenticated")))
+}
+
+fn is_unauthorized_item(item: &Result<StreamEvent>) -> bool {
+    match item {
+        Err(error) => is_unauthorized_text(&format!("{error:#}")),
+        Ok(StreamEvent::Error { message, .. }) => is_unauthorized_text(message),
+        _ => false,
+    }
+}
+
+/// Emits the inner stream, but if the first error is a 401 before any model
+/// output, forces a token refresh and replays the request once.
+struct AuthRetryStream {
+    inner: EventStream,
+    retry: Option<Box<dyn FnOnce() -> RetryFuture + Send>>,
+    pending: Option<RetryFuture>,
+    saw_output: bool,
+}
+
+type RetryFuture = Pin<Box<dyn Future<Output = Result<EventStream>> + Send>>;
+
+fn produces_output(event: &StreamEvent) -> bool {
+    matches!(
+        event,
+        StreamEvent::TextDelta(_)
+            | StreamEvent::ThinkingDelta(_)
+            | StreamEvent::ToolUseStart { .. }
+            | StreamEvent::ToolInputDelta(_)
+    )
+}
+
+impl Stream for AuthRetryStream {
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(pending) = this.pending.as_mut() {
+                match pending.as_mut().poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Ok(stream)) => {
+                        this.pending = None;
+                        this.inner = stream;
+                    }
+                    Poll::Ready(Err(error)) => {
+                        this.pending = None;
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
+            match this.inner.poll_next_unpin(cx) {
+                Poll::Ready(Some(item)) => {
+                    if !this.saw_output && is_unauthorized_item(&item) {
+                        if let Some(retry) = this.retry.take() {
+                            this.pending = Some(retry());
+                            continue;
+                        }
+                    }
+                    if let Ok(event) = &item
+                        && produces_output(event)
+                    {
+                        this.saw_output = true;
+                    }
+                    return Poll::Ready(Some(item));
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for GrokBuildProvider {
     async fn complete(
         &self,
         messages: &[Message],
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         system: &str,
-        resume_session_id: Option<&str>,
+        _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
-        let prompt = build_prompt(messages, system, resume_session_id.is_some())?;
-        let process = self.process.clone();
-        // Before catalog prefetch or an explicit `--model`/picker choice, let
-        // Grok CLI keep its advertised current model instead of forcing our
-        // display fallback onto a newer CLI catalog.
-        let selected_model = self
-            .model_selected
-            .load(Ordering::Acquire)
-            .then(|| self.model());
-        let resume_session_id = resume_session_id.map(ToOwned::to_owned);
-        let (tx, rx) = mpsc::channel(128);
-        let (cancel_tx, cancel_rx) = oneshot::channel();
-
-        let thread = std::thread::Builder::new()
-            .name("jcode-grok-build-acp".to_string())
-            .spawn(move || {
-                if let Err(error) = run_turn_thread(
-                    process,
-                    selected_model,
-                    resume_session_id,
-                    prompt,
-                    tx.clone(),
-                    cancel_rx,
-                ) {
-                    let _ = tx.blocking_send(Err(error));
-                }
+        let first = self.complete_once(messages, tools, system).await;
+        let provider = self.clone();
+        let messages = messages.to_vec();
+        let tools = tools.to_vec();
+        let system = system.to_string();
+        let retry = move || -> RetryFuture {
+            Box::pin(async move {
+                jcode_base::auth::grok_build::bearer_token(true).await?;
+                provider.complete_once(&messages, &tools, &system).await
             })
-            .context("Failed to start Grok Build ACP runtime thread")?;
-
-        Ok(Box::pin(GrokEventStream {
-            inner: ReceiverStream::new(rx),
-            cancel: Some(cancel_tx),
-            thread: Some(thread),
+        };
+        let inner = match first {
+            Ok(stream) => stream,
+            // Already retried once: return the replayed stream as-is.
+            Err(error) if is_unauthorized_text(&format!("{error:#}")) => return retry().await,
+            Err(error) => return Err(error),
+        };
+        Ok(Box::pin(AuthRetryStream {
+            inner,
+            retry: Some(Box::new(retry)),
+            pending: None,
+            saw_output: false,
         }))
     }
 
@@ -175,41 +189,23 @@ impl Provider for GrokBuildProvider {
     }
 
     fn model(&self) -> String {
-        self.model
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.inner.model()
     }
 
     fn set_model(&self, model: &str) -> Result<()> {
-        let model = model.strip_prefix("grok-build:").unwrap_or(model).trim();
-        if model.is_empty() {
+        let Some(model) = normalize_model(model) else {
             bail!("Grok Build model cannot be empty");
-        }
-        let available = self
-            .models
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !available.is_empty() && !available.iter().any(|candidate| candidate == model) {
-            bail!(
-                "Model '{model}' is not advertised by Grok Build. Available models: {}",
-                available.join(", ")
-            );
-        }
-        drop(available);
-        *self
-            .model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = model.to_string();
-        self.model_selected.store(true, Ordering::Release);
-        Ok(())
+        };
+        self.inner.set_model(model)
     }
 
     fn available_models_display(&self) -> Vec<String> {
-        self.models
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        let mut models: Vec<String> = GROK_BUILD_MODELS.iter().map(|m| m.to_string()).collect();
+        let current = self.model();
+        if !current.is_empty() && !models.contains(&current) {
+            models.insert(0, current);
+        }
+        models
     }
 
     fn available_models_for_switching(&self) -> Vec<String> {
@@ -222,9 +218,9 @@ impl Provider for GrokBuildProvider {
             .map(|model| ModelRoute {
                 model,
                 provider: "Grok Build".to_string(),
-                api_method: "grok-build-acp".to_string(),
+                api_method: ROUTE_API_METHOD.to_string(),
                 available: true,
-                detail: "Grok Build subscription via Jcode-managed ACP".to_string(),
+                detail: "Grok Build subscription via the Grok CLI chat proxy (HTTPS)".to_string(),
                 usage: None,
                 cheapness: None,
             })
@@ -232,16 +228,6 @@ impl Provider for GrokBuildProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        let process = self.process.clone();
-        let discovered = run_on_acp_thread_with_process(process, move |connection| {
-            Box::pin(async move {
-                let initialized = initialize_and_authenticate(&connection).await?;
-                Ok::<_, anyhow::Error>(models_from_initialize(&initialized))
-            })
-        })
-        .await
-        .with_context(|| cached_login_hint("Failed to discover Grok Build models"))?;
-        self.update_models(discovered);
         Ok(())
     }
 
@@ -250,585 +236,133 @@ impl Provider for GrokBuildProvider {
     }
 
     fn handles_tools_internally(&self) -> bool {
+        false
+    }
+
+    fn supports_compaction(&self) -> bool {
         true
     }
 
+    fn supports_image_input(&self) -> bool {
+        self.inner.supports_image_input()
+    }
+
+    fn context_window(&self) -> usize {
+        self.inner.context_window()
+    }
+
     fn transport(&self) -> Option<String> {
-        Some("ACP stdio".to_string())
+        Some("HTTPS (SSE)".to_string())
     }
 
     fn fork(&self) -> Arc<dyn Provider> {
-        let fork = Self::with_process(self.process.clone());
-        *fork
-            .model
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.model();
-        *fork
-            .models
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.available_models_display();
-        fork.model_selected.store(
-            self.model_selected.load(Ordering::Acquire),
-            Ordering::Release,
-        );
-        Arc::new(fork)
+        Arc::new(Self::with_model(&self.model()))
     }
-}
-
-struct GrokEventStream {
-    inner: ReceiverStream<Result<StreamEvent>>,
-    cancel: Option<oneshot::Sender<()>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Stream for GrokEventStream {
-    type Item = Result<StreamEvent>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_next(cx)
-    }
-}
-
-impl Drop for GrokEventStream {
-    fn drop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
-        // Joining can block while the child handles cancellation. Detach here;
-        // dropping the child in the ACP thread has kill_on_drop enabled.
-        self.thread.take();
-    }
-}
-
-#[derive(Default, Debug)]
-struct DiscoveredModels {
-    current: Option<String>,
-    available: Vec<String>,
-}
-
-fn models_from_initialize(response: &acp::InitializeResponse) -> DiscoveredModels {
-    let state = response
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.get("modelState"));
-    models_from_value(state)
-}
-
-fn models_from_value(value: Option<&Value>) -> DiscoveredModels {
-    let Some(object) = value.and_then(Value::as_object) else {
-        return DiscoveredModels::default();
-    };
-    let current = object
-        .get("currentModelId")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned);
-    let mut available = Vec::new();
-    if let Some(models) = object.get("availableModels").and_then(Value::as_array) {
-        for value in models {
-            let id = value.as_str().or_else(|| {
-                value.as_object().and_then(|model| {
-                    ["modelId", "id", "name"]
-                        .into_iter()
-                        .find_map(|key| model.get(key).and_then(Value::as_str))
-                })
-            });
-            if let Some(id) = id.filter(|id| !id.trim().is_empty())
-                && !available.iter().any(|known| known == id)
-            {
-                available.push(id.to_string());
-            }
-        }
-    }
-    if let Some(current) = current.as_ref()
-        && !available.iter().any(|model| model == current)
-    {
-        available.insert(0, current.clone());
-    }
-    DiscoveredModels { current, available }
-}
-
-fn select_subscription_auth_method(
-    response: &acp::InitializeResponse,
-) -> Result<acp::AuthMethodId> {
-    let allowed = response.auth_methods.iter().filter(|method| {
-        let id = method.id().0.as_ref().to_ascii_lowercase();
-        id != "xai.api_key" && !id.contains("api_key") && !id.contains("api-key")
-    });
-    for preferred in ["cached_token", "grok.com"] {
-        if let Some(method) = allowed
-            .clone()
-            .find(|method| method.id().0.as_ref() == preferred)
-        {
-            return Ok(method.id().clone());
-        }
-    }
-    if let Some(method) = allowed.into_iter().find(|method| {
-        let id = method.id().0.as_ref().to_ascii_lowercase();
-        let name = method.name().to_ascii_lowercase();
-        id.contains("grok") || id.contains("cached") || name.contains("grok")
-    }) {
-        return Ok(method.id().clone());
-    }
-    let advertised = response
-        .auth_methods
-        .iter()
-        .map(|method| method.id().0.as_ref())
-        .collect::<Vec<_>>()
-        .join(", ");
-    bail!(
-        "Grok CLI did not advertise a cached subscription authentication method (advertised: {})",
-        if advertised.is_empty() {
-            "none"
-        } else {
-            &advertised
-        }
-    )
-}
-
-async fn initialize_and_authenticate(
-    connection: &acp::ClientSideConnection,
-) -> Result<acp::InitializeResponse> {
-    let initialize = acp::InitializeRequest::new(acp::ProtocolVersion::V1)
-        .client_info(acp::Implementation::new("jcode", env!("CARGO_PKG_VERSION")).title("Jcode"));
-    let response = timeout_request("initialize", connection.initialize(initialize)).await?;
-    if response.protocol_version != acp::ProtocolVersion::V1 {
-        bail!(
-            "Grok CLI negotiated unsupported ACP protocol version {:?}",
-            response.protocol_version
-        );
-    }
-    let auth_method = select_subscription_auth_method(&response)?;
-    let mut meta = Map::new();
-    meta.insert("headless".to_string(), Value::Bool(true));
-    timeout_request(
-        "authenticate",
-        connection.authenticate(acp::AuthenticateRequest::new(auth_method).meta(meta)),
-    )
-    .await?;
-    Ok(response)
-}
-
-async fn timeout_request<T>(
-    name: &'static str,
-    future: impl std::future::Future<Output = acp::Result<T>>,
-) -> Result<T> {
-    tokio::time::timeout(ACP_REQUEST_TIMEOUT, future)
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "Grok CLI ACP {name} timed out after {}s",
-                ACP_REQUEST_TIMEOUT.as_secs()
-            )
-        })?
-        .map_err(|error| anyhow!("Grok CLI ACP {name} failed: {error}"))
-}
-
-fn run_turn_thread(
-    process: GrokBuildProcess,
-    selected_model: Option<String>,
-    resume_session_id: Option<String>,
-    prompt: String,
-    tx: mpsc::Sender<Result<StreamEvent>>,
-    cancel_rx: oneshot::Receiver<()>,
-) -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Failed to build Grok Build ACP Tokio runtime")?;
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async move {
-        with_connection(process, tx.clone(), async move |connection| {
-            initialize_and_authenticate(&connection).await?;
-            let cwd = std::env::current_dir().context("Failed to determine working directory")?;
-            let (session_id, session_model) = if let Some(session_id) = resume_session_id {
-                let response = timeout_request(
-                    "session/resume",
-                    connection.resume_session(acp::ResumeSessionRequest::new(
-                        session_id.clone(),
-                        cwd,
-                    )),
-                )
-                .await?;
-                (acp::SessionId::new(session_id), response.models)
-            } else {
-                let response = timeout_request(
-                    "session/new",
-                    connection.new_session(acp::NewSessionRequest::new(cwd).mcp_servers(Vec::new())),
-                )
-                .await?;
-                (response.session_id, response.models)
-            };
-
-            tx.send(Ok(StreamEvent::SessionId(session_id.0.to_string())))
-                .await
-                .map_err(|_| anyhow!("Grok Build stream consumer closed"))?;
-
-            let current_model = session_model
-                .as_ref()
-                .map(|models| models.current_model_id.0.as_ref());
-            if let Some(selected_model) = selected_model
-                && current_model != Some(selected_model.as_str())
-            {
-                timeout_request(
-                    "session/set_model",
-                    connection.set_session_model(acp::SetSessionModelRequest::new(
-                        session_id.clone(),
-                        selected_model,
-                    )),
-                )
-                .await?;
-            }
-
-            let prompt_request = acp::PromptRequest::new(
-                session_id.clone(),
-                vec![acp::ContentBlock::Text(acp::TextContent::new(prompt))],
-            );
-            tokio::pin!(cancel_rx);
-            let response = tokio::select! {
-                response = tokio::time::timeout(ACP_PROMPT_TIMEOUT, connection.prompt(prompt_request)) => {
-                    response
-                        .map_err(|_| anyhow!("Grok CLI ACP session/prompt timed out after {}s", ACP_PROMPT_TIMEOUT.as_secs()))?
-                        .map_err(|error| anyhow!("Grok CLI ACP session/prompt failed: {error}"))?
-                }
-                _ = &mut cancel_rx => {
-                    connection.cancel(acp::CancelNotification::new(session_id.clone())).await
-                        .map_err(|error| anyhow!("Failed to cancel Grok CLI ACP prompt: {error}"))?;
-                    // `cancel` queues a JSON-RPC notification. Give the local
-                    // connection driver one scheduling turn to flush it before
-                    // dropping the kill-on-drop child process.
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    return Ok(());
-                }
-            };
-            tx.send(Ok(StreamEvent::MessageEnd {
-                stop_reason: Some(format!("{:?}", response.stop_reason).to_ascii_lowercase()),
-            }))
-            .await
-            .map_err(|_| anyhow!("Grok Build stream consumer closed"))?;
-            Ok(())
-        })
-        .await
-    })
-}
-
-type LocalConnectionFuture<T> = Pin<Box<dyn std::future::Future<Output = Result<T>> + 'static>>;
-
-async fn run_on_acp_thread_with_process<T: Send + 'static>(
-    process: GrokBuildProcess,
-    operation: impl FnOnce(acp::ClientSideConnection) -> LocalConnectionFuture<T> + Send + 'static,
-) -> Result<T> {
-    let (result_tx, result_rx) = oneshot::channel();
-    std::thread::Builder::new()
-        .name("jcode-grok-build-acp-probe".to_string())
-        .spawn(move || {
-            let result = (|| {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                let local = tokio::task::LocalSet::new();
-                local.block_on(&runtime, async move {
-                    with_connection(process, mpsc::channel(1).0, operation).await
-                })
-            })();
-            let _ = result_tx.send(result);
-        })
-        .context("Failed to start Grok Build ACP probe thread")?;
-    result_rx
-        .await
-        .context("Grok Build ACP probe thread exited without a result")?
-}
-
-async fn with_connection<T, F, Fut>(
-    process: GrokBuildProcess,
-    event_tx: mpsc::Sender<Result<StreamEvent>>,
-    operation: F,
-) -> Result<T>
-where
-    F: FnOnce(acp::ClientSideConnection) -> Fut,
-    Fut: std::future::Future<Output = Result<T>> + 'static,
-{
-    let mut command = Command::new(&process.command);
-    command
-        .args(&process.args)
-        .envs(&process.env)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn().with_context(|| {
-        format!(
-            "Failed to launch Jcode's managed Grok Build backend at '{}'",
-            process.command.display()
-        )
-    })?;
-    let stdin = child
-        .stdin
-        .take()
-        .context("Grok CLI stdin was unavailable")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("Grok CLI stdout was unavailable")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("Grok CLI stderr was unavailable")?;
-    let stderr_capture = Arc::new(std::sync::Mutex::new(String::new()));
-    let mut stderr_task =
-        tokio::task::spawn_local(capture_stderr(stderr, Arc::clone(&stderr_capture)));
-
-    let received_message = Arc::new(AtomicBool::new(false));
-    let client = GrokAcpClient {
-        tx: event_tx,
-        received_message: Arc::clone(&received_message),
-    };
-    let (connection, io) =
-        acp::ClientSideConnection::new(client, stdin.compat_write(), stdout.compat(), |future| {
-            tokio::task::spawn_local(future);
-        });
-    let io_task = tokio::task::spawn_local(io);
-    let result = operation(connection).await;
-    let _ = child.kill().await;
-    io_task.abort();
-    let _ = tokio::time::timeout(Duration::from_millis(100), &mut stderr_task).await;
-    stderr_task.abort();
-    let stderr = stderr_capture
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .trim()
-        .to_string();
-    if result.is_ok()
-        && !received_message.load(Ordering::Acquire)
-        && stderr_reports_provider_failure(&stderr)
-    {
-        bail!("Grok CLI provider request failed: {stderr}");
-    }
-    result.map_err(|error| {
-        if stderr.is_empty() {
-            error
-        } else {
-            error.context(format!("Grok CLI stderr: {stderr}"))
-        }
-    })
-}
-
-fn stderr_reports_provider_failure(stderr: &str) -> bool {
-    let lower = stderr.to_ascii_lowercase();
-    [
-        "api error",
-        "payment required",
-        "balance exhausted",
-        "quota exhausted",
-        "too many requests",
-        "rate limit",
-        "http_status",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
-
-async fn capture_stderr(
-    mut stderr: tokio::process::ChildStderr,
-    capture: Arc<std::sync::Mutex<String>>,
-) {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let Ok(read) = stderr.read(&mut buffer).await else {
-            return;
-        };
-        if read == 0 {
-            return;
-        }
-        let mut output = capture
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if output.len() < STDERR_LIMIT {
-            let remaining = STDERR_LIMIT - output.len();
-            output.push_str(&String::from_utf8_lossy(&buffer[..read.min(remaining)]));
-        }
-    }
-}
-
-struct GrokAcpClient {
-    tx: mpsc::Sender<Result<StreamEvent>>,
-    received_message: Arc<AtomicBool>,
-}
-
-#[async_trait(?Send)]
-impl acp::Client for GrokAcpClient {
-    async fn request_permission(
-        &self,
-        request: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        let selected = request.options.iter().find(|option| {
-            matches!(
-                option.kind,
-                acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-            )
-        });
-        let outcome = match selected {
-            Some(option) => acp::RequestPermissionOutcome::Selected(
-                acp::SelectedPermissionOutcome::new(option.option_id.clone()),
-            ),
-            None => acp::RequestPermissionOutcome::Cancelled,
-        };
-        Ok(acp::RequestPermissionResponse::new(outcome))
-    }
-
-    async fn session_notification(
-        &self,
-        notification: acp::SessionNotification,
-    ) -> acp::Result<()> {
-        let event = match notification.update {
-            acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                self.received_message.store(true, Ordering::Release);
-                text_from_acp_content(chunk.content).map(StreamEvent::TextDelta)
-            }
-            acp::SessionUpdate::AgentThoughtChunk(chunk) => {
-                text_from_acp_content(chunk.content).map(StreamEvent::ThinkingDelta)
-            }
-            acp::SessionUpdate::ToolCall(call) => {
-                Some(StreamEvent::StatusDetail { detail: call.title })
-            }
-            acp::SessionUpdate::ToolCallUpdate(update) => update
-                .fields
-                .title
-                .map(|detail| StreamEvent::StatusDetail { detail }),
-            _ => None,
-        };
-        if let Some(event) = event {
-            let _ = self.tx.send(Ok(event)).await;
-        }
-        Ok(())
-    }
-}
-
-fn text_from_acp_content(content: acp::ContentBlock) -> Option<String> {
-    match content {
-        acp::ContentBlock::Text(text) => Some(text.text),
-        _ => None,
-    }
-}
-
-fn build_prompt(messages: &[Message], system: &str, resumed: bool) -> Result<String> {
-    let latest_user = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == Role::User)
-        .map(message_text)
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| anyhow!("No user prompt found for Grok Build request"))?;
-
-    let mut sections = Vec::new();
-    if !system.trim().is_empty() {
-        sections.push(format!("<system>\n{}\n</system>", system.trim()));
-    }
-    if !resumed {
-        let history = messages
-            .iter()
-            .take(messages.len().saturating_sub(1))
-            .filter_map(|message| {
-                let text = message_text(message);
-                (!text.trim().is_empty()).then(|| {
-                    let role = match message.role {
-                        Role::User => "user",
-                        Role::Assistant => "assistant",
-                    };
-                    format!("<{role}>\n{text}\n</{role}>")
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !history.is_empty() {
-            sections.push(history);
-        }
-    }
-    sections.push(latest_user);
-    Ok(sections.join("\n\n"))
-}
-
-fn message_text(message: &Message) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            JcodeContentBlock::Text { text, .. } => Some(text.clone()),
-            JcodeContentBlock::ToolResult { content, .. } => Some(content.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn cached_login_hint(prefix: &str) -> String {
-    format!(
-        "{prefix}. Grok Build uses subscription login, not XAI_API_KEY. Run `jcode login --provider grok-build` and retry"
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn chooses_cached_subscription_auth_and_rejects_api_key_only() {
-        let response = acp::InitializeResponse::new(acp::ProtocolVersion::V1).auth_methods(vec![
-            acp::AuthMethod::Agent(acp::AuthMethodAgent::new("xai.api_key", "xAI API key")),
-            acp::AuthMethod::Agent(acp::AuthMethodAgent::new("grok.com", "Grok.com")),
-            acp::AuthMethod::Agent(acp::AuthMethodAgent::new("cached_token", "Cached token")),
-        ]);
+    fn model_selection_strips_route_prefix_and_rejects_empty() {
+        let provider = GrokBuildProvider::new();
+        assert_eq!(provider.model(), DEFAULT_MODEL);
+        provider.set_model("grok-build:grok-4.5").unwrap();
+        assert_eq!(provider.model(), "grok-4.5");
+        provider.set_model("grok-code-fast-1").unwrap();
+        assert_eq!(provider.model(), "grok-code-fast-1");
+        assert!(provider.set_model("grok-build:").is_err());
+        assert!(provider.set_model("  ").is_err());
         assert_eq!(
-            select_subscription_auth_method(&response)
-                .unwrap()
-                .0
-                .as_ref(),
-            "cached_token"
+            GrokBuildProvider::with_model("grok-build:grok-4.5").model(),
+            "grok-4.5"
         );
-
-        let grok_com_only =
-            acp::InitializeResponse::new(acp::ProtocolVersion::V1).auth_methods(vec![
-                acp::AuthMethod::Agent(acp::AuthMethodAgent::new("grok.com", "Grok.com")),
-            ]);
-        assert_eq!(
-            select_subscription_auth_method(&grok_com_only)
-                .unwrap()
-                .0
-                .as_ref(),
-            "grok.com"
-        );
-
-        let api_only = acp::InitializeResponse::new(acp::ProtocolVersion::V1).auth_methods(vec![
-            acp::AuthMethod::Agent(acp::AuthMethodAgent::new("xai.api_key", "xAI API key")),
-        ]);
-        assert!(select_subscription_auth_method(&api_only).is_err());
     }
 
     #[test]
-    fn parses_dynamic_models_from_initialize_meta() {
-        let state = json!({
-            "currentModelId": "grok-4.5",
-            "availableModels": [
-                {"modelId": "grok-4.5", "name": "Grok 4.5"},
-                "grok-code-fast-1",
-                {"id": "grok-4.5"}
-            ]
-        });
-        let models = models_from_value(Some(&state));
-        assert_eq!(models.current.as_deref(), Some("grok-4.5"));
-        assert_eq!(models.available, ["grok-4.5", "grok-code-fast-1"]);
+    fn routes_keep_stable_ids_and_jcode_owns_tools() {
+        let provider = GrokBuildProvider::new();
+        let routes = provider.model_routes();
+        assert!(routes.iter().any(|route| route.model == "grok-4.6"));
+        assert!(
+            routes
+                .iter()
+                .all(|route| route.api_method == ROUTE_API_METHOD)
+        );
+        assert_eq!(
+            jcode_provider_core::ModelRouteApiMethod::parse(ROUTE_API_METHOD),
+            jcode_provider_core::ModelRouteApiMethod::GrokBuild
+        );
+        assert!(!provider.handles_tools_internally());
+        assert!(provider.supports_compaction());
+        assert_eq!(provider.name(), "grok-build");
+        assert_eq!(provider.context_window(), 500_000);
+        let fork = provider.fork();
+        assert_eq!(fork.model(), provider.model());
     }
 
     #[test]
-    fn resumed_prompt_sends_only_outer_system_and_latest_user() {
-        let messages = vec![
-            Message::user("old"),
-            Message::assistant_text("old answer"),
-            Message::user("new"),
-        ];
-        let prompt = build_prompt(&messages, "outer", true).unwrap();
-        assert!(prompt.contains("outer"));
-        assert!(prompt.ends_with("new"));
-        assert!(!prompt.contains("old answer"));
+    fn classifies_proxy_401_messages() {
+        assert!(is_unauthorized_text(
+            "OpenAI-compatible chat request failed\n  status: 401 Unauthorized\n  response: {}"
+        ));
+        assert!(is_unauthorized_text(
+            "HTTP 401: Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli)"
+        ));
+        assert!(!is_unauthorized_text("status: 429 Too Many Requests"));
+        assert!(!is_unauthorized_text("processed 401 tokens"));
+    }
+
+    fn stream_of(items: Vec<Result<StreamEvent>>) -> EventStream {
+        Box::pin(futures::stream::iter(items))
+    }
+
+    #[tokio::test]
+    async fn retries_once_on_401_before_output() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let stream = AuthRetryStream {
+            inner: stream_of(vec![Err(anyhow::anyhow!("status: 401 Unauthorized"))]),
+            retry: Some(Box::new(move || -> RetryFuture {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(stream_of(vec![Ok(StreamEvent::TextDelta("hi".into()))])) })
+            })),
+            pending: None,
+            saw_output: false,
+        };
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], Ok(StreamEvent::TextDelta(text)) if text == "hi"));
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_after_output_or_twice() {
+        let stream = AuthRetryStream {
+            inner: stream_of(vec![
+                Ok(StreamEvent::TextDelta("partial".into())),
+                Err(anyhow::anyhow!("status: 401 Unauthorized")),
+            ]),
+            retry: Some(Box::new(|| -> RetryFuture { panic!("must not retry") })),
+            pending: None,
+            saw_output: false,
+        };
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 2);
+        assert!(items[1].is_err());
+
+        let stream = AuthRetryStream {
+            inner: stream_of(vec![Err(anyhow::anyhow!("status: 401 Unauthorized"))]),
+            retry: Some(Box::new(|| -> RetryFuture {
+                Box::pin(async { Ok(stream_of(vec![Err(anyhow::anyhow!("status: 401 again"))])) })
+            })),
+            pending: None,
+            saw_output: false,
+        };
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_err());
     }
 }

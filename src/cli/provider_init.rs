@@ -1552,7 +1552,7 @@ async fn init_provider_with_options(
         }
         ProviderChoice::GrokBuild => {
             disable_subscription_runtime_mode();
-            init_notice("Using Grok Build subscription via the authenticated Grok CLI");
+            init_notice("Using Grok Build subscription (Grok CLI login, direct HTTPS)");
             clear_initial_model_provider();
             crate::env::set_var("JCODE_ACTIVE_PROVIDER", "grok-build");
             crate::provider::external::instantiate_external_provider(
