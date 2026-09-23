@@ -254,7 +254,9 @@ cat "$SANDBOX/logs/"*.log > "$GW_LOG" 2>/dev/null || true
 
 APP_CONNECTS="$(grep -c "Harness Simulator connected" "$GW_LOG" 2>/dev/null | tr -d ' ')"
 APP_CONNECTS="${APP_CONNECTS:-0}"
-UNAUTHORIZED="$(grep -c "401 Unauthorized" "$GW_LOG" 2>/dev/null | tr -d ' ')"
+# Count only gateway WebSocket rejections. Provider API errors (e.g. an expired
+# OpenAI key in memory extraction) also log "401 Unauthorized" and are not the app.
+UNAUTHORIZED="$(grep "401 Unauthorized" "$GW_LOG" 2>/dev/null | { grep -ivc "API error" || true; } | tr -d ' ')"
 UNAUTHORIZED="${UNAUTHORIZED:-0}"
 
 # The probe accounts for exactly one connection; anything beyond that is the app.
