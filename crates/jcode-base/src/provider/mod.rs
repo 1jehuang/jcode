@@ -332,6 +332,9 @@ pub use self::state::{ProviderModelSelectionSource, ProviderRuntimeState, Provid
 
 pub(crate) const GROK_BUILD_PROFILE_ID: &str = "grok-build";
 
+/// Profile key for the Antigravity CLI (`agy`) runtime.
+pub(crate) const AGY_PROFILE_ID: &str = "agy";
+
 /// MultiProvider wraps multiple providers and allows seamless model switching
 pub struct MultiProvider {
     /// Claude Code CLI provider
@@ -2017,6 +2020,23 @@ impl Provider for MultiProvider {
             provider.set_model(target_model)?;
             registry.install_compatible_profile(GROK_BUILD_PROFILE_ID, provider);
             registry.set_active_compatible_profile(GROK_BUILD_PROFILE_ID);
+            self.set_active_provider(ActiveProvider::OpenRouter);
+            return Ok(());
+        }
+
+        if let Some(target_model) = requested_model.strip_prefix("agy:") {
+            let target_model = target_model.trim();
+            if target_model.is_empty() {
+                anyhow::bail!("Antigravity (agy) model cannot be empty");
+            }
+            let registry = ProviderRegistry::new(self);
+            let provider = registry
+                .compatible_profile(AGY_PROFILE_ID)
+                .or_else(|| external::instantiate_expected_external_provider(external::AGY_RUNTIME))
+                .ok_or_else(|| anyhow!("Antigravity (agy) is not available"))?;
+            provider.set_model(target_model)?;
+            registry.install_compatible_profile(AGY_PROFILE_ID, provider);
+            registry.set_active_compatible_profile(AGY_PROFILE_ID);
             self.set_active_provider(ActiveProvider::OpenRouter);
             return Ok(());
         }

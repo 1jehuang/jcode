@@ -65,6 +65,9 @@ pub fn runtime_id_for_login_provider(
         LoginProviderTarget::OpenAiCompatible(_) => Some(RuntimeProviderId::OpenAiCompatible),
         LoginProviderTarget::Cursor => Some(RuntimeProviderId::Cursor),
         LoginProviderTarget::GrokBuild => Some(RuntimeProviderId::GrokBuild),
+        // `agy` owns its own login; Jcode manages no runtime credential for it,
+        // so there is no jcode-side auth runtime to restore.
+        LoginProviderTarget::Agy => None,
         LoginProviderTarget::Copilot => Some(RuntimeProviderId::Copilot),
         LoginProviderTarget::Gemini => Some(RuntimeProviderId::Gemini),
         LoginProviderTarget::Antigravity => Some(RuntimeProviderId::Antigravity),

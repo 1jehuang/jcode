@@ -35,6 +35,7 @@ pub enum LoginProviderTarget {
     OpenAiCompatible(OpenAiCompatibleProfile),
     Cursor,
     GrokBuild,
+    Agy,
     Copilot,
     Gemini,
     Antigravity,
@@ -55,6 +56,7 @@ pub enum LoginProviderAuthStateKey {
     Antigravity,
     Cursor,
     GrokBuild,
+    Agy,
     Google,
 }
 

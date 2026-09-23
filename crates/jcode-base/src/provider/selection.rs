@@ -99,6 +99,7 @@ impl MultiProvider {
             LoginProviderTarget::Copilot => Some("copilot"),
             LoginProviderTarget::Gemini => Some("gemini"),
             LoginProviderTarget::Antigravity => Some("antigravity"),
+            LoginProviderTarget::Agy => Some("agy"),
             LoginProviderTarget::AutoImport
             | LoginProviderTarget::Jcode
             | LoginProviderTarget::Azure

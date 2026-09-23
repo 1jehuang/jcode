@@ -97,6 +97,9 @@ pub enum ProviderChoice {
     /// Grok Build subscription via the authenticated Grok CLI ACP transport.
     #[value(name = "grok-build")]
     GrokBuild,
+    /// Antigravity CLI (`agy`) agent backend over its NDJSON stdio transport.
+    #[value(name = "agy")]
+    Agy,
     #[value(alias = "nvidia", alias = "nim")]
     NvidiaNim,
     #[value(alias = "xiaomi", alias = "mimo", alias = "xiaomi-mimo-api")]
@@ -183,6 +186,7 @@ impl ProviderChoice {
             Self::Minimax => "minimax",
             Self::Xai => "xai",
             Self::GrokBuild => "grok-build",
+            Self::Agy => "agy",
             Self::NvidiaNim => "nvidia-nim",
             Self::XiaomiMimo => "xiaomi-mimo",
             Self::MetaMuse => "meta-muse",
@@ -350,6 +354,10 @@ const PROVIDER_CHOICE_LOGIN_PROVIDERS: &[(ProviderChoice, LoginProviderDescripto
     (
         ProviderChoice::GrokBuild,
         crate::provider_catalog::GROK_BUILD_LOGIN_PROVIDER,
+    ),
+    (
+        ProviderChoice::Agy,
+        crate::provider_catalog::AGY_LOGIN_PROVIDER,
     ),
     (
         ProviderChoice::NvidiaNim,
@@ -1321,6 +1329,13 @@ pub async fn login_and_bootstrap_provider(
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
         }
+        LoginProviderTarget::Agy => {
+            disable_subscription_runtime_mode();
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::AGY_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Antigravity (agy) runtime is not registered"))?
+        }
         LoginProviderTarget::OpenAiApiKey => {
             disable_subscription_runtime_mode();
             select_initial_model_provider("openai");
@@ -1547,6 +1562,16 @@ async fn init_provider_with_options(
                 crate::provider::external::GROK_BUILD_RUNTIME,
             )
             .ok_or_else(|| anyhow::anyhow!("Grok Build runtime is not registered"))?
+        }
+        ProviderChoice::Agy => {
+            disable_subscription_runtime_mode();
+            init_notice("Using the Antigravity CLI (agy) agent backend");
+            clear_initial_model_provider();
+            crate::env::set_var("JCODE_ACTIVE_PROVIDER", "agy");
+            crate::provider::external::instantiate_external_provider(
+                crate::provider::external::AGY_RUNTIME,
+            )
+            .ok_or_else(|| anyhow::anyhow!("Antigravity (agy) runtime is not registered"))?
         }
         ProviderChoice::Openrouter => {
             disable_subscription_runtime_mode();

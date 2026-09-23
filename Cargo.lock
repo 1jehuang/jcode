@@ -3171,6 +3171,7 @@ dependencies = [
  "jcode-build-meta",
  "jcode-harness-api",
  "jcode-harness-api-server",
+ "jcode-provider-agy-runtime",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-claude-cli-runtime",
@@ -3611,6 +3612,20 @@ dependencies = [
  "rand 0.9.3",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "jcode-provider-agy-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "jcode-message-types",
+ "jcode-provider-core",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

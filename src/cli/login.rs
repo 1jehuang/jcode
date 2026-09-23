@@ -358,6 +358,13 @@ pub async fn run_login_provider(
             LoginProviderTarget::Antigravity => login_antigravity_flow(options.no_browser)
                 .await
                 .map(|_| LoginFlowOutcome::Completed),
+            LoginProviderTarget::Agy => {
+                // `agy` owns its own credential; there is no Jcode-side login flow.
+                eprintln!(
+                    "The Antigravity CLI (agy) signs in through its own CLI: run `agy` once and complete the browser sign-in. Jcode needs no separate login for it."
+                );
+                Ok(LoginFlowOutcome::Completed)
+            }
             LoginProviderTarget::Google => {
                 login_google_flow(options.no_browser, options.google_access_tier)
                     .await

@@ -471,6 +471,9 @@ impl AuthStatus {
             LoginProviderAuthStateKey::Gemini => self.gemini,
             LoginProviderAuthStateKey::Cursor => self.cursor,
             LoginProviderAuthStateKey::GrokBuild => self.grok_build,
+            // The Antigravity CLI is authenticated by `agy` itself; Jcode tracks
+            // no separate credential for it.
+            LoginProviderAuthStateKey::Agy => AuthState::Available,
             LoginProviderAuthStateKey::Google => self.google,
         }
     }
@@ -1326,6 +1329,21 @@ fn assessment_for_key(
                 "Grok CLI cached login".to_string()
             } else {
                 "Grok CLI unavailable".to_string()
+            },
+            AuthExpiryConfidence::Unknown,
+            AuthRefreshSupport::ExternalManaged,
+            AuthValidationMethod::CommandProbe,
+        ),
+        LoginProviderAuthStateKey::Agy => (
+            if state == AuthState::Available {
+                AuthCredentialSource::LocalCliSession
+            } else {
+                AuthCredentialSource::None
+            },
+            if state == AuthState::Available {
+                "Antigravity CLI (agy) login".to_string()
+            } else {
+                "Antigravity CLI unavailable".to_string()
             },
             AuthExpiryConfidence::Unknown,
             AuthRefreshSupport::ExternalManaged,

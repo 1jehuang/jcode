@@ -212,6 +212,16 @@ pub fn register_external_provider_runtimes() {
             )
         },
     );
+    // Antigravity CLI (`agy`): agent backend over agy's own NDJSON stdio
+    // transport. Auth is delegated to the installed agy binary's cached login.
+    crate::provider::external::register_external_provider(
+        crate::provider::external::AGY_RUNTIME,
+        || {
+            std::sync::Arc::new(jcode_provider_agy_runtime::AgyProvider::with_process(
+                jcode_provider_agy_runtime::AgyProcess::from_env(),
+            ))
+        },
+    );
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
         || std::sync::Arc::new(jcode_provider_gemini_runtime::GeminiProvider::new()),
@@ -775,6 +785,7 @@ mod tests {
                 crate::provider::external::ANTIGRAVITY_RUNTIME,
                 "antigravity",
             ),
+            (crate::provider::external::AGY_RUNTIME, "agy"),
         ] {
             assert!(
                 crate::provider::external::external_provider_registered(key),

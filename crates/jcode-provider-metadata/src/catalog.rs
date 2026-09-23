@@ -1080,6 +1080,21 @@ pub const GROK_BUILD_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     order: LoginProviderSurfaceOrder::new(Some(100), Some(100), Some(100), Some(100), Some(100)),
 };
 
+/// Antigravity CLI (`agy`) is a separate identity from `antigravity`: Jcode
+/// drives the installed `agy` binary over its NDJSON stdio transport.
+pub const AGY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "agy",
+    display_name: "Antigravity (agy)",
+    auth_kind: LoginProviderAuthKind::Cli,
+    auth_state_key: LoginProviderAuthStateKey::Agy,
+    auth_status_method: "Antigravity CLI login",
+    aliases: &[],
+    menu_detail: "Antigravity CLI (agy) agent backend",
+    recommended: false,
+    target: LoginProviderTarget::Agy,
+    order: LoginProviderSurfaceOrder::new(Some(101), Some(101), Some(101), Some(101), Some(101)),
+};
+
 pub const NVIDIA_NIM_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
     id: "nvidia-nim",
     display_name: "NVIDIA NIM",
@@ -1254,7 +1269,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1296,6 +1311,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
     MINIMAX_LOGIN_PROVIDER,
     XAI_LOGIN_PROVIDER,
     GROK_BUILD_LOGIN_PROVIDER,
+    AGY_LOGIN_PROVIDER,
     NVIDIA_NIM_LOGIN_PROVIDER,
     XIAOMI_MIMO_LOGIN_PROVIDER,
     META_MUSE_LOGIN_PROVIDER,

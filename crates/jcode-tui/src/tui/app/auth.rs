@@ -569,6 +569,17 @@ impl App {
             crate::provider_catalog::LoginProviderTarget::Antigravity => {
                 self.start_antigravity_login()
             }
+            crate::provider_catalog::LoginProviderTarget::Agy => {
+                crate::telemetry::record_auth_surface_blocked(
+                    provider.id,
+                    provider.auth_kind.label(),
+                );
+                self.push_display_message(DisplayMessage::system(
+                    "The Antigravity CLI (agy) signs in through its own CLI: run `agy` once and complete the browser sign-in, then pick it with /model. No Jcode login step is required."
+                        .to_string(),
+                ));
+                self.set_status_notice("Login: agy uses its own CLI login");
+            }
             crate::provider_catalog::LoginProviderTarget::Google => {
                 crate::telemetry::record_auth_surface_blocked(
                     provider.id,

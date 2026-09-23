@@ -1,0 +1,19 @@
+[package]
+name = "jcode-provider-agy-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "Antigravity CLI (agy) runtime for jcode over agy's NDJSON stdio transport"
+
+[lib]
+name = "jcode_provider_agy_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+futures = "0.3"
+jcode-message-types = { path = "../jcode-message-types" }
+jcode-provider-core = { path = "../jcode-provider-core" }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio-stream = "0.1"
