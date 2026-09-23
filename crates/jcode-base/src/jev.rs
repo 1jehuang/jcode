@@ -16,6 +16,26 @@ const MAX_REQUEST_BYTES: usize = 80 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ME_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_QUESTIONS: usize = 24;
+/// Typesafe direct accepts far more (256 verified live on 2026-09-23). A voice
+/// request has at most 26 questions, so it always fits in one round trip.
+const TYPESAFE_MAX_QUESTIONS: usize = 64;
+
+/// Typesafe latency is bimodal and sticky per connection: a connection is
+/// served in ~150ms or 2-12s (measured live 2026-09-23). Voice waits on this
+/// before inserting or sending, so duplicates on fresh connections race the
+/// primary. Decisions are side-effect-free and cost fractions of a cent.
+#[cfg(not(test))]
+const VOICE_HEDGE_DELAYS: [Duration; 3] = [
+    Duration::from_millis(300),
+    Duration::from_millis(700),
+    Duration::from_millis(1500),
+];
+#[cfg(test)]
+const VOICE_HEDGE_DELAYS: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(150),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JevPurpose {
@@ -94,6 +114,13 @@ impl JevProvider {
         }
     }
 
+    fn max_questions(self) -> usize {
+        match self {
+            Self::TypeSafe => TYPESAFE_MAX_QUESTIONS,
+            _ => MAX_QUESTIONS,
+        }
+    }
+
     fn model(self) -> &'static str {
         match self {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
@@ -116,6 +143,9 @@ impl JevProvider {
 #[derive(Clone)]
 pub struct JevClient {
     client: Client,
+    /// Voice only. Typesafe speed is sticky per connection (a slow connection
+    /// stays slow), so each hedge needs its own client and connection.
+    hedge_clients: Vec<Client>,
     purpose: JevPurpose,
     provider: JevProvider,
     api_key: String,
@@ -150,11 +180,23 @@ impl JevClient {
 
     fn for_purpose(purpose: JevPurpose) -> Result<Self> {
         let (provider, api_key, endpoint, me_endpoint) = Self::resolve(purpose)?;
-        let client = client_builder()
-            .build()
-            .map_err(|_| anyhow!("Could not initialize the Jev decision client"))?;
+        let build = || {
+            client_builder()
+                .build()
+                .map_err(|_| anyhow!("Could not initialize the Jev decision client"))
+        };
+        let client = build()?;
+        let hedge_clients = if purpose == JevPurpose::Voice {
+            VOICE_HEDGE_DELAYS
+                .iter()
+                .map(|_| build())
+                .collect::<Result<_>>()?
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             client,
+            hedge_clients,
             purpose,
             provider,
             api_key,
@@ -200,6 +242,11 @@ impl JevClient {
         self.provider.model()
     }
 
+    /// Largest question batch this route accepts in one request.
+    pub(crate) fn max_questions(&self) -> usize {
+        self.provider.max_questions()
+    }
+
     /// Return the full typed Decisions response, including provider usage.
     /// Never retries using another provider or account after an auth/billing
     /// failure. Callers own the relevance threshold and uncertainty policy.
@@ -230,19 +277,65 @@ impl JevClient {
                 self.purpose.capability()
             );
         }
+        if self.purpose == JevPurpose::Voice {
+            return self.send_hedged(body, &questions).await;
+        }
         let value = self.send(&self.endpoint, body).await?;
         validate_answers(&value, &questions)?;
         Ok(value)
+    }
+
+    /// Send once, then again on a fresh connection after each
+    /// [`VOICE_HEDGE_DELAYS`] step while nothing has answered. The first valid
+    /// answer wins and the rest are dropped. A primary failure returns at once,
+    /// so auth/billing errors are never duplicated. Hedge failures are ignored
+    /// while any other attempt is still pending.
+    async fn send_hedged(&self, body: Vec<u8>, questions: &Map<String, Value>) -> Result<Value> {
+        use futures::StreamExt;
+        let attempt = |client: &Client, delay: Duration, primary: bool| {
+            let body = body.clone();
+            let client = client.clone();
+            async move {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                let result = async {
+                    let value = self.send_with(&client, &self.endpoint, body).await?;
+                    validate_answers(&value, questions)?;
+                    Ok::<_, anyhow::Error>(value)
+                }
+                .await;
+                (primary, result)
+            }
+        };
+        let mut attempts = futures::stream::FuturesUnordered::new();
+        attempts.push(attempt(&self.client, Duration::ZERO, true));
+        for (client, delay) in self.hedge_clients.iter().zip(VOICE_HEDGE_DELAYS) {
+            attempts.push(attempt(client, delay, false));
+        }
+        let mut hedge_error = None;
+        while let Some((primary, result)) = attempts.next().await {
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) if primary => return Err(error),
+                Err(error) => hedge_error = Some(error),
+            }
+        }
+        Err(hedge_error.unwrap_or_else(|| anyhow!("Jev decision request failed")))
+    }
+
+    async fn send(&self, endpoint: &str, body: Vec<u8>) -> Result<Value> {
+        self.send_with(&self.client, endpoint, body).await
     }
 
     /// Decisions requests are side-effect-free classifications, so transient
     /// overload responses (429/502/503/504/529) are retried with a short bounded
     /// backoff on the same provider and account. Auth, billing, redirect, and
     /// other failures are never retried and never fall back to another account.
-    async fn send(&self, endpoint: &str, body: Vec<u8>) -> Result<Value> {
+    async fn send_with(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Value> {
         let mut attempt = 0;
         loop {
-            let response = self.send_once(endpoint, body.clone()).await?;
+            let response = self.send_once(client, endpoint, body.clone()).await?;
             let status = response.status().as_u16();
             if attempt < TRANSIENT_RETRY_DELAYS.len() && is_transient_status(status) {
                 let delay = retry_after(&response).unwrap_or(TRANSIENT_RETRY_DELAYS[attempt]);
@@ -260,9 +353,8 @@ impl JevClient {
         }
     }
 
-    async fn send_once(&self, endpoint: &str, body: Vec<u8>) -> Result<Response> {
-        let mut request = self
-            .client
+    async fn send_once(&self, client: &Client, endpoint: &str, body: Vec<u8>) -> Result<Response> {
+        let mut request = client
             .post(endpoint)
             .bearer_auth(&self.api_key)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -454,8 +546,9 @@ fn request_body_for(
         "Jev state must be text, an object, or an array"
     );
     ensure!(
-        (1..=MAX_QUESTIONS).contains(&questions.len()),
-        "Jev requests require between 1 and 24 questions"
+        (1..=provider.max_questions()).contains(&questions.len()),
+        "Jev requests require between 1 and {} questions",
+        provider.max_questions()
     );
     for (id, question) in questions {
         ensure!(!id.is_empty() && id.len() <= 64, "Invalid Jev question ID");
@@ -989,12 +1082,23 @@ mod tests {
     type MockReply = (u16, String, Vec<(String, String)>);
 
     fn mock_server(replies: Vec<MockReply>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let count = replies.len();
+        let mut replies = replies.into_iter();
+        mock_server_with(count, move |_| replies.next().unwrap())
+    }
+
+    /// Serve `count` requests, choosing each reply from the request itself, so
+    /// concurrent requests get correct replies whatever order they connect in.
+    fn mock_server_with(
+        count: usize,
+        mut respond: impl FnMut(&str) -> MockReply + Send + 'static,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let worker = std::thread::spawn(move || {
             let mut requests = Vec::new();
-            for (status, body, headers) in replies {
+            for _ in 0..count {
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 let mut stream = loop {
                     match listener.accept() {
@@ -1037,7 +1141,9 @@ mod tests {
                         }
                     }
                 }
-                requests.push(String::from_utf8(bytes).unwrap());
+                let request = String::from_utf8(bytes).unwrap();
+                let (status, body, headers) = respond(&request);
+                requests.push(request);
                 let chunked = headers.iter().any(|(key, value)| {
                     key.eq_ignore_ascii_case("transfer-encoding") && value == "chunked"
                 });
@@ -1067,6 +1173,10 @@ mod tests {
     fn mock_client(base: &str, provider: JevProvider) -> JevClient {
         JevClient {
             client: client_builder().no_proxy().build().unwrap(),
+            hedge_clients: VOICE_HEDGE_DELAYS
+                .iter()
+                .map(|_| client_builder().no_proxy().build().unwrap())
+                .collect(),
             purpose: JevPurpose::Memory,
             provider,
             api_key: "test-route-secret".into(),
@@ -1112,6 +1222,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Serve every connection on its own thread. Connection `n` waits
+    /// `delays[n]` before replying, so a slow primary can overlap a hedge.
+    fn concurrent_mock(
+        delays: Vec<(Duration, u16)>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        std::thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                let Ok(mut stream) = stream else { return };
+                let Some(&(delay, status)) = delays.get(index) else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let n = stream.read(&mut buffer).unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&buffer[..n]);
+                    }
+                    std::thread::sleep(delay);
+                    let body = response().to_string();
+                    let _ = stream.write_all(format!("HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    #[tokio::test]
+    async fn voice_hedges_a_slow_request_and_takes_the_first_valid_answer() {
+        let (base, seen) =
+            concurrent_mock(vec![(Duration::from_secs(3), 200), (Duration::ZERO, 200)]);
+        let mut client = mock_client(&base, JevProvider::TypeSafe);
+        client.purpose = JevPurpose::Voice;
+        let started = std::time::Instant::now();
+        let value = client
+            .evaluate(json!({"transcript": "synthetic"}), questions())
+            .await
+            .unwrap();
+        assert!(validate_answers(&value, &questions()).is_ok());
+        assert!(started.elapsed() < Duration::from_secs(2), "hedge won");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn voice_hedge_failure_waits_for_primary_and_memory_never_hedges() {
+        let (base, seen) = concurrent_mock(vec![
+            (Duration::from_millis(300), 200),
+            (Duration::ZERO, 500),
+        ]);
+        let mut client = mock_client(&base, JevProvider::TypeSafe);
+        client.purpose = JevPurpose::Voice;
+        client
+            .evaluate(json!({"transcript": "synthetic"}), questions())
+            .await
+            .unwrap();
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        let (base, seen) = concurrent_mock(vec![(Duration::from_millis(300), 200)]);
+        mock_client(&base, JevProvider::TypeSafe)
+            .evaluate(json!({"transcript": "synthetic"}), questions())
+            .await
+            .unwrap();
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1211,29 +1395,31 @@ mod tests {
         ] {
             // All batches participate in ranking, with no competing-score veto.
             for competing in [0.01, 0.9, 0.99, 1.0] {
-                let mut replies = Vec::new();
-                for batch in questions.chunks(MAX_QUESTIONS) {
-                    if provider == JevProvider::Jcode {
-                        replies.push((
-                            200,
-                            json!({"capabilities": {"memory_jev": true}}).to_string(),
-                            vec![],
-                        ));
+                let batches = questions.chunks(provider.max_questions()).count();
+                let per_batch = if provider == JevProvider::Jcode { 2 } else { 1 };
+                // Batches run concurrently, so answer whatever each request asks.
+                let (base, worker) = mock_server_with(batches * per_batch, move |request| {
+                    if request.starts_with("GET ") {
+                        let me = json!({"capabilities": {"memory_jev": true}});
+                        return (200, me.to_string(), vec![]);
                     }
-                    let answers: Map<String, Value> = batch
-                        .iter()
-                        .map(|q| {
-                            let probability = match q.id.as_str() {
+                    let body: Value =
+                        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                    let answers: Map<String, Value> = body["questions"]
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .map(|id| {
+                            let probability = match id.as_str() {
                                 "navigation" | "candidate_19" => 0.99,
                                 "coding_agent" => competing,
                                 _ => 0.01,
                             };
-                            (q.id.clone(), json!({"type": "noul", "noul": probability}))
+                            (id.clone(), json!({"type": "noul", "noul": probability}))
                         })
                         .collect();
-                    replies.push((200, json!({"answers": answers}).to_string(), vec![]));
-                }
-                let (base, worker) = mock_server(replies);
+                    (200, json!({"answers": answers}).to_string(), vec![])
+                });
                 let result =
                     classify_with_client(transcript, &offered, &mock_client(&base, provider))
                         .await
@@ -1271,8 +1457,12 @@ mod tests {
                         serde_json::from_str(wire).unwrap()
                     })
                     .collect();
-                assert_eq!(bodies.len(), 2);
-                assert_eq!(bodies[0]["state"], bodies[1]["state"]);
+                assert_eq!(bodies.len(), batches);
+                assert!(
+                    bodies
+                        .iter()
+                        .all(|body| body["state"] == bodies[0]["state"])
+                );
                 let state = if let Some(text) = bodies[0]["state"].as_str() {
                     serde_json::from_str::<Value>(text).unwrap()
                 } else {
@@ -1297,15 +1487,17 @@ mod tests {
                     );
                 }
                 assert!(!state.to_string().contains("private-session"));
-                for (body, expected) in bodies.iter().zip(questions.chunks(MAX_QUESTIONS)) {
-                    let sent = body["questions"].as_object().unwrap();
-                    assert_eq!(sent.len(), expected.len());
-                    assert!(sent.len() <= 24);
-                    for question in expected {
-                        assert_eq!(sent[&question.id]["instructions"], question.instructions);
-                        assert_eq!(sent[&question.id]["criteria"]["true"], question.yes);
-                        assert_eq!(sent[&question.id]["criteria"]["false"], question.no);
-                    }
+                let mut sent = Map::new();
+                for body in &bodies {
+                    let batch = body["questions"].as_object().unwrap();
+                    assert!(batch.len() <= provider.max_questions());
+                    sent.extend(batch.clone());
+                }
+                assert_eq!(sent.len(), questions.len());
+                for question in &questions {
+                    assert_eq!(sent[&question.id]["instructions"], question.instructions);
+                    assert_eq!(sent[&question.id]["criteria"]["true"], question.yes);
+                    assert_eq!(sent[&question.id]["criteria"]["false"], question.no);
                 }
             }
         }
@@ -1345,10 +1537,19 @@ mod tests {
         wrong_ids.insert("invented".into(), json!({"type": "noul", "noul": 0.99}));
         failures.push((200, json!({"answers": wrong_ids}).to_string(), vec![]));
         for failure in failures {
-            let (base, worker) = mock_server(vec![
-                (200, json!({"answers": first}).to_string(), vec![]),
-                failure,
-            ]);
+            // Batches run concurrently, so reply by which batch was requested.
+            let later = questions[MAX_QUESTIONS].id.clone();
+            let good = json!({"answers": first}).to_string();
+            let mut failure = Some(failure);
+            let (base, worker) = mock_server_with(2, move |request| {
+                let body: Value =
+                    serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+                if body["questions"].get(&later).is_some() {
+                    failure.take().unwrap()
+                } else {
+                    (200, good.clone(), vec![])
+                }
+            });
             assert!(
                 classify_with_client(
                     "next conversation",

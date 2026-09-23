@@ -205,8 +205,9 @@ pub(crate) async fn classify_with_client(
     // Batches are independent and share the identical state, so run them
     // concurrently. Voice sends wait on this, and sequential round trips
     // doubled the delay whenever candidates overflowed one batch.
-    let responses = futures::future::try_join_all(entries.chunks(crate::jev::MAX_QUESTIONS).map(
-        |chunk| {
+    // Typesafe direct takes every voice question in one request.
+    let responses =
+        futures::future::try_join_all(entries.chunks(client.max_questions()).map(|chunk| {
             let batch = chunk
                 .iter()
                 .map(|(id, value)| ((*id).clone(), (*value).clone()))
@@ -214,9 +215,8 @@ pub(crate) async fn classify_with_client(
             // evaluate validates the exact batch IDs and typed probabilities before
             // anything is merged. Never feed previous answers into subsequent state.
             client.evaluate(state.clone(), batch)
-        },
-    ))
-    .await?;
+        }))
+        .await?;
     for response in responses {
         usage = usage
             .zip(VoiceUsage::from_response(&response))
