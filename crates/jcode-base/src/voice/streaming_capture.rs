@@ -360,15 +360,18 @@ impl Events {
         self.queue.push_back(event);
     }
 }
-/// Unified network + microphone operation. Constructors block, all handle methods
-/// and Drop are nonblocking. Capture starts at once and PCM is buffered until
-/// session.configured, so speech during the handshake is kept.
+/// Unified network + microphone operation. Construction, every handle method
+/// and Drop are nonblocking, so a push-to-talk UI can show recording at the
+/// press. The microphone opens and the provider handshake runs concurrently in
+/// the background. PCM is buffered until session.configured, so speech during
+/// setup is kept. Setup failures arrive as `NariEvent::Finished(Err(_))`.
 pub struct NariRecording {
     cancel: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     events: Arc<Mutex<Events>>,
     worker: thread::JoinHandle<()>,
-    level: Arc<AtomicU32>,
+    // Set once the native stream exists. Reads zero until then.
+    level: Arc<std::sync::OnceLock<Arc<AtomicU32>>>,
 }
 impl NariRecording {
     pub fn start_cancellable(cancel: Arc<AtomicBool>, key: &str) -> Result<Self, VoiceError> {
@@ -398,9 +401,8 @@ impl NariRecording {
         let key = key.to_owned();
         let events = Arc::new(Mutex::new(Events::default()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (ready, started) = mpsc::sync_channel(1);
-        let (level_tx, level_rx) = mpsc::sync_channel(1);
-        let (c, s, e) = (cancel.clone(), stop.clone(), events.clone());
+        let level = Arc::new(std::sync::OnceLock::new());
+        let (c, s, e, l) = (cancel.clone(), stop.clone(), events.clone(), level.clone());
         let worker = thread::Builder::new()
             .name("voice-nari".into())
             .spawn(move || {
@@ -429,9 +431,8 @@ impl NariRecording {
                             _ = super::nari::cancelled(&c) => { setup_cancel.store(true, Ordering::SeqCst); return Err(VoiceError::Cancelled); },
                             result = tokio::task::spawn_blocking(move || factory(factory_cancel)) => result.map_err(|_|VoiceError::CaptureFailed)??,
                         };
-                        let _ = level_tx.send(mic.level.clone());
-                        super::timing::mark("recording ready (ui switches to recording)");
-                        let _ = ready.send(Ok(()));
+                        let _ = l.set(mic.level.clone());
+                        super::timing::mark("microphone capturing");
                         // Forward release even while still connecting. Buffered
                         // audio then drains and commits once the session is up.
                         let mic_stop = mic.stop.clone();
@@ -467,25 +468,18 @@ impl NariRecording {
                     runtime.shutdown_background();
                     result
                 })();
-                if let Err(err) = &result {
-                    let _ = ready.try_send(Err(err.clone()));
-                }
                 if let Ok(mut events) = e.lock() {
                     events.push(NariEvent::Finished(result));
                 }
             })
             .map_err(|_| VoiceError::CaptureFailed)?;
-        match wait_started(&started, &cancel) {
-            Ok(Ok(())) => Ok(Self {
-                cancel,
-                stop,
-                events,
-                worker,
-                level: level_rx.recv().map_err(|_| VoiceError::CaptureFailed)?,
-            }),
-            Ok(Err(e)) => Err(e),
-            _ => Err(VoiceError::CaptureFailed),
-        }
+        Ok(Self {
+            cancel,
+            stop,
+            events,
+            worker,
+            level,
+        })
     }
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -502,7 +496,9 @@ impl NariRecording {
         {
             return 0.0;
         }
-        f32::from_bits(self.level.load(Ordering::Relaxed))
+        self.level
+            .get()
+            .map_or(0.0, |level| f32::from_bits(level.load(Ordering::Relaxed)))
     }
     pub fn try_event(&self) -> Option<NariEvent> {
         self.events.lock().ok()?.queue.pop_front()
@@ -583,7 +579,7 @@ mod tests {
         let recording = NariRecording {
             cancel: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
-            level: c.level.clone(),
+            level: Arc::new(std::sync::OnceLock::from(c.level.clone())),
             events: Arc::new(Mutex::new(Events::default())),
             worker: thread::spawn(move || {
                 wait.recv().unwrap();
@@ -863,8 +859,29 @@ mod tests {
         assert_eq!(c.samples, cap);
         assert_eq!(c.chunk.len(), 1);
     }
+    #[test]
+    fn construction_returns_before_microphone_or_network_are_ready() {
+        // Unroutable address: the handshake cannot complete during this test.
+        let (release, blocked) = mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let recording = NariRecording::start_with(
+            Arc::new(AtomicBool::new(false)),
+            "test",
+            "ws://10.255.255.1:9",
+            move |c| {
+                let _ = blocked.recv_timeout(Duration::from_secs(2));
+                Ok(fake_capture(c, Arc::new(AtomicBool::new(false))))
+            },
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(!recording.is_finished());
+        assert_eq!(recording.audio_level(), 0.0);
+        drop(recording);
+        let _ = release.send(());
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_slow_factory_does_not_block_constructor_or_start_stale_capture() {
+    async fn cancelled_slow_factory_finishes_cancelled_without_starting_stale_capture() {
         use futures::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -900,13 +917,23 @@ mod tests {
         .await
         .unwrap();
         cancel.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_millis(200), starting)
-                .await
-                .unwrap()
-                .unwrap(),
-            Err(VoiceError::Cancelled)
-        ));
+        // Construction never waits for the microphone or network.
+        let recording = tokio::time::timeout(Duration::from_millis(200), starting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                if let Some(NariEvent::Finished(result)) = recording.try_event() {
+                    return result;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Err(VoiceError::Cancelled));
         tokio::time::sleep(Duration::from_millis(40)).await;
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
