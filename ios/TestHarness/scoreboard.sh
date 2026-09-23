@@ -46,7 +46,7 @@ swift test >"$TEST_OUT" 2>&1
 TEST_EXIT=$?
 # `grep -c` on multiple pattern hits per line stays 1-per-line; tr -d strips any
 # stray whitespace so the counts stay safe to interpolate into python below.
-TESTS_PASSED="$(grep -c '^✔ Test ' "$TEST_OUT" 2>/dev/null | tr -d '[:space:]')"
+TESTS_PASSED="$(grep '^✔ Test ' "$TEST_OUT" 2>/dev/null | grep -vc '^✔ Test run with ' | tr -d '[:space:]')"
 TESTS_FAILED="$(grep -c '^✘ Test ' "$TEST_OUT" 2>/dev/null | tr -d '[:space:]')"
 TESTS_PASSED="${TESTS_PASSED:-0}"; TESTS_FAILED="${TESTS_FAILED:-0}"
 
