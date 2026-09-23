@@ -402,6 +402,9 @@ pub(super) fn draw_messages(
     super::set_last_total_wrapped_lines(total_lines);
     super::set_last_resolved_chat_scroll(scroll);
     super::set_last_chat_viewport_height(viewport_height);
+    // Retain the frame itself: it is the geometry (per-item row ranges), and
+    // handlers outside `draw` resolve anchors against it.
+    super::set_last_chat_frame(prepared.clone());
 
     let prompt_preview_lines = if crate::config::config().display.prompt_preview && scroll > 0 {
         compute_prompt_preview_line_count(
