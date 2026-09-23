@@ -1928,14 +1928,49 @@ pub fn run_pair_command(list: bool, revoke: Option<String>) -> Result<()> {
 
 pub use gateway::{detect_tailscale_dns_name, parse_tailscale_dns_name, resolve_connect_host};
 
-pub async fn run_browser(action: &str) -> Result<()> {
+pub async fn run_browser(action: &str, requested: Option<&str>) -> Result<()> {
     match action {
-        "setup" => browser::run_setup_command().await?,
+        "setup" => browser::run_setup_command_for(requested).await?,
+        "detect" => {
+            let target = browser::resolve_target_browser(requested)?;
+            println!("Browser detection");
+            println!(
+                "  target: {} ({})",
+                target.kind.display_name(),
+                target.source.describe()
+            );
+            match crate::browser_detect::system_default_browser_id() {
+                Some(id) => println!("  system default: {}", id),
+                None => println!("  system default: unknown"),
+            }
+            let installed: Vec<&str> = crate::browser_detect::ALL_BROWSERS
+                .iter()
+                .filter(|k| k.is_installed())
+                .map(|k| k.id())
+                .collect();
+            println!(
+                "  installed: {}",
+                if installed.is_empty() {
+                    "none detected".to_string()
+                } else {
+                    installed.join(", ")
+                }
+            );
+            if let Some(saved) = browser::saved_browser_preference() {
+                println!("  configured by setup: {}", saved.id());
+            }
+            println!("\nOverride with `jcode browser setup <browser>` or JCODE_BROWSER=<browser>.");
+        }
         "status" => {
-            let status = browser::ensure_browser_ready_noninteractive().await?;
+            let target = browser::resolve_target_browser(requested)?;
+            let name = target.kind.display_name();
+            let status = browser::ensure_browser_ready_noninteractive_for(&target).await?;
             println!("Browser automation");
             println!("  backend: {}", status.backend);
-            println!("  browser: {}", status.browser);
+            println!("  browser: {} ({})", status.browser, status.detected_via);
+            if let Some(connected) = &status.connected_browser {
+                println!("  connected browser: {}", connected);
+            }
             println!(
                 "  binary: {}",
                 if status.binary_installed {
@@ -1976,15 +2011,18 @@ pub async fn run_browser(action: &str) -> Result<()> {
                 println!("\nBuilt-in browser tool is ready.");
             } else if status.responding && !status.compatible {
                 println!(
-                    "\nThe browser bridge is connected, but the installed Firefox extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
+                    "\nThe browser bridge is connected, but the installed extension is out of date for this jcode build. Run `jcode browser setup` to repair or update it."
                 );
-            } else if status.binary_installed && !browser::is_firefox_running() {
+            } else if status.binary_installed && !browser::is_browser_running(target.kind) {
                 println!(
-                    "\nFirefox is not running, so the bridge cannot respond. Start Firefox (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run."
+                    "\n{} is not running, so the bridge cannot respond. Start {} (or run a browser tool action, which launches it automatically), then re-check status. Setup is one-time and does not need to be re-run.",
+                    name, name
                 );
             } else if status.binary_installed {
                 println!(
-                    "\nFirefox is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled in the running profile. Run `jcode browser setup` only to repair the install."
+                    "\n{} is running, but the bridge is not responding. Check that the Browser Agent Bridge extension is enabled ({}). Run `jcode browser setup` only to repair the install.",
+                    name,
+                    target.kind.extensions_page()
                 );
             } else {
                 println!("\nRun `jcode browser setup` to install or repair it.");
@@ -1992,7 +2030,7 @@ pub async fn run_browser(action: &str) -> Result<()> {
         }
         other => {
             eprintln!("Unknown browser action: {}", other);
-            eprintln!("Available: setup, status");
+            eprintln!("Available: setup [browser], status [browser], detect");
             std::process::exit(1);
         }
     }

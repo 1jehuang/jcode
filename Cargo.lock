@@ -3321,6 +3321,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "dirs",
+ "flate2",
  "futures",
  "global-hotkey",
  "hex",
