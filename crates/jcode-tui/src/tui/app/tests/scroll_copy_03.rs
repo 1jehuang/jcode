@@ -588,6 +588,8 @@ fn test_overscroll_requires_gesture_starting_at_bottom() {
     // continuing past it) must not pop the elastic line.
     let _render_lock = scroll_render_test_lock();
     let (mut app, mut terminal) = create_scroll_test_app(80, 25, 1, 12);
+    // Exercise the elastic reveal explicitly (the default pins the line on).
+    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
     render_and_snap(&app, &mut terminal);
     let rendered_max = crate::tui::ui::last_max_scroll();
     assert!(rendered_max > 2, "expected scrollable chat content");

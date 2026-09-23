@@ -5,6 +5,8 @@
     clippy::unnecessary_sort_by,
     clippy::useless_conversion
 )]
+// Tests hold the process-wide env lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 //! Root `jcode` crate: the entrypoint + cli layer on top of the `jcode-tui`
 //! presentation crate (which in turn re-exports `jcode-app-core` and

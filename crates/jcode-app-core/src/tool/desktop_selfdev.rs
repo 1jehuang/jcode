@@ -37,7 +37,7 @@ impl Tool for DesktopSelfDevTool {
     }
 
     fn description(&self) -> &str {
-        "Develop Jcode Desktop from its checkout only. Status, paired host/UI build, private-socket rebuild/reload, tests, isolated Xvfb screenshot, or read-only preview catalog. Never builds/reloads the Jcode CLI or focuses a window. Reload acknowledgement is not build/reload completion."
+        "Build, reload, test, or screenshot Jcode Desktop from its checkout (not the CLI)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -46,8 +46,8 @@ impl Tool for DesktopSelfDevTool {
             "action": {"type":"string", "enum":["status","build","reload","build-reload","test","screenshot","inspect"]},
             "instance": {"type":"string", "enum":["main","no-sidebar"], "description":"Required when both Desktop instances exist. No arbitrary socket paths."},
             "command": {"type":"string", "description":"Optional test shell command, run with the Desktop repository as cwd. Default cargo test."},
-            "output": {"type":"string", "description":"Screenshot output relative to target/. Default desktop-selfdev.png. Uses a private Xvfb, never the live desktop."},
-            "timeout_seconds": {"type":"integer", "minimum":1, "maximum":600, "description":"Bounded command timeout, default 120 seconds. For longer jobs use bash/background in the Desktop checkout."}
+            "output": {"type":"string", "description":"Screenshot path under target/. Default desktop-selfdev.png. Uses private Xvfb."},
+            "timeout_seconds": {"type":"integer", "minimum":1, "maximum":600, "description":"Command timeout, default 120s. For longer jobs use bash in the Desktop checkout."}
         }})
     }
 

@@ -58,6 +58,34 @@ fn catalog_is_capability_filtered_and_uses_shared_aliases() {
     assert!(client.begin("jcode", None).is_err());
 }
 
+#[test]
+fn legacy_validation_report_is_only_accepted_after_authenticated_completion() {
+    let success = br#"{"status":"authenticated","provider":"openai"}"#;
+    let mut legacy = success.to_vec();
+    legacy.extend_from_slice(b"\n=== auth-test: OpenAI ===\nresult: PASS\n");
+    for operation in [Operation::Callback, Operation::Code, Operation::Complete] {
+        assert_eq!(
+            parse_login_response(&legacy, operation).unwrap()["status"],
+            "authenticated"
+        );
+    }
+    for operation in [Operation::Begin, Operation::Cancel] {
+        assert!(parse_login_response(&legacy, operation).is_err());
+    }
+    for invalid in [
+        b"banner\n{\"status\":\"authenticated\"}".as_slice(),
+        b"{\"status\":\"pending\"}\n=== auth-test: OpenAI ===\n",
+        b"{\"status\":\"authenticated\"}\n{\"status\":\"failed\"}",
+        b"{\"status\":\"authenticated\"}\nunrecognized private output",
+    ] {
+        let error = parse_login_response(invalid, Operation::Callback).unwrap_err();
+        assert_eq!(
+            error.message,
+            "Invalid login response. Update Jcode and retry."
+        );
+    }
+}
+
 #[cfg(unix)]
 mod processes {
     use super::*;
@@ -98,12 +126,18 @@ if mode == 'hang':
     (home / 'pid').write_text(str(os.getpid()))
     time.sleep(60)
     sys.exit(1)
+if mode == 'exchange-error':
+    print('Error: Token exchange failed: private-fixture-secret', file=sys.stderr)
+    sys.exit(1)
 payload = sys.stdin.read()
 (home / 'callback-input').write_text(payload)
 (home / 'stdin-ok').write_text(str(payload == 'private-fixture-secret'))
 print('private-fixture-secret', file=sys.stderr)
 print(json.dumps(dict(status='authenticated', provider=provider)))
-sys.exit(1 if mode == 'warning' else 0)
+if mode.startswith('legacy-'):
+    print('=== auth-test: Fixture ===')
+    print('result: FAIL' if mode == 'legacy-warning' else 'result: PASS')
+sys.exit(1 if mode in ('warning', 'legacy-warning') else 0)
 "#,
         )
         .unwrap();
@@ -173,6 +207,22 @@ sys.exit(1 if mode == 'warning' else 0)
         assert_eq!(request["type"], "notify_auth_changed");
         assert_eq!(request["provider"], "openai");
         assert!(!request.to_string().contains("private-fixture-secret"));
+    }
+
+    #[test]
+    fn legacy_cli_reports_preserve_completion_and_validation_warning() {
+        for (mode, warning) in [("legacy-success", false), ("legacy-warning", true)] {
+            let (_dir, client) = fixture(mode);
+            let flow = client.begin("openai", None).unwrap();
+            flow.start().unwrap();
+            assert_eq!(
+                flow.submit_callback("private-fixture-secret")
+                    .unwrap()
+                    .validation_warning,
+                warning
+            );
+            assert!(flow.submit_callback("private-fixture-secret").is_err());
+        }
     }
 
     #[test]
@@ -344,6 +394,79 @@ sys.exit(1 if mode == 'warning' else 0)
     }
 
     #[test]
+    fn callback_denial_is_actionable_private_and_releases_listener() {
+        let (dir, client, reserved) = loopback_fixture();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        let worker = flow.clone();
+        let task = thread::spawn(move || {
+            worker.wait_for_callback_with_progress(|| {
+                panic!("denied authorization must not enter token exchange")
+            })
+        });
+        send_callback(
+            port,
+            "/auth/callback?state=fixture-state&error=access_denied&error_description=private-fixture-secret",
+        );
+        let error = task.join().unwrap().unwrap_err();
+        assert!(error.message.contains("authorization was denied"));
+        assert!(!error.message.contains("private-fixture-secret"));
+        assert!(!dir.path().join("callback-input").exists());
+        assert!(!flow.has_callback_listener());
+        let next = client.begin("openai", None).unwrap();
+        next.start().unwrap();
+        assert!(next.has_callback_listener());
+        next.cancel().unwrap();
+        flow.cancel().unwrap();
+    }
+
+    #[test]
+    fn exchange_failure_reports_stage_and_releases_callback_for_retry() {
+        let (dir, client, reserved) = loopback_fixture();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        std::fs::write(dir.path().join("mode"), "exchange-error").unwrap();
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        let worker = flow.clone();
+        let (tx, rx) = mpsc::channel();
+        let task = thread::spawn(move || {
+            worker.wait_for_callback_with_progress(|| {
+                tx.send(()).unwrap();
+            })
+        });
+        send_callback(port, "/auth/callback?state=fixture-state&code=fixture-code");
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let error = task.join().unwrap().unwrap_err();
+        assert!(error.message.contains("token exchange"));
+        assert!(!error.message.contains("private-fixture-secret"));
+        assert!(!flow.has_callback_listener());
+        let next = client.begin("openai", None).unwrap();
+        next.start().unwrap();
+        assert!(next.has_callback_listener());
+        next.cancel().unwrap();
+        flow.cancel().unwrap();
+    }
+
+    #[test]
+    fn cancel_releases_port_even_while_another_owner_retains_listener() {
+        let (_dir, client, reserved) = loopback_fixture();
+        drop(reserved);
+        let flow = client.begin("openai", None).unwrap();
+        flow.start().unwrap();
+        // Deterministically model a waiter still holding its Arc after cancel.
+        let retained_listener = flow.0.callback.lock().unwrap().clone().unwrap();
+        flow.cancel().unwrap();
+        let next = client.begin("openai", None).unwrap();
+        next.start().unwrap();
+        assert!(next.has_callback_listener());
+        drop(retained_listener);
+        next.cancel().unwrap();
+    }
+
+    #[test]
     fn busy_callback_port_keeps_manual_completion_available() {
         let (_dir, client, _reserved) = loopback_fixture();
         let flow = client.begin("openai", None).unwrap();
@@ -416,5 +539,34 @@ sys.exit(1 if mode == 'warning' else 0)
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(!flow.has_callback_listener());
         assert!(flow.submit_callback("private-fixture-secret").is_ok());
+    }
+}
+
+#[test]
+fn process_failure_diagnostics_never_echo_private_output() {
+    for (stderr, expected) in [
+        (
+            "OAuth state mismatch: private-fixture-secret",
+            "state mismatch",
+        ),
+        (
+            "Pending openai login state expired private-fixture-secret",
+            "expired",
+        ),
+        (
+            "No pending openai login state found private-fixture-secret",
+            "could not be found",
+        ),
+        (
+            "unexpected argument '--flow-id' private-fixture-secret",
+            "does not support",
+        ),
+        ("Permission denied private-fixture-secret", "permissions"),
+        ("error sending request private-fixture-secret", "connection"),
+        ("private-fixture-secret", "process failed"),
+    ] {
+        let error = login_process_failure(stderr.as_bytes());
+        assert!(error.message.contains(expected), "{}", error.message);
+        assert!(!error.message.contains("private-fixture-secret"));
     }
 }

@@ -2045,7 +2045,6 @@ fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
 
 include!("tests/cache_prompt_accounting.rs");
 
-
 #[test]
 fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
     let mut app = create_test_app();
@@ -2063,7 +2062,12 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         provider: "openai-api".into(),
         model: "gpt-6-astra".into(),
         upstream_provider: None,
-        signature: Some(App::kv_cache_request_signature(&messages, &[], "before", "")),
+        signature: Some(App::kv_cache_request_signature(
+            &messages,
+            &[],
+            "before",
+            "",
+        )),
     };
     for writes in [None, Some(2_000)] {
         app.kv_cache.kv_cache_baseline = Some(baseline.clone());
@@ -2073,7 +2077,11 @@ fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
         app.streaming.streaming_cache_creation_tokens = writes;
         assert!(app.record_completed_stream_cache_usage());
         assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
-        assert!(!app.display_messages.iter().any(|m| m.content.contains("KV cache miss")));
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|m| m.content.contains("KV cache miss"))
+        );
     }
     // An explicitly reported zero remains meaningful and is not suppressed.
     app.kv_cache.kv_cache_baseline = Some(baseline);

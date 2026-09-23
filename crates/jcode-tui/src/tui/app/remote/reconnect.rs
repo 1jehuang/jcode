@@ -420,6 +420,9 @@ pub(in crate::tui::app) async fn connect_with_retry(
         }
     } {
         Ok(remote) => {
+            // Request IDs are scoped to a connection. Old acknowledgements cannot
+            // arrive on this new socket and must not swallow a new turn's Done.
+            app.usage_reset.invalidate_requests.clear();
             crate::logging::info(&format!(
                 "[TIMING] remote bootstrap: connected after {}ms (resume={:?}, reconnect_attempts={})",
                 app.app_started.elapsed().as_millis(),

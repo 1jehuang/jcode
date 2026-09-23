@@ -70,7 +70,7 @@ fn compact_tool_input_for_display(name: &str, input: &serde_json::Value) -> serd
                     .get("patch_text")
                     .and_then(|v| v.as_str())
                     .and_then(|patch_text| {
-                        match crate::tui::ui::tools_ui::canonical_tool_name(name) {
+                        match crate::tui::ui::tools_ui::edit_render_name(name, input) {
                             "apply_patch" => {
                                 crate::tui::ui::tools_ui::extract_apply_patch_primary_file(
                                     patch_text,

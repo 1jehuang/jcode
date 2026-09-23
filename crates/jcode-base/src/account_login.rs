@@ -229,6 +229,143 @@ pub async fn poll(
     )
 }
 
+/// A native email-code sign-in. The token is an in-memory secret that binds
+/// the emailed code to this client, so it never appears in Debug output.
+#[derive(Clone)]
+pub struct EmailLogin {
+    api_base: String,
+    email: String,
+    token: String,
+    code_length: usize,
+    expires_in: Duration,
+    started_at: Instant,
+}
+
+impl EmailLogin {
+    pub fn email(&self) -> &str {
+        &self.email
+    }
+    pub fn code_length(&self) -> usize {
+        self.code_length
+    }
+    pub fn expires_in(&self) -> Duration {
+        self.expires_in
+    }
+    pub fn is_expired(&self) -> bool {
+        self.started_at.elapsed() >= self.expires_in
+    }
+}
+
+impl fmt::Debug for EmailLogin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmailLogin")
+            .field("code_length", &self.code_length)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum EmailCodeResult {
+    Approved(ApprovedLogin),
+    Incorrect { attempts_remaining: Option<u32> },
+    Expired,
+}
+
+/// Address the account service sends sign-in codes from.
+pub const LOGIN_EMAIL_SENDER: &str = "login@solosystems.dev";
+
+/// Gmail link for `email` that searches for our sign-in email, including
+/// Spam (`in:anywhere`). `authuser` picks the matching signed-in account.
+pub fn gmail_search_link(email: &str) -> String {
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    format!(
+        "https://mail.google.com/mail/?authuser={}#search/{}",
+        enc(&email.trim().to_lowercase()),
+        enc(&format!(
+            "from:{LOGIN_EMAIL_SENDER} in:anywhere newer_than:1d"
+        )),
+    )
+}
+
+/// Why an email sign-in could not start, in words safe for the UI.
+pub fn email_start_error_message(error: &AccountLoginError) -> String {
+    match error {
+        AccountLoginError::Http { status: 400 } => "Enter a valid email address.".into(),
+        AccountLoginError::Http { status: 429 } => {
+            "Too many sign-in emails. Wait a few minutes and try again.".into()
+        }
+        AccountLoginError::Http { status: 502 | 503 } => {
+            "We could not send the email right now. Try again shortly.".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Email a sign-in code to `email`. Opens no browser.
+pub async fn start_email(
+    client: &reqwest::Client,
+    email: &str,
+) -> Result<EmailLogin, AccountLoginError> {
+    start_email_with_api_base(client, &subscription_api::configured_api_base(), email).await
+}
+
+pub async fn start_email_with_api_base(
+    client: &reqwest::Client,
+    api_base: &str,
+    email: &str,
+) -> Result<EmailLogin, AccountLoginError> {
+    let started_at = Instant::now();
+    let start = subscription_api::request_email_code(client, api_base, email).await?;
+    Ok(EmailLogin {
+        api_base: api_base.to_owned(),
+        email: email.trim().to_lowercase(),
+        token: start.login_token,
+        code_length: start.code_length,
+        expires_in: Duration::from_secs(start.expires_in),
+        started_at,
+    })
+}
+
+/// Check a typed code. Does not persist anything; call `save()` on approval.
+pub async fn verify_email(
+    client: &reqwest::Client,
+    login: &EmailLogin,
+    code: &str,
+) -> Result<EmailCodeResult, AccountLoginError> {
+    if login.is_expired() {
+        return Ok(EmailCodeResult::Expired);
+    }
+    let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+    Ok(
+        match subscription_api::verify_email_code(client, &login.api_base, &login.token, &digits)
+            .await?
+        {
+            subscription_api::EmailCodeVerifyOutcome::Approved(key) => {
+                EmailCodeResult::Approved(ApprovedLogin {
+                    api_key: key.api_key,
+                    account_id: key.account_id,
+                    email: key.email,
+                    tier: key.tier,
+                    status: key.status,
+                })
+            }
+            subscription_api::EmailCodeVerifyOutcome::Incorrect { attempts_remaining } => {
+                EmailCodeResult::Incorrect { attempts_remaining }
+            }
+            subscription_api::EmailCodeVerifyOutcome::Expired => EmailCodeResult::Expired,
+        },
+    )
+}
+
 /// Save to the existing owner-only Jcode credential store. This performs local
 /// filesystem I/O, so GUI callers should use their background executor. Does not
 /// select a provider, modify runtime routing, or change any billing settings.

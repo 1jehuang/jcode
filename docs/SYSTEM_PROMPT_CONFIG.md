@@ -52,3 +52,26 @@ This replaces only the base prompt. AGENTS.md, overlays, skills, and memory stil
   Use `/swarm-prompt` to edit the active project or global file. New agents load
   the latest contents immediately; already-running agents keep the prompt they
   captured at session creation so their tool definition and context cache stay stable.
+
+## Direct SDK overrides
+
+SDK callers can replace the **complete assembled system prompt** when creating a
+session, without writing files:
+
+```typescript
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  systemPrompt: "You are a concise programming tutor.",
+});
+```
+
+Rust callers use `create_session_with_options(CreateSessionOptions {
+working_dir: None, system_prompt: Some("You are a concise programming tutor.".into())
+})`. The existing `create_session(working_dir)` API remains available.
+
+Unlike `system-prompt.md`, which replaces only the base layer, this option replaces
+all assembled prompt layers. Omit the option to retain normal Jcode prompting.
+An empty string explicitly selects an empty system prompt. The override belongs
+to that session and is persisted for resume and inherited by forks. Attaching to
+an existing session does not change its prompt. This requires a daemon version
+that supports the `system_prompt` session-creation field.

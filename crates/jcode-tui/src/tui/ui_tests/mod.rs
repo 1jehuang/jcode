@@ -145,6 +145,7 @@ struct TestState {
     inline_images_visible: bool,
     chat_overscroll_active: bool,
     cache_ttl_status: Option<crate::tui::CacheTtlInfo>,
+    openai_reset_hint: Option<&'static str>,
     status_notice: Option<String>,
     time_since_user_interaction: Option<Duration>,
     swarm_members: Vec<crate::protocol::SwarmMemberStatus>,
@@ -495,6 +496,10 @@ impl crate::tui::TuiState for TestState {
     }
     fn cache_ttl_status(&self) -> Option<crate::tui::CacheTtlInfo> {
         self.cache_ttl_status.clone()
+    }
+
+    fn openai_reset_hint(&self) -> Option<String> {
+        self.openai_reset_hint.map(str::to_owned)
     }
     fn chat_native_scrollbar(&self) -> bool {
         self.chat_native_scrollbar

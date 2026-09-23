@@ -100,11 +100,10 @@ impl App {
             state.last_work = work;
         }
         let title = title_with_metrics(&state.base, self.display_edit_line_counts, work, active);
-        if state.last_sent != title {
-            if crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title)).is_ok()
-            {
-                state.last_sent = title;
-            }
+        if state.last_sent != title
+            && crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title)).is_ok()
+        {
+            state.last_sent = title;
         }
     }
 

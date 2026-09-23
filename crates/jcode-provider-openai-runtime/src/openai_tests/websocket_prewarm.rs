@@ -43,6 +43,8 @@ async fn wait_for_prewarm(slot: &openai_websocket_prewarm::PrewarmSlot) {
 }
 
 #[tokio::test]
+// The tungstenite handshake callback signature fixes the large Err type.
+#[allow(clippy::result_large_err)]
 async fn websocket_v2_prewarm_is_adopted_by_complete_without_losing_request_state() {
     let _lock = jcode_base::storage::lock_test_env();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

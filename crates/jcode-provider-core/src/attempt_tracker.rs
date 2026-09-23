@@ -34,6 +34,9 @@ fn stream_event_is_replay_visible(event: &StreamEvent) -> bool {
         | StreamEvent::TextDone
         | StreamEvent::ToolUseStart { .. }
         | StreamEvent::ToolInputDelta(_)
+        | StreamEvent::ToolInputDeltaFor { .. }
+        | StreamEvent::ToolUseEndFor { .. }
+        | StreamEvent::ToolUseSignatureFor { .. }
         | StreamEvent::ToolUseEnd
         | StreamEvent::ToolUseSignature(_)
         | StreamEvent::ToolResult { .. }
@@ -145,6 +148,23 @@ mod tests {
         assert!(stream_event_is_replay_visible(&StreamEvent::MessageEnd {
             stop_reason: None,
         }));
+    }
+
+    #[test]
+    fn keyed_tool_events_are_replay_visible() {
+        for event in [
+            StreamEvent::ToolInputDeltaFor {
+                id: "a".into(),
+                delta: "{".into(),
+            },
+            StreamEvent::ToolUseEndFor { id: "a".into() },
+            StreamEvent::ToolUseSignatureFor {
+                id: "a".into(),
+                signature: "sig".into(),
+            },
+        ] {
+            assert!(stream_event_is_replay_visible(&event), "{event:?}");
+        }
     }
 
     #[test]

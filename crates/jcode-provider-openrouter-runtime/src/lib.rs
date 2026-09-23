@@ -4,6 +4,8 @@
 //! crate plus a binary relink instead of rebuilding the base -> app-core ->
 //! tui spine. The binary's composition root registers a parameterized factory
 //! with `jcode_base::provider::external::register_openrouter_factory`.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 //! OpenRouter API provider
 //!

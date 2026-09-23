@@ -372,6 +372,18 @@ impl Session {
     }
 
     pub fn save(&mut self) -> Result<()> {
+        self.save_inner(false)
+    }
+
+    /// Persist the session even when it has no visible conversation message
+    /// yet. Use this for sessions prepared by one process and attached to by
+    /// another (for example visible swarm spawns), where caller-configured
+    /// state such as model, provider, or effort must survive until attach.
+    pub fn save_prepared(&mut self) -> Result<()> {
+        self.save_inner(true)
+    }
+
+    fn save_inner(&mut self, force: bool) -> Result<()> {
         self.updated_at = Utc::now();
         let path = session_path(&self.id)?;
         let journal_path = session_journal_path_from_snapshot(&path);
@@ -387,7 +399,12 @@ impl Session {
         // id find no file and silently treat the session as missing.
         // Parent linkage is also explicit state: an empty fork carries only a
         // hidden fork notice but must be loadable when its new client attaches.
-        if !self.persist_state.snapshot_exists
+        // An explicit system prompt, including an empty string, must likewise
+        // survive attachment before the first visible message.
+        // Canary (self-dev) and debug markers are likewise explicit: the
+        // selfdev tool and debug-socket clients read them back from disk.
+        if !force
+            && !self.persist_state.snapshot_exists
             && !self
                 .messages
                 .iter()
@@ -396,6 +413,9 @@ impl Session {
             && self.custom_title.is_none()
             && self.title.is_none()
             && self.parent_id.is_none()
+            && self.system_prompt.is_none()
+            && !self.is_canary
+            && !self.is_debug
         {
             return Ok(());
         }

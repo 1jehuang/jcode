@@ -159,13 +159,12 @@ mod tests {
         );
         assert!(edited.output.contains("@@ -37,7 +37,7 @@"));
         assert!(edited.output.contains("40- ine 40"));
-        let multi = super::super::multiedit::MultiEditTool::new()
+        let multi = super::super::edit::EditTool::new()
             .execute(
                 json!({
                     "file_path": "file.rs", "edits": [
                         {"old_string":"line 10\n", "new_string":"inserted\nextra\n"},
-                        {"old_string":"line 90", "new_string":"tail"},
-                        {"old_string":"missing", "new_string":"must not appear"}
+                        {"old_string":"line 90", "new_string":"tail"}
                     ]
                 }),
                 ctx.clone(),
@@ -205,13 +204,12 @@ mod tests {
         let diff = patch.metadata.as_ref().unwrap()["diff"].as_str().unwrap();
         assert!(diff.contains("--- a/file.rs\n+++ b/moved.rs\n"), "{diff}");
         assert!(diff.contains("--- /dev/null\n+++ b/created.rs\n"), "{diff}");
-        let noop = super::super::multiedit::MultiEditTool::new()
+        let noop = super::super::edit::EditTool::new()
             .execute(
                 json!({
                     "file_path":"moved.rs", "edits":[
                         {"old_string":"patched", "new_string":"temporary"},
-                        {"old_string":"temporary", "new_string":"patched"},
-                        {"old_string":"missing", "new_string":"not applied"}
+                        {"old_string":"temporary", "new_string":"patched"}
                     ]
                 }),
                 ctx.clone(),

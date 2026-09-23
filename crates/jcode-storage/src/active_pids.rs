@@ -89,6 +89,31 @@ pub fn unmark_streaming(session_id: &str) {
     }
 }
 
+/// Session IDs whose streaming marker names a live process, i.e. every session
+/// some jcode process (normally the shared daemon) is running a turn for right
+/// now. Cheaper than [`session_presence`]: it reads only the handful of
+/// streaming markers, never the whole active-PID registry, so clients such as
+/// the desktop sidebar can poll it every second for sessions they have not
+/// attached to.
+pub fn streaming_session_ids() -> Vec<String> {
+    let Some(dir) = streaming_pids_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                .is_some_and(process_is_running)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect()
+}
+
 /// RAII guard that marks a session as streaming for its lifetime and clears the
 /// marker on drop. This guarantees the marker is cleared on every exit path
 /// (normal return, `?` propagation, interrupt, or panic) so the menu bar count
@@ -310,6 +335,10 @@ mod tests {
         if let Some(dir) = streaming_pids_dir() {
             let _ = std::fs::write(dir.join("session_delta"), dead.to_string());
         }
+
+        let mut streaming_ids = streaming_session_ids();
+        streaming_ids.sort();
+        assert_eq!(streaming_ids, vec!["session_alpha".to_string()]);
 
         let counts = session_counts();
         assert_eq!(counts.total, 3, "three live sessions expected");

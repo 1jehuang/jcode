@@ -1480,6 +1480,8 @@ fn test_changelog_overlay_mouse_drag_release_copies_text() {
     // in the test environment, but the selection path must have run).
     assert!(matches!(
         app.status_notice().as_deref(),
-        Some("Copied selection") | Some("Failed to copy selection") | Some("Selection is empty")
+        Some("Copied selection · highlight remains visible")
+            | Some("Failed to copy selection")
+            | Some("Selection is empty")
     ));
 }

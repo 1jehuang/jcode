@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::Client;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -250,7 +251,9 @@ fn read_vscdb_key(db_path: &PathBuf, key: &str) -> Result<String> {
         .query_row("SELECT value FROM ItemTable WHERE key = ?1", [key], |row| {
             row.get(0)
         })
-        .with_context(|| format!("Key '{key}' not found in {}", db_path.display()))?;
+        .optional()
+        .with_context(|| format!("Failed to query Cursor state at {}", db_path.display()))?
+        .unwrap_or_default();
     let value = value.trim().to_string();
     if value.is_empty() {
         anyhow::bail!("Key '{}' not found or empty in {}", key, db_path.display());

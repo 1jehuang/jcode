@@ -1546,7 +1546,7 @@ fn render_message_into(
                                 .get("patch_text")
                                 .and_then(|v| v.as_str())
                                 .and_then(|patch_text| {
-                                    match tools_ui::canonical_tool_name(&tc.name) {
+                                    match tools_ui::edit_render_name(&tc.name, &tc.input) {
                                         "apply_patch" => {
                                             tools_ui::extract_apply_patch_primary_file(patch_text)
                                         }
