@@ -50,7 +50,9 @@ impl PcmRecording {
                 result
             })
             .map_err(|_| VoiceError::CaptureFailed)?;
-        match wait_started(&started, &cancel) {
+        let started = wait_started(&started, &cancel);
+        super::timing::mark("pcm start returned");
+        match started {
             Ok(Ok(())) => Ok((
                 Self {
                     level,
@@ -309,6 +311,7 @@ fn capture(
         drop(state);
         thread::sleep(Duration::from_millis(2));
     }
+    super::timing::mark("capture signalled ready");
     let _ = ready.send(Ok(()));
     let deadline = std::time::Instant::now() + MAX_RECORDING_DURATION;
     loop {
@@ -402,7 +405,11 @@ impl NariRecording {
             .name("voice-nari".into())
             .spawn(move || {
                 let result = (|| {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
+                    // Two workers so the provider handshake (native root loading
+                    // and TLS setup are CPU-bound) never delays mic readiness.
+                    let runtime = tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .thread_name("voice-nari-rt")
                         .enable_all()
                         .build()
                         .map_err(|_| VoiceError::CaptureFailed)?;
