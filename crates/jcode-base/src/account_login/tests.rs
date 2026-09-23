@@ -318,3 +318,56 @@ async fn deployed_account_start_and_pending_are_compatible() {
         LoginPoll::Pending
     ));
 }
+
+#[tokio::test]
+async fn email_code_sign_in_uses_expected_wire_contract() {
+    let token = "T".repeat(43);
+    let started = format!(r#"{{"login_token":"{token}","expires_in":900,"code_length":6}}"#);
+    let (base, requests) = server(vec![
+        (200, "", started),
+        (
+            400,
+            "",
+            r#"{"error":{"code":"invalid_code","message":"no","attempts_remaining":4}}"#.into(),
+        ),
+        (200, "", APPROVED.into()),
+        (
+            400,
+            "",
+            r#"{"error":{"code":"expired_code","message":"no"}}"#.into(),
+        ),
+    ]);
+    let client = client();
+    let login = start_email_with_api_base(&client, &base, " Me@Example.com ")
+        .await
+        .unwrap();
+    assert_eq!(login.email(), "me@example.com");
+    assert_eq!(login.code_length(), 6);
+    assert!(!format!("{login:?}").contains(&token));
+    let request = requests.recv().unwrap();
+    assert!(request.starts_with("POST /v1/auth/email/start "));
+    assert!(request.contains(r#""email":"Me@Example.com""#));
+    assert!(request.contains(r#""client_name":"jcode-cli""#));
+
+    match verify_email(&client, &login, "000000").await.unwrap() {
+        EmailCodeResult::Incorrect { attempts_remaining } => {
+            assert_eq!(attempts_remaining, Some(4))
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let _ = requests.recv().unwrap();
+    match verify_email(&client, &login, "123 456").await.unwrap() {
+        EmailCodeResult::Approved(approved) => {
+            assert_eq!(approved.email, "fixture@example.invalid")
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let request = requests.recv().unwrap();
+    assert!(request.starts_with("POST /v1/auth/email/verify "));
+    assert!(request.contains(r#""code":"123456""#));
+    assert!(request.contains(&token));
+    assert!(matches!(
+        verify_email(&client, &login, "123456").await.unwrap(),
+        EmailCodeResult::Expired
+    ));
+}
