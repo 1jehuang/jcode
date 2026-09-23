@@ -770,7 +770,10 @@ impl JcodeClient {
 
     /// Create a session with optional full system prompt replacement.
     /// See [`CreateSessionOptions::system_prompt`] for override semantics.
-    pub fn create_session_with_options(&self, options: CreateSessionOptions) -> Result<SessionInfo> {
+    pub fn create_session_with_options(
+        &self,
+        options: CreateSessionOptions,
+    ) -> Result<SessionInfo> {
         match self
             .request_ok(ApiRequest::CreateSession {
                 working_dir: options.working_dir,

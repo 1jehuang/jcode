@@ -400,7 +400,7 @@ pub(crate) enum Command {
         uninstall: bool,
     },
 
-    /// Install a launcher so jcode appears in your app launcher
+    /// Install platform launcher integration (Windows shortcut; macOS notification helper)
     SetupLauncher,
 
     /// Browser automation setup and status

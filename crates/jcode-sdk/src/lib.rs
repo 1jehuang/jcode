@@ -143,9 +143,9 @@ pub use auth::{
     LoginProvider,
 };
 pub use client::{
-    AssistantTextMessage, ConnectOptions, CreateSessionOptions, EventStream, FileContent, FileStatus,
-    GlobalEventStream, GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo, SearchTextOptions,
-    ToolCall, Transport, TurnResult, UnixTransport, Usage,
+    AssistantTextMessage, ConnectOptions, CreateSessionOptions, EventStream, FileContent,
+    FileStatus, GlobalEventStream, GlobalEventsOptions, JcodeClient, RunOptions, RuntimeInfo,
+    SearchTextOptions, ToolCall, Transport, TurnResult, UnixTransport, Usage,
 };
 pub use diagnostics::{SocketState, Stage, describe_disconnect, explain, human_duration};
 pub use errors::{Error, ErrorKind, Result};
