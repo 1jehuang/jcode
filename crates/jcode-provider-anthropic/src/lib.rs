@@ -524,8 +524,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
         // Forward every other registered tool, remapping its name to the
         // OAuth-accepted form. This restores websearch/webfetch/browser/
         // codesearch/memory/swarm/multiedit/open/etc. for subscription users,
-        // matching the documented "remap names, keep the full toolset" behavior
-        // and the (deprecated) Claude CLI transport.
+        // matching the documented "remap names, keep the full toolset" behavior.
         for tool in tools {
             if OAUTH_BUILTIN_LOCAL_TOOLS.contains(&tool.name.as_str()) {
                 continue;

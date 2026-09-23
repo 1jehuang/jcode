@@ -3174,7 +3174,6 @@ dependencies = [
  "jcode-harness-api-server",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
- "jcode-provider-claude-cli-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
@@ -3707,22 +3706,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "jcode-provider-claude-cli-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "jcode-base",
- "jcode-message-types",
- "jcode-provider-core",
- "serde",
- "serde_json",
  "tokio",
  "tokio-stream",
 ]

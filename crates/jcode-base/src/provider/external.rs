@@ -30,9 +30,6 @@ pub const ANTIGRAVITY_RUNTIME: &str = "antigravity";
 /// Registry key for the GitHub Copilot provider runtime.
 pub const COPILOT_RUNTIME: &str = "copilot";
 
-/// Registry key for the deprecated Claude CLI provider runtime.
-pub const CLAUDE_CLI_RUNTIME: &str = "claude-cli";
-
 /// Registry key for the direct Anthropic API provider runtime.
 pub const ANTHROPIC_RUNTIME: &str = "anthropic";
 

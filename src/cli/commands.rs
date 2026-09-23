@@ -3493,7 +3493,7 @@ fn filter_cli_model_routes_for_choice(
     use super::provider_init::ProviderChoice;
 
     let keep = |route: &&crate::provider::ModelRoute| match choice {
-        ProviderChoice::Claude | ProviderChoice::ClaudeSubprocess => {
+        ProviderChoice::Claude => {
             route.api_method_kind().is_anthropic_credential_route()
         }
         ProviderChoice::Openai => {

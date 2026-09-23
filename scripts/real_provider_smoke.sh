@@ -11,9 +11,9 @@ echo "=== Real Provider Smoke ==="
 echo "Provider: ${provider}"
 
 if [[ "${JCODE_REAL_PROVIDER_TEST_API:-1}" == "1" ]]; then
-  if [[ "${provider}" == "claude" && "${JCODE_USE_DIRECT_API:-0}" != "1" ]]; then
+  if [[ "${provider}" == "claude" ]]; then
     echo ""
-    echo "Test 1: Claude CLI smoke (test_api)"
+    echo "Test 1: Direct Anthropic smoke (test_api)"
     if [[ "${JCODE_REMOTE_CARGO:-0}" == "1" ]]; then
       (cd "$repo_root" && "$cargo_exec" build --bin test_api)
       (cd "$repo_root" && ./target/debug/test_api)
@@ -22,7 +22,7 @@ if [[ "${JCODE_REAL_PROVIDER_TEST_API:-1}" == "1" ]]; then
     fi
   else
     echo ""
-    echo "Test 1: Skipping test_api (provider=${provider}, JCODE_USE_DIRECT_API=${JCODE_USE_DIRECT_API:-0})"
+    echo "Test 1: Skipping test_api (provider=${provider})"
   fi
 fi
 
