@@ -100,7 +100,9 @@ pub fn classify_telemetry_tool_category(name: &str) -> TelemetryToolCategory {
         | "ls"
         | "conversation_search"
         | "session_search" => TelemetryToolCategory::ReadSearch,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => TelemetryToolCategory::Write,
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => {
+            TelemetryToolCategory::Write
+        }
         "bash" | "bg" | "schedule" => TelemetryToolCategory::Shell,
         "webfetch" | "websearch" | "codesearch" | "open" => TelemetryToolCategory::Web,
         "memory" => TelemetryToolCategory::Memory,

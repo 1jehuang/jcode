@@ -224,8 +224,7 @@ impl Tool for EditTool {
         let mut body = if let [edit] = edits.as_slice() {
             let applied = &applied[0];
             let diff = generate_diff(&edit.old_string, &edit.new_string, applied.start_line);
-            let end_line =
-                applied.start_line + edit.new_string.lines().count().saturating_sub(1);
+            let end_line = applied.start_line + edit.new_string.lines().count().saturating_sub(1);
             Bus::global().publish(BusEvent::FileTouch(FileTouch {
                 session_id: ctx.session_id.clone(),
                 path: path.to_path_buf(),
@@ -260,7 +259,11 @@ impl Tool for EditTool {
                 )),
                 detail: build_file_touch_preview(&diff),
             }));
-            let mut body = format!("Edited {}: applied {} edits\n", params.file_path, edits.len());
+            let mut body = format!(
+                "Edited {}: applied {} edits\n",
+                params.file_path,
+                edits.len()
+            );
             for (index, edit) in applied.iter().enumerate() {
                 body.push_str(&format!(
                     "  ✓ Edit {}: replaced {} occurrence{} at line {}\n",
@@ -421,7 +424,9 @@ fn flexible_match_hint(content: &str, old_string: &str, file_path: &str) -> Stri
         }
     }
 
-    format!("old_string not found in {file_path}. Use the read tool to see the current file contents.")
+    format!(
+        "old_string not found in {file_path}. Use the read tool to see the current file contents."
+    )
 }
 
 /// Generate a compact whole-file diff: "42- old" / "42+ new" (max 30 lines)
@@ -606,9 +611,17 @@ mod tests {
                 .len(),
             2
         );
-        assert!(parse(json!({"file_path":"f","edits":[],"old_string":"a","new_string":"b"})).operations().is_err());
+        assert!(
+            parse(json!({"file_path":"f","edits":[],"old_string":"a","new_string":"b"}))
+                .operations()
+                .is_err()
+        );
         assert!(parse(json!({"file_path":"f"})).operations().is_err());
-        assert!(parse(json!({"file_path":"f","old_string":"a"})).operations().is_err());
+        assert!(
+            parse(json!({"file_path":"f","old_string":"a"}))
+                .operations()
+                .is_err()
+        );
     }
 
     #[test]

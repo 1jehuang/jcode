@@ -1712,7 +1712,10 @@ fn cli_config_save_round_trips_desktop_tables() {
         desktop["voice"]["global_devices"][0].as_str(),
         Some("/dev/input/event3")
     );
-    assert_eq!(desktop["appearance"]["theme"].as_str(), Some("warm-neutral"));
+    assert_eq!(
+        desktop["appearance"]["theme"].as_str(),
+        Some("warm-neutral")
+    );
 
     // Configs without Desktop tables stay free of an empty [desktop] header.
     std::fs::write(&path, "[display]\ncentered = false\n").unwrap();

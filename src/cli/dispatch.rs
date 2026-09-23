@@ -148,7 +148,8 @@ pub(crate) async fn run_main(mut args: Args) -> Result<()> {
             }
             let provider_start = Instant::now();
             let provider =
-                provider_init::init_provider_for_serve(&args.provider, args.model.as_deref()).await?;
+                provider_init::init_provider_for_serve(&args.provider, args.model.as_deref())
+                    .await?;
             let provider_ms = provider_start.elapsed().as_millis();
             let server_new_start = Instant::now();
             let server = server::Server::new_with_name(provider, server_name);

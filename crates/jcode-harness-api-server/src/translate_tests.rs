@@ -3637,7 +3637,10 @@ fn session_list_recovers_save_label_missing_from_older_index_rows() {
         .find(|session| session.session_id == "session_labelled")
         .expect("labelled session listed");
     assert!(labelled.saved);
-    assert_eq!(labelled.save_label.as_deref(), Some("investor catch up work"));
+    assert_eq!(
+        labelled.save_label.as_deref(),
+        Some("investor catch up work")
+    );
 }
 
 #[test]

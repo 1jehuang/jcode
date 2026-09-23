@@ -395,8 +395,7 @@ mod tests {
         assert_eq!(parse(&app.input), Some(Action::Prepare));
         // Without a runtime this exercises dispatch without any network I/O.
         assert!(super::super::commands_dispatch::dispatch_local_command(
-            &mut app,
-            "/reset"
+            &mut app, "/reset"
         ));
         assert!(
             app.display_messages

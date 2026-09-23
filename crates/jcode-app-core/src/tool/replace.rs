@@ -322,7 +322,14 @@ fn summary_lines(changes: &[FileChange]) -> String {
     let mut lines: Vec<String> = changes
         .iter()
         .take(PREVIEW_FILES)
-        .map(|change| format!("  ✓ {}: {} match{}", change.display, change.count, plural_es(change.count)))
+        .map(|change| {
+            format!(
+                "  ✓ {}: {} match{}",
+                change.display,
+                change.count,
+                plural_es(change.count)
+            )
+        })
         .collect();
     if changes.len() > PREVIEW_FILES {
         lines.push(format!("  … {} more files", changes.len() - PREVIEW_FILES));
@@ -349,7 +356,10 @@ mod tests {
     #[test]
     fn literal_mode_escapes_pattern_and_replacement() {
         let matcher = Matcher::new(&input(json!({"pattern":"a.b($1)","replacement":"x"}))).unwrap();
-        assert_eq!(matcher.apply("a.b($1) axb($1)", "$0"), ("$0 axb($1)".into(), 1));
+        assert_eq!(
+            matcher.apply("a.b($1) axb($1)", "$0"),
+            ("$0 axb($1)".into(), 1)
+        );
     }
 
     #[test]
@@ -366,7 +376,9 @@ mod tests {
 
     #[test]
     fn invalid_regex_is_an_error() {
-        assert!(Matcher::new(&input(json!({"pattern":"(","replacement":"","regex":true}))).is_err());
+        assert!(
+            Matcher::new(&input(json!({"pattern":"(","replacement":"","regex":true}))).is_err()
+        );
         assert!(Matcher::new(&input(json!({"pattern":"","replacement":"x"}))).is_err());
     }
 

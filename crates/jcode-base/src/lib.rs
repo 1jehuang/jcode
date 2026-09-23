@@ -29,7 +29,6 @@ pub mod claude_live;
 pub mod client_input;
 pub mod compaction;
 pub mod config;
-pub mod external_auth;
 pub mod console;
 pub mod copilot_usage;
 pub mod dictation;
@@ -39,6 +38,7 @@ pub mod embedding_backend;
 #[cfg(not(feature = "embeddings"))]
 pub mod embedding_stub;
 pub mod env;
+pub mod external_auth;
 pub mod gateway;
 pub mod generated_image;
 pub mod github;

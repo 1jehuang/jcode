@@ -267,10 +267,16 @@ pub fn metered_usage_cost_usd(
     let fresh = if split {
         input
     } else {
-        input.saturating_sub(cache_read).saturating_sub(cache_creation)
+        input
+            .saturating_sub(cache_read)
+            .saturating_sub(cache_creation)
     };
     let write_multiplier = if anthropic {
-        if super::anthropic::is_cache_ttl_1h() { 2.0 } else { 1.25 }
+        if super::anthropic::is_cache_ttl_1h() {
+            2.0
+        } else {
+            1.25
+        }
     } else if openai {
         1.25
     } else {

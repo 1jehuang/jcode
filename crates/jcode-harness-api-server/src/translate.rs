@@ -2397,10 +2397,7 @@ impl BridgeState {
             "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
             [],
         );
-        let _ = connection.execute(
-            "ALTER TABLE recent_sessions ADD COLUMN save_label TEXT",
-            [],
-        );
+        let _ = connection.execute("ALTER TABLE recent_sessions ADD COLUMN save_label TEXT", []);
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
                     todo_title, saved, updated_at_ms, last_active_at_ms, save_label

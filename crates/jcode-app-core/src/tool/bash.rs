@@ -938,9 +938,7 @@ fn file_edit_hint(command: &str) -> Option<&'static str> {
             && words.any(|word| {
                 word == "--in-place"
                     || word.starts_with("--in-place=")
-                    || (word.starts_with('-')
-                        && !word.starts_with("--")
-                        && word[1..].contains('i'))
+                    || (word.starts_with('-') && !word.starts_with("--") && word[1..].contains('i'))
             })
     });
     let perl_in_place = compact

@@ -115,7 +115,10 @@ impl VoiceUsage {
         let usage = value.get("usage")?;
         Some(Self {
             input_tokens: usage.get("input_tokens")?.as_u64()?,
-            output_tokens: usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+            output_tokens: usage
+                .get("output_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             requests: 1,
         })
     }
@@ -207,11 +210,13 @@ pub(crate) async fn classify_with_client(
         // evaluate validates the exact batch IDs and typed probabilities before
         // anything is merged. Never feed previous answers into subsequent state.
         let response = client.evaluate(state.clone(), batch).await?;
-        usage = usage.zip(VoiceUsage::from_response(&response)).map(|(total, batch)| VoiceUsage {
-            input_tokens: total.input_tokens + batch.input_tokens,
-            output_tokens: total.output_tokens + batch.output_tokens,
-            requests: total.requests + 1,
-        });
+        usage = usage
+            .zip(VoiceUsage::from_response(&response))
+            .map(|(total, batch)| VoiceUsage {
+                input_tokens: total.input_tokens + batch.input_tokens,
+                output_tokens: total.output_tokens + batch.output_tokens,
+                requests: total.requests + 1,
+            });
         answers.extend(
             response["answers"]
                 .as_object()
@@ -810,7 +815,10 @@ mod tests {
         assert!(coding.contains("candidate titles or directories are NOT work requested"));
         assert!(coding.contains("Mixed work plus navigation is true"));
         assert!(!coding.contains("instructions mentioning sessions are coding_agent"));
-        assert!(!questions.contains_key("uncertain"), "Jev has no unsure option");
+        assert!(
+            !questions.contains_key("uncertain"),
+            "Jev has no unsure option"
+        );
     }
 
     #[tokio::test]
