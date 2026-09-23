@@ -1373,6 +1373,9 @@ pub(super) fn handle_prompt_history_navigation(
                 return history
                     .last()
                     .map(|prompt| {
+                        app.remember_input_undo_state();
+                        app.history_draft =
+                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1386,8 +1389,13 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                app.input.clear();
-                app.cursor_pos = 0;
+                if let Some((draft, cursor_pos)) = app.history_draft.take() {
+                    app.input = draft;
+                    app.cursor_pos = cursor_pos;
+                } else {
+                    app.input.clear();
+                    app.cursor_pos = 0;
+                }
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
                 return true;
