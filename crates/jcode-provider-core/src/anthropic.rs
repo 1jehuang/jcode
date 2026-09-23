@@ -26,7 +26,8 @@ pub fn resolve_claude_code_version(raw: Option<&str>) -> String {
 }
 
 fn is_dotted_numeric_version(value: &str) -> bool {
-    !value.is_empty()
+    // At least two components: a bare number such as `1` is not a version.
+    value.contains('.')
         && value.len() <= 32
         && value
             .split('.')
@@ -534,6 +535,8 @@ mod tests {
     fn claude_code_version_override_rejects_values_unsafe_for_headers() {
         for bad in [
             "latest",
+            "1",
+            "2801",
             "2.1.280-beta",
             "2..1",
             ".2.1",
