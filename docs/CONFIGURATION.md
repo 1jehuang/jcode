@@ -56,6 +56,8 @@ Model selection, reasoning effort, failover, and retry behavior.
 | `openai_native_compaction_mode` | string | `"auto"` | `auto`, `explicit`, `off` |
 | `openai_native_compaction_threshold_tokens` | int | `200000` | Trigger point for auto native compaction |
 | `preserve_reasoning_context` | bool | `true` | Keep provider-native reasoning items for later turns where supported |
+| `anthropic_cache_ttl_1h` | bool | `true` | Request one-hour Anthropic prompt caching instead of five minutes |
+| `gemini_force_oauth` | bool | `false` | Pin the `gemini` provider to Code Assist OAuth even when a `GEMINI_API_KEY` is present, which would otherwise silently win and bill per token |
 | `cross_provider_failover` | `"countdown"` \| `"manual"` | `countdown` | `countdown` shows a cancelable 3s countdown, then resends to another provider. `manual` (aliases `off`, `none`, `disabled`) never auto-resends. |
 | `same_provider_account_failover` | bool | `true` | Try another account on the same provider before switching provider |
 | `copilot_premium` | string | unset | `normal`, `one`, `zero` (`zero` = never consume premium requests) |
@@ -145,7 +147,7 @@ TUI presentation. Most of these have a matching slash command or hotkey.
 | `active_sessions_manager` | bool | `false` | Left arrow on empty input opens the live-session picker |
 | `external_sessions` | bool | `true` | Include Claude Code / Codex / Pi / OpenCode / Cursor transcripts in `/resume` |
 | `usage_display` | string | `left` | `left` or `used` wording for the usage percentage |
-| `overscroll_status` | enum | `overscroll` | `off`, `on`, `overscroll` (elastic reveal below the input) |
+| `overscroll_status` | enum | `on` | `off`, `on` (always visible), `overscroll` (elastic reveal below the input) |
 
 ### `[display.native_scrollbars]`
 
@@ -244,6 +246,8 @@ Swarm workers and the memory sidecar.
 | `swarm_max_concurrent_agents` | int | `32` | Live-worker RAM budget. `0` disables this guard, leaving only the hard cap. |
 | `memory_model` | string | auto | Model override for the memory sidecar |
 | `memory_sidecar_enabled` | bool | `true` | LLM precision-judge memory path. `false` opts into the lower-precision no-LLM hybrid. |
+| `memory_jev_provider` | string | `auto` | Jev Decisions provider for recall: `auto`, `openrouter`, `typesafe`, `aimlapi`, `jcode`. Auto prefers a provider-specific BYOK credential before Jcode. |
+| `memory_jev_threshold` | float | `0.8` | Minimum Jev relevance probability; invalid values fail closed |
 | `memory_rerank_cadence` | int | `3` | Minimum turns between listwise LLM reranks (0/1 = every turn) |
 | `memory_rerank_votes` | int | `2` | Independent judges per fired rerank |
 | `memory_rerank_min_agree` | int | `2` | Judge agreement needed to inject a memory (clamped to 1..=votes) |
@@ -277,6 +281,8 @@ array of commands. Hooks receive `JCODE_HOOK_*` env vars plus a
 | `session_start` | string/array | unset | Session created or resumed |
 | `session_end` | string/array | unset | Session closed normally |
 | `pre_tool` | string/array | unset | Gate before each tool call. Exit 0 allows, exit 2 blocks (stderr goes back to the model), anything else fails open. |
+| `pre_tool_transform` | string/array | unset | Input transformer before each tool call: receives the tool input JSON on stdin and may print replacement JSON on stdout. Empty stdout or failure leaves input unchanged. |
+| `pre_tool_transform_timeout_ms` | int | `500` | Max wait per input transformer |
 | `post_tool` | string/array | unset | After each tool call. Fields: `TOOL_NAME`, `STATUS`, `DURATION_MS`, `OUTPUT_BYTES`. |
 | `pre_tool_timeout_ms` | int | `5000` | Gate timeout before failing open |
 
@@ -297,6 +303,7 @@ All hooks except `pre_tool` are detached fire-and-forget observers. See
 | `topic_shift_threshold` | float | `0.45` | Semantic: cosine similarity below which a topic shift is declared |
 | `relevance_keep_threshold` | float | `0.65` | Semantic: similarity above which a message is kept verbatim |
 | `goal_window_turns` | int | `5` | Semantic: recent turns used to build the current-goal embedding |
+| `max_context_tokens` | int | `0` | `0` = provider window. A positive value bounds the compaction trigger budget, useful to compact earlier on large-window (1M+) providers |
 
 ## `[websearch]`
 
@@ -407,6 +414,7 @@ WebSocket gateway for the iOS and web clients.
 | `mode` | enum | `send` | `insert`, `append`, `replace`, `send` |
 | `key` | string | `off` | In-app hotkey |
 | `timeout_secs` | int | `90` | `0` = no timeout |
+| `vocabulary` | array | `[]` | Extra names/terms sent as recognition context to built-in voice transcription |
 
 ## `[autoreview]`
 
