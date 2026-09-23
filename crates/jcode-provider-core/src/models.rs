@@ -390,6 +390,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
+    // --- Xiaomi MiMo V2.6 (Pro, Flash, Ultraspeed): 1 Mi tokens (issue #1401) ---
+    if m.contains("mimo-v2.6") || m.contains("mimo-v2-6") {
+        return Some(1_048_576);
+    }
+
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);
