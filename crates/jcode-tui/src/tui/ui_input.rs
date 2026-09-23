@@ -2124,30 +2124,34 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         )
     });
 
-    let mut spans: Vec<Span> = Vec::new();
+    // Each fact is its own group so the line can be assembled in reverse
+    // order (most important fact, the model, sits at the right edge) and so
+    // narrow terminals drop whole facts from the left instead of mid-word.
+    let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
 
-    // Model
+    // Model (muted, not colored, so the line stays quiet)
     let model = data
         .model
         .clone()
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| app.provider_model());
     if !model.is_empty() && !overscroll_is_placeholder(&model) {
-        spans.push(Span::styled(
+        let mut group = vec![Span::styled(
             session_facts::pretty_model(&model),
-            Style::default().fg(rgb(255, 150, 200)).bold(),
-        ));
+            Style::default().fg(rgb(190, 190, 200)).bold(),
+        )];
         // Reasoning level shown inline next to the model, e.g. " high".
         if let Some(effort) = data
             .reasoning_effort
             .as_deref()
             .and_then(overscroll_short_reasoning)
         {
-            spans.push(Span::styled(
+            group.push(Span::styled(
                 format!(" {}", effort),
                 Style::default().fg(rgb(140, 140, 150)),
             ));
         }
+        groups.push(group);
     }
 
     // Provider
@@ -2157,69 +2161,68 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
+        groups.push(vec![Span::styled(
             overscroll_provider_display(&provider),
-            Style::default().fg(rgb(140, 180, 255)),
-        ));
+            Style::default().fg(rgb(140, 140, 150)),
+        )]);
     }
 
     // Access method (auth)
     if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(label.to_string(), Style::default().fg(color)));
+        groups.push(vec![Span::styled(
+            label.to_string(),
+            Style::default().fg(color),
+        )]);
     }
 
     // Context usage as a rounded bar
     if let Some((used, limit)) = overscroll_context_usage(&data) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(
+        let mut group = vec![Span::styled(
             format!(
                 "{}/{} ",
                 overscroll_format_tokens(used),
                 overscroll_format_tokens(limit)
             ),
             Style::default().fg(rgb(140, 140, 150)),
-        ));
-        spans.extend(overscroll_context_bar(used, limit, 10));
+        )];
+        group.extend(overscroll_context_bar(used, limit, 10));
+        groups.push(group);
     }
 
-    // Working directory last, shown as a home-relative path, with the git
-    // branch alongside when available.
+    // Working directory, shown as a home-relative path, with the git branch
+    // alongside when available.
     if let Some(dir) = app.working_dir().and_then(|d| overscroll_dir_label(&d)) {
-        if !spans.is_empty() {
-            spans.push(sep());
-        }
-        spans.push(Span::styled(" ", Style::default().fg(rgb(140, 180, 255))));
-        spans.push(Span::styled(dir, Style::default().fg(rgb(140, 140, 150))));
+        let mut group = vec![
+            Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
+            Span::styled(dir, Style::default().fg(rgb(140, 140, 150))),
+        ];
         if let Some(branch) = overscroll_git_branch(&data) {
-            spans.push(Span::styled(
+            group.push(Span::styled(
                 format!("  {branch}"),
                 Style::default().fg(rgb(150, 170, 140)),
             ));
         }
+        groups.push(group);
     }
 
-    let total_width = area.width as usize;
+    // Reverse: directory first, model last (right edge).
+    groups.reverse();
 
-    // No countdown active: just render the info line (centered or not) as before.
+    let total_width = area.width as usize;
+    let alignment = if app.centered_mode() {
+        Alignment::Center
+    } else {
+        Alignment::Right
+    };
+
+    // No countdown active: just render the info line.
     let Some(countdown) = countdown else {
+        let spans = overscroll_fit_groups(groups, total_width, sep);
         if spans.is_empty() {
             return;
         }
-        let line = Line::from(overscroll_truncate_spans(spans, total_width));
-        let aligned_line = if app.centered_mode() {
-            line.alignment(Alignment::Center)
-        } else {
-            line
-        };
-        frame.render_widget(Paragraph::new(aligned_line), area);
+        let line = Line::from(spans).alignment(alignment);
+        frame.render_widget(Paragraph::new(line), area);
         return;
     };
 
@@ -2236,7 +2239,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     }
 
     // Reserve the countdown on the right; the info line gets the rest and is
-    // truncated to fit so the two never collide.
+    // fitted so the two never collide.
     let gap = 1u16;
     let right_w = countdown_width as u16;
     let left_w = area.width.saturating_sub(right_w);
@@ -2250,19 +2253,43 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         ..area
     };
 
+    let spans = overscroll_fit_groups(groups, left_area.width as usize, sep);
     if !spans.is_empty() {
-        let avail = left_area.width as usize;
-        let info_line = Line::from(overscroll_truncate_spans(spans, avail));
-        let info_line = if app.centered_mode() {
-            info_line.alignment(Alignment::Center)
-        } else {
-            info_line
-        };
+        let info_line = Line::from(spans).alignment(alignment);
         frame.render_widget(Paragraph::new(info_line), left_area);
     }
 
     let countdown_line = Line::from(vec![countdown]).alignment(Alignment::Right);
     frame.render_widget(Paragraph::new(countdown_line), right_area);
+}
+
+/// Join fact groups with separators, dropping whole groups from the left
+/// (least important end) until the line fits `max_width`. Falls back to
+/// character truncation when even the last remaining group is too wide.
+fn overscroll_fit_groups(
+    mut groups: Vec<Vec<Span<'static>>>,
+    max_width: usize,
+    sep: impl Fn() -> Span<'static>,
+) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
+    let join = |groups: &[Vec<Span<'static>>]| {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        for group in groups {
+            if !out.is_empty() {
+                out.push(sep());
+            }
+            out.extend(group.iter().cloned());
+        }
+        out
+    };
+    loop {
+        let spans = join(&groups);
+        let width: usize = spans.iter().map(|s| s.content.width()).sum();
+        if width <= max_width || groups.len() <= 1 {
+            return overscroll_truncate_spans(spans, max_width);
+        }
+        groups.remove(0);
+    }
 }
 
 /// Truncate a list of spans to at most `max_width` display columns, appending a
