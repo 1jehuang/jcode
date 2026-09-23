@@ -20,6 +20,10 @@ impl App {
         self.copy_selection_anchor = None;
         self.copy_selection_cursor = None;
         self.copy_selection_goal_column = None;
+        // Leaving mode must clear the armed edge autoscroll: a later drag that
+        // starts at the same pane and edge would otherwise compare equal and skip
+        // its entry nudge.
+        self.copy_selection_edge_autoscroll = None;
     }
 
     pub(super) fn toggle_copy_selection_mode(&mut self) {
