@@ -217,10 +217,6 @@ static TAIL_CATCHUP_ACTIVE: std::sync::atomic::AtomicBool =
 #[cfg(not(test))]
 static TAIL_FOLLOW_SNAP_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-/// Wrapped line indices where each user prompt starts (updated each render frame).
-/// Used by prompt-jump keybindings (Ctrl+5..9, Ctrl+[/]) for accurate positioning.
-#[cfg(not(test))]
-static LAST_USER_PROMPT_POSITIONS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -234,7 +230,6 @@ thread_local! {
     static TEST_LAST_RESOLVED_CHAT_SCROLL: Cell<usize> = const { Cell::new(0) };
     static TEST_TAIL_CATCHUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
-    static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
     static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
@@ -321,43 +316,6 @@ pub fn last_diff_pane_max_scroll() -> usize {
     #[cfg(not(test))]
     {
         LAST_DIFF_PANE_MAX_SCROLL.load(Ordering::Relaxed)
-    }
-}
-
-/// Get the last known user prompt line positions (from the most recent render frame).
-/// Returns positions as wrapped line indices from the top of content.
-pub fn last_user_prompt_positions() -> Vec<usize> {
-    #[cfg(test)]
-    {
-        return TEST_LAST_USER_PROMPT_POSITIONS.with(|v| v.borrow().clone());
-    }
-    #[cfg(not(test))]
-    {
-        LAST_USER_PROMPT_POSITIONS
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default()
-    }
-}
-
-fn update_user_prompt_positions(positions: &[usize]) {
-    #[cfg(test)]
-    {
-        TEST_LAST_USER_PROMPT_POSITIONS.with(|v| {
-            let mut v = v.borrow_mut();
-            v.clear();
-            v.extend_from_slice(positions);
-        });
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        let mutex = LAST_USER_PROMPT_POSITIONS.get_or_init(|| Mutex::new(Vec::new()));
-        if let Ok(mut v) = mutex.lock() {
-            v.clear();
-            v.extend_from_slice(positions);
-        }
     }
 }
 
@@ -1623,7 +1581,6 @@ fn clear_test_render_state_locked() {
     set_last_total_wrapped_lines(0);
     set_last_resolved_chat_scroll(0);
     TEST_TAIL_FOLLOW_SNAP_PENDING.with(|cell| cell.set(false));
-    update_user_prompt_positions(&[]);
     // Flicker events recorded by sibling tests add a "⚠ flicker detected"
     // notification line to subsequent renders, shifting every layout-sensitive
     // assertion (click mapping, snapshot rows).
