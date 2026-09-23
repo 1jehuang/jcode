@@ -194,10 +194,9 @@ fn resuming_the_tail_drops_a_pending_resize_anchor() {
 
 #[test]
 fn a_prepend_invalidates_a_pending_resize_anchor() {
-    // A resize anchor captured before older history is prepended has a stale
-    // occurrence ordinal: a prepended duplicate becomes occurrence zero, so the
-    // resolver would name that older message instead of the reader's. The
-    // prepend anchor is authoritative and must supersede it.
+    // A resize anchor captured before older history is prepended is measured
+    // against the older content; the prepend anchor is authoritative and must
+    // supersede it.
     let _lock = scroll_render_test_lock();
     crate::perf::pin_full_profile_for_tests();
     let mut app = anchored_scroll_test_app();
@@ -242,13 +241,13 @@ fn a_pending_prepend_does_not_block_a_resize_capture() {
 }
 
 /// The message owning the row at the top of the viewport.
-fn top_message_hash() -> Option<u64> {
+fn top_message_id() -> Option<jcode_tui_messages::ItemId> {
     let frame = crate::tui::ui::last_chat_frame()?;
     match jcode_tui_messages::content_pos_at_row(
         &frame,
         crate::tui::ui::last_resolved_chat_scroll(),
     )? {
-        jcode_tui_messages::ContentPos::Message(anchor) => Some(anchor.msg_hash),
+        jcode_tui_messages::ContentPos::Message(anchor) => Some(anchor.item_id),
         jcode_tui_messages::ContentPos::Section { .. } => None,
     }
 }
@@ -276,7 +275,7 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     app.scroll_offset = 40;
     app.auto_scroll_paused = true;
     render_and_snap(&app, &mut wide);
-    let before = top_message_hash().expect("a message under the reader");
+    let before = top_message_id().expect("a message under the reader");
 
     // Older history is queued (its anchor is a row distance at 100 columns).
     app.capture_history_anchor(0);
@@ -288,7 +287,7 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     render_and_snap(&app, &mut narrow);
 
     assert_eq!(
-        top_message_hash(),
+        top_message_id(),
         Some(before),
         "the reader must stay on the same message while history is loading"
     );

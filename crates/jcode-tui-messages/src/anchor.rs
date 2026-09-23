@@ -7,41 +7,35 @@
 //! (which message, which row inside it) and is resolved against the geometry of
 //! the frame being drawn.
 //!
-//! Identity is the [`MessageBoundary::item_id`] already carried by the frame,
-//! plus an occurrence index to disambiguate messages with identical content.
-//!
-//! Ceiling: the occurrence is an ordinal counted from the start of *one* frame.
-//! A content hash survives a reflow, but inserting messages above the anchor
-//! (older compacted history being prepended) renumbers that ordinal, so an
-//! anchor held across a prepend can name an older duplicate instead of the
-//! message it was captured on. Callers must not carry an anchor across a
-//! prepend; that path has its own distance-from-bottom anchor, which is
-//! invariant under a top-side insert.
+//! Identity is the [`MessageBoundary::item_id`] already carried by the frame: a
+//! stable id minted when the message entered the transcript. It survives a
+//! reflow, a prepend, a removal and a compaction re-sync, so a position names
+//! exactly one message. There is no ordinal and no content hash here.
 
+use crate::ItemId;
 use crate::prepared::{PreparedChatFrame, PreparedSectionKind};
 
-/// A reader position in content coordinates: the `occurrence`-th message whose
-/// content hash is `msg_hash`, `row_within_item` rows below its first row.
+/// A reader position in content coordinates: the message identified by
+/// `item_id`, `row_within_item` rows below its first row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Anchor {
-    pub msg_hash: u64,
-    pub occurrence: usize,
+    pub item_id: ItemId,
     pub row_within_item: usize,
 }
 
 /// Row range of every message in the frame's flat wrapped-row vector, in
-/// transcript order, as `(msg_hash, start, len)`.
+/// transcript order, as `(item_id, start, len)`.
 ///
 /// Boundaries are cumulative within a section, so the absolute start is the
 /// section's `line_start` plus the previous boundary's cumulative length.
-pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(u64, usize, usize)> {
+pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(ItemId, usize, usize)> {
     let mut ranges = Vec::new();
     for section in &frame.sections {
         let mut prev = 0usize;
         for boundary in &section.prepared.message_boundaries {
             let end = boundary.wrapped_len;
             ranges.push((
-                boundary.item_id.0,
+                boundary.item_id,
                 section.line_start + prev,
                 end.saturating_sub(prev),
             ));
@@ -54,16 +48,10 @@ pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(u64, usize, usize)>
 /// Capture the anchor for `row`, or `None` when the row is outside every
 /// message (e.g. trailing blank rows, or a frame without boundaries).
 pub fn anchor_at_row(frame: &PreparedChatFrame, row: usize) -> Option<Anchor> {
-    let ranges = message_row_ranges(frame);
-    let mut occurrences: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-    for (msg_hash, start, len) in ranges {
-        let occurrence = occurrences.entry(msg_hash).or_insert(0);
-        let this_occurrence = *occurrence;
-        *occurrence += 1;
+    for (item_id, start, len) in message_row_ranges(frame) {
         if row >= start && row < start + len {
             return Some(Anchor {
-                msg_hash,
-                occurrence: this_occurrence,
+                item_id,
                 row_within_item: row - start,
             });
         }
@@ -78,19 +66,15 @@ pub fn anchor_at_row(frame: &PreparedChatFrame, row: usize) -> Option<Anchor> {
 /// or the frame carries no boundaries, so the caller can keep its current
 /// position instead of jumping.
 pub fn resolve(anchor: &Anchor, frame: &PreparedChatFrame, max_scroll: usize) -> Option<usize> {
-    let mut seen = 0usize;
-    for (msg_hash, start, len) in message_row_ranges(frame) {
-        if msg_hash != anchor.msg_hash {
+    for (item_id, start, len) in message_row_ranges(frame) {
+        if item_id != anchor.item_id {
             continue;
         }
-        if seen == anchor.occurrence {
-            if len == 0 {
-                return Some(start.min(max_scroll));
-            }
-            let row = start + anchor.row_within_item.min(len - 1);
-            return Some(row.min(max_scroll));
+        if len == 0 {
+            return Some(start.min(max_scroll));
         }
-        seen += 1;
+        let row = start + anchor.row_within_item.min(len - 1);
+        return Some(row.min(max_scroll));
     }
     None
 }
@@ -103,7 +87,7 @@ mod tests {
     use ratatui::text::Line;
     use std::sync::Arc;
 
-    /// Build a frame whose messages have the given `(hash, wrapped rows at this
+    /// Build a frame whose messages have the given `(item id, wrapped rows at this
     /// width)` pairs, in transcript order.
     fn frame(messages: &[(u64, usize)]) -> PreparedChatFrame {
         let mut boundaries = Vec::new();
@@ -147,7 +131,11 @@ mod tests {
         let f = frame(&[(1, 3), (2, 1), (3, 2)]);
         assert_eq!(
             message_row_ranges(&f),
-            vec![(1, 0, 3), (2, 3, 1), (3, 4, 2)]
+            vec![
+                (ItemId(1), 0, 3),
+                (ItemId(2), 3, 1),
+                (ItemId(3), 4, 2)
+            ]
         );
         assert_eq!(message_row_ranges(&f).len(), 3);
         assert_eq!(f.total_wrapped_lines(), 6);
@@ -160,8 +148,7 @@ mod tests {
         assert_eq!(
             anchor,
             Anchor {
-                msg_hash: 20,
-                occurrence: 0,
+                item_id: ItemId(20),
                 row_within_item: 1
             }
         );
@@ -176,7 +163,7 @@ mod tests {
 
         // Anchor two rows into the second message at the wide width.
         let anchor = anchor_at_row(&wide, 3).expect("row 3 is in message 2");
-        assert_eq!(anchor.msg_hash, 2);
+        assert_eq!(anchor.item_id, ItemId(2));
         assert_eq!(anchor.row_within_item, 1);
 
         // At the narrow width the same message starts at row 5.
@@ -193,19 +180,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_hashes_are_disambiguated_by_occurrence() {
-        // Two identical messages: the anchor must land on the right one.
-        let f = frame(&[(5, 2), (5, 2)]);
-        let second = anchor_at_row(&f, 3).expect("row 3 is in the second copy");
-        assert_eq!(second.occurrence, 1);
-        assert_eq!(resolve(&second, &f, 100), Some(3));
-
-        let first = anchor_at_row(&f, 0).expect("row 0 is in the first copy");
-        assert_eq!(first.occurrence, 0);
-        assert_eq!(resolve(&first, &f, 100), Some(0));
-    }
-
-    #[test]
     fn removed_message_resolves_to_none() {
         let before = frame(&[(1, 2), (2, 2)]);
         let after = frame(&[(1, 2)]);
@@ -217,8 +191,7 @@ mod tests {
     fn resolved_row_is_clamped_to_max_scroll() {
         let f = frame(&[(1, 50)]);
         let anchor = Anchor {
-            msg_hash: 1,
-            occurrence: 0,
+            item_id: ItemId(1),
             row_within_item: 40,
         };
         assert_eq!(resolve(&anchor, &f, 12), Some(12));
@@ -232,8 +205,7 @@ mod tests {
         assert_eq!(
             resolve(
                 &Anchor {
-                    msg_hash: 1,
-                    occurrence: 0,
+                    item_id: ItemId(1),
                     row_within_item: 0
                 },
                 &f,
