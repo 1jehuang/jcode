@@ -141,6 +141,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     // Adopt the resolved scroll position once a frame containing newly loaded
     // older history has rendered, so manual scrolling resumes seamlessly.
     needs_redraw |= app.reconcile_history_anchor();
+    // Same for a resize: adopt the resolved row once the rewrap has rendered.
+    needs_redraw |= app.reconcile_resize_anchor();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
     // same as the local turn loop. When Done arrived with a backlog, leave one
     // rendered live frame after the final reveal before committing the turn.

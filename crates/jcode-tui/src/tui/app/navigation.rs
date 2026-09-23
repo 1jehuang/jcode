@@ -1761,6 +1761,8 @@ impl App {
     /// (e.g. the mouse-wheel queue) rely on this to avoid accumulating
     /// "phantom" scroll once the viewport is already pinned to the top.
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
+        // A user scroll supersedes a pending resize anchor.
+        self.pending_resize_anchor = None;
         // Scrolling up cancels any pending overscroll rebound line immediately
         // Leaving the collapsed terminal-clear screen: drop the trailing Ctrl+L
         // spacer so scrolling up reveals the transcript immediately instead of
@@ -1825,6 +1827,8 @@ impl App {
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {
+        // A user scroll supersedes a pending resize anchor.
+        self.pending_resize_anchor = None;
         if self.auto_scroll_paused {
             return;
         }
@@ -1842,6 +1846,8 @@ impl App {
     /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
     /// that would later have to be undone before scrolling up moves the view.
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
+        // A user scroll supersedes a pending resize anchor.
+        self.pending_resize_anchor = None;
         // Segment downward motion into gestures: a pause longer than
         // `OVERSCROLL_GESTURE_GAP` starts a new gesture. Record whether this
         // gesture began while already pinned to the bottom; only such gestures

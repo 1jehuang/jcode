@@ -676,6 +676,57 @@ impl App {
         changed
     }
 
+    /// Capture the reader's position in content coordinates before a resize
+    /// rewraps the transcript. Only meaningful while parked in history; while
+    /// following the tail the resize snaps to the new bottom instead.
+    pub(super) fn capture_resize_anchor(&mut self) {
+        if !self.auto_scroll_paused {
+            return;
+        }
+        let Some(frame) = crate::tui::ui::last_chat_frame() else {
+            return;
+        };
+        // The row actually on screen, not the stored index (which may exceed
+        // the scrollable range after an earlier widen).
+        let row = crate::tui::ui::last_resolved_chat_scroll();
+        let Some(anchor) = jcode_tui_messages::anchor_at_row(&frame, row) else {
+            return;
+        };
+        let captured_width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        self.pending_resize_anchor = Some(super::PendingResizeAnchor {
+            anchor,
+            captured_width,
+            captured_scroll: row,
+        });
+    }
+
+    /// Adopt the row the renderer resolved from a pending resize anchor, once a
+    /// frame laid out against the new geometry has rendered. Returns true when
+    /// the scroll position changed.
+    pub(super) fn reconcile_resize_anchor(&mut self) -> bool {
+        let Some(pending) = self.pending_resize_anchor else {
+            return false;
+        };
+        let width = crate::tui::ui::last_layout_snapshot()
+            .map(|layout| layout.messages_area.width)
+            .unwrap_or(0);
+        let resolved = crate::tui::ui::last_resolved_chat_scroll();
+        // Wait until a frame has been laid out against the new geometry: either
+        // the viewport width moved off the captured one, or the resolved row
+        // already differs from the row captured. Both readings are stale until
+        // that frame exists, so resolving early would adopt the old position.
+        if width == pending.captured_width && resolved == pending.captured_scroll {
+            return false;
+        }
+        self.pending_resize_anchor = None;
+        let changed = self.scroll_offset != resolved;
+        self.scroll_offset = resolved;
+        self.auto_scroll_paused = true;
+        changed
+    }
+
     pub(super) fn maybe_queue_compacted_history_load(&mut self) {
         self.maybe_queue_compacted_history_load_with_overshoot(0);
     }
