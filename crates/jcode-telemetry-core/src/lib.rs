@@ -1198,7 +1198,7 @@ fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Val
 
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) {
         state.file_write_calls += 1;
         if let Some(turn) = state.current_turn.as_mut() {
@@ -1254,14 +1254,14 @@ fn mark_tool_success_side_effects(state: &mut SessionTelemetry, name: &str, inpu
 
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) && state.first_file_edit_ms.is_none()
     {
         state.first_file_edit_ms = Some(now_ms_since(state.started_at));
     }
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) && let Some(turn) = state.current_turn.as_mut()
         && turn.first_file_edit_ms.is_none()
     {
@@ -2525,7 +2525,7 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
         emit_onboarding_step_once("first_successful_tool", None, None);
         if matches!(
             name,
-            "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+            "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
         ) {
             emit_onboarding_step_once("first_file_edit", None, None);
         }

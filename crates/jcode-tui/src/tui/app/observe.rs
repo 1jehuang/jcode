@@ -98,6 +98,7 @@ impl App {
                 | "multiedit"
                 | "patch"
                 | "apply_patch"
+                | "replace"
                 | "batch"
                 | "run_shell"
         );

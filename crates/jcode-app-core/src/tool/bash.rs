@@ -913,7 +913,82 @@ impl Tool for BashTool {
         }
 
         // Foreground execution with stdin detection
-        self.execute_foreground(&params, &ctx).await
+        let hint = file_edit_hint(&params.command);
+        let mut output = self.execute_foreground(&params, &ctx).await?;
+        if let Some(hint) = hint {
+            output.output.push_str("\n\n");
+            output.output.push_str(hint);
+        }
+        Ok(output)
+    }
+}
+
+const FILE_EDIT_HINT: &str = "Note: this command edits files in place. Next time use `edit` \
+(exact replacements, all-or-nothing, pass `edits` for several), `replace` (regex or multi-file, \
+with expected_count), or `apply_patch` (multi-file patches). They fail loudly on a missed match \
+instead of silently writing nothing, and show a reviewable diff.";
+
+/// Detect shell commands that rewrite source files in place, where a missed
+/// match silently does nothing. The command still runs, the agent is nudged.
+fn file_edit_hint(command: &str) -> Option<&'static str> {
+    let compact: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let sed_in_place = compact.split(['|', ';', '&']).any(|segment| {
+        let mut words = segment.split_whitespace();
+        words.next() == Some("sed")
+            && words.any(|word| {
+                word == "--in-place"
+                    || word.starts_with("--in-place=")
+                    || (word.starts_with('-')
+                        && !word.starts_with("--")
+                        && word[1..].contains('i'))
+            })
+    });
+    let perl_in_place = compact
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair[0] == "perl" && pair[1].starts_with('-') && pair[1].contains('i'));
+    let script_rewrite = (compact.contains("python") || compact.contains("node "))
+        && (compact.contains(".replace(") || compact.contains("re.sub("))
+        && (compact.contains(",'w')")
+            || compact.contains(",\"w\")")
+            || compact.contains(", 'w')")
+            || compact.contains(", \"w\")")
+            || compact.contains("write_text(")
+            || compact.contains("writeFileSync("));
+    (sed_in_place || perl_in_place || script_rewrite).then_some(FILE_EDIT_HINT)
+}
+
+#[cfg(test)]
+mod file_edit_hint_tests {
+    use super::file_edit_hint;
+
+    #[test]
+    fn flags_in_place_edits() {
+        for command in [
+            "sed -i 's/a/b/' src/main.rs",
+            "cd x && sed -Ei 's/a/b/g' f.rs",
+            "sed --in-place=.bak 's/a/b/' f",
+            "perl -pi -e 's/a/b/' f.rs",
+            "python3 - <<'EOF'\ns=open(p).read()\ns=s.replace('a','b')\nopen(p,'w').write(s)\nEOF",
+            "python3 -c \"import pathlib;p=pathlib.Path('f');p.write_text(p.read_text().replace('a','b'))\"",
+        ] {
+            assert!(file_edit_hint(command).is_some(), "{command}");
+        }
+    }
+
+    #[test]
+    fn ignores_read_only_commands() {
+        for command in [
+            "sed -n '1,20p' f.rs",
+            "sed 's/a/b/' f.rs",
+            "grep -i foo f.rs",
+            "cargo test -p jcode-app-core",
+            "python3 -c \"print('a'.replace('a','b'))\"",
+            "git diff --ignore-space-change",
+        ] {
+            assert!(file_edit_hint(command).is_none(), "{command}");
+        }
     }
 }
 

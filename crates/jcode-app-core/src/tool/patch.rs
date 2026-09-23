@@ -69,6 +69,12 @@ impl Tool for PatchTool {
 
         // Watch config.toml across the whole invocation so an edit that lands
         // on it is reported regardless of which patch produced it.
+        let _locks = super::file_lock::lock_all(
+            patches
+                .iter()
+                .map(|patch| ctx.resolve_path(Path::new(&patch.path))),
+        )
+        .await;
         let config_watch = super::config_edit_notice::ConfigEditWatch::begin();
         let mut results = Vec::new();
 

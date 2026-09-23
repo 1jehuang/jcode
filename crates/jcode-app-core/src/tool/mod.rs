@@ -16,6 +16,7 @@ mod desktop_selfdev;
 mod discover;
 mod discover_secrets;
 mod edit;
+pub(crate) mod file_lock;
 mod edit_stats;
 mod feedback;
 mod file_diff;
@@ -27,10 +28,10 @@ mod jcode_docs;
 mod ls;
 pub mod mcp;
 mod memory;
-mod multiedit;
 mod open;
 mod panel;
 mod patch;
+mod replace;
 mod read;
 pub(crate) mod sdk;
 pub mod selfdev;
@@ -381,13 +382,9 @@ impl Registry {
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "multiedit",
-                multiedit::MultiEditTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+            // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
+            // Both old names still resolve through `resolve_tool_name`.
+            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
