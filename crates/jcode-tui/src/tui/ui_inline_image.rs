@@ -259,6 +259,25 @@ fn release_payload(id: u64) {
     }
 }
 
+/// Test-only: forget every staged payload and pending restage request. These
+/// tables are process-global and every test renders the same fixture image
+/// (same id), so a prewarm worker left over from an earlier test could request
+/// a restage mid-test and turn a plain click into "click + copy".
+#[cfg(test)]
+pub(crate) fn reset_payload_staging_for_tests() {
+    if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {
+        reg.clear();
+    }
+    if let Ok(mut ids) = PAYLOAD_RESTAGE_IDS.lock() {
+        ids.clear();
+    }
+    PAYLOAD_RESTAGE_PENDING.store(false, Ordering::Release);
+    PAYLOAD_RESTAGE_ALL.store(false, Ordering::Release);
+    if let Ok(mut cache) = ANCHORED_CACHE.lock() {
+        cache.take();
+    }
+}
+
 fn clear_staged_payloads() {
     let mut cleared = false;
     if let Ok(mut reg) = PAYLOAD_REGISTRY.lock() {

@@ -112,7 +112,10 @@ fn test_alt_shift_i_toggles_inline_images_and_persists() {
     assert!(!app.inline_images_visible, "Alt+Shift+I should hide images");
     assert_eq!(
         app.status_notice(),
-        Some("Inline images: hidden (Alt+Shift+I to show)".to_string())
+        Some(format!(
+            "Inline images: hidden ({} to show)",
+            jcode_tui_core::keybind::alt_chord("Shift+I")
+        ))
     );
 
     // The flag persists for the next app (e.g. resume after restart).
@@ -1042,6 +1045,7 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
     use crate::tui::ui::inline_image_ui::ImageExpandLevel;
 
     let _render_lock = scroll_render_test_lock();
+    crate::tui::ui::clear_test_render_state_for_tests();
     let mut app = create_test_app();
     assert!(!app.is_remote, "repro must use the local image render path");
 
@@ -1161,6 +1165,11 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "image should start at Fit before any click"
     );
 
+    // The click also copies the image when its payload is staged; the notice
+    // must say exactly that. Staging can be requested asynchronously by the
+    // prewarm worker, so read it at the click instead of assuming either way.
+    let copied = crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_some();
+
     // REAL click on the rendered label cell. A terminal delivers a *pair* of
     // events for one physical click: `Down` then `Up`. We must replay both, just
     // like the live event loop, or we silently skip the copy-selection state the
@@ -1184,7 +1193,12 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    assert_eq!(app.status_notice(), Some("Image size: large".to_string()));
+    let expected = if copied {
+        "Image size: large · Image copied"
+    } else {
+        "Image size: large"
+    };
+    assert_eq!(app.status_notice(), Some(expected.to_string()));
 }
 
 /// The inline-image placeholder marker row must never reach the terminal as

@@ -17,7 +17,10 @@ fn unknown_ctrl_chord_sets_hotkey_feedback_with_suggestion() {
         .expect("unknown chord should set feedback");
     assert!(message.contains("Ctrl+M"), "{message}");
     assert!(message.contains("isn't bound"), "{message}");
-    assert!(message.contains("Alt+M"), "{message}");
+    assert!(
+        message.contains(&jcode_tui_core::keybind::alt_chord("M")),
+        "{message}"
+    );
     assert!(message.contains("side panel"), "{message}");
 
     // The renderer consumes the trait accessor; it must surface the same text

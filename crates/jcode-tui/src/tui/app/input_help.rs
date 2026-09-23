@@ -1,5 +1,12 @@
 use super::*;
 
+/// `/alignment` help. Mac keyboards label the Alt modifier ⌥ (as `alt_chord` renders
+/// everywhere else in the UI), so the static help text follows the platform too.
+#[cfg(target_os = "macos")]
+const ALIGNMENT_HELP: &str = "/alignment\nShow the current alignment and the saved default.\n\n/alignment centered\nSave centered alignment as the default and apply it immediately.\n\n/alignment left\nSave left-aligned mode as the default and apply it immediately.\n\nPress ⌥+C anytime to toggle alignment just for the current session.";
+#[cfg(not(target_os = "macos"))]
+const ALIGNMENT_HELP: &str = "/alignment\nShow the current alignment and the saved default.\n\n/alignment centered\nSave centered alignment as the default and apply it immediately.\n\n/alignment left\nSave left-aligned mode as the default and apply it immediately.\n\nPress Alt+C anytime to toggle alignment just for the current session.";
+
 impl App {
     pub(super) fn command_help(&self, topic: &str) -> Option<String> {
         let topic = topic.trim().trim_start_matches('/').to_lowercase();
@@ -186,9 +193,7 @@ impl App {
             "config" => {
                 "/config\nShow active configuration.\n\n/config init\nCreate default config file.\n\n/config edit\nOpen config in $EDITOR."
             }
-            "alignment" => {
-                "/alignment\nShow the current alignment and the saved default.\n\n/alignment centered\nSave centered alignment as the default and apply it immediately.\n\n/alignment left\nSave left-aligned mode as the default and apply it immediately.\n\nPress Alt+C anytime to toggle alignment just for the current session."
-            }
+            "alignment" => ALIGNMENT_HELP,
             "compact-notifications" => {
                 "/compact-notifications\nShow whether swarm/file-activity notifications are compact.\n\n/compact-notifications on\nCollapse file-activity notifications to a single line (path · summary), dropping the intent and diff preview.\n\n/compact-notifications off\nRestore the full multi-line notification cards."
             }
