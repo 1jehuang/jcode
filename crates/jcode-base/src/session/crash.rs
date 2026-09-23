@@ -584,6 +584,14 @@ pub fn find_session_by_name_or_id(name_or_id: &str) -> Result<String> {
         return Ok(imported_id);
     }
 
+    // A full generated id (`session_<name>_<millis>_<hex>`) can never match a
+    // short name or title, so the scan below (which parses every session file
+    // on disk) is pure overhead. With thousands of sessions that scan took
+    // ~15s and stalled reload handoffs for ids that only exist server-side.
+    if crate::id::is_generated_session_id(name_or_id) {
+        anyhow::bail!("No session found matching '{}'", name_or_id);
+    }
+
     // Otherwise, search for a session with matching short name or title.
     let sessions_dir = storage::jcode_dir()?.join("sessions");
     if !sessions_dir.exists() {

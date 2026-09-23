@@ -705,6 +705,11 @@ pub fn resolve_resume_target_to_jcode(
 }
 
 pub fn import_external_resume_id(resume_id: &str) -> Result<Option<String>> {
+    // Native jcode ids never live in external tool stores; skip their scans.
+    if crate::id::is_generated_session_id(resume_id) {
+        return Ok(None);
+    }
+
     if let Ok(path) = find_codex_session_file(resume_id) {
         let session = import_codex_session_from_path(&path, Some(resume_id))?;
         return Ok(Some(session.id));
