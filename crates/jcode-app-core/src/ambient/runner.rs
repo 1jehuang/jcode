@@ -876,19 +876,42 @@ impl AmbientRunnerHandle {
             let jcode_bin =
                 std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("jcode"));
 
-            std::process::Command::new("kitty")
-                .args([
-                    "--title",
-                    "🤖 jcode ambient cycle",
-                    "-e",
-                    &jcode_bin.to_string_lossy(),
-                    "ambient",
-                    "run-visible",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
+            // Walk the same terminal candidate list the rest of jcode uses
+            // (JCODE_TERMINAL, the detected/attached terminal, then the
+            // platform preference order) instead of hardcoding one emulator.
+            // This previously ran `kitty` unconditionally, so `visible = true`
+            // silently degraded to headless on every machine without kitty
+            // installed, including ones with an explicitly configured terminal.
+            let args = vec!["ambient".to_string(), "run-visible".to_string()];
+            let mut command = jcode_terminal_launch::TerminalCommand::new(&jcode_bin, args);
+            command.title = Some("🤖 jcode ambient cycle".to_string());
+            command.kind = Some("ambient-cycle".to_string());
+            command.fresh_spawn = true;
+
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+            let mut spawned: Option<std::process::Child> = None;
+            let launched =
+                jcode_terminal_launch::spawn_command_in_new_terminal_with(&command, &cwd, |cmd| {
+                    let child = cmd
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
+                    spawned = Some(child);
+                    Ok(())
+                });
+
+            match launched {
+                Ok(true) => spawned.ok_or_else(|| {
+                    std::io::Error::other("terminal launcher reported success without a child")
+                }),
+                Ok(false) => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no usable terminal emulator found",
+                )),
+                Err(err) => Err(std::io::Error::other(err.to_string())),
+            }
         })
         .await
     }
@@ -1008,7 +1031,7 @@ impl AmbientRunnerHandle {
         Ok(forced)
     }
 
-    /// Run a visible ambient cycle by spawning a full TUI in a kitty window.
+    /// Run a visible ambient cycle by spawning a full TUI in a new terminal window.
     async fn run_cycle_visible<F>(
         &self,
         started_at: chrono::DateTime<Utc>,
@@ -1035,15 +1058,15 @@ impl AmbientRunnerHandle {
             let _ = std::fs::remove_file(&result_path);
         }
 
-        // Spawn kitty with `jcode ambient run-visible`
-        logging::info("Ambient visible: spawning kitty with jcode TUI");
+        // Spawn a terminal window running `jcode ambient run-visible`
+        logging::info("Ambient visible: spawning terminal with jcode TUI");
         let child = launch_visible();
 
         match child {
             Ok(mut child) => {
                 self.set_running_detail("waiting for TUI cycle").await;
 
-                // Wait for the kitty process to exit (user closes window or cycle completes)
+                // Wait for the terminal process to exit (user closes window or cycle completes)
                 let status = tokio::task::spawn_blocking(move || child.wait()).await?;
                 match status {
                     Ok(s) => logging::info(&format!("Ambient visible: TUI exited with {}", s)),
@@ -1083,7 +1106,7 @@ impl AmbientRunnerHandle {
             }
             Err(e) => {
                 logging::warn(&format!(
-                    "Ambient visible: failed to spawn kitty ({}), falling back to headless",
+                    "Ambient visible: failed to spawn terminal ({}), falling back to headless",
                     e
                 ));
                 // Fall back to headless mode
