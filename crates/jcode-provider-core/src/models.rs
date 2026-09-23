@@ -11,6 +11,7 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 /// live again. Opus 5.5 launched 2026-09-22. The list is curated best-first;
 /// position 0 is the flagship used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
+    "claude-opus-5-5",
     DEFAULT_CLAUDE_MODEL,
     "claude-opus-5",
     "claude-fable-5-1",
