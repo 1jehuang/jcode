@@ -236,6 +236,7 @@ thread_local! {
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
@@ -1445,6 +1446,17 @@ pub struct LayoutSnapshot {
 #[cfg(not(test))]
 static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
 
+/// The prepared transcript frame the renderer last drew. The retained frame
+/// *is* the published geometry: it carries per-item row ranges and totals, so
+/// handlers outside `draw` can resolve a viewport anchor against it.
+#[cfg(not(test))]
+static LAST_CHAT_FRAME: OnceLock<Mutex<Option<Arc<PreparedChatFrame>>>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn last_chat_frame_state() -> &'static Mutex<Option<Arc<PreparedChatFrame>>> {
+    LAST_CHAT_FRAME.get_or_init(|| Mutex::new(None))
+}
+
 #[cfg(not(test))]
 fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
     LAST_LAYOUT.get_or_init(|| Mutex::new(None))
@@ -1492,6 +1504,36 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
             .lock()
             .ok()
             .and_then(|snapshot| *snapshot)
+    }
+}
+
+/// Record the prepared transcript frame the renderer just drew.
+pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
+    #[cfg(test)]
+    {
+        TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut slot) = last_chat_frame_state().lock() {
+            *slot = Some(frame);
+        }
+    }
+}
+
+/// The prepared transcript frame the renderer last drew, if any.
+pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_CHAT_FRAME.with(|slot| slot.borrow().clone());
+    }
+    #[cfg(not(test))]
+    {
+        last_chat_frame_state()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -1584,6 +1626,9 @@ fn clear_test_render_state_locked() {
     frame_metrics::clear_flicker_frame_history_for_tests();
     TEST_LAST_LAYOUT.with(|snapshot| {
         *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        *slot.borrow_mut() = None;
     });
     TEST_LAST_STATUS_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;

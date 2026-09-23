@@ -1257,3 +1257,43 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
         "scrolling up should cancel the overscroll line"
     );
 }
+
+#[test]
+fn renderer_publishes_the_prepared_frame_as_geometry() {
+    let _lock = scroll_render_test_lock();
+    let (app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    render_and_snap(&app, &mut terminal);
+
+    // The retained frame *is* the published geometry: its total must agree with
+    // the scalar the rest of the code reads, and its section ranges must tile
+    // the wrapped row vector with no gaps so an anchor can index into it.
+    let frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    assert_eq!(
+        frame.total_wrapped_lines(),
+        crate::tui::ui::last_total_wrapped_lines()
+    );
+    let mut next_start = 0;
+    for section in &frame.sections {
+        assert_eq!(
+            section.line_start, next_start,
+            "section ranges must be contiguous"
+        );
+        next_start += section.prepared.wrapped_lines.len();
+    }
+    assert_eq!(next_start, frame.total_wrapped_lines());
+
+    // A narrower window re-lays the frame out: same handle, new ranges.
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    let narrow_frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    assert_eq!(
+        narrow_frame.total_wrapped_lines(),
+        crate::tui::ui::last_total_wrapped_lines()
+    );
+    assert!(
+        narrow_frame.total_wrapped_lines() > frame.total_wrapped_lines(),
+        "narrowing must wrap into more rows: {} vs {}",
+        narrow_frame.total_wrapped_lines(),
+        frame.total_wrapped_lines()
+    );
+}
