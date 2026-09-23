@@ -218,7 +218,11 @@ fn a_prepend_invalidates_a_pending_resize_anchor() {
 }
 
 #[test]
-fn a_prepend_in_flight_blocks_a_resize_anchor() {
+fn a_pending_prepend_does_not_block_a_resize_capture() {
+    // The prepend anchor stores a row distance, which only means something at the
+    // width it was captured at. Refusing a resize while a prepend is pending left
+    // that stale distance to be resolved against the rewrapped total, so the
+    // reader jumped. The resize must still capture a content position.
     let _lock = scroll_render_test_lock();
     crate::perf::pin_full_profile_for_tests();
     let mut app = anchored_scroll_test_app();
@@ -232,8 +236,61 @@ fn a_prepend_in_flight_blocks_a_resize_anchor() {
 
     assert!(app.should_redraw_after_resize());
     assert!(
-        app.pending_resize_anchor.is_none(),
-        "a prepend in flight must block a resize anchor capture"
+        app.pending_resize_anchor.is_some(),
+        "a resize during a pending prepend must still capture a content position"
+    );
+}
+
+/// The message owning the row at the top of the viewport.
+fn top_message_hash() -> Option<u64> {
+    let frame = crate::tui::ui::last_chat_frame()?;
+    match jcode_tui_messages::content_pos_at_row(
+        &frame,
+        crate::tui::ui::last_resolved_chat_scroll(),
+    )? {
+        jcode_tui_messages::ContentPos::Message(anchor) => Some(anchor.msg_hash),
+        jcode_tui_messages::ContentPos::Section { .. } => None,
+    }
+}
+
+#[test]
+fn resize_during_a_pending_prepend_keeps_the_same_message() {
+    // Reviewer finding on #1427: a paused reader with a compacted-history prepend
+    // pending, then a resize. The pending distance from the bottom is a row count
+    // measured at the old width, so resolving it against the rewrapped total
+    // showed a different message.
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+    app.display_messages = (0..30)
+        .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(20))))
+        .collect();
+    app.bump_display_messages_version();
+
+    let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut wide);
+    app.scroll_offset = 40;
+    app.auto_scroll_paused = true;
+    render_and_snap(&app, &mut wide);
+    let before = top_message_hash().expect("a message under the reader");
+
+    // Older history is queued (its anchor is a row distance at 100 columns).
+    app.capture_history_anchor(0);
+    assert!(app.pending_history_anchor.is_some());
+
+    // Then the terminal is resized.
+    assert!(app.should_redraw_after_resize());
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+
+    assert_eq!(
+        top_message_hash(),
+        Some(before),
+        "the reader must stay on the same message while history is loading"
     );
 }
 

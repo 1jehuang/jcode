@@ -687,14 +687,18 @@ impl App {
         if !self.auto_scroll_paused {
             return;
         }
-        // A prepend is already in flight. Its distance-from-bottom anchor is
-        // invariant under the insert, while a content anchor's occurrence
-        // ordinal is not (a prepended duplicate shifts it), so it wins. The two
-        // must never be alive at once or the stale ordinal resolves to the
-        // wrong message.
-        if self.pending_history_anchor.is_some() {
-            return;
-        }
+        // A prepend anchor may be pending here, and this capture is still the
+        // right one: a content position is width-independent, while the prepend
+        // anchor's row distance is only meaningful at the width it was captured
+        // at. So this anchor takes precedence while it exists, and the prepend
+        // anchor adopts the resolved row afterwards. The prepend anchor still
+        // wins when it is captured *after* this one (see
+        // `capture_history_anchor`), which is what stops a prepended duplicate
+        // from being misnamed.
+        //
+        // ponytail: if the prepended history is still in flight (a remote load)
+        // and contains a message identical to the anchored one, this ordinal can
+        // name the older copy until messages get a stable identity.
         let Some(frame) = crate::tui::ui::last_chat_frame() else {
             return;
         };
