@@ -560,6 +560,36 @@ async fn test_schedule_tool_create_with_repeat_stamps_series() {
         "got: {}",
         listed.output
     );
+
+    // Folded (late-wake) intervals surface in the human-readable row.
+    let folded = ScheduledItem {
+        id: "latewake-item".into(),
+        scheduled_for: chrono::Utc::now(),
+        context: "garden".into(),
+        priority: Priority::Normal,
+        target: ScheduleTarget::Spawn {
+            parent_session_id: "parent".into(),
+        },
+        created_by_session: "test".into(),
+        created_at: chrono::Utc::now(),
+        working_dir: None,
+        task_description: None,
+        relevant_files: Vec::new(),
+        git_branch: None,
+        additional_context: None,
+        repeat: Some(crate::ambient::RepeatState {
+            every_minutes: 60,
+            remaining: None,
+            recurrence_id: "recur_latewake".into(),
+            skipped: 17,
+        }),
+    };
+    let row = format_scheduled_item(&folded);
+    assert!(row.contains("17 folded"), "got: {row}");
+    // Zero stays quiet: no noise on healthy series.
+    let mut healthy = folded.clone();
+    healthy.repeat.as_mut().expect("repeat").skipped = 0;
+    assert!(!format_scheduled_item(&healthy).contains("folded"));
     assert!(
         listed.output.contains(&repeat.recurrence_id),
         "got: {}",

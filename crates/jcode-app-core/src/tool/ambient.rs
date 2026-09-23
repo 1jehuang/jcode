@@ -1072,12 +1072,17 @@ fn format_scheduled_item(item: &ScheduledItem) -> String {
         .as_ref()
         .map(|repeat| {
             format!(
-                " | repeats every {}m{} {}",
+                " | repeats every {}m{}{} {}",
                 repeat.every_minutes,
                 repeat
                     .remaining
                     .map(|n| format!(", {} left", n))
                     .unwrap_or_default(),
+                if repeat.skipped > 0 {
+                    format!(", {} folded", repeat.skipped)
+                } else {
+                    String::new()
+                },
                 repeat.recurrence_id
             )
         })
