@@ -250,6 +250,11 @@ impl Tool for BatchTool {
             .enumerate()
             .map(|(i, tc)| {
                 let (tool_name, parameters) = tc.resolved_parameters();
+                // Display and dispatch the canonical name (e.g. `functions.bash`
+                // -> `bash`) while keeping SDK custom tool names intact.
+                let tool_name =
+                    Registry::resolve_tool_name_for_session(&ctx.session_id, &tool_name)
+                        .to_string();
                 (i, tool_name, parameters)
             })
             .collect();

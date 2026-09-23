@@ -13,6 +13,8 @@
 //! This keeps the daemon untouched while the API surface stabilizes. Once
 //! proven, the same translation can move in-process behind a `hello` sniff on
 //! the main socket.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 pub mod background_progress;
 pub mod translate;

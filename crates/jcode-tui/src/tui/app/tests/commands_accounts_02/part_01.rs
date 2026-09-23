@@ -558,7 +558,7 @@ fn test_account_switch_shorthand_switches_openai_account_by_label() {
 
             assert_eq!(
                 crate::auth::codex::active_account_label().as_deref(),
-                Some("openai-1")
+                Some("openai-otter")
             );
         });
     });

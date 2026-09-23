@@ -794,13 +794,13 @@ pub fn should_refresh_anthropic_model_catalog() -> bool {
 
 pub fn should_refresh_anthropic_model_catalog_for_scope(scope: &str) -> bool {
     let _ = cached_anthropic_model_ids_for_scope(scope);
-    if anthropic_model_cache_is_fresh(&scope) {
+    if anthropic_model_cache_is_fresh(scope) {
         return false;
     }
-    if anthropic_model_catalog_refresh_throttled(&scope) {
+    if anthropic_model_catalog_refresh_throttled(scope) {
         return false;
     }
-    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(&scope)
+    ANTHROPIC_MODEL_CATALOG_SERVICE.should_refresh(scope)
 }
 
 pub fn begin_openai_model_catalog_refresh() -> bool {

@@ -8,7 +8,8 @@
 //!
 //! `jcode-app-core` re-exports this crate via `pub use jcode_base::*`, so every
 //! existing `crate::<module>` path in the upper layers keeps resolving.
-
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 #![allow(
     unknown_lints,
     clippy::collapsible_match,

@@ -630,7 +630,11 @@ async fn tool_descriptions_stay_under_token_cap() {
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
-    const EXEMPT: &[&str] = &["integration_tools", "swarm"];
+    // batch carries a deliberate parallel-call example (2f4abae33, pinned by
+    // batch_tests::description_includes_parallel_tool_call_example).
+    // browser carries the status-first and handoff-by-default routing policy
+    // (e1576e9e3 and earlier), pinned by browser_tests.
+    const EXEMPT: &[&str] = &["integration_tools", "swarm", "batch", "browser"];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -687,6 +691,13 @@ fn collect_param_descriptions(schema: &Value, path: &str, out: &mut Vec<(String,
 #[tokio::test]
 async fn tool_parameter_descriptions_stay_under_token_cap() {
     const PARAM_DESCRIPTION_TOKEN_CAP: usize = 25;
+    // The feedback-loop relevance rubric defines every enum state inline
+    // (abb0baabc, d21916db5) and todo::tests pins each concept, so it is
+    // deliberately longer than the cap.
+    const EXEMPT: &[(&str, &str)] = &[(
+        "todo",
+        "$.properties.goals.items.properties.feedback_loop_relevance",
+    )];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
     let registry = Registry::new(provider).await;
@@ -696,7 +707,9 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         collect_param_descriptions(&def.input_schema, "$", &mut descriptions);
         for (path, description) in descriptions {
             let tokens = crate::util::estimate_tokens(&description);
-            if tokens > PARAM_DESCRIPTION_TOKEN_CAP {
+            if tokens > PARAM_DESCRIPTION_TOKEN_CAP
+                && !EXEMPT.contains(&(def.name.as_str(), path.as_str()))
+            {
                 over_cap.push(format!(
                     "{} {} (~{} tokens): {}",
                     def.name, path, tokens, description

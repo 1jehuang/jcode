@@ -826,6 +826,18 @@ impl Registry {
         )
     }
 
+    /// Resolve a model-supplied tool name for a session: strips a
+    /// `functions.` namespace and maps aliases, but leaves SDK custom tool
+    /// names untouched so they are never rewritten to a built-in.
+    pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        if sdk::custom(session_id, unqualified_name) {
+            unqualified_name
+        } else {
+            Self::resolve_tool_name(unqualified_name)
+        }
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         // Mark this call in-flight for the whole execution so the missing
@@ -834,12 +846,7 @@ impl Registry {
         // `tool::inflight`.
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
-        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
-        let resolved_name = if sdk::custom(&ctx.session_id, unqualified_name) {
-            unqualified_name
-        } else {
-            Self::resolve_tool_name(unqualified_name)
-        };
+        let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
         let is_custom = sdk::custom(&ctx.session_id, resolved_name);
         if is_custom {
             if let Some(config) = sdk::config(&ctx.session_id) {

@@ -1211,7 +1211,9 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     seed_transient_session_state(&mut agent);
     assert_eq!(agent.soft_interrupt_count(), 1);
@@ -1246,6 +1248,12 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::new(provider_dyn.clone()).await;
     let mut agent = Agent::new(provider_dyn, registry);
+    // Untouched sessions are not persisted (783c979a0); materialize the
+    // snapshot so the pin written by set_model lands on disk.
+    agent
+        .session
+        .save_prepared()
+        .expect("materialize session snapshot");
 
     agent
         .set_model("z-ai/glm-5.2@Novita")
@@ -1292,7 +1300,9 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         5,
         vec!["memory-persisted".to_string()],
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
 
@@ -1477,7 +1487,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
-    agent.session.save().expect("save active session");
+    agent.session.save_prepared().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
         Vec::new(),

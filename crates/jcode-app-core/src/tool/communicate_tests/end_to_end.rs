@@ -7,6 +7,9 @@ async fn communicate_list_and_await_members_work_end_to_end() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Independently created root sessions own separate swarms (83dbc36dc);
+    // opt both clients into one shared swarm explicitly.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "communicate-e2e-shared-swarm");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -135,6 +138,9 @@ async fn communicate_await_members_background_returns_immediately_and_notifies()
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Independently created root sessions own separate swarms (83dbc36dc);
+    // opt both clients into one shared swarm explicitly.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "communicate-e2e-shared-swarm");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -293,6 +299,9 @@ async fn communicate_status_returns_busy_snapshot_for_running_member() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Independently created root sessions own separate swarms (83dbc36dc);
+    // opt both clients into one shared swarm explicitly.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "communicate-e2e-shared-swarm");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(300),
@@ -555,6 +564,9 @@ async fn communicate_message_routes_as_dm_while_broadcast_targets_swarm() {
     let _runtime = EnvGuard::set("JCODE_RUNTIME_DIR", runtime_dir.path());
     let _socket = EnvGuard::set("JCODE_SOCKET", &socket_path);
     let _debug = EnvGuard::set("JCODE_DEBUG_CONTROL", "1");
+    // Independently created root sessions own separate swarms (83dbc36dc);
+    // opt both clients into one shared swarm explicitly.
+    let _swarm = EnvGuard::set("JCODE_SWARM_ID", "communicate-e2e-shared-swarm");
 
     let provider: Arc<dyn Provider> = Arc::new(DelayedTestProvider {
         delay: Duration::from_millis(100),

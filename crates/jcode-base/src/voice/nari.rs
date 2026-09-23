@@ -79,7 +79,10 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
             .iter()
             .map(|(pattern, fixed)| {
                 let pattern = format!(r"(?i)\b{pattern}\b");
-                (regex::Regex::new(&pattern).expect("valid correction"), *fixed)
+                (
+                    regex::Regex::new(&pattern).expect("valid correction"),
+                    *fixed,
+                )
             })
             .collect()
     })
@@ -453,7 +456,10 @@ mod tests {
             correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
             "Hey, Jev. Open the Jcode desktop and ask Jev's route."
         );
-        assert_eq!(correct_transcript("J code, j-code, Jay code"), "Jcode, Jcode, Jcode");
+        assert_eq!(
+            correct_transcript("J code, j-code, Jay code"),
+            "Jcode, Jcode, Jcode"
+        );
         // Whole words only.
         assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
         assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");

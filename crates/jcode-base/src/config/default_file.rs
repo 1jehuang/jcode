@@ -482,6 +482,7 @@ swarm_max_concurrent_agents = 32
 #
 # Optional text-generating extraction is separate from recall. Disable it to
 # learn only through the main agent's explicit memory writes.
+# (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
 # Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
 # memory_sidecar_enabled = true
 # memory_model = "gpt-5.6-luna"

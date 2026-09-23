@@ -200,11 +200,11 @@ pub fn launch_instance(options: &LaunchOptions) -> Result<LaunchedInstance> {
             remove_ephemeral_home(&jcode_home, Duration::ZERO);
         }
     };
-    if options.inherit_logins {
-        if let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home) {
-            cleanup_on_error();
-            return Err(error);
-        }
+    if options.inherit_logins
+        && let Err(error) = inherit_credentials(&user_jcode_home(), &jcode_home)
+    {
+        cleanup_on_error();
+        return Err(error);
     }
 
     let binary = options

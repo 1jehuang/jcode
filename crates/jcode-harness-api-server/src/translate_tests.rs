@@ -6,8 +6,10 @@ use std::sync::MutexGuard;
 
 #[test]
 fn token_usage_preserves_cache_creation_and_missing_counters() {
-    let mut state = BridgeState::default();
-    state.session_id = Some("s1".into());
+    let mut state = BridgeState {
+        session_id: Some("s1".into()),
+        ..Default::default()
+    };
     for cache_creation_input in [None, Some(0), Some(42)] {
         let mut legacy = json!({
             "type": "tokens", "input": 10, "output": 5, "cache_read_input": 2
@@ -1792,7 +1794,7 @@ fn archive_restore_and_retention_are_reversible_and_owner_only() {
         .iter()
         .find(|session| session.session_id == "old_session")
         .expect("old session remains restorable");
-    assert_eq!(old.archived, true);
+    assert!(old.archived);
     assert!(old.archived_at_ms.is_some());
     let recent = sessions
         .iter()
@@ -2610,8 +2612,10 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
 
 #[test]
 fn attachment_recovery_ignores_wrong_session_and_request_without_consuming_intent() {
-    let mut state = BridgeState::default();
-    state.session_id = Some("previous".into());
+    let mut state = BridgeState {
+        session_id: Some("previous".into()),
+        ..Default::default()
+    };
     let (history, _) = recovery_attach(&mut state, Some("recover"));
     let mut unrelated = history.clone();
     unrelated["session_id"] = json!("other");

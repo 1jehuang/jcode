@@ -67,6 +67,10 @@ const LEDGER: &[(&str, Disposition)] = &[
     ("SetReasoningEffort", Covered),
     ("SetRoute", ClientInternal),
     ("SetServiceTier", ClientInternal),
+    (
+        "SetSessionSaved",
+        Gap("clients can read a session's saved flag but cannot pin or unpin it"),
+    ),
     ("SetSubagentModel", ClientInternal),
     ("SetTransport", ClientInternal),
     ("SoftInterrupt", Covered),
@@ -84,7 +88,8 @@ const LEDGER: &[(&str, Disposition)] = &[
 /// Requests the reference clients (TUI) send to the daemon.
 fn reference_client_requests() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for dir in ["../jcode-tui/src"] {
+    {
+        let dir = "../jcode-tui/src";
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
         collect_requests(&root, &mut found);
     }

@@ -173,7 +173,25 @@ fn judge_visible_tool_summary(tool: &ToolCall) -> Option<String> {
 fn build_judge_visible_transcript_messages(parent_session: &Session) -> Vec<StoredMessage> {
     let mut transcript = Vec::new();
 
-    for rendered in crate::session::render_messages(parent_session) {
+    // The judge sees only what the user saw as the answer. Rendering honors the
+    // user's `reasoning_display` mode, so strip reasoning up front rather than
+    // letting a `Full` display preference leak hidden reasoning to the judge.
+    let mut visible_parent = parent_session.clone();
+    let mut messages = std::mem::take(&mut visible_parent.messages);
+    for message in &mut messages {
+        message.content.retain(|block| {
+            !matches!(
+                block,
+                ContentBlock::Reasoning { .. }
+                    | ContentBlock::ReasoningTrace { .. }
+                    | ContentBlock::AnthropicThinking { .. }
+                    | ContentBlock::OpenAIReasoning { .. }
+            )
+        });
+    }
+    visible_parent.replace_messages(messages);
+
+    for rendered in crate::session::render_messages(&visible_parent) {
         match rendered.role.as_str() {
             "user" => {
                 if !rendered.content.trim().is_empty() {

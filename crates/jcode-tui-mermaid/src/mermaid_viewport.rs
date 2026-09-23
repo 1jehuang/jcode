@@ -1822,7 +1822,7 @@ mod kitty_viewport_leak_tests {
             );
         }
         assert!(
-            SOURCE_CACHE.lock().unwrap().entries.get(&HASH).is_none(),
+            !SOURCE_CACHE.lock().unwrap().entries.contains_key(&HASH),
             "full decoded original should be released after fitting"
         );
         assert_eq!(

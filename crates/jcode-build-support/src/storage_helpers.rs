@@ -63,48 +63,6 @@ pub fn shared_server_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("shared-server").join(binary_name()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::resolve_builds_dir;
-    use std::path::PathBuf;
-
-    #[test]
-    fn windows_builds_use_local_app_data() {
-        let resolved = resolve_builds_dir(
-            None,
-            Some(PathBuf::from("/local-app-data")),
-            PathBuf::from("/home/test/.jcode"),
-            true,
-        );
-
-        assert_eq!(resolved, PathBuf::from("/local-app-data/jcode/builds"));
-    }
-
-    #[test]
-    fn jcode_home_override_wins_on_windows() {
-        let resolved = resolve_builds_dir(
-            Some(PathBuf::from("/isolated-jcode")),
-            Some(PathBuf::from("/local-app-data")),
-            PathBuf::from("/home/test/.jcode"),
-            true,
-        );
-
-        assert_eq!(resolved, PathBuf::from("/isolated-jcode/builds"));
-    }
-
-    #[test]
-    fn non_windows_builds_stay_under_jcode_home() {
-        let resolved = resolve_builds_dir(
-            None,
-            Some(PathBuf::from("/ignored/local-app-data")),
-            PathBuf::from("/home/test/.jcode"),
-            false,
-        );
-
-        assert_eq!(resolved, PathBuf::from("/home/test/.jcode/builds"));
-    }
-}
-
 /// Get path to canary binary
 pub fn canary_binary_path() -> Result<PathBuf> {
     Ok(builds_dir()?.join("canary").join(binary_name()))
@@ -280,4 +238,46 @@ pub fn clear_build_progress() -> Result<()> {
     }
     invalidate_build_progress_cache();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_builds_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn windows_builds_use_local_app_data() {
+        let resolved = resolve_builds_dir(
+            None,
+            Some(PathBuf::from("/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            true,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/local-app-data/jcode/builds"));
+    }
+
+    #[test]
+    fn jcode_home_override_wins_on_windows() {
+        let resolved = resolve_builds_dir(
+            Some(PathBuf::from("/isolated-jcode")),
+            Some(PathBuf::from("/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            true,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/isolated-jcode/builds"));
+    }
+
+    #[test]
+    fn non_windows_builds_stay_under_jcode_home() {
+        let resolved = resolve_builds_dir(
+            None,
+            Some(PathBuf::from("/ignored/local-app-data")),
+            PathBuf::from("/home/test/.jcode"),
+            false,
+        );
+
+        assert_eq!(resolved, PathBuf::from("/home/test/.jcode/builds"));
+    }
 }

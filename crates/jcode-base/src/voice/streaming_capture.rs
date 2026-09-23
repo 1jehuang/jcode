@@ -449,11 +449,10 @@ impl NariRecording {
                         // Dropping `mic` on failure cancels the unfinished capture.
                         let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
                         let stream = session.run(pcm, |event| {
-                            if !matches!(event, NariEvent::Finished(_)) {
-                                if let Ok(mut events) = e.lock() {
+                            if !matches!(event, NariEvent::Finished(_))
+                                && let Ok(mut events) = e.lock() {
                                     events.push(event);
                                 }
-                            }
                         });
                         let result = stream.await;
                         mic.stop();

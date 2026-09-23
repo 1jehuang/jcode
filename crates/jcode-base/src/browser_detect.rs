@@ -117,10 +117,7 @@ impl BrowserKind {
 
     /// Whether the bridge can support this browser on the current OS.
     pub fn supported_on_this_os(self) -> bool {
-        match self {
-            BrowserKind::Safari => cfg!(target_os = "macos"),
-            _ => true,
-        }
+        !matches!(self, BrowserKind::Safari) || cfg!(target_os = "macos")
     }
 
     /// The URL of the browser's extension management page.

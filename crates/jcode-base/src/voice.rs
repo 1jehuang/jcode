@@ -13,9 +13,8 @@ use std::{fmt, time::Duration};
 mod nari;
 pub mod timing;
 pub use nari::{
-    NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession,
-    correct_transcript, estimated_transcription_usd, nari_api_key, nari_pcm_channel,
-    recognition_prompt,
+    NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession, correct_transcript,
+    estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
 };
 #[cfg(any(feature = "voice-capture", test))]
 mod resample;
@@ -263,7 +262,7 @@ fn validate_wav(bytes: &[u8]) -> Result<(), VoiceError> {
                 rate = Some(sample_rate);
             }
             b"data" => {
-                if data_len.is_some() || len == 0 || len % 2 != 0 {
+                if data_len.is_some() || len == 0 || !len.is_multiple_of(2) {
                     return Err(invalid());
                 }
                 data_len = Some(len);
@@ -514,6 +513,35 @@ mod capture {
         state.full = state.samples.len() == max_samples;
     }
 
+    fn build<T>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        buffer: Arc<Mutex<Buffer>>,
+        max_samples: usize,
+    ) -> Result<cpal::Stream, VoiceError>
+    where
+        T: cpal::SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        let errors = buffer.clone();
+        let channels = config.channels as usize;
+        device
+            .build_input_stream(
+                config,
+                move |data: &[T], _| {
+                    let Ok(mut state) = buffer.lock() else { return };
+                    append_samples(&mut state, data, channels, max_samples);
+                },
+                move |_| {
+                    if let Ok(mut state) = errors.lock() {
+                        state.failed = true;
+                    }
+                },
+                None,
+            )
+            .map_err(|_| VoiceError::MicrophoneUnavailable)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -594,35 +622,6 @@ mod capture {
             assert!(cancel.load(Ordering::SeqCst));
             assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
         }
-    }
-
-    fn build<T>(
-        device: &cpal::Device,
-        config: &cpal::StreamConfig,
-        buffer: Arc<Mutex<Buffer>>,
-        max_samples: usize,
-    ) -> Result<cpal::Stream, VoiceError>
-    where
-        T: cpal::SizedSample,
-        f32: cpal::FromSample<T>,
-    {
-        let errors = buffer.clone();
-        let channels = config.channels as usize;
-        device
-            .build_input_stream(
-                config,
-                move |data: &[T], _| {
-                    let Ok(mut state) = buffer.lock() else { return };
-                    append_samples(&mut state, data, channels, max_samples);
-                },
-                move |_| {
-                    if let Ok(mut state) = errors.lock() {
-                        state.failed = true;
-                    }
-                },
-                None,
-            )
-            .map_err(|_| VoiceError::MicrophoneUnavailable)
     }
 }
 

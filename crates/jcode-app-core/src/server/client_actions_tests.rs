@@ -461,9 +461,10 @@ async fn enabling_swarm_does_not_auto_elect_coordinator() {
             .read()
             .await
             .get(session_id)
-            .and_then(|member| member.swarm_id.clone())
-            .as_deref(),
-        Some("/tmp/jcode-passive-swarm")
+            .and_then(|member| member.swarm_id.clone()),
+        // Root sessions own a session-scoped swarm rather than one derived
+        // from the working directory (83dbc36dc).
+        crate::server::util::swarm_id_for_session(session_id)
     );
     assert_eq!(
         swarm_members
