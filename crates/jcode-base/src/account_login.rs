@@ -271,6 +271,31 @@ pub enum EmailCodeResult {
     Expired,
 }
 
+/// Address the account service sends sign-in codes from.
+pub const LOGIN_EMAIL_SENDER: &str = "login@solosystems.dev";
+
+/// Gmail link for `email` that searches for our sign-in email, including
+/// Spam (`in:anywhere`). `authuser` picks the matching signed-in account.
+pub fn gmail_search_link(email: &str) -> String {
+    let enc = |s: &str| {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    format!(
+        "https://mail.google.com/mail/?authuser={}#search/{}",
+        enc(&email.trim().to_lowercase()),
+        enc(&format!(
+            "from:{LOGIN_EMAIL_SENDER} in:anywhere newer_than:1d"
+        )),
+    )
+}
+
 /// Why an email sign-in could not start, in words safe for the UI.
 pub fn email_start_error_message(error: &AccountLoginError) -> String {
     match error {

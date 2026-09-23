@@ -371,3 +371,11 @@ async fn email_code_sign_in_uses_expected_wire_contract() {
         EmailCodeResult::Expired
     ));
 }
+
+#[test]
+fn gmail_link_searches_for_our_sender_including_spam() {
+    assert_eq!(
+        gmail_search_link(" Me@Gmail.com "),
+        "https://mail.google.com/mail/?authuser=me%40gmail.com#search/from%3Alogin%40solosystems.dev%20in%3Aanywhere%20newer_than%3A1d"
+    );
+}
