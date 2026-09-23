@@ -202,14 +202,22 @@ pub(crate) async fn classify_with_client(
     let entries: Vec<_> = questions.iter().collect();
     let mut answers = Map::new();
     let mut usage = Some(VoiceUsage::default());
-    for chunk in entries.chunks(crate::jev::MAX_QUESTIONS) {
-        let batch = chunk
-            .iter()
-            .map(|(id, value)| ((*id).clone(), (*value).clone()))
-            .collect();
-        // evaluate validates the exact batch IDs and typed probabilities before
-        // anything is merged. Never feed previous answers into subsequent state.
-        let response = client.evaluate(state.clone(), batch).await?;
+    // Batches are independent and share the identical state, so run them
+    // concurrently. Voice sends wait on this, and sequential round trips
+    // doubled the delay whenever candidates overflowed one batch.
+    let responses = futures::future::try_join_all(entries.chunks(crate::jev::MAX_QUESTIONS).map(
+        |chunk| {
+            let batch = chunk
+                .iter()
+                .map(|(id, value)| ((*id).clone(), (*value).clone()))
+                .collect();
+            // evaluate validates the exact batch IDs and typed probabilities before
+            // anything is merged. Never feed previous answers into subsequent state.
+            client.evaluate(state.clone(), batch)
+        },
+    ))
+    .await?;
+    for response in responses {
         usage = usage
             .zip(VoiceUsage::from_response(&response))
             .map(|(total, batch)| VoiceUsage {
