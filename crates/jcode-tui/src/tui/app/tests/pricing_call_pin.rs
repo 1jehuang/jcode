@@ -169,6 +169,77 @@ fn local_path_uses_call_time() {
 }
 
 #[test]
+fn remote_first_snapshot_is_priced_at_the_call_start_not_arrival() {
+    // F15 for the remote path: a remote client prices a call from the
+    // ServerEvent::TokenUsage snapshots it receives. The first snapshot must be
+    // priced at the call's *start* instant (recorded by
+    // `begin_api_call_accounting_at`), not the instant the snapshot arrives: a
+    // call that starts off-peak but reports its usage after the peak window
+    // opens must keep the off-peak tariff.
+    with_temp_jcode_home(|| {
+        write_pricing_config(PEAK_CARD_CONFIG);
+        let mut app = remote_deepseek_app();
+
+        // The call starts Saturday 02:00Z, off-peak.
+        app.begin_api_call_accounting_at(instant(FAR_FUTURE_OFF_PEAK));
+
+        // The first usage snapshot arrives Monday 02:00Z, inside the peak
+        // window. The call must still be billed at the off-peak rate it started
+        // with ($1.00/Mtok), not the peak rate ($10.00/Mtok).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TokenUsage {
+                input: 1_000_000,
+                output: 0,
+                cache_read_input: None,
+                cache_creation_input: None,
+            },
+            &mut remote,
+        );
+        assert!(
+            (session_cost_usd(&app) - 1.0).abs() < 1e-4,
+            "the first snapshot must price at the call's off-peak start, got ${:.4}",
+            session_cost_usd(&app)
+        );
+    });
+}
+
+#[test]
+fn remote_first_snapshot_without_a_recorded_start_falls_back_to_now() {
+    // The `call_started_at` fallback: when no call start was recorded (e.g. a
+    // server that emits TokenUsage without a preceding KvCacheRequest), the
+    // first snapshot still prices the call at `now()` rather than failing or
+    // billing nothing.
+    with_temp_jcode_home(|| {
+        write_pricing_config(PEAK_CARD_CONFIG);
+        let mut app = remote_deepseek_app();
+
+        // No `begin_api_call_accounting_at`: `call_started_at` is None.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TokenUsage {
+                input: 1_000_000,
+                output: 0,
+                cache_read_input: None,
+                cache_creation_input: None,
+            },
+            &mut remote,
+        );
+        // The exact figure depends on the wall clock, but the call must still
+        // be billed (off-peak base $1.00, peak $10.00).
+        let cost = session_cost_usd(&app);
+        assert!(
+            cost > 0.0,
+            "a missing call start must fall back to now() and still bill, got ${cost:.4}"
+        );
+    });
+}
+
+#[test]
 fn unconfigured_model_keeps_the_generic_default_fallback() {
     // Global constraint 1: with no `[pricing]` section at all, the pre-feature
     // behaviour stands, including the generic per-token estimate for a model

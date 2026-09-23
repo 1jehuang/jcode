@@ -795,14 +795,22 @@ pub(in crate::tui::app) fn handle_server_event(
                 // The server only reports tokens, never a dollar cost, so the
                 // remote client prices each completed call itself. This is the
                 // first usage snapshot for this call, so bill the full counts
-                // and let this instant decide the call's tariff (F15); later
-                // deltas of the same call reuse the card pinned here (F16).
+                // and price them at the call's start instant (F15), not this
+                // snapshot's arrival: a call that crosses a peak/off-peak
+                // boundary must keep the tariff it started in. Later deltas of
+                // the same call reuse the card pinned here (F16).
+                //
+                // `call_started_at` is recorded by `begin_api_call_accounting_at`
+                // when the call starts; the `now()` below is an explicit fallback
+                // for the rare path where no start was recorded.
                 app.accrue_remote_call_cost(
                     input,
                     output,
                     app.streaming.streaming_cache_read_tokens.unwrap_or(0),
                     app.streaming.streaming_cache_creation_tokens.unwrap_or(0),
-                    std::time::SystemTime::now(),
+                    app.cost
+                        .call_started_at
+                        .unwrap_or_else(std::time::SystemTime::now),
                 );
                 app.last_api_completed = Some(Instant::now());
                 app.last_api_completed_provider = Some(<App as TuiState>::provider_name(app));
