@@ -8,6 +8,30 @@ fn block_kinds(doc: &crate::Document) -> Vec<&BlockKind> {
 }
 
 #[test]
+fn ordinary_invisible_separator_is_preserved_without_reasoning_role_leakage() {
+    let marker = crate::REASONING_SENTINEL;
+    let doc = parse_markdown(&format!(
+        "ordinary{marker}marker\n\n*italic {marker} marker*\n\nfollowing text"
+    ));
+    let spans: Vec<_> = doc
+        .blocks
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .flat_map(|line| line.spans.iter())
+        .collect();
+
+    let visible: String = spans.iter().map(|span| span.text.as_str()).collect();
+    assert!(visible.contains(&format!("ordinary{marker}marker")));
+    assert!(visible.contains(&format!("italic {marker} marker")));
+    assert!(spans.iter().all(|span| span.role != StyleRole::Reasoning));
+    let following = spans
+        .iter()
+        .find(|span| span.text.contains("following text"))
+        .expect("following paragraph is present");
+    assert_ne!(following.role, StyleRole::Reasoning);
+}
+
+#[test]
 fn parses_heading() {
     let doc = parse_markdown("# Hello world");
     assert_eq!(doc.blocks.len(), 1);

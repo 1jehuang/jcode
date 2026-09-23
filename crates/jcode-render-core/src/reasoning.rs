@@ -38,6 +38,63 @@ pub fn reasoning_line_content(line: &str) -> Option<String> {
     Some(content)
 }
 
+/// Return cleaned text for a parser text event that belongs to a complete
+/// generated reasoning wrapper on its source line.
+///
+/// The source range is supplied by pulldown-cmark's offset iterator. Requiring
+/// the complete wrapper prevents an ordinary U+2063 in Markdown from being
+/// interpreted as control data, while removing only the two wrapper markers
+/// preserves any U+2063 that was part of the wrapped body itself.
+pub fn reasoning_text_event(
+    markdown: &str,
+    source_range: std::ops::Range<usize>,
+    text: &str,
+) -> Option<String> {
+    if source_range.start > markdown.len()
+        || source_range.end > markdown.len()
+        || source_range.start > source_range.end
+        || !markdown.is_char_boundary(source_range.start)
+        || !markdown.is_char_boundary(source_range.end)
+    {
+        return None;
+    }
+
+    let line_start = markdown[..source_range.start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let line_end = markdown[source_range.start..]
+        .find('\n')
+        .map_or(markdown.len(), |offset| source_range.start + offset);
+    let line = &markdown[line_start..line_end];
+    let trimmed_len = line.trim_end_matches([' ', '\r']).len();
+    if reasoning_line_content(&line[..trimmed_len]).is_none() {
+        return None;
+    }
+
+    let marker_len = REASONING_SENTINEL.len();
+    let leading_marker = line_start + 1..line_start + 1 + marker_len;
+    let trailing_marker_start = line_start + trimmed_len - marker_len - 1;
+    let trailing_marker = trailing_marker_start..trailing_marker_start + marker_len;
+    if source_range.end <= leading_marker.start || source_range.start >= trailing_marker.end {
+        return None;
+    }
+
+    let mut cleaned = text.to_string();
+    if source_range.start <= leading_marker.start
+        && source_range.end >= leading_marker.end
+        && let Some(without_marker) = cleaned.strip_prefix(REASONING_SENTINEL)
+    {
+        cleaned = without_marker.to_string();
+    }
+    if source_range.start <= trailing_marker.start
+        && source_range.end >= trailing_marker.end
+        && let Some(without_marker) = cleaned.strip_suffix(REASONING_SENTINEL)
+    {
+        cleaned = without_marker.to_string();
+    }
+    Some(cleaned)
+}
+
 /// Escape the characters that would otherwise be interpreted as inline markdown
 /// inside a reasoning line, so the body renders literally inside the dim/italic
 /// emphasis run.
@@ -147,5 +204,28 @@ mod tests {
         ] {
             assert_eq!(reasoning_line_content(text), None);
         }
+    }
+
+    #[test]
+    fn reasoning_text_event_removes_only_wrapper_markers() {
+        let body = format!("plain{REASONING_SENTINEL}body");
+        let markup = reasoning_line_markup(&body);
+        let mut options = pulldown_cmark::Options::empty();
+        options.insert(pulldown_cmark::Options::ENABLE_SMART_PUNCTUATION);
+        let mut visible = String::new();
+
+        for (event, source_range) in
+            pulldown_cmark::Parser::new_ext(&markup, options).into_offset_iter()
+        {
+            if let pulldown_cmark::Event::Text(text) = event {
+                let cleaned = reasoning_text_event(&markup, source_range.clone(), &text)
+                    .unwrap_or_else(|| {
+                        panic!("generated wrapper not recognized at {source_range:?}")
+                    });
+                visible.push_str(&cleaned);
+            }
+        }
+
+        assert_eq!(visible, body);
     }
 }

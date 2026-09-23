@@ -300,7 +300,16 @@ fn adapt_buffer_impl(buf: &mut Buffer, mode: ThemeMode, palette: Option<&crate::
             .or_insert_with(|| readable_light_foreground(color, background))
     };
     for cell in buf.content.iter_mut() {
-        let (fg, fg_override) = adapt(cell.fg);
+        let (fg, fg_override) = palette
+            .and_then(|palette| {
+                crate::palette::configured_native_color_for_context(
+                    palette,
+                    cell.fg,
+                    cell.modifier.contains(Modifier::ITALIC),
+                )
+                .map(|color| (color, true))
+            })
+            .unwrap_or_else(|| adapt(cell.fg));
         let (bg, bg_override) = adapt(cell.bg);
         let (underline, underline_override) = adapt(cell.underline_color);
         cell.fg = fg;
@@ -376,6 +385,27 @@ mod tests {
         let c = Color::Rgb(138, 180, 248);
         assert_eq!(adapt_color_for_theme(c), c);
         assert_eq!(adapt_color_for_theme(Color::White), Color::White);
+    }
+
+    #[test]
+    fn italic_reasoning_uses_its_override_without_recoloring_dim_cells() {
+        let mut palette = crate::palette::Palette::default();
+        let chosen = (18, 52, 86);
+        palette.set(crate::palette::Role::Reasoning, chosen);
+
+        let default = crate::color::rgb(100, 100, 100);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf.content[0].fg = default;
+        buf.content[0].modifier.insert(Modifier::ITALIC);
+        buf.content[1].fg = default;
+
+        adapt_buffer_impl(&mut buf, ThemeMode::Dark, Some(&palette));
+
+        assert_eq!(
+            buf.content[0].fg,
+            crate::color::rgb(chosen.0, chosen.1, chosen.2)
+        );
+        assert_eq!(buf.content[1].fg, default);
     }
 
     #[test]
