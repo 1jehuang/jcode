@@ -1932,6 +1932,8 @@ impl App {
 
     pub(super) fn follow_chat_bottom(&mut self) {
         self.pending_history_anchor = None;
+        // Resuming the tail drops any reading position captured for a resize.
+        self.pending_resize_anchor = None;
         self.scroll_offset = 0;
         self.auto_scroll_paused = false;
         super::super::ui::request_tail_follow_snap();
