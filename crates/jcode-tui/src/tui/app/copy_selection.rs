@@ -20,9 +20,7 @@ impl App {
         self.copy_selection_anchor = None;
         self.copy_selection_cursor = None;
         self.copy_selection_goal_column = None;
-        // Leaving mode must clear the armed edge autoscroll: a later drag that
-        // starts at the same pane and edge would otherwise compare equal and skip
-        // its entry nudge.
+        // A re-entered drag at the same pane and edge must not skip its nudge.
         self.copy_selection_edge_autoscroll = None;
     }
 

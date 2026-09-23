@@ -1060,16 +1060,12 @@ fn test_edge_autoscroll_is_one_line_per_tick_and_stops_on_release() {
         modifiers: KeyModifiers::empty(),
     });
 
-    // The tick must never be slower than the autoscroll cadence (a slow tick is
-    // what used to stall the autoscroll), but a faster display cadence still wins
-    // so live output keeps streaming while the drag is held.
-    let policy = crate::perf::tui_policy();
-    let interval = crate::tui::redraw_interval_with_policy(&app, &policy);
-    let fast_interval = std::time::Duration::from_millis((1000 / policy.redraw_fps.max(1)) as u64);
+    // The rate must follow the tick cadence, not the display refresh rate.
+    let interval = crate::tui::redraw_interval_with_policy(&app, &crate::perf::tui_policy());
     assert_eq!(
         interval,
-        fast_interval.min(crate::tui::redraw_schedule::REDRAW_COPY_AUTOSCROLL),
-        "drag-edge autoscroll must not pin the tick to its own cadence"
+        crate::tui::redraw_schedule::REDRAW_COPY_AUTOSCROLL,
+        "drag-edge autoscroll must pin the tick to its own cadence"
     );
 
     // Held-still ticks move exactly one line each: never a velocity-scaled

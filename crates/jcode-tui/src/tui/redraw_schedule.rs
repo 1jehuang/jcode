@@ -422,11 +422,9 @@ pub(crate) fn redraw_interval_with_policy_and_animation(
         };
     }
 
-    // A held drag must never tick slower than its own step cadence, but it must
-    // not override a faster display cadence either: live output keeps streaming
-    // at `redraw_fps` while the mouse is held at the edge.
+    // A held drag scrolls a line per tick: pace the tick, not the fps.
     if state.copy_selection_edge_autoscroll_active() {
-        return REDRAW_COPY_AUTOSCROLL.min(fast_interval);
+        return REDRAW_COPY_AUTOSCROLL;
     }
 
     // While the terminal is backgrounded (FocusLost), an idle session has nothing
