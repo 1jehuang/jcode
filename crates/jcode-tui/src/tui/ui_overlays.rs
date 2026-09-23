@@ -238,6 +238,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, area: Rect, scroll: usize, ap
         "/keys",
         "Show keybinding conflicts with your terminal/OS",
     ));
+    lines.push(help_entry(
+        "/reset usage limits openai",
+        "Review a banked reset, then confirm or cancel",
+    ));
     lines.push(help_entry("/usage", "Show connected provider usage limits"));
     lines.push(help_entry(
         "/support",

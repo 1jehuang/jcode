@@ -339,11 +339,11 @@ impl Agent {
         }
     }
 
-    /// Mark this session as a debug/test session
-    /// Set a custom system prompt override (used by ambient mode).
+    /// Set a persisted custom system prompt override (also used by ambient mode).
     /// When set, this replaces the normal system prompt entirely.
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.system_prompt_override = Some(prompt.to_string());
+        self.session.system_prompt = Some(prompt.to_string());
+        self.persist_session_best_effort("system prompt override");
     }
 
     pub fn set_debug(&mut self, is_debug: bool) {
@@ -423,10 +423,11 @@ impl Agent {
         // Account sign-in/out and verified entitlement changes must reach the
         // model even when the tool list is frozen (including deferred MCP).
         // Only update this definition when its guidance actually changes.
-        if self
-            .locked_tools
-            .as_ref()
-            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "compile_remote"))
+        if !crate::tool::sdk::custom(&self.session.id, "compile_remote")
+            && self
+                .locked_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "compile_remote"))
             && let Some(fresh) = self.registry.remote_compile_definition().await
             && let Some(locked) = self.locked_tools.as_mut()
             && let Some(previous) = locked.iter_mut().find(|tool| tool.name == "compile_remote")
@@ -512,8 +513,14 @@ impl Agent {
     /// Build the agent's tool definitions from the registry, applying the
     /// session's `allowed_tools`, `disabled_tools`, and self-dev filters.
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
-        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
-        if !self.disabled_tools.is_empty() {
+        let sdk = crate::tool::sdk::config(&self.session.id);
+        let enabled = sdk
+            .as_ref()
+            .and_then(|c| c.enabled.as_ref())
+            .map(|names| names.iter().cloned().collect());
+        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
+        let mut tools = self.registry.definitions(allowed).await;
+        if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
                 !self
                     .registry
@@ -526,6 +533,11 @@ impl Agent {
             self.is_desktop_selfdev(),
         );
         self.apply_mcp_tool_exposure(&mut tools);
+        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id, tools);
+        if let Some(config) = sdk.as_ref() {
+            let disabled = config.disabled.iter().cloned().collect();
+            tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
+        }
         tools
     }
 
@@ -604,6 +616,12 @@ impl Agent {
                 && !self.registry.tool_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
+    }
+
+    pub(crate) fn invalidate_sdk_tools(&mut self) {
+        self.mcp_late_register_resolved = false;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -696,6 +714,33 @@ impl Agent {
     }
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        let name = if crate::tool::sdk::custom(&self.session.id, unqualified_name) {
+            unqualified_name
+        } else {
+            Registry::resolve_tool_name(unqualified_name)
+        };
+        let mut sdk_enabled = false;
+        if let Some(config) = crate::tool::sdk::config(&self.session.id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.registry.tool_is_disabled(&disabled, name),
+                "Tool '{}' is disabled",
+                name
+            );
+            if config.custom.iter().any(|t| t.name == name) {
+                return Ok(());
+            }
+            if let Some(enabled) = config.enabled {
+                let allowed = enabled.into_iter().collect();
+                anyhow::ensure!(
+                    self.registry.tool_is_allowed(&allowed, name),
+                    "Tool '{}' is not allowed",
+                    name
+                );
+                sdk_enabled = true;
+            }
+        }
         let is_desktop = self.is_desktop_selfdev();
         if is_desktop && matches!(name, "selfdev" | "debug_socket") {
             return Err(anyhow::anyhow!(
@@ -712,6 +757,9 @@ impl Agent {
             return Err(anyhow::anyhow!(
                 "Tool 'jcode_docs' is disabled in self-development mode. Read the working tree documentation instead."
             ));
+        }
+        if sdk_enabled {
+            return Ok(());
         }
         if let Some(allowed) = self.allowed_tools.as_ref()
             && !self.registry.tool_is_allowed(allowed, name)

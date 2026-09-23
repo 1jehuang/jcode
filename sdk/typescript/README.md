@@ -112,6 +112,92 @@ console.log("tokens:", turn.usage);
 client.close();
 ```
 
+### Full system prompt override
+
+```ts
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  systemPrompt: "You are a concise code reviewer.",
+});
+```
+
+`systemPrompt` is sent as `system_prompt` and replaces the **entire assembled
+system prompt**, not just its base text. Default instructions and assembled
+instruction/context additions are not appended. The override is immutable after
+session creation and is persisted by the runtime for resume. Omit it (or use
+`undefined`) to keep normal prompt assembly. An empty string explicitly replaces
+the system prompt with an empty prompt. Existing `createSession()` and
+`createSession("/path")` calls retain their normal behavior.
+
+### Controlling tools
+
+Use `createSession({ workingDir, tools })` or `configureTools(sessionId, tools)`
+to control the tools exposed to one session. This requires a runtime and API
+bridge advertising `session_tools`. Existing `createSession("/path")` calls
+continue to work unchanged.
+
+```ts
+const session = await client.createSession({
+  workingDir: process.cwd(),
+  tools: {
+    enabled: ["read", "agentgrep"],
+    disabled: ["bash"],
+    custom: [{
+      name: "lookup_ticket",
+      description: "Look up a ticket in the application's ticket store",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+      execute: async (input, { signal }) => {
+        // Your application implements this function. Honor signal for cancellation.
+        return JSON.stringify(await lookupTicket(String(input.id), { signal }));
+      },
+    }],
+  },
+});
+
+console.log(await client.listTools(session.session_id));
+const turn = await client.run(session.session_id, "Summarize ticket ABC-123");
+
+// Replace the policy between turns. No tools at all:
+await client.configureTools(session.session_id, { enabled: [] });
+// Restore configured defaults and remove all custom callbacks:
+await client.configureTools(session.session_id, {});
+```
+
+- `enabled` selects built-in/MCP tools. Omitted or `null` inherits configured
+  defaults. An empty array exposes no built-in/MCP tools.
+- `custom` adds tools regardless of `enabled`. A custom tool with the same name
+  replaces that tool only in this session. `disabled` wins over both lists.
+- Configuration replaces the previous SDK policy, not a patch. It is accepted
+  only while the session is idle. Await it before starting another turn.
+- `execute` receives schema-validated input and returns a string or
+  `{ output: string, error?: string }`. Thrown errors become tool errors sent back
+  to the model. The SDK never serializes the callback function.
+- Callbacks have a 60-second deadline. Set `timeoutMs` on a custom tool to shorten
+  it. Cancellation and disconnect abort the supplied signal. Callbacks must
+  cooperate with that signal to stop external work, and synchronous blocking
+  callbacks cannot be forcibly interrupted by JavaScript timers.
+- Custom callbacks belong to the registering connection. Keep it open throughout
+  the turn. Policies are in-memory, not saved in the transcript. Reconfigure
+  before sending a message after reconnecting, reloading a session, restarting
+  the daemon, or forking a session. These controls are not an OS sandbox:
+  an enabled shell or application callback can still perform arbitrary work.
+  Automatic recovery after a daemon restart uses the daemon's default policy,
+  not the previous SDK selection. Do not treat these live-session controls as
+  a persistent security boundary. Prefer a private ephemeral `JcodeClient.launch()`
+  instance for embedding rather than a shared or automatically resumed session.
+- If a configuration acknowledgement times out, the SDK closes its connection
+  rather than risk executing old callbacks against an uncertain new policy.
+
+For manual dispatch, send a wire-level `configure_tools` request via
+`client.request`, consume `tool_call` events, and call
+`client.submitToolResult(sessionId, callId, result)`. Do not manually answer calls
+that already have an `execute` callback.
+
 ### Assistant messages and final answers
 
 `turn.text` is the concatenation of **all** assistant text in the turn, including
@@ -244,7 +330,7 @@ discovery pass only.
 | `listSessions({ includeArchived? })` | Every persisted session, optionally including archived sessions |
 | `archiveSession(id)` / `restoreSession(id)` | Reversibly hide or restore a session |
 | `setRetentionPolicy(days?)` | Auto-archive inactive sessions, or disable retention |
-| `createSession(workingDir?)` | Create and attach |
+| `createSession(workingDirOrOptions?)` | Create and attach, optionally overriding the full system prompt |
 | `attachSession(id)` / `detachSession(id)` | Subscribe / unsubscribe |
 | `sendMessage(id, content, images?)` | Send a user message (awaits `message_accepted`) |
 | `run(id, content, options?)` | Send and collect one full turn |
@@ -429,6 +515,8 @@ try {
 | `unknown_session` | The session no longer exists, is not available to this instance, or the connection is not attached where attachment is required. | Refresh `listSessions()`, use the right private/shared instance, and attach when the method requires it. |
 | `invalid_request` | Arguments or current state violate the operation's contract (for example an invalid model, retry count, path, or compaction request). | Correct the caller input. The message contains the rejected constraint; do not blindly retry. |
 | `invalid_option` | A client-only option is outside its allowed range. | Correct the named option, such as `discoveryIntervalMs` or `maxBufferedEvents`. |
+| `unsupported` | The runtime does not advertise `session_tools`. | Update both the jcode daemon and API bridge before using tool controls. |
+| `busy` | Another tool configuration request is in flight for this session. | Await the previous configuration before submitting another. |
 | `internal` | The bridge or daemon failed unexpectedly while handling a valid request. | Preserve the message and jcode logs, retry once if safe, then report it if reproducible. |
 
 ### Streaming and structured-output errors

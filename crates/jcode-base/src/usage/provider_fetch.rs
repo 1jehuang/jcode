@@ -117,6 +117,7 @@ pub(super) async fn fetch_openai_usage_for_account(
     mut creds: auth::codex::CodexCredentials,
     account_label: Option<&str>,
 ) -> ProviderUsage {
+    let generation = openai_usage_generation();
     let is_chatgpt = !creds.refresh_token.is_empty() || creds.id_token.is_some();
     if creds.access_token.is_empty() || !is_chatgpt {
         return ProviderUsage {
@@ -166,7 +167,8 @@ pub(super) async fn fetch_openai_usage_for_account(
                         )),
                         ..Default::default()
                     };
-                    store_openai_usage(
+                    store_openai_usage_for_generation(
+                        generation,
                         initial_cache_key,
                         openai_usage_data_from_provider_report(&report),
                     );
@@ -201,7 +203,11 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to fetch: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
@@ -214,7 +220,11 @@ pub(super) async fn fetch_openai_usage_for_account(
             error: Some(format!("API error ({}): {}", status, body)),
             ..Default::default()
         };
-        store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+        store_openai_usage_for_generation(
+            generation,
+            cache_key,
+            openai_usage_data_from_provider_report(&report),
+        );
         return report;
     }
 
@@ -226,7 +236,11 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to read response: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
@@ -239,22 +253,47 @@ pub(super) async fn fetch_openai_usage_for_account(
                 error: Some(format!("Failed to parse response: {}", e)),
                 ..Default::default()
             };
-            store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+            store_openai_usage_for_generation(
+                generation,
+                cache_key,
+                openai_usage_data_from_provider_report(&report),
+            );
             return report;
         }
     };
 
     let parsed = parse_openai_usage_payload(&json);
 
+    // Read-only detail lookup. Failure must not hide otherwise valid usage.
+    let available_expirations = if parsed.available_reset_count.is_some_and(|count| count > 0) {
+        super::openai_reset::fetch_available_expirations(&client, &creds)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let report = ProviderUsage {
         provider_name: display_name,
         limits: parsed.limits,
         extra_info: parsed.extra_info,
         hard_limit_reached: parsed.hard_limit_reached,
+        openai_reset_credits: parsed.available_reset_count.map(|available_count| {
+            jcode_usage_types::OpenAiResetCredits {
+                available_count,
+                available_expirations,
+                account_label: account_label.map(str::to_string),
+                ordinary_usage_allowed: parsed.ordinary_usage_allowed,
+            }
+        }),
         error: None,
         last_used_unix_secs: None,
     };
-    store_openai_usage(cache_key, openai_usage_data_from_provider_report(&report));
+    store_openai_usage_for_generation(
+        generation,
+        cache_key,
+        openai_usage_data_from_provider_report(&report),
+    );
     report
 }
 
@@ -356,6 +395,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -453,6 +493,7 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -493,6 +534,7 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -555,6 +597,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         limits: Vec::new(),
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -676,6 +719,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         limits,
         extra_info,
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     })

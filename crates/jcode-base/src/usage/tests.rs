@@ -411,6 +411,7 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
             "enabled".to_string(),
         )],
         hard_limit_reached: false,
+        openai_reset_credits: None,
         error: None,
         last_used_unix_secs: None,
     };

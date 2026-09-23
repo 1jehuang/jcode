@@ -2146,6 +2146,27 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
     assert_eq!(provider.context_window(), 1_000_000);
 }
 
+/// DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`. Its live
+/// `/v1/models` now reports `deepseek-flash` and `deepseek-v4-pro`; both are
+/// 1M-window models. Without the renamed spelling in the static classifier the
+/// Flash id is budgeted at the generic 200K default before the catalog loads.
+#[test]
+fn direct_deepseek_profile_uses_1m_context_for_listed_models_when_catalog_is_absent() {
+    for model in ["deepseek-flash", "deepseek-v4-pro"] {
+        let _lock = ENV_LOCK.lock();
+        let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
+        let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
+        let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
+        let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "deepseek");
+        let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", model);
+        let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+
+        let provider = OpenRouterProvider::new().expect("provider");
+
+        assert_eq!(provider.context_window(), 1_000_000, "{model}");
+    }
+}
+
 #[test]
 fn conifer_context_fallback_yields_to_live_and_disk_catalog_without_remapping_aliases() {
     let _lock = ENV_LOCK.lock();

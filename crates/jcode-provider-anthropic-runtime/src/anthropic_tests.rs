@@ -223,7 +223,7 @@ fn test_anthropic_reasoning_effort_request_parts() {
         provider.build_reasoning_request_parts("claude-sonnet-4-6", true);
 
     match thinking.expect("adaptive thinking should be enabled") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Claude 4.6 should use adaptive thinking"),
     }
     assert_eq!(
@@ -293,7 +293,7 @@ fn test_anthropic_show_thinking_enables_adaptive_thinking_without_effort() {
     let (thinking, output_config, temperature) =
         provider.build_reasoning_request_parts_inner("claude-sonnet-4-6", true, true);
     match thinking.expect("show_thinking should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Sonnet 4.6 should use adaptive thinking"),
     }
     assert!(
@@ -361,7 +361,7 @@ fn test_anthropic_fable_defaults_to_high_effort() {
         "high",
     );
     match thinking.expect("Fable default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Fable 5 should use adaptive thinking"),
     }
 
@@ -484,7 +484,7 @@ fn test_anthropic_opus_defaults_to_xhigh_effort() {
         "xhigh",
     );
     match thinking.expect("Opus default effort should enable adaptive thinking") {
-        ApiThinking::Adaptive { display } => assert_eq!(display, Some("summarized")),
+        ApiThinking::Adaptive { display, .. } => assert_eq!(display, Some("summarized")),
         ApiThinking::Enabled { .. } => panic!("Opus 4.8 should use adaptive thinking"),
     }
 
@@ -1872,6 +1872,13 @@ fn anthropic_fallback_honors_server_recommendation() {
         "claude-opus-4-8"
     );
 
+    let opus_55 = anthropic_recommended_model_from_error("please use opus 5.5. learn more")
+        .expect("decimal release recommendation should resolve");
+    assert_eq!(
+        AnthropicProvider::normalized_model_key(&opus_55),
+        "claude-opus-5-5"
+    );
+
     // A recommendation pointing at a retired model is ignored (falls through to
     // quality ranking).
     let retired_rec = "model x not available. please use mythos 1.";
@@ -2023,7 +2030,7 @@ fn ping_keepalive_emits_streaming_phase_event() {
 #[test]
 fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     // Benchmark campaigns pin `claude-opus-5` at `low` effort. Opus 5 also
-    // *defaults* to `low` (jcode's default model/effort pairing), and an
+    // *defaults* to `low`, and an
     // explicit `low` must survive normalization, must NOT be silently
     // promoted, and must land in `output_config.effort` on the request.
     assert!(AnthropicProvider::model_supports_output_effort(
@@ -2032,6 +2039,11 @@ fn test_anthropic_opus_5_low_effort_reaches_the_wire() {
     assert_eq!(
         AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5").as_deref(),
         Some("low"),
+    );
+    // Opus 5.5 is jcode's default Claude model and defaults to `medium`.
+    assert_eq!(
+        AnthropicProvider::default_reasoning_effort_for_model("claude-opus-5-5").as_deref(),
+        Some("medium"),
     );
     assert_eq!(
         AnthropicProvider::normalize_reasoning_effort("low").as_deref(),
@@ -2217,5 +2229,75 @@ fn configured_swarm_root_effort_reads_real_config() {
             }
         }
         assert_eq!(provider.stored_reasoning_effort().as_deref(), Some(mode));
+    }
+}
+
+#[test]
+fn opus_55_request_json_supports_api_and_oauth_without_forced_tools() {
+    let provider = AnthropicProvider::new();
+    for model in ["claude-opus-5-5", "claude-fable-5-1"] {
+        for is_oauth in [false, true] {
+            for show_thinking in [false, true] {
+                for effort in [None, Some("none"), Some("low"), Some("xhigh"), Some("max")] {
+                    let (thinking, output_config, temperature) = provider
+                        .build_reasoning_request_parts_with_effort(
+                            model,
+                            is_oauth,
+                            show_thinking,
+                            effort,
+                        );
+                    let request = ApiRequest {
+                        model: model.to_string(),
+                        max_tokens: jcode_provider_core::anthropic::anthropic_max_output_tokens(
+                            model,
+                        ),
+                        system: None,
+                        messages: vec![],
+                        tools: None,
+                        metadata: None,
+                        thinking,
+                        output_config,
+                        temperature,
+                        service_tier: None,
+                        stream: true,
+                    };
+                    let value = serde_json::to_value(&request).unwrap();
+                    assert_eq!(value["thinking"]["type"], "adaptive");
+                    assert_eq!(value["thinking"]["display"], "summarized");
+                    assert_eq!(
+                        value["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+                        "drop_block"
+                    );
+                    assert_eq!(value["max_tokens"], 128_000);
+                    assert!(value.get("temperature").is_none());
+                    assert!(value.get("tool_choice").is_none());
+                    match effort {
+                        None => assert!(value.get("output_config").is_none()),
+                        Some("none") => assert_eq!(value["output_config"]["effort"], "low"),
+                        Some(effort) => assert_eq!(value["output_config"]["effort"], effort),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
+    let provider = AnthropicProvider::new();
+    for is_oauth in [false, true] {
+        let blocks = provider.format_content_blocks(
+            &[ContentBlock::AnthropicThinking {
+                thinking: String::new(),
+                signature: "model-and-prefix-bound-signature".to_string(),
+            }],
+            is_oauth,
+        );
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::json!([{
+                "type": "thinking", "thinking": "", "signature": "model-and-prefix-bound-signature"
+            }])
+        );
     }
 }

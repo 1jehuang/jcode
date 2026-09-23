@@ -34,7 +34,7 @@ mod tests {
         let path = dir.join("round-trip.sock");
         remove_socket(&path);
 
-        let mut listener = Listener::bind(&path).expect("bind");
+        let listener = Listener::bind(&path).expect("bind");
         assert!(is_socket_path(&path), "a bound socket path should exist");
 
         let server = tokio::spawn(async move {

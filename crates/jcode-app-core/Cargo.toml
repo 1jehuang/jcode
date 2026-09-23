@@ -36,6 +36,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 
 # File operations
 glob = "0.3"
+ignore = "0.4"
 similar = "2"            # diffing for edits
 
 # Utilities

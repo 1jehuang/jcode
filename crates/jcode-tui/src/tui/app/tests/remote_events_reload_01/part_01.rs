@@ -1550,7 +1550,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .push((77, "pending soft interrupt".to_string()));
 
     remote.handle_tool_start("tool_1", "bash");
-    remote.handle_tool_input("{\"command\":\"sleep 10\"}");
+    remote.handle_tool_input(None, "{\"command\":\"sleep 10\"}");
     remote.handle_tool_exec("tool_1", "edit");
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);

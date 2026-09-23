@@ -7,6 +7,8 @@
 //! Model-catalog/account-availability state stays in `jcode_base::provider`
 //! (it is shared vocabulary for routing), as does the pure request shaping in
 //! `jcode_base::provider::openai_request`.
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

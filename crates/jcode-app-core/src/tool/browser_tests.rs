@@ -176,20 +176,50 @@ fn schema_exposes_advanced_browser_fields() {
 }
 
 #[test]
-fn resolve_provider_accepts_auto_and_firefox() {
-    assert!(resolve_provider(Some("auto")).is_ok());
-    assert!(resolve_provider(Some("firefox")).is_ok());
+fn resolve_provider_accepts_every_supported_browser() {
+    for browser in [
+        "auto", "firefox", "chrome", "chromium", "edge", "brave", "safari",
+    ] {
+        assert!(resolve_provider(Some(browser)).is_ok(), "{browser}");
+    }
 }
 
 #[test]
-fn resolve_provider_rejects_unsupported_browser() {
-    let err = resolve_provider(Some("chrome"))
+fn resolve_provider_rejects_unknown_browser() {
+    let err = resolve_provider(Some("netscape"))
         .err()
-        .expect("chrome should not resolve yet");
+        .expect("unknown browsers must not resolve");
+    assert!(err.to_string().contains("Unknown browser 'netscape'"));
+}
+
+#[test]
+fn explicit_browser_request_refuses_a_different_connected_browser() {
+    let status = jcode_base::browser::BrowserStatus {
+        backend: "firefox_agent_bridge",
+        browser: "chrome",
+        detected_via: "requested explicitly",
+        connected_browser: Some("firefox".into()),
+        setup_complete: true,
+        binary_installed: true,
+        responding: true,
+        compatible: true,
+        missing_actions: vec![],
+        ready: true,
+    };
+    let err = ready_in_requested_browser(&status, BrowserKind::Chrome, true)
+        .expect_err("explicit chrome must not silently drive firefox");
     assert!(
         err.to_string()
-            .contains("not wired into the built-in browser tool")
+            .contains("connected to Firefox, not Google Chrome")
     );
+    // Auto mode drives whichever browser owns the bridge.
+    assert!(ready_in_requested_browser(&status, BrowserKind::Chrome, false).is_ok());
+    // Chromium-family browsers share one extension build.
+    let edge = jcode_base::browser::BrowserStatus {
+        connected_browser: Some("edge".into()),
+        ..status
+    };
+    assert!(ready_in_requested_browser(&edge, BrowserKind::Chrome, true).is_ok());
 }
 
 #[test]
@@ -243,7 +273,9 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
     std::fs::write(browser_dir.join("firefox-agent-bridge-host"), "host").expect("write fake host");
     std::fs::write(browser_dir.join(".setup-complete"), "complete").expect("write setup marker");
 
-    let error = ensure_firefox_ready()
+    // Pin the target so the test does not depend on this machine's browsers.
+    let target = jcode_base::browser::resolve_target_browser(Some("firefox")).expect("firefox");
+    let error = ensure_firefox_ready(&target, false)
         .await
         .expect_err("stale setup marker must not bypass live readiness");
     let message = error.to_string();
@@ -361,20 +393,17 @@ async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_pro
             graceful_shutdown_signal: None,
             execution_mode: super::super::ToolExecutionMode::Direct,
         };
-        // An unsupported provider makes the enabled branch hermetic. In the
+        // An unknown browser makes the enabled branch hermetic. In the
         // disabled branch the guard must fire before even resolving a provider.
         let err = tool
-            .execute(json!({"action":"handoff", "browser":"chrome"}), ctx)
+            .execute(json!({"action":"handoff", "browser":"netscape"}), ctx)
             .await
             .err()
             .expect("request must fail without browser side effects");
         if disabled {
             assert!(err.to_string().contains("JCODE_BROWSER_HANDOFF_DISABLED=1"));
         } else {
-            assert!(
-                err.to_string()
-                    .contains("not wired into the built-in browser tool")
-            );
+            assert!(err.to_string().contains("Unknown browser 'netscape'"));
         }
     }
 }

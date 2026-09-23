@@ -2702,3 +2702,55 @@ fn cache_prompt_totals_preserve_mixed_provider_accounting_and_legacy_unknown() {
     assert_eq!(session.token_usage_totals().cache_prompt_tokens, None);
     assert_eq!(session.token_usage_totals().cache_read_input_tokens, 19_000);
 }
+
+#[test]
+fn system_prompt_persists_before_first_message_and_across_metadata_updates() -> Result<()> {
+    let _lock = lock_env();
+    let home = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("JCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let mut session = Session::create(None, None);
+        assert_eq!(session.system_prompt, None);
+        session.system_prompt = Some(prompt.into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some(prompt)
+        );
+        // Unchanged prompt survives metadata-only journal persistence too.
+        session.model = Some("test-model".into());
+        session.save()?;
+        assert_eq!(
+            Session::load(&session.id)?.system_prompt.as_deref(),
+            Some(prompt)
+        );
+        session.system_prompt = Some("replacement".into());
+        session.save()?;
+        assert_eq!(
+            Session::load_startup_stub(&session.id)?
+                .system_prompt
+                .as_deref(),
+            Some("replacement")
+        );
+        session.system_prompt = None;
+        session.save()?;
+        assert_eq!(Session::load(&session.id)?.system_prompt, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn system_prompt_missing_in_legacy_session_defaults_to_none() -> Result<()> {
+    let session = Session::create_with_id("legacy-prompt-test".into(), None, None);
+    let json = serde_json::to_value(&session)?;
+    assert!(json.get("system_prompt").is_none());
+    let restored: Session = serde_json::from_value(json)?;
+    assert_eq!(restored.system_prompt, None);
+    Ok(())
+}

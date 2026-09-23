@@ -68,6 +68,7 @@ pub fn anthropic_api_pricing_with_tier(
     }
 
     match base {
+        "claude-opus-5-5" => exact(4.0, 20.0, 0.20, "Anthropic API pricing"),
         "claude-fable-5-1" => exact(10.0, 50.0, 0.25, "Anthropic API pricing"),
         "claude-fable-5" => exact(10.0, 50.0, 1.0, "Anthropic API pricing"),
         "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6"
@@ -297,6 +298,16 @@ pub fn openrouter_pricing_from_token_prices(
 mod tests {
     use super::*;
     use crate::RouteBillingKind;
+
+    #[test]
+    fn opus_55_published_pricing_includes_discounted_cache_reads() {
+        for model in ["claude-opus-5-5", "claude-opus-5-5[1m]"] {
+            let pricing = anthropic_api_pricing(model).expect("Opus 5.5 pricing");
+            assert_eq!(pricing.input_price_per_mtok_micros, Some(4_000_000));
+            assert_eq!(pricing.output_price_per_mtok_micros, Some(20_000_000));
+            assert_eq!(pricing.cache_read_price_per_mtok_micros, Some(200_000));
+        }
+    }
 
     #[test]
     fn anthropic_api_pricing_long_context_uses_standard_rates() {

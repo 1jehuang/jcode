@@ -301,6 +301,7 @@ fn test_remote_auth_model_change_does_not_add_a_third_visible_line() {
             model: "gpt-5.6-sol".to_string(),
             provider_name: Some("OpenAI".to_string()),
             error: None,
+            resolved_credential: None,
         },
         &mut remote,
     );

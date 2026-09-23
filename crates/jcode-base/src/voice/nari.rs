@@ -26,6 +26,14 @@ const END: &str = "jcode_end";
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const FINAL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const NARI_PCM_CHUNK_SAMPLES: usize = 6400;
+/// Published `qwen3-asr-fast` list price per input audio hour.
+/// Source: <https://docs.narilabs.com/models-and-pricing> (checked 2026-09-22).
+pub const NARI_USD_PER_AUDIO_HOUR: f64 = 0.12;
+
+/// Estimated Nari transcription cost for the given streamed audio duration.
+pub fn estimated_transcription_usd(audio: Duration) -> f64 {
+    audio.as_secs_f64() / 3600.0 * NARI_USD_PER_AUDIO_HOUR
+}
 
 /// Full aggregate revisions, not deltas. Finished is emitted exactly once by run().
 #[derive(Clone, PartialEq, Eq)]
@@ -33,6 +41,109 @@ pub enum NariEvent {
     Started,
     Transcript(String),
     Finished(Result<String, VoiceError>),
+}
+
+/// Describes the assistant name in context. Qwen3-ASR uses the prompt as
+/// biasing context, and a descriptive sentence with example addresses beats a
+/// bare term list: on noisy synthetic speech it doubled exact "Jev" (12/18 vs
+/// 6/18, repeatable), recovering "Jen", "Gem", "Kim" and dropped names.
+const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
+Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
+Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
+Other names: ";
+
+/// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
+/// "Jev" is covered by `NAME_CONTEXT`, so it is deduplicated from this list.
+const BUILTIN_VOCABULARY: &[&str] = &[
+    "Jev",
+    "Jcode",
+    "Jcode Desktop",
+    "Handterm",
+    "Nari",
+    "TypeSafe",
+    "GPUI",
+    "Wayland",
+    "niri",
+    "Copilot",
+    "swarm",
+    "hot reload",
+    "Claude",
+    "Codex",
+    "OpenAI",
+    "Anthropic",
+];
+/// Mishearings the recognition prompt cannot fix, because the audio is
+/// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
+/// transcript revision as whole-word, case-insensitive replacements.
+const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
+    (r"jeff", "Jev"),
+    (r"j[\s.-]?code", "Jcode"),
+    (r"jay[\s-]?code", "Jcode"),
+];
+
+fn corrections() -> &'static [(regex::Regex, &'static str)] {
+    static CORRECTIONS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    CORRECTIONS.get_or_init(|| {
+        BUILTIN_CORRECTIONS
+            .iter()
+            .map(|(pattern, fixed)| {
+                let pattern = format!(r"(?i)\b{pattern}\b");
+                (
+                    regex::Regex::new(&pattern).expect("valid correction"),
+                    *fixed,
+                )
+            })
+            .collect()
+    })
+}
+
+/// Apply product-name corrections to a transcript.
+pub fn correct_transcript(text: &str) -> String {
+    corrections()
+        .iter()
+        .fold(text.to_owned(), |text, (pattern, fixed)| {
+            pattern.replace_all(&text, *fixed).into_owned()
+        })
+}
+
+/// Conservative bound on the recognition context sent per session.
+const MAX_PROMPT_CHARS: usize = 1000;
+
+/// Recognition context: built-in names plus `[dictation] vocabulary`,
+/// deduplicated case-insensitively and bounded without splitting a term.
+pub fn recognition_prompt() -> String {
+    build_prompt(&crate::config::config().dictation.vocabulary)
+}
+
+fn build_prompt(extra: &[String]) -> String {
+    let mut seen = HashSet::from(["jev".to_string()]);
+    let mut prompt = String::new();
+    let terms = BUILTIN_VOCABULARY
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str));
+    for term in terms {
+        if term.chars().any(char::is_control) {
+            continue;
+        }
+        let term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        let term = term.trim_matches(',').trim();
+        if term.is_empty() {
+            continue;
+        }
+        if !seen.insert(term.to_lowercase()) {
+            continue;
+        }
+        let sep = if prompt.is_empty() { "" } else { ", " };
+        let used = NAME_CONTEXT.chars().count() + prompt.chars().count() + 1;
+        if used + sep.len() + term.chars().count() > MAX_PROMPT_CHARS {
+            break;
+        }
+        prompt.push_str(sep);
+        prompt.push_str(term);
+    }
+    format!("{NAME_CONTEXT}{prompt}.")
 }
 
 pub fn nari_api_key() -> Option<String> {
@@ -44,6 +155,13 @@ pub fn nari_api_key() -> Option<String> {
 /// Chunks must contain 1..=6400 samples. Backpressure is intentional.
 pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
     mpsc::channel(16)
+}
+
+/// Microphone-owned channel. Holds 100 ms chunks for longer than the setup
+/// timeout so audio captured during the handshake is buffered, never dropped.
+#[cfg(feature = "voice-capture")]
+pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
+    mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
 }
 
 pub(super) async fn cancelled(cancel: &AtomicBool) {
@@ -71,6 +189,14 @@ impl NariSession {
         key: &str,
         cancel: Arc<AtomicBool>,
     ) -> Result<Self, VoiceError> {
+        Self::connect_with_prompt(url, key, &recognition_prompt(), cancel).await
+    }
+    pub(super) async fn connect_with_prompt(
+        url: &str,
+        key: &str,
+        prompt: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, VoiceError> {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
@@ -96,11 +222,15 @@ impl NariSession {
                 tokio_tungstenite::connect_async_with_config(request, Some(config), false)
                     .await
                     .map_err(handshake_error)?;
-            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en"}})).await?;
+            super::timing::mark("nari websocket connected");
+            send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
                 let event = receive(&mut socket).await?;
                 match event["type"].as_str() {
-                    Some("session.configured") => return Ok(socket),
+                    Some("session.configured") => {
+                        super::timing::mark("nari session configured");
+                        return Ok(socket);
+                    }
                     Some("error") => return Err(provider_error(&event)),
                     _ => {}
                 }
@@ -112,18 +242,6 @@ impl NariSession {
             result = timeout(IO_TIMEOUT, setup) => result.map_err(|_| VoiceError::Timeout)??,
         };
         Ok(Self { socket, cancel })
-    }
-
-    // Supervise provider failures while native permission/setup is in progress.
-    #[cfg(feature = "voice-capture")]
-    pub(super) async fn wait_for_error(&mut self) -> VoiceError {
-        loop {
-            match receive(&mut self.socket).await {
-                Ok(event) if event["type"] == "error" => return provider_error(&event),
-                Ok(_) => {}
-                Err(error) => return error,
-            }
-        }
     }
 
     /// Stream bounded PCM from any source. Callback must be fast and nonblocking.
@@ -156,6 +274,9 @@ impl NariSession {
         let sender = async move {
             let mut samples = 0usize;
             while let Some(chunk) = pcm.recv().await {
+                if samples == 0 {
+                    super::timing::mark("first audio chunk sent to nari");
+                }
                 if chunk.is_empty() || chunk.len() > NARI_PCM_CHUNK_SAMPLES {
                     return Err(VoiceError::InvalidAudio);
                 }
@@ -179,6 +300,7 @@ impl NariSession {
         };
         tokio::pin!(sender);
         let mut sent = false;
+        let mut first_text = false;
         let mut state = TranscriptState::default();
         // Capture owns its normal five-minute stop. Allow queued PCM and filter
         // tail to drain rather than racing that stop with a network timeout.
@@ -194,6 +316,7 @@ impl NariSession {
                 incoming = receive(&mut source) => {
                     let incoming = incoming?;
                     if state.apply(&incoming, stopping.load(Ordering::SeqCst))? {
+                        if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
                     }
                     if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() { return Ok(state.text()); }
@@ -261,12 +384,15 @@ struct TranscriptState {
 }
 impl TranscriptState {
     fn text(&self) -> String {
-        self.items
-            .iter()
-            .map(|(_, text)| text.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+        correct_transcript(
+            &self
+                .items
+                .iter()
+                .map(|(_, text)| text.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
     fn apply(&mut self, event: &Value, stopping: bool) -> Result<bool, VoiceError> {
         let kind = event["type"].as_str().ok_or(VoiceError::InvalidResponse)?;
@@ -335,6 +461,54 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn product_name_mishearings_are_corrected() {
+        assert_eq!(
+            correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
+            "Hey, Jev. Open the Jcode desktop and ask Jev's route."
+        );
+        assert_eq!(
+            correct_transcript("J code, j-code, Jay code"),
+            "Jcode, Jcode, Jcode"
+        );
+        // Whole words only.
+        assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
+        assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
+    }
+
+    #[test]
+    fn transcription_cost_uses_published_hourly_rate() {
+        assert_eq!(estimated_transcription_usd(Duration::from_secs(3600)), 0.12);
+        assert!((estimated_transcription_usd(Duration::from_secs(30)) - 0.001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn prompt_merges_user_terms_dedupes_and_stays_bounded() {
+        let prompt = build_prompt(&[
+            "  Alice   Zhang ".into(),
+            "jcode".into(),
+            "".into(),
+            "bad\nterm".into(),
+            ",Kubernetes,".into(),
+        ]);
+        assert!(prompt.starts_with(NAME_CONTEXT));
+        assert!(prompt.contains("sounds like Jeff. Write it as Jev."));
+        let terms = prompt.strip_prefix(NAME_CONTEXT).unwrap();
+        assert!(terms.starts_with("Jcode, Jcode Desktop, Handterm"));
+        assert!(terms.ends_with(", Alice Zhang, Kubernetes."));
+        assert!(!terms.contains("Jev"), "Jev lives in the context: {terms}");
+        assert_eq!(terms.matches("code").count(), 2, "jcode deduped: {prompt}");
+        assert!(!prompt.contains("bad"));
+        let long = build_prompt(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
+        assert!(long.chars().count() <= MAX_PROMPT_CHARS);
+        assert!(
+            long.strip_prefix(NAME_CONTEXT)
+                .unwrap()
+                .trim_end_matches('.')
+                .split(", ")
+                .all(|t| t.starts_with("term") || BUILTIN_VOCABULARY.contains(&t))
+        );
+    }
     async fn server(events: Vec<Value>) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
@@ -345,6 +519,12 @@ mod tests {
                 serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
             assert_eq!(config["type"], "session.configure");
             assert_eq!(config["session"]["model"], "qwen3-asr-fast");
+            assert!(
+                config["session"]["prompt"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(NAME_CONTEXT)
+            );
             ws.send(Message::Text(
                 json!({"type":"session.configured"}).to_string(),
             ))

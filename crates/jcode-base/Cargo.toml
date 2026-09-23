@@ -119,7 +119,8 @@ jcode-tool-core = { path = "../jcode-tool-core" }
 jcode-tool-types = { path = "../jcode-tool-types" }
 jcode-side-panel-types = { path = "../jcode-side-panel-types" }
 
-# Gzip decoding (used by provider import/helpers)
+# Gzip/deflate decoding (provider import helpers, browser extension unzip)
+flate2 = "1"
 tempfile = "3"
 qrcode = { version = "0.14.1", default-features = false }
 
@@ -160,3 +161,7 @@ global-hotkey = "0.7"
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
+
+[[example]]
+name = "voice_startup_profile"
+required-features = ["voice-capture"]

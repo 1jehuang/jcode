@@ -1381,9 +1381,19 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
 
     assert!(rendered.contains("✓ todo"), "{rendered}");
     assert!(rendered.contains("pelican-bike"), "{rendered}");
+    // The plan intent renders inline with the understanding state on a single
+    // ellipsized line (2e847827f). The full text lives in the todo payload.
+    let intent_line = rendered
+        .lines()
+        .find(|line| line.contains("Intent clear:"))
+        .expect("batched todo card should show the plan intent");
+    let shown = intent_line
+        .split_once("Intent clear:")
+        .map(|(_, rest)| rest.trim().trim_end_matches('…'))
+        .unwrap_or_default();
     assert!(
-        compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo plan intention was truncated:\n{rendered}"
+        shown.len() > 20 && OBJECTIVE.starts_with(shown),
+        "batched todo plan intent should show the objective prefix:\n{rendered}"
     );
     // Compact transcript cards show the goal's quality assessments rather than
     // repeating its potentially long feedback-loop prose. The full prose remains

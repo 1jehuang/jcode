@@ -165,10 +165,10 @@ mod diff_display_mode_tests {
 pub enum OverscrollStatusMode {
     /// Never show the status line.
     Off,
-    /// Always show the status line below the input.
-    On,
-    /// Elastic reveal: show it briefly when scrolling past the bottom (default).
+    /// Always show the status line below the input (default).
     #[default]
+    On,
+    /// Elastic reveal: show it briefly when scrolling past the bottom.
     Overscroll,
 }
 

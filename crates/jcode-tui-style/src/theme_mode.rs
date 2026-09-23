@@ -252,10 +252,10 @@ pub fn adapt_buffer_for_display(buf: &mut Buffer) {
 
 /// The same ordering for a foreground patched outside a full-frame redraw.
 pub fn adapt_foreground_for_display(color: Color, background: Color) -> Color {
-    if let Some(palette) = crate::palette::configured_palette() {
-        if let Some(chosen) = crate::palette::configured_native_color(&palette, color) {
-            return chosen;
-        }
+    if let Some(palette) = crate::palette::configured_palette()
+        && let Some(chosen) = crate::palette::configured_native_color(&palette, color)
+    {
+        return chosen;
     }
     adapt_foreground_for_theme(color, background)
 }

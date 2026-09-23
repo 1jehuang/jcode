@@ -654,3 +654,26 @@ test("sendSystemReminder writes hidden content without waiting for acceptance", 
     await server.close();
   }
 });
+
+test("run retains an abnormal stop without leaking another session's reason", async () => {
+  const server = await startMockHarness({
+    onRequest(request, send) {
+      if (request.req === "send_message") {
+        send({ v: 1, reply_to: request.id, ev: "ok" });
+        send({ v: 1, ev: "message_accepted", session_id: "s1" });
+        send({ v: 1, ev: "turn_stopped", session_id: "other", reason: "crash", message: "Other session" });
+        send({ v: 1, ev: "turn_stopped", session_id: "s1", reason: "interrupted", message: "Cancelled by user" });
+        send({ v: 1, ev: "turn_done", session_id: "s1" });
+      }
+    },
+  });
+  const client = await JcodeClient.connect({ socketPath: server.socketPath });
+  try {
+    const result = await client.run("s1", "hello");
+    assert.equal(result.stopReason, "interrupted");
+    assert.equal(result.stopMessage, "Cancelled by user");
+  } finally {
+    client.close();
+    await server.close();
+  }
+});

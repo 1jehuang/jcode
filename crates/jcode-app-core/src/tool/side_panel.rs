@@ -38,7 +38,7 @@ impl Tool for SidePanelTool {
     }
 
     fn description(&self) -> &str {
-        "Legacy panel management. Prefer panel to spawn, update, focus, close or list desktop panels. Load accepts Markdown or PDF files. Write and append accept Markdown only."
+        "Legacy panel management. Prefer panel. Load accepts Markdown or PDF files."
     }
 
     fn parameters_schema(&self) -> Value {

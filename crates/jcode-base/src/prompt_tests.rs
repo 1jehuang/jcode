@@ -48,7 +48,8 @@ fn test_skill_prompt_integration() {
     let prompt = build_system_prompt(Some(skill_prompt), &[]);
 
     // The prompt should contain our default system prompt
-    assert!(prompt.contains("Your name is Jcode."));
+    // Identity line reworded in 24838926e ("docs: refine base agent guidance").
+    assert!(prompt.contains("You are Jcode."));
 
     // The prompt should contain the skill prompt
     assert!(prompt.contains(skill_prompt));

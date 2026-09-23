@@ -55,6 +55,26 @@ Credential discovery order is:
 jcode owns the full runtime path itself: auth, refresh, request shaping, tool
 compatibility, and transport.
 
+#### Anthropic API-key setup
+
+The direct API-key route is separate from both a Claude subscription login and
+OpenRouter. In the TUI, run `/login anthropic-api` and enter your key in the
+login prompt, not in an agent message. The CLI equivalent is
+`jcode login --provider anthropic-api`. You can also configure
+`ANTHROPIC_API_KEY` in the process environment. Login persists the key in
+`anthropic.env` inside jcode's configuration directory.
+
+To explicitly select the direct API route, use
+`/model claude-api:claude-opus-5-5`. The Claude subscription route uses
+`claude-oauth:` instead. These route prefixes avoid accidentally selecting an
+OpenRouter entry for the same model.
+
+Configured direct Anthropic routes discover models from Anthropic's Models API.
+New releases do not require a bundled-list update once the authenticated catalog
+advertises them. API-key and OAuth availability can differ, so a model advertised
+for one route does not establish access on the other. Without credentials, jcode
+can only show its bundled fallback list, not verify account availability.
+
 #### Claude OAuth direct API compatibility
 Claude Code OAuth tokens can be used directly against the Messages API, but only
 if the request matches the Claude Code "OAuth contract". jcode applies this
@@ -149,6 +169,39 @@ jcode appends `/responses` itself, derives the WebSocket and `/compact`
 endpoints from the same base, and also points the `/models` catalog probe at it.
 The override is ignored in ChatGPT/Codex OAuth mode (that backend is fixed), and
 a malformed value is logged and ignored rather than breaking requests.
+
+### Banked Codex usage resets
+
+`/reset` (or `/reset usage limits openai`) checks the active OpenAI OAuth account's banked
+resets and shows the selected reset, account, and expiry. It selects the
+soonest-expiring available reset. Nothing is spent until you run
+`/reset usage limits openai confirm`. Use `/reset usage limits openai cancel`
+to dismiss the pending confirmation. API keys cannot redeem these resets.
+
+When the active ChatGPT account is fully limited and has a banked reset, the
+TUI notification shows the reset count and each known expiry in UTC, followed by
+`/reset usage limits openai`. The hint wraps on narrow terminals. Expiries that
+cannot be retrieved are explicitly marked unknown. Credit details are fetched
+read-only alongside usage data and are also listed in the confirmation review.
+This uses fresh, account-matched quota data and respects OpenAI's `allowed`
+flag rather than suggesting a reset merely because a percentage rounds to 100%.
+Hard quota failures trigger a read-only refresh. The hint never redeems a reset.
+
+The implementation follows [Codex's backend client](https://github.com/openai/codex/blob/5c5308fc9a9ee789049d646ef11e5400384b9c6f/codex-rs/backend-client/src/client/rate_limit_resets.rs):
+
+- Read: `GET https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`
+- Redeem: `POST` to that URL plus `/consume`, with JSON `credit_id` and a UUID
+  `redeem_request_id`.
+- Both requests use the ChatGPT OAuth bearer token and `chatgpt-account-id`
+  when available. This is the Codex backend contract, not a public OpenAI API-key
+  endpoint, and availability depends on the account.
+- Confirmation pins the original account and credit. Retrying a failed or
+  timed-out confirmation reuses the same redemption UUID, since the original
+  request may already have succeeded. Check `/usage` before abandoning an
+  uncertain redemption. Pending confirmations are session-local, not persisted.
+- A reset spends one earned, single-use grant. It does not purchase credits,
+  increase the subscription's limits, or bypass OpenAI's eligibility rules.
+  See [OpenAI's banked reset explanation](https://help.openai.com/en/articles/20001498-how-banked-codex-resets-work).
 
 ### Troubleshooting
 - Claude 401/auth errors: run `jcode login --provider claude`.
