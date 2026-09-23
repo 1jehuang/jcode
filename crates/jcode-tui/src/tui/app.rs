@@ -639,6 +639,25 @@ pub(super) struct HistoryScrollAnchor {
     pub base_total: usize,
 }
 
+/// Resize anchor captured against the pre-resize geometry.
+///
+/// The stored `scroll_offset` is a wrapped line index, which only means
+/// something for the width that produced it. When a resize rewraps the
+/// transcript while the reader is paused in history, the reading position is
+/// captured in content coordinates instead, and the next frame resolves it
+/// against the new geometry so the same message stays under the reader
+/// (issue #1412, persistent half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingResizeAnchor {
+    pub anchor: jcode_tui_messages::Anchor,
+    /// Viewport width the anchor was captured at; the frame that resolves it
+    /// is laid out at a different one.
+    pub captured_width: u16,
+    /// Resolved row the screen was showing when the anchor was captured, used
+    /// to tell the stale published value from the post-resize one.
+    pub captured_scroll: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OvernightAutoPokeFingerprint {
     pub run_id: String,
@@ -860,6 +879,12 @@ pub struct App {
     /// viewport to the content the reader was looking at so the prepend does not
     /// visibly jump. Resolved into `scroll_offset` by the next render frame.
     pending_history_anchor: Option<HistoryScrollAnchor>,
+    /// Set when a resize rewraps the transcript while the reader is paused in
+    /// history. Holds the reading position in content coordinates (which
+    /// message, which row inside it) captured against the pre-resize geometry,
+    /// and is resolved against each new frame until the renderer reports that
+    /// it applied it. See `jcode_tui_messages::anchor`.
+    pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see

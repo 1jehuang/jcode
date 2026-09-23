@@ -361,8 +361,9 @@ impl App {
         if positions.is_empty() {
             return;
         }
-        // An explicit jump should win over a still-settling history prepend.
+        // An explicit jump should win over a still-settling anchor.
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -407,6 +408,7 @@ impl App {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         let current = self.scroll_offset;
 
@@ -434,6 +436,7 @@ impl App {
             return;
         }
         self.pending_history_anchor = None;
+        self.pending_resize_anchor = None;
 
         // positions are in document order (top to bottom), we want most-recent first
         let target_idx = positions.len().saturating_sub(rank);

@@ -458,6 +458,12 @@ pub trait TuiState {
     fn terminal_clear_collapsed(&self) -> bool {
         false
     }
+    /// Content-coordinate reading position captured before a resize rewrapped
+    /// the transcript. The renderer resolves it against the frame it is drawing
+    /// so the anchored message stays under the reader.
+    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::Anchor> {
+        None
+    }
     /// When older compacted history is being loaded in, this is the reader's
     /// captured distance (in wrapped lines) from the bottom of the transcript.
     /// The renderer uses it to keep the viewport anchored to the same content as
