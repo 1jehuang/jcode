@@ -388,3 +388,39 @@ fn terminal_launcher_offers_candidates() {
         "terminal candidate list should never be empty"
     );
 }
+
+/// `trigger()` must persist the idle status, not just set it in memory.
+///
+/// The run loop re-reads state from disk through `AmbientManager::new()` on
+/// every iteration, so an in-memory-only status flip is invisible to
+/// `should_run()`. That shipped: `jcode ambient trigger` printed "Ambient cycle
+/// triggered" and returned 0 while the loop woke, reloaded the still-`Scheduled`
+/// status from disk, logged "not time to run", and slept again. The cycle never
+/// ran and nothing surfaced the discrepancy.
+#[tokio::test]
+async fn trigger_persists_idle_status_to_disk() {
+    use crate::ambient::{AmbientState, AmbientStatus};
+
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = EnvVarGuard::set_path("JCODE_HOME", temp.path());
+
+    // Put a scheduled wake far enough out that should_run() is false.
+    let mut state = AmbientState::default();
+    state.status = AmbientStatus::Scheduled {
+        next_wake: chrono::Utc::now() + chrono::Duration::hours(4),
+    };
+    state.save().expect("seed scheduled state");
+
+    let runner = AmbientRunnerHandle::new(Arc::new(crate::safety::SafetySystem::new()));
+    runner.trigger().await;
+
+    // Re-read from disk exactly as the run loop does.
+    let reloaded = AmbientState::load().expect("reload state");
+    assert!(
+        matches!(reloaded.status, AmbientStatus::Idle),
+        "trigger() must persist Idle so the run loop's disk reload sees it; \
+         found {:?}",
+        reloaded.status
+    );
+}

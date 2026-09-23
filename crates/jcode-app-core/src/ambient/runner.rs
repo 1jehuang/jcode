@@ -26,6 +26,17 @@ use jcode_agent_runtime::{SoftInterruptMessage, SoftInterruptQueue, SoftInterrup
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 
+/// Idle polling cadence, in seconds.
+///
+/// This serves two distinct roles below, which is why it appears with both
+/// `.max()` and `clamp()`:
+///
+/// * When ambient is disabled, it is the *ceiling* on how long the loop sleeps,
+///   so the runner still wakes regularly to service the scheduled-task queue.
+/// * When ambient is enabled, it is the *floor* on the computed interval. The
+///   interval comes from `max_interval_minutes`, which nothing validates as
+///   non-zero, so the floor keeps a `max_interval_minutes = 0` config from
+///   turning the loop into a zero-second busy spin.
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
 /// Re-read enabled on each loop iteration, without overriding an explicit stop.
@@ -136,13 +147,26 @@ impl AmbientRunnerHandle {
 
     /// Manually trigger an ambient cycle (returns immediately, cycle runs async).
     pub async fn trigger(&self) {
-        // Set status to idle so should_run returns true
+        // Set status to idle so should_run returns true.
+        //
+        // This must be persisted, not just flipped in memory: the run loop
+        // re-reads state from disk via `AmbientManager::new()` on every
+        // iteration, so an unsaved in-memory status is invisible to
+        // `should_run()` and the trigger is silently ignored. The loop would
+        // wake, reload the still-`Scheduled` status, log "not time to run",
+        // and go back to sleep while the CLI reported success.
         let mut state = self.inner.state.write().await;
         if matches!(
             state.status,
             AmbientStatus::Scheduled { .. } | AmbientStatus::Idle
         ) {
             state.status = AmbientStatus::Idle;
+            if let Err(e) = state.save() {
+                logging::warn(&format!(
+                    "Ambient trigger: failed to persist idle status, the run loop may ignore \
+                     this trigger: {e}"
+                ));
+            }
         }
         drop(state);
         self.inner.wake_notify.notify_one();
