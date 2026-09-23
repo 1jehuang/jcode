@@ -14,7 +14,7 @@ pub(super) fn find_known_commands(input: &str, names: &[&str]) -> Vec<SlashComma
     let mut matches = Vec::new();
     scan_slash_tokens(input, |start, end| {
         let token = &input[start..end];
-        if names.iter().any(|name| *name == token) {
+        if names.contains(&token) {
             matches.push(SlashCommandMatch {
                 start,
                 name_end: end,
