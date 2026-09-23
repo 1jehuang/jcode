@@ -6,7 +6,7 @@
 //! `jcode_base::provider::external` at startup.
 //!
 //! Pure header/attribution helpers that base's usage/sidecar code needs
-//! (`apply_oauth_attribution_headers`, `CLAUDE_CLI_USER_AGENT`, API-key
+//! (`apply_oauth_attribution_headers`, `claude_cli_user_agent`, API-key
 //! loading, cache-TTL toggles) stay in `jcode_base::provider::anthropic`;
 //! this crate re-uses them from there.
 
@@ -28,8 +28,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use jcode_base::provider::anthropic::{
-    AVAILABLE_MODELS, AnthropicCredentialMode, CLAUDE_CLI_USER_AGENT,
-    apply_oauth_attribution_headers, is_cache_ttl_1h, load_anthropic_api_key,
+    AVAILABLE_MODELS, AnthropicCredentialMode, apply_oauth_attribution_headers,
+    claude_cli_user_agent, is_cache_ttl_1h, load_anthropic_api_key,
 };
 #[cfg(test)]
 use jcode_base::provider::anthropic::{OAUTH_BETA_HEADERS, effectively_1m};
@@ -358,7 +358,7 @@ async fn ensure_oauth_preflight(
     );
     headers.insert(
         reqwest::header::USER_AGENT,
-        reqwest::header::HeaderValue::from_static(CLAUDE_CLI_USER_AGENT),
+        reqwest::header::HeaderValue::from_static(claude_cli_user_agent()),
     );
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -415,7 +415,7 @@ async fn ensure_oauth_preflight(
             rate_limit_tier: "default_claude_ai".to_string(),
             first_token_time: 1_740_976_801_491,
             email: email_address,
-            app_version: "2.1.280".to_string(),
+            app_version: jcode_provider_core::claude_code_version().to_string(),
         },
         forced_variations: Default::default(),
         forced_features: Vec::new(),
@@ -2086,7 +2086,7 @@ async fn stream_response(
         let beta_header = reasoning_request::with_binding_beta(&beta_header, &request.thinking);
         req = apply_oauth_attribution_headers(
             req.header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", CLAUDE_CLI_USER_AGENT)
+                .header("User-Agent", claude_cli_user_agent())
                 .header("anthropic-beta", beta_header),
             oauth_session_id,
         );

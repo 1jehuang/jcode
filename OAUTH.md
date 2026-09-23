@@ -109,6 +109,14 @@ Notes:
 - If the OAuth token expires, refresh via the Claude OAuth refresh endpoint.
 - Without the identity line and allow-listed tool names, the API will reject
   OAuth requests even if the token is otherwise valid.
+- Anthropic gates newer models on a minimum Claude Code version and rejects an
+  older identity with `400 claude_code_version_too_old` (for example
+  `claude-opus-5-5` requires 2.1.280). jcode presents one version in the
+  `claude-cli/<version>` User-Agent, the `cc_version` billing attribution and
+  the OAuth preflight. If the floor moves before a jcode release, set
+  `JCODE_CLAUDE_CODE_VERSION` (for example `JCODE_CLAUDE_CODE_VERSION=2.1.281`)
+  to the version named in the error. Only a dotted numeric version is accepted;
+  anything else falls back to the built-in default.
 
 ### Deprecated Claude CLI transport
 The old Claude CLI shell-out path is deprecated and should only be used for
