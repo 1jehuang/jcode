@@ -131,23 +131,33 @@ impl Config {
     }
 
     /// Snapshot the removals declared for the active config path.
-    fn clone_declared_removals() -> Vec<String> {
+    pub(crate) fn clone_declared_removals() -> Vec<String> {
         let Some(path) = Self::path() else {
             return Vec::new();
         };
         declared_removals().get(&path).cloned().unwrap_or_default()
     }
 
-    /// Drop the removals declared for the active config path.
+    /// Drop exactly the removals a save applied, for the active config path.
     ///
-    /// Called only after a save actually succeeded: a declaration belongs to
-    /// the next *successful* save, so a failed write must leave it in place for
-    /// a later save to apply.
-    fn clear_declared_removals() {
+    /// Called only after a save actually succeeded, and only with the snapshot
+    /// that save wrote. A declaration made *after* the snapshot (for example a
+    /// concurrent revocation) is not in `removals`, so it stays pending for the
+    /// next save: dropping the whole entry here would silently discard it and
+    /// let the next preserving save keep an entry the user just revoked. A
+    /// failed write never reaches this call, so a declaration survives it for a
+    /// later successful save to apply.
+    pub(crate) fn consume_declared_removals(removals: &[String]) {
         let Some(path) = Self::path() else {
             return;
         };
-        declared_removals().remove(&path);
+        let mut pending = declared_removals();
+        if let Some(entry) = pending.get_mut(&path) {
+            entry.retain(|declared| !removals.iter().any(|applied| applied == declared));
+            if entry.is_empty() {
+                pending.remove(&path);
+            }
+        }
     }
 
     /// Removals currently pending for the active config path (inspection only).
@@ -161,14 +171,16 @@ impl Config {
 
     /// Save config to file
     pub fn save(&self) -> anyhow::Result<()> {
-        // Snapshot the declaration for this write and only drop it once the
-        // write has actually landed: a declaration belongs to the next
-        // *successful* save, so a failed write must leave it in place for a
-        // later save to apply (otherwise the declared key would never be
-        // deleted after the failure).
+        // Snapshot the declaration for this write and only consume that
+        // snapshot once the write has actually landed: a declaration belongs to
+        // the next *successful* save, so a failed write must leave it in place
+        // for a later save to apply (otherwise the declared key would never be
+        // deleted after the failure). Consuming only the snapshot also means a
+        // removal declared *after* it (a concurrent revocation) is not dropped
+        // by this save and is applied by the next one.
         let removals = Self::clone_declared_removals();
         self.save_with_removals(&removals)?;
-        Self::clear_declared_removals();
+        Self::consume_declared_removals(&removals);
         Ok(())
     }
 
