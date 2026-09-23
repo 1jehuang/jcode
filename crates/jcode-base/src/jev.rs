@@ -235,7 +235,32 @@ impl JevClient {
         Ok(value)
     }
 
+    /// Decisions requests are side-effect-free classifications, so transient
+    /// overload responses (429/502/503/504/529) are retried with a short bounded
+    /// backoff on the same provider and account. Auth, billing, redirect, and
+    /// other failures are never retried and never fall back to another account.
     async fn send(&self, endpoint: &str, body: Vec<u8>) -> Result<Value> {
+        let mut attempt = 0;
+        loop {
+            let response = self.send_once(endpoint, body.clone()).await?;
+            let status = response.status().as_u16();
+            if attempt < TRANSIENT_RETRY_DELAYS.len() && is_transient_status(status) {
+                let delay = retry_after(&response).unwrap_or(TRANSIENT_RETRY_DELAYS[attempt]);
+                attempt += 1;
+                crate::logging::info(&format!(
+                    "Jev {} returned HTTP {status}; retry {attempt}/{} in {}ms",
+                    self.provider.name(),
+                    TRANSIENT_RETRY_DELAYS.len(),
+                    delay.as_millis()
+                ));
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            return read_response(response, MAX_RESPONSE_BYTES).await;
+        }
+    }
+
+    async fn send_once(&self, endpoint: &str, body: Vec<u8>) -> Result<Response> {
         let mut request = self
             .client
             .post(endpoint)
@@ -252,11 +277,40 @@ impl JevClient {
                 },
             );
         }
-        let response = request.send().await.map_err(|_| {
+        request.send().await.map_err(|_| {
             anyhow!("Jev decision request failed or timed out; check the selected provider")
-        })?;
-        read_response(response, MAX_RESPONSE_BYTES).await
+        })
     }
+}
+
+#[cfg(not(test))]
+const TRANSIENT_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(600), Duration::from_millis(1800)];
+#[cfg(test)]
+const TRANSIENT_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(1), Duration::from_millis(1)];
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
+
+fn is_transient_status(status: u16) -> bool {
+    matches!(status, 429 | 502 | 503 | 504 | 529)
+}
+
+/// Honor a short numeric Retry-After. Long waits fail fast instead of
+/// stalling the caller beyond the bounded retry budget.
+fn retry_after(response: &Response) -> Option<Duration> {
+    let secs: u64 = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let delay = Duration::from_secs(secs);
+    if cfg!(test) {
+        return Some(Duration::from_millis(1));
+    }
+    (delay <= MAX_RETRY_AFTER).then_some(delay)
 }
 
 fn client_builder() -> reqwest::ClientBuilder {
@@ -1063,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn voice_typesafe_errors_never_retry_or_return_a_partial_report() {
-        for status in [401, 402, 403, 429, 500, 302] {
+        for status in [401, 402, 403, 500, 302] {
             let (base, worker) = mock_server(vec![(
                 status,
                 "private-error test-route-secret".into(),
@@ -1275,7 +1329,7 @@ mod tests {
             .map(|q| (q.id.clone(), json!({"type": "noul", "noul": 0.01})))
             .collect();
         let mut failures = vec![
-            (503, "{}".into(), vec![]),
+            (500, "{}".into(), vec![]),
             (200, json!({"answers": {}}).to_string(), vec![]),
         ];
         for invalid in [
@@ -1457,8 +1511,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transient_overload_is_retried_on_same_route_then_succeeds() {
+        for status in [429, 502, 503, 504, 529] {
+            let (base, worker) = mock_server(vec![
+                (status, "{}".into(), vec![("Retry-After".into(), "1".into())]),
+                (status, "{}".into(), vec![]),
+                (200, response().to_string(), vec![]),
+            ]);
+            let client = mock_client(&base, JevProvider::OpenRouter);
+            let value = client.evaluate(json!("state"), questions()).await.unwrap();
+            assert_eq!(value, response());
+            let requests = worker.join().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert!(requests.iter().all(|r| r.starts_with("POST /v1/decisions ")));
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_overload_fails_after_bounded_retries_without_echo() {
+        for status in [429, 529] {
+            let replies = (0..=TRANSIENT_RETRY_DELAYS.len())
+                .map(|_| (status, "private-provider-error test-route-secret".into(), vec![]))
+                .collect();
+            let (base, worker) = mock_server(replies);
+            let client = mock_client(&base, JevProvider::OpenRouter);
+            let detail = format!(
+                "{:#}",
+                client
+                    .evaluate(json!("private-state"), questions())
+                    .await
+                    .unwrap_err()
+            );
+            assert!(detail.contains(&status.to_string()));
+            assert!(detail.contains("overloaded"));
+            assert!(!detail.contains("test-route-secret"));
+            assert!(!detail.contains("private-state"));
+            assert_eq!(
+                worker.join().unwrap().len(),
+                TRANSIENT_RETRY_DELAYS.len() + 1
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn auth_billing_and_redirect_errors_are_redacted_and_never_retried() {
-        for status in [401, 402, 403, 404, 429, 500, 529, 302, 307] {
+        for status in [401, 402, 403, 404, 500, 302, 307] {
             let headers = vec![("Location".into(), "http://127.0.0.1:1/never-follow".into())];
             let (base, worker) = mock_server(vec![(
                 status,
