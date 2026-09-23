@@ -2783,11 +2783,14 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
-            } else if !app.input.is_empty() {
-                // First Ctrl+C: clear the input box
+            } else if !app.input.is_empty() || !app.pending_images.is_empty() {
+                // First Ctrl+C: clear the input box and images
                 app.input.clear();
                 app.pending_images.clear();
                 app.cursor_pos = 0;
+                app.reset_tab_completion();
+                app.sync_model_picker_preview_from_input();
+                app.quit_pending = Some(std::time::Instant::now());
                 app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
                 // Second Ctrl+C (input already empty): proceed with quit
