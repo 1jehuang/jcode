@@ -1111,34 +1111,56 @@ pub(super) fn gather_git_info() -> Option<GitInfo> {
 
     const TTL: Duration = Duration::from_secs(5);
 
-    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-        if let Some((ts, cached, refreshing)) = guard.as_mut() {
-            if ts.elapsed() < TTL {
-                return cached.clone();
+    // Tests never probe the live repository. The probe runs on a background
+    // thread and writes its answer into this process-global cache, so the
+    // first test to call this gets `None` while every later test in the same
+    // binary silently inherits the developer's real branch and dirty counts.
+    // That made frame assertions depend on how many tests ran before them and
+    // on whether the checkout happened to be clean.
+    //
+    // Tests that want git data seed it explicitly with
+    // `seed_git_info_cache_for_tests`, which marks the entry `refreshing` and
+    // is honored by the read below.
+    #[cfg(test)]
+    {
+        return GIT_INFO_CACHE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, cached, _)| cached.clone()))
+            .flatten();
+    }
+
+    #[cfg(not(test))]
+    {
+        if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+            if let Some((ts, cached, refreshing)) = guard.as_mut() {
+                if ts.elapsed() < TTL {
+                    return cached.clone();
+                }
+                if *refreshing {
+                    return cached.clone();
+                }
+                let stale = cached.clone();
+                *refreshing = true;
+                std::thread::spawn(|| {
+                    let result = gather_git_info_inner();
+                    if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
+                        *guard = Some((Instant::now(), result, false));
+                    }
+                });
+                return stale;
             }
-            if *refreshing {
-                return cached.clone();
-            }
-            let stale = cached.clone();
-            *refreshing = true;
+
+            *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
             std::thread::spawn(|| {
                 let result = gather_git_info_inner();
                 if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
                     *guard = Some((Instant::now(), result, false));
                 }
             });
-            return stale;
         }
-
-        *guard = Some((backdated_now(TTL + Duration::from_secs(1)), None, true));
-        std::thread::spawn(|| {
-            let result = gather_git_info_inner();
-            if let Ok(mut guard) = GIT_INFO_CACHE.lock() {
-                *guard = Some((Instant::now(), result, false));
-            }
-        });
+        None
     }
-    None
 }
 
 /// Fetch a session's todos plus its goal-level assessments through the same
