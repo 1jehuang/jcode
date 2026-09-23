@@ -111,6 +111,19 @@ pub fn retry_delay(attempt: u32, base_ms: u64, server_hint: Option<Duration>) ->
     server_hint.unwrap_or_else(|| crate::attempt_tracker::retry_backoff_delay(attempt, base_ms))
 }
 
+/// Fallback delay for provider capacity shedding ("overloaded" / HTTP 529)
+/// when the server sends no `Retry-After` hint.
+///
+/// Observed Anthropic overload bursts last tens of seconds, so the normal
+/// ~1s/~2s/~4s transport backoff burns every retry inside the same burst and
+/// still fails. This ladder spreads the same retry budget across the typical
+/// burst duration instead. `attempt` is 1-based (the retry being scheduled).
+pub fn overload_backoff(attempt: u32) -> Duration {
+    const LADDER_SECS: [u64; 3] = [5, 15, 30];
+    let idx = (attempt.saturating_sub(1) as usize).min(LADDER_SECS.len() - 1);
+    Duration::from_secs(LADDER_SECS[idx])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +133,16 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(RETRY_AFTER, value);
         headers
+    }
+
+    #[test]
+    fn overload_backoff_ladder_is_bounded_and_monotonic() {
+        assert_eq!(overload_backoff(0), Duration::from_secs(5));
+        assert_eq!(overload_backoff(1), Duration::from_secs(5));
+        assert_eq!(overload_backoff(2), Duration::from_secs(15));
+        assert_eq!(overload_backoff(3), Duration::from_secs(30));
+        // Saturates instead of growing unbounded or panicking.
+        assert_eq!(overload_backoff(u32::MAX), Duration::from_secs(30));
     }
 
     #[test]

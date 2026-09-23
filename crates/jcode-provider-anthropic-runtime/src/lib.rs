@@ -1936,6 +1936,15 @@ async fn run_stream_with_retries(
                         jcode_base::logging::info(&format!("Transient error, will retry: {}", e));
                     }
                     next_retry_delay = jcode_provider_core::retry_after::retry_after_from_error(&e);
+                    // Anthropic sheds load ("overloaded_error" / HTTP 529) in
+                    // bursts lasting tens of seconds and usually without a
+                    // Retry-After hint. The default ~1s/~2s/~4s backoff spends
+                    // every retry inside the same burst; fall back to a wider
+                    // ladder so the last retry lands after a typical burst.
+                    if next_retry_delay.is_none() && error_str.contains("overloaded") {
+                        next_retry_delay =
+                            Some(jcode_provider_core::retry_after::overload_backoff(attempt + 1));
+                    }
                     last_error = Some(e);
                     continue;
                 }
