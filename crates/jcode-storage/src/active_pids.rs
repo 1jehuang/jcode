@@ -506,7 +506,6 @@ mod tests {
 
         // Idempotent: nothing left to prune on a second pass.
         assert_eq!(prune_active_pids_owned_by(me), (0, 0));
-
     }
 
     /// A marker that cannot be unlinked must not be reported as pruned, since
@@ -538,6 +537,5 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
             .expect("restore write access");
         assert_eq!(prune_active_pids_owned_by(me), (1, 0));
-
     }
 }

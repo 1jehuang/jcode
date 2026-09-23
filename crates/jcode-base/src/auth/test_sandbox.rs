@@ -24,7 +24,12 @@ impl AuthTestSandbox {
             .collect::<Vec<_>>();
 
         for (key, _) in &saved_env {
-            crate::env::remove_var(key);
+            // JCODE_HOME is overwritten below. Never unset it, even briefly: in
+            // that window a concurrent test or a background task from one would
+            // resolve paths under the developer's real ~/.jcode.
+            if key != "JCODE_HOME" {
+                crate::env::remove_var(key);
+            }
         }
 
         std::fs::create_dir_all(temp.path().join("config").join("jcode"))?;
