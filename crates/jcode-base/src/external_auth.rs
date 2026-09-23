@@ -698,6 +698,57 @@ pub async fn run_external_auth_auto_import_candidates(
     Ok(outcome)
 }
 
+/// Whether Jcode already has a usable login for a canonical provider id, as
+/// returned by [`ExternalAuthReviewCandidate::provider_ids`]. API keys do not
+/// count for the OAuth providers, since importing an OAuth login adds to them.
+pub fn provider_connected_in_jcode(status: &auth::AuthStatus, provider_id: &str) -> bool {
+    use auth::AuthState::Available;
+    match provider_id {
+        "claude" => status.anthropic.oauth_state == Available,
+        "openai" => status.openai_has_oauth && status.openai_oauth_state == Available,
+        "gemini" => status.gemini == Available,
+        "antigravity" => status.antigravity == Available,
+        "copilot" => status.copilot == Available,
+        "cursor" => status.cursor == Available,
+        "openrouter" => status.openrouter == Available,
+        _ => false,
+    }
+}
+
+/// Like [`run_external_auth_auto_import_candidates`], but never lets an
+/// imported source shadow a login Jcode already has. Connection state is
+/// re-read at import time, and any selected source that would touch an
+/// already connected provider is skipped and reported.
+pub async fn run_external_auth_import_candidates_preserving_existing(
+    candidates: &[ExternalAuthReviewCandidate],
+    selected: &[usize],
+) -> Result<ExternalAuthAutoImportOutcome> {
+    auth::AuthStatus::invalidate_cache();
+    let status = auth::AuthStatus::check();
+    let mut kept = Vec::new();
+    let mut skipped = Vec::new();
+    for &index in selected {
+        let Some(candidate) = candidates.get(index) else {
+            continue;
+        };
+        if candidate
+            .provider_ids()
+            .iter()
+            .any(|id| provider_connected_in_jcode(&status, id))
+        {
+            skipped.push(format!(
+                "✕ {} (from {}): already connected in jcode, kept the existing login",
+                candidate.provider_summary, candidate.source_name
+            ));
+        } else {
+            kept.push(index);
+        }
+    }
+    let mut outcome = run_external_auth_auto_import_candidates(candidates, &kept).await?;
+    outcome.messages.extend(skipped);
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod render_markdown_tests {
     use super::ExternalAuthAutoImportOutcome;
@@ -808,5 +859,21 @@ mod render_markdown_tests {
                 .provider_ids()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn existing_oauth_logins_block_import_but_api_keys_do_not() {
+        use crate::auth::{AuthState, AuthStatus};
+        let mut status = AuthStatus::default();
+        assert!(!super::provider_connected_in_jcode(&status, "claude"));
+        status.anthropic.state = AuthState::Available;
+        status.anthropic.has_api_key = true;
+        assert!(!super::provider_connected_in_jcode(&status, "claude"));
+        status.anthropic.has_oauth = true;
+        status.anthropic.oauth_state = AuthState::Available;
+        assert!(super::provider_connected_in_jcode(&status, "claude"));
+        status.gemini = AuthState::Available;
+        assert!(super::provider_connected_in_jcode(&status, "gemini"));
+        assert!(!super::provider_connected_in_jcode(&status, "unknown"));
     }
 }
