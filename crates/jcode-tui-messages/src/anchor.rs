@@ -18,7 +18,7 @@
 //! prepend; that path has its own distance-from-bottom anchor, which is
 //! invariant under a top-side insert.
 
-use crate::prepared::PreparedChatFrame;
+use crate::prepared::{PreparedChatFrame, PreparedSectionKind};
 
 /// A reader position in content coordinates: the `occurrence`-th message whose
 /// content hash is `msg_hash`, `row_within_item` rows below its first row.
@@ -237,6 +237,177 @@ mod tests {
                 },
                 &f,
                 10
+            ),
+            None
+        );
+    }
+}
+
+/// A viewport position in content coordinates, for any row of a frame.
+///
+/// [`Anchor`] names a message. Not every scrollable row belongs to one: live
+/// streaming output, retained reasoning, and the header are sections with no
+/// message boundaries. Those rows still need a content coordinate, or a resize
+/// has nothing to resolve against and replays a wrapped row index instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentPos {
+    Message(Anchor),
+    /// A row inside a section with no message boundaries, identified by the raw
+    /// line and column it was wrapped from. A rewrap preserves both.
+    Section {
+        kind: PreparedSectionKind,
+        raw_line: usize,
+        column: usize,
+    },
+}
+
+/// Capture the content position of `row`, message or not.
+pub fn content_pos_at_row(frame: &PreparedChatFrame, row: usize) -> Option<ContentPos> {
+    if let Some(anchor) = anchor_at_row(frame, row) {
+        return Some(ContentPos::Message(anchor));
+    }
+    let section = frame.sections.iter().find(|section| {
+        row >= section.line_start && row < section.line_start + section.prepared.wrapped_lines.len()
+    })?;
+    // A duplicate kind would resolve into the wrong section; decline instead.
+    if frame
+        .sections
+        .iter()
+        .filter(|other| other.kind == section.kind)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let entry = section
+        .prepared
+        .wrapped_line_map
+        .get(row - section.line_start)?;
+    Some(ContentPos::Section {
+        kind: section.kind,
+        raw_line: entry.raw_line,
+        column: entry.start_col,
+    })
+}
+
+/// Resolve a content position to a row offset in `frame`, clamped to
+/// `max_scroll`. `None` keeps the caller's current position.
+pub fn resolve_content_pos(
+    pos: &ContentPos,
+    frame: &PreparedChatFrame,
+    max_scroll: usize,
+) -> Option<usize> {
+    match pos {
+        ContentPos::Message(anchor) => resolve(anchor, frame, max_scroll),
+        // ponytail: precise inside the section only, and assumes its raw text is
+        // unchanged (true for a resize and for append-only streaming). Promote
+        // to a public anchor if a bookmark or selection ever needs a coordinate
+        // inside live output.
+        ContentPos::Section {
+            kind,
+            raw_line,
+            column,
+        } => {
+            let mut sections = frame
+                .sections
+                .iter()
+                .filter(|section| section.kind == *kind);
+            let section = sections.next()?;
+            if sections.next().is_some() {
+                return None;
+            }
+            // Last entry starting at or before the column: the row the offset
+            // was wrapped into. The captured row is exactly one of these.
+            let local = section
+                .prepared
+                .wrapped_line_map
+                .iter()
+                .rposition(|entry| entry.raw_line == *raw_line && entry.start_col <= *column)?;
+            Some((section.line_start + local).min(max_scroll))
+        }
+    }
+}
+
+#[cfg(test)]
+mod section_pos_tests {
+    use super::*;
+    use crate::WrappedLineMap;
+    use crate::prepared::PreparedMessages;
+    use ratatui::text::Line;
+    use std::sync::Arc;
+
+    /// A section whose `rows` wrapped rows each begin one stride later in a
+    /// single raw line, the shape a long streaming blob is prepared in.
+    fn section(total: usize, rows: usize) -> Arc<PreparedMessages> {
+        let stride = (total / rows).max(1);
+        Arc::new(PreparedMessages {
+            wrapped_lines: vec![Line::from("x"); rows],
+            wrapped_plain_lines: Arc::new(Vec::new()),
+            wrapped_copy_offsets: Arc::new(Vec::new()),
+            raw_plain_lines: Arc::new(vec!["x".repeat(total)]),
+            wrapped_line_map: Arc::new(
+                (0..rows)
+                    .map(|row| WrappedLineMap {
+                        raw_line: 0,
+                        start_col: row * stride,
+                        end_col: (row + 1) * stride,
+                    })
+                    .collect(),
+            ),
+            wrapped_user_indices: Vec::new(),
+            wrapped_user_prompt_starts: Vec::new(),
+            wrapped_user_prompt_ends: Vec::new(),
+            user_prompt_texts: Vec::new(),
+            image_regions: Vec::new(),
+            edit_tool_ranges: Vec::new(),
+            copy_targets: Vec::new(),
+            message_boundaries: Vec::new(),
+            mermaid_pending_epoch: None,
+        })
+    }
+
+    fn frame(kind: PreparedSectionKind, total: usize, rows: usize) -> PreparedChatFrame {
+        PreparedChatFrame::from_sections(vec![(kind, section(total, rows))])
+    }
+
+    #[test]
+    fn section_row_keeps_its_content_through_a_rewrap() {
+        // Same 100 columns of text: 4 rows wide, 10 rows narrow. The content at
+        // column 50 is row 2 wide and row 5 narrow.
+        let wide = frame(PreparedSectionKind::Streaming, 100, 4);
+        let narrow = frame(PreparedSectionKind::Streaming, 100, 10);
+
+        let pos = content_pos_at_row(&wide, 2).expect("row 2 is inside the section");
+        assert_eq!(
+            pos,
+            ContentPos::Section {
+                kind: PreparedSectionKind::Streaming,
+                raw_line: 0,
+                column: 50
+            }
+        );
+        assert_eq!(resolve_content_pos(&pos, &narrow, 100), Some(5));
+    }
+
+    #[test]
+    fn rows_outside_a_section_and_ambiguous_kinds_decline() {
+        let wide = frame(PreparedSectionKind::Streaming, 100, 4);
+        assert_eq!(content_pos_at_row(&wide, 99), None);
+
+        let doubled = PreparedChatFrame::from_sections(vec![
+            (PreparedSectionKind::Streaming, section(100, 4)),
+            (PreparedSectionKind::Streaming, section(100, 4)),
+        ]);
+        assert_eq!(content_pos_at_row(&doubled, 0), None);
+        assert_eq!(
+            resolve_content_pos(
+                &ContentPos::Section {
+                    kind: PreparedSectionKind::Streaming,
+                    raw_line: 0,
+                    column: 0
+                },
+                &doubled,
+                100
             ),
             None
         );

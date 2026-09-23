@@ -392,7 +392,7 @@ pub(super) fn draw_messages(
     // reinterpreting a stale line index (issue #1412, persistent half).
     let resize_anchor_scroll = if app.auto_scroll_paused() {
         app.pending_resize_anchor()
-            .and_then(|anchor| jcode_tui_messages::resolve(&anchor, &prepared, max_scroll))
+            .and_then(|pos| jcode_tui_messages::resolve_content_pos(&pos, &prepared, max_scroll))
     } else {
         // The anchor describes a reading position; following the tail is not one.
         None

@@ -649,7 +649,10 @@ pub(super) struct HistoryScrollAnchor {
 /// (issue #1412, persistent half).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PendingResizeAnchor {
-    pub anchor: jcode_tui_messages::Anchor,
+    /// Where the reader was, in content coordinates. A message, or a row in a
+    /// section with no message boundaries (live streaming output, retained
+    /// reasoning, the header).
+    pub target: jcode_tui_messages::ContentPos,
     /// Viewport width the anchor was captured at; the frame that resolves it
     /// is laid out at a different one.
     pub captured_width: u16,
