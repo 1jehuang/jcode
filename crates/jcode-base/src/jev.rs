@@ -287,8 +287,7 @@ impl JevClient {
 const TRANSIENT_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(600), Duration::from_millis(1800)];
 #[cfg(test)]
-const TRANSIENT_RETRY_DELAYS: [Duration; 2] =
-    [Duration::from_millis(1), Duration::from_millis(1)];
+const TRANSIENT_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 fn is_transient_status(status: u16) -> bool {
@@ -1514,7 +1513,11 @@ mod tests {
     async fn transient_overload_is_retried_on_same_route_then_succeeds() {
         for status in [429, 502, 503, 504, 529] {
             let (base, worker) = mock_server(vec![
-                (status, "{}".into(), vec![("Retry-After".into(), "1".into())]),
+                (
+                    status,
+                    "{}".into(),
+                    vec![("Retry-After".into(), "1".into())],
+                ),
                 (status, "{}".into(), vec![]),
                 (200, response().to_string(), vec![]),
             ]);
@@ -1523,7 +1526,11 @@ mod tests {
             assert_eq!(value, response());
             let requests = worker.join().unwrap();
             assert_eq!(requests.len(), 3);
-            assert!(requests.iter().all(|r| r.starts_with("POST /v1/decisions ")));
+            assert!(
+                requests
+                    .iter()
+                    .all(|r| r.starts_with("POST /v1/decisions "))
+            );
         }
     }
 
@@ -1531,7 +1538,13 @@ mod tests {
     async fn persistent_overload_fails_after_bounded_retries_without_echo() {
         for status in [429, 529] {
             let replies = (0..=TRANSIENT_RETRY_DELAYS.len())
-                .map(|_| (status, "private-provider-error test-route-secret".into(), vec![]))
+                .map(|_| {
+                    (
+                        status,
+                        "private-provider-error test-route-secret".into(),
+                        vec![],
+                    )
+                })
                 .collect();
             let (base, worker) = mock_server(replies);
             let client = mock_client(&base, JevProvider::OpenRouter);
