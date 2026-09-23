@@ -480,7 +480,7 @@ mod tests {
     fn prune_active_pids_owned_by_removes_only_that_pid_and_companions() {
         let _guard = lock_env();
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let me = std::process::id();
         let other = 999_999u32;
@@ -507,7 +507,6 @@ mod tests {
         // Idempotent: nothing left to prune on a second pass.
         assert_eq!(prune_active_pids_owned_by(me), (0, 0));
 
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 
     /// A marker that cannot be unlinked must not be reported as pruned, since
@@ -523,7 +522,7 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
-        jcode_core::env::set_var("JCODE_HOME", temp.path());
+        let _jcode_home = jcode_core::env::ScopedVar::set("JCODE_HOME", temp.path());
 
         let me = std::process::id();
         register_active_pid("session_mine", me);
@@ -540,6 +539,5 @@ mod tests {
             .expect("restore write access");
         assert_eq!(prune_active_pids_owned_by(me), (1, 0));
 
-        jcode_core::env::remove_var("JCODE_HOME");
     }
 }
