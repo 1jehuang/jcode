@@ -96,7 +96,6 @@ mod tests {
     use ratatui::text::Line;
     use std::sync::Arc;
 
-
     /// Build a frame whose messages have the given `(hash, wrapped rows at this
     /// width)` pairs, in transcript order.
     fn frame(messages: &[(u64, usize)]) -> PreparedChatFrame {
@@ -223,6 +222,17 @@ mod tests {
         let f = frame(&[]);
         assert_eq!(message_row_ranges(&f), Vec::new());
         assert_eq!(anchor_at_row(&f, 0), None);
-        assert_eq!(resolve(&Anchor { msg_hash: 1, occurrence: 0, row_within_item: 0 }, &f, 10), None);
+        assert_eq!(
+            resolve(
+                &Anchor {
+                    msg_hash: 1,
+                    occurrence: 0,
+                    row_within_item: 0
+                },
+                &f,
+                10
+            ),
+            None
+        );
     }
 }
