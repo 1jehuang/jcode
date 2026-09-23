@@ -291,3 +291,99 @@ fn every_config_section_is_documented() {
         "config sections missing from docs/CONFIGURATION.md: {undocumented:?}"
     );
 }
+
+/// Every enum value the doc advertises must actually deserialize.
+///
+/// Config parsing is deliberately lenient: an unknown enum value silently
+/// falls back to the default instead of erroring. That is good for resilience
+/// but means a typo'd or invented value in the docs would look like it works
+/// while quietly doing nothing, so each documented spelling is round-tripped
+/// through the real `Config` deserializer and compared against the default.
+#[test]
+fn documented_enum_values_are_accepted() {
+    // section, key, documented values, and a value known to differ from the
+    // default (so "silently fell back to default" is detectable).
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "display",
+            "diff_mode",
+            &["off", "inline", "full-inline", "pinned", "file"],
+        ),
+        ("display", "reasoning_display", &["off", "full", "current"]),
+        ("display", "diagram_mode", &["none", "margin", "pinned"]),
+        ("display", "markdown_spacing", &["compact", "document"]),
+        ("display", "latex_rendering", &["none", "unicode", "image"]),
+        ("display", "overscroll_status", &["off", "on", "overscroll"]),
+        ("tools", "mcp_tools", &["auto", "eager", "deferred"]),
+        (
+            "agents",
+            "swarm_spawn_mode",
+            &["visible", "headless", "inline", "auto"],
+        ),
+        ("agents", "swarm_strip_layout", &["vertical", "horizontal"]),
+        ("compaction", "mode", &["reactive", "proactive", "semantic"]),
+        ("features", "update_channel", &["stable", "main"]),
+        ("websearch", "engine", &["duckduckgo", "bing", "searxng"]),
+        (
+            "dictation",
+            "mode",
+            &["insert", "append", "replace", "send"],
+        ),
+        ("server", "wake_mode", &["internal", "external"]),
+        (
+            "provider",
+            "cross_provider_failover",
+            &["countdown", "manual"],
+        ),
+        ("features", "update_channel", &["stable", "main"]),
+        (
+            "keybindings",
+            "session_picker_enter",
+            &["current-terminal", "new-terminal"],
+        ),
+    ];
+
+    let default_toml = toml::to_string_pretty(&Config::default()).expect("serialize default");
+    let mut failures = Vec::new();
+
+    for (section, key, values) in cases {
+        // A value is "accepted" if parsing it yields a config whose serialized
+        // form differs from the default for at least one non-default spelling.
+        // Collect the serialized result of each documented value; if a value is
+        // rejected, lenient parsing snaps it back to the default.
+        let mut rendered = Vec::new();
+        for value in *values {
+            let src = format!("[{section}]\n{key} = \"{value}\"\n");
+            let parsed: Config = match toml::from_str(&src) {
+                Ok(c) => c,
+                Err(e) => {
+                    failures.push(format!("  {section}.{key} = \"{value}\": parse error: {e}"));
+                    continue;
+                }
+            };
+            let out = toml::to_string_pretty(&parsed).expect("serialize parsed");
+            rendered.push((value, out));
+        }
+
+        // At most one documented spelling may serialize identically to the
+        // default (the actual default). If two or more do, at least one
+        // documented value was silently rejected and fell back.
+        let same_as_default: Vec<&str> = rendered
+            .iter()
+            .filter(|(_, out)| *out == default_toml)
+            .map(|(v, _)| **v)
+            .collect();
+        if same_as_default.len() > 1 {
+            failures.push(format!(
+                "  {section}.{key}: values {same_as_default:?} all round-trip to the default, \
+                 so at least one is not actually accepted"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "documented enum values are not accepted by the config parser:\n{}",
+        failures.join("\n")
+    );
+}

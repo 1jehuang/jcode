@@ -454,9 +454,9 @@ swarm_spawn_mode = "inline"
 # Env override: JCODE_SWARM_MAX_CONCURRENT_AGENTS
 swarm_max_concurrent_agents = 32
 #
-# Max percentage (1-90) of the chat height the inline swarm gallery band may use.
-# Unset = built-in default (40%). Lower values keep more transcript visible; set
-# near the minimum to collapse the gallery to a thin strip.
+# Deprecated: swarm_gallery_max_pct sized the old inline gallery band, which was
+# replaced by the compact swarm strip. The setting still parses but nothing
+# reads it.
 # swarm_gallery_max_pct = 40
 #
 # Layout of the inline swarm strip above the status line:

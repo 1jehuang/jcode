@@ -240,7 +240,7 @@ Swarm workers and the memory sidecar.
 | `swarm_effort` | string | inherit | Default worker reasoning effort |
 | `swarm_spawn_mode` | enum | `inline` | `visible`, `headless`, `inline`, `auto` |
 | `swarm_strip_layout` | enum | `vertical` | `vertical` (one agent per row) or `horizontal` (chips) |
-| `swarm_gallery_max_pct` | int | `40` | Max percent of chat height the inline gallery may take (1-90) |
+| `swarm_gallery_max_pct` | int | unset | **No longer used.** Sized the old inline gallery band, which was replaced by the swarm strip; nothing reads this today. |
 | `swarm_max_concurrent_agents` | int | `32` | Live-worker RAM budget. `0` disables this guard, leaving only the hard cap. |
 | `memory_model` | string | auto | Model override for the memory sidecar |
 | `memory_sidecar_enabled` | bool | `true` | LLM precision-judge memory path. `false` opts into the lower-precision no-LLM hybrid. |
