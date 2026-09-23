@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 #[tokio::test]
 async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_cooldown() {
