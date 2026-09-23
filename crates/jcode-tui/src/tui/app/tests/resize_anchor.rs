@@ -325,3 +325,62 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
         "the prepend must supersede the resize anchor"
     );
 }
+
+/// The reviewer's other case: a reader parked inside live output has no message
+/// boundary, so it used to capture nothing and the resize replayed the stale
+/// wrapped row, showing unrelated stream text.
+#[test]
+fn resize_keeps_a_reader_parked_in_live_output_on_the_same_text() {
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.status = ProcessingStatus::Streaming;
+    app.is_processing = true;
+    app.session.short_name = Some("test".to_string());
+    app.streaming.streaming_text = (0..120)
+        .map(|i| format!("STREAM{i:03} - {}", "filler ".repeat(12)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut wide);
+
+    let streaming_start = {
+        let frame = crate::tui::ui::last_chat_frame().expect("frame");
+        frame
+            .sections
+            .iter()
+            .find(|section| section.kind == jcode_tui_messages::PreparedSectionKind::Streaming)
+            .map(|section| section.line_start)
+            .expect("streaming section")
+    };
+    app.scroll_offset = streaming_start + 40;
+    app.auto_scroll_paused = true;
+    render_and_snap(&app, &mut wide);
+
+    let before_top =
+        crate::tui::ui::copy_viewport_line_text(crate::tui::ui::last_resolved_chat_scroll())
+            .unwrap_or_default();
+    assert!(
+        before_top.starts_with("STREAM040"),
+        "fixture must park inside the live output: {before_top:?}"
+    );
+
+    assert!(app.should_redraw_after_resize());
+    assert!(
+        app.pending_resize_anchor.is_some(),
+        "a live-output row must capture a content position"
+    );
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+
+    let after_top =
+        crate::tui::ui::copy_viewport_line_text(crate::tui::ui::last_resolved_chat_scroll())
+            .unwrap_or_default();
+    assert!(
+        after_top.starts_with("STREAM040"),
+        "the reader must stay on the same live text: {after_top:?}"
+    );
+}

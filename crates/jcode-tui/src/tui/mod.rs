@@ -461,7 +461,7 @@ pub trait TuiState {
     /// Content-coordinate reading position captured before a resize rewrapped
     /// the transcript. The renderer resolves it against the frame it is drawing
     /// so the anchored message stays under the reader.
-    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::Anchor> {
+    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::ContentPos> {
         None
     }
     /// When older compacted history is being loaded in, this is the reader's

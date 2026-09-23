@@ -701,14 +701,14 @@ impl App {
         // The row actually on screen, not the stored index (which may exceed
         // the scrollable range after an earlier widen).
         let row = crate::tui::ui::last_resolved_chat_scroll();
-        let Some(anchor) = jcode_tui_messages::anchor_at_row(&frame, row) else {
+        let Some(target) = jcode_tui_messages::content_pos_at_row(&frame, row) else {
             return;
         };
         let captured_width = crate::tui::ui::last_layout_snapshot()
             .map(|layout| layout.messages_area.width)
             .unwrap_or(0);
         self.pending_resize_anchor = Some(super::PendingResizeAnchor {
-            anchor,
+            target,
             captured_width,
             captured_scroll: row,
         });

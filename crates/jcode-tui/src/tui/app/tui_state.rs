@@ -676,8 +676,8 @@ impl crate::tui::TuiState for App {
         self.terminal_clear_collapsed()
     }
 
-    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::Anchor> {
-        self.pending_resize_anchor.map(|pending| pending.anchor)
+    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::ContentPos> {
+        self.pending_resize_anchor.map(|pending| pending.target)
     }
 
     fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
