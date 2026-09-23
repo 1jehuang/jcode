@@ -880,3 +880,118 @@ fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
             .any(|(key, _)| key == "Account label")
     );
 }
+
+/// Scope an environment variable to one test, restoring it on drop.
+struct TestEnvVar {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl TestEnvVar {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prev = std::env::var_os(key);
+        crate::env::set_var(key, value);
+        Self { key, prev }
+    }
+}
+
+impl Drop for TestEnvVar {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(prev) => crate::env::set_var(self.key, prev),
+            None => crate::env::remove_var(self.key),
+        }
+    }
+}
+
+/// `/usage` renders locally tracked spend from the per-currency buckets, one row
+/// per currency. The summed `*_usd` mirrors are exact only when every bucket is
+/// USD (otherwise they are a cross-currency approximation, see `ProviderSpend`),
+/// so they are never what gets printed.
+#[tokio::test]
+async fn test_usage_report_renders_local_spend_per_currency() {
+    let _env_lock = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = TestEnvVar::set("JCODE_HOME", temp.path().as_os_str());
+
+    // Writing through the ledger also refreshes its process-local cache, so the
+    // sweeper below reads this temp home rather than another test's ledger.
+    let cny = jcode_provider_core::Currency::new("cny");
+    crate::provider_activity::record_spend("cny-only-endpoint", 7.0, &cny);
+    crate::provider_activity::record_spend("mixed-endpoint", 30.0, &cny);
+    crate::provider_activity::record_spend(
+        "mixed-endpoint",
+        5.0,
+        &jcode_provider_core::Currency::usd(),
+    );
+    crate::provider_activity::record_spend(
+        "usd-only-endpoint",
+        5.0,
+        &jcode_provider_core::Currency::usd(),
+    );
+
+    let mut tasks = tokio::task::JoinSet::new();
+    assert_eq!(
+        enqueue_activity_sweeper_task(&mut tasks),
+        3,
+        "every entry without a dedicated report falls through to the sweeper"
+    );
+    let mut reports = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        if let Some(report) = joined.expect("sweeper task succeeds") {
+            reports.push(report);
+        }
+    }
+    assert_eq!(
+        reports.len(),
+        3,
+        "sweeper reported: {:?}",
+        reports
+            .iter()
+            .map(|report| report.provider_name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    let local_spend = |name: &str| -> Vec<(String, String)> {
+        reports
+            .iter()
+            .find(|report| report.provider_name == name)
+            .expect("sweeper reported every entry")
+            .extra_info
+            .iter()
+            .filter(|(label, _)| label.starts_with("Local spend (this machine)"))
+            .cloned()
+            .collect()
+    };
+
+    assert_eq!(
+        local_spend("Cny Only Endpoint"),
+        vec![(
+            "Local spend (this machine)".to_string(),
+            "CNY 7.00 today · CNY 7.00 this month · CNY 7.00 all-time".to_string()
+        )],
+        "a CNY-only window is reported as CNY, not as dollars"
+    );
+
+    // Mixed window: one row per currency, and the `$` figure is nowhere near
+    // the CNY amount.
+    let mixed = local_spend("Mixed Endpoint");
+    assert_eq!(mixed.len(), 2, "one row per currency: {mixed:?}");
+    assert_eq!(mixed[0].0, "Local spend (this machine) [CNY]");
+    assert!(mixed[0].1.starts_with("CNY 30.00 today"), "{}", mixed[0].1);
+    assert_eq!(mixed[1].0, "Local spend (this machine) [USD]");
+    assert!(mixed[1].1.starts_with("$5.00 today"), "{}", mixed[1].1);
+    assert!(
+        !mixed.iter().any(|(_, value)| value.contains("$35.00")),
+        "the cross-currency mirror sum must never be rendered: {mixed:?}"
+    );
+
+    assert_eq!(
+        local_spend("Usd Only Endpoint"),
+        vec![(
+            "Local spend (this machine)".to_string(),
+            "$5.00 today · $5.00 this month · $5.00 all-time".to_string()
+        )],
+        "a USD-only window keeps its single, plain row"
+    );
+}

@@ -82,6 +82,11 @@ fn gemini_config_reload_does_not_export_sticky_environment_overrides() {
     );
 
     cfg.provider.gemini_project = None;
+    // The preserving save keeps keys the serialized struct does not write
+    // (a cleared field serializes as absent; see `merge_table` in
+    // `config_file`), so a programmatic clear must announce its removal or
+    // the previous value stays in the file and reloads as a sticky override.
+    Config::declare_removal("provider.gemini_project");
     cfg.save().unwrap();
     assert_eq!(crate::auth::gemini::cloud_project(), None);
 }
@@ -1656,6 +1661,67 @@ fn swarm_root_effort_env_overrides_and_shared_resolution() {
     }
 }
 
+/// A config that stops parsing must be reportable, not only silently replaced
+/// by defaults: the fallback is invisible and every setting stops applying.
+#[test]
+fn load_with_parse_error_reports_a_malformed_file() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[display\ncentered = true\n",
+    )
+    .expect("write malformed config");
+
+    let (config, error) = Config::load_with_parse_error();
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    let error = error.expect("a malformed config must be reported");
+    assert!(
+        error.contains("config.toml"),
+        "the report should name the file: {error}"
+    );
+    // The fallback still has to be usable, or every caller breaks.
+    assert_eq!(config.display.centered, Config::default().display.centered);
+}
+
+/// The cache reload is what every session sees, so a broken config has to be
+/// reported there; this is the signal the TUI turns into a user-facing notice.
+#[test]
+fn config_cache_reports_a_parse_failure_until_the_file_is_fixed() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[display\ncentered = true\n").expect("write malformed config");
+    crate::config::invalidate_config_cache();
+    let _ = crate::config::config();
+    let broken = crate::config::config_parse_error();
+
+    std::fs::write(&path, "[display]\ncentered = true\n").expect("write valid config");
+    crate::config::invalidate_config_cache();
+    let _ = crate::config::config();
+    let fixed = crate::config::config_parse_error();
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    let broken = broken.expect("a malformed config must be reported after a reload");
+    assert!(
+        broken.contains("config.toml"),
+        "the report should name the file: {broken}"
+    );
+    assert!(
+        fixed.is_none(),
+        "fixing the file must clear the report, got {fixed:?}"
+    );
+}
+
 #[test]
 fn anthropic_cache_preference_persists_and_preserves_other_settings() {
     let _guard = crate::storage::lock_test_env();
@@ -1685,4 +1751,147 @@ fn anthropic_cache_preference_persists_and_preserves_other_settings() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken");
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
+}
+
+/// The example in `docs/MODEL_PRICING.md` is meant to be copied, so keep it
+/// executable: the block has to parse as a config (an invalid one makes jcode
+/// ignore the whole file) and price the call at the rates the document states.
+///
+/// The doc now leads with the vendor-file quick start, so the inline CNY card
+/// is found by content rather than by position.
+#[test]
+fn documented_pricing_example_prices_as_documented() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/MODEL_PRICING.md"
+    ))
+    .expect("docs/MODEL_PRICING.md should exist");
+    let example = doc
+        .split("```toml")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("[pricing.providers.acme.models.acme-small.cost]"))
+        .expect("the documented CNY inline-card TOML block");
+
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    std::fs::write(dir.path().join("config.toml"), example).expect("write documented config");
+    crate::config::invalidate_config_cache();
+
+    // A malformed example reverts every setting, so this is the first thing the
+    // document has to get right.
+    Config::load_strict().expect("the documented example must parse");
+
+    let instant = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // 2030-06-22T02:00:00Z (Saturday) and 2030-06-24T02:00:00Z (Monday, inside
+    // the documented 01:00-04:00 UTC weekday peak window).
+    let off_peak =
+        crate::model_pricing::effective_cost("acme", "acme-small", instant(1_908_324_000))
+            .expect("the documented example prices an off-peak acme-small call");
+    let peak = crate::model_pricing::effective_cost("acme", "acme-small", instant(1_908_496_800))
+        .expect("the documented example prices a peak acme-small call");
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    // 25k input at CNY 1.0/Mtok plus 5k output at CNY 4.0/Mtok.
+    assert_eq!(
+        off_peak.currency.as_str(),
+        "CNY",
+        "the card is denominated in CNY"
+    );
+    assert!(
+        (off_peak.amount - 0.045).abs() < 1e-9,
+        "off-peak should be CNY 0.045 per reference request, got {off_peak:?}"
+    );
+    assert!(
+        (peak.amount - 0.09).abs() < 1e-9,
+        "the documented peak multiplier doubles it, got {peak:?}"
+    );
+}
+
+/// The vendor-file example in `docs/MODEL_PRICING.md` is meant to be copied,
+/// so keep it executable the same way the card example is: the config points at
+/// the file under the vendor key, and the file is the JSON block beside it.
+///
+/// This is the quick-start block, so it also pins the bare-name form: the
+/// document must keep showing `file = "prices.json"`, and the file lives where a
+/// bare name resolves (under `~/.jcode/cache/`).
+#[test]
+fn documented_vendor_file_example_prices_as_documented() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/MODEL_PRICING.md"
+    ))
+    .expect("docs/MODEL_PRICING.md should exist");
+    let example = doc
+        .split("```toml")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("file = \"prices.json\""))
+        .expect("the documented vendor-file TOML block");
+    let vendor_file = doc
+        .split("```json")
+        .skip(1)
+        .filter_map(|rest| rest.split("```").next())
+        .find(|block| block.contains("acme-large"))
+        .expect("the documented vendor-file JSON block");
+    assert!(
+        example.contains("[pricing.providers.acme]"),
+        "the quick-start file must hang under a vendor key:\n{example}"
+    );
+    assert!(
+        example.contains("file = \"prices.json\""),
+        "the quick-start file must name a bare file:\n{example}"
+    );
+    assert!(
+        vendor_file.contains("\"models\""),
+        "the vendor file must have a top-level `models` map:\n{vendor_file}"
+    );
+    assert!(
+        !vendor_file.contains("\"acme\": {"),
+        "the vendor file must not repeat the vendor as an outer key:\n{vendor_file}"
+    );
+
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    // A bare name resolves under `~/.jcode/cache/`, so that is where the
+    // documented file is written.
+    let cache_dir = dir.path().join("cache");
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    std::fs::write(cache_dir.join("prices.json"), vendor_file).expect("write vendor file");
+    std::fs::write(dir.path().join("config.toml"), example).expect("write documented config");
+    crate::config::invalidate_config_cache();
+
+    Config::load_strict().expect("the documented example must parse");
+
+    let instant = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    // The same instants the card example uses: 2030-06-22T02:00:00Z
+    // (Saturday) and 2030-06-24T02:00:00Z (Monday, inside the documented
+    // 01:00-04:00 UTC weekday peak window).
+    let off_peak =
+        crate::model_pricing::effective_cost("acme", "acme-large", instant(1_908_324_000))
+            .expect("the vendor file prices an off-peak call");
+    let peak = crate::model_pricing::effective_cost("acme", "acme-large", instant(1_908_496_800))
+        .expect("the vendor file prices a peak call");
+
+    restore_env_var("JCODE_HOME", prev_home);
+
+    // 25k input at CNY 4.5/Mtok plus 5k output at CNY 13.5/Mtok.
+    assert_eq!(
+        off_peak.currency.as_str(),
+        "CNY",
+        "the documented vendor states CNY"
+    );
+    assert!(
+        (off_peak.amount - 0.18).abs() < 1e-9,
+        "off-peak should be CNY 0.18 per reference request, got {off_peak:?}"
+    );
+    assert!(
+        (peak.amount - 0.36).abs() < 1e-9,
+        "the documented peak multiplier doubles it, got {peak:?}"
+    );
 }

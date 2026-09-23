@@ -485,6 +485,31 @@ fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str,
     }
 }
 
+/// Sort key for the routes of one model in the model picker: available routes
+/// first, then by auth method, then cheapest first, then by provider name.
+///
+/// Cheapest-first only ever compares comparable numbers: the cost is the
+/// estimate converted into one currency, so a CNY card is never ordered against
+/// a USD card as if the units matched. A route with no price, or a currency the
+/// configured `[pricing].fx_rates` cannot convert, sorts below every comparable
+/// route instead.
+pub(super) fn route_sort_key(r: &PickerOption) -> (u8, u8, u64, String) {
+    let avail = if r.available { 0 } else { 1 };
+    let method = match crate::provider::ModelRouteApiMethod::parse(&r.api_method) {
+        crate::provider::ModelRouteApiMethod::ClaudeOAuth
+        | crate::provider::ModelRouteApiMethod::OpenAIOAuth
+        | crate::provider::ModelRouteApiMethod::OpenAIApiKey => 0,
+        crate::provider::ModelRouteApiMethod::AnthropicApiKey
+        | crate::provider::ModelRouteApiMethod::OpenAiCompatible { .. } => 1,
+        crate::provider::ModelRouteApiMethod::Cursor => 2,
+        crate::provider::ModelRouteApiMethod::Copilot => 3,
+        crate::provider::ModelRouteApiMethod::OpenRouter => 4,
+        _ => 5,
+    };
+    let cheapness = r.comparable_reference_cost_micros.unwrap_or(u64::MAX);
+    (avail, method, cheapness, r.provider.clone())
+}
+
 fn model_picker_route_provider_matches_key(
     route_provider_key: Option<&str>,
     route_provider_label: &str,
@@ -612,6 +637,7 @@ impl App {
                     available: true,
                     detail: "use the current active model".to_string(),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: PickerAction::SubagentModelChoice { inherit: true },
                 selected_option: 0,
@@ -1348,6 +1374,7 @@ impl App {
                     available: true,
                     detail: "updating model list…".to_string(),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: PickerAction::Model,
                 selected_option: 0,
@@ -1629,26 +1656,16 @@ impl App {
                     available: r.available,
                     detail: r.detail.clone(),
                     estimated_reference_cost_micros: r.estimated_reference_cost_micros(),
+                    // Ordering across currencies needs the estimate normalized
+                    // through the configured FX table; the raw estimate above is
+                    // in the route's own currency and is not comparable.
+                    comparable_reference_cost_micros: r
+                        .cheapness
+                        .as_ref()
+                        .and_then(crate::model_pricing::comparable_reference_cost_micros),
                 });
         }
         let grouping_ms = grouping_started.elapsed().as_millis();
-
-        fn route_sort_key(r: &PickerOption) -> (u8, u8, u64, String) {
-            let avail = if r.available { 0 } else { 1 };
-            let method = match crate::provider::ModelRouteApiMethod::parse(&r.api_method) {
-                crate::provider::ModelRouteApiMethod::ClaudeOAuth
-                | crate::provider::ModelRouteApiMethod::OpenAIOAuth
-                | crate::provider::ModelRouteApiMethod::OpenAIApiKey => 0,
-                crate::provider::ModelRouteApiMethod::AnthropicApiKey
-                | crate::provider::ModelRouteApiMethod::OpenAiCompatible { .. } => 1,
-                crate::provider::ModelRouteApiMethod::Cursor => 2,
-                crate::provider::ModelRouteApiMethod::Copilot => 3,
-                crate::provider::ModelRouteApiMethod::OpenRouter => 4,
-                _ => 5,
-            };
-            let cheapness = r.estimated_reference_cost_micros.unwrap_or(u64::MAX);
-            (avail, method, cheapness, r.provider.clone())
-        }
 
         fn route_matches_recent_auth(route_provider: &str, login_provider: &str) -> bool {
             jcode_provider_core::model_route_provider_labels_related(route_provider, login_provider)
@@ -4037,6 +4054,7 @@ mod tests {
             available: true,
             detail: String::new(),
             estimated_reference_cost_micros: None,
+            comparable_reference_cost_micros: None,
         }
     }
 

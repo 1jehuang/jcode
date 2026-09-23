@@ -6,6 +6,17 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Sentinel value for `[display].currency` meaning "show each provider in its
+/// own currency, never convert".
+pub const DISPLAY_CURRENCY_NATIVE: &str = "native";
+
+/// Whether `[display].currency` is still at its default, so a save leaves it out
+/// of the user's `config.toml` instead of baking a default in (the same rule
+/// `sponsors` follows; `Config::save` serializes the whole struct).
+fn currency_is_default(currency: &str) -> bool {
+    currency.eq_ignore_ascii_case(DISPLAY_CURRENCY_NATIVE)
+}
+
 /// Display/UI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -119,6 +130,11 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Cost display currency: `"native"` (default) shows each provider in its
+    /// own currency; any ISO 4217 code (e.g. `"CNY"`) converts costs into it
+    /// using the `[pricing]` reference rates.
+    #[serde(skip_serializing_if = "currency_is_default")]
+    pub currency: String,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: on). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
@@ -162,6 +178,7 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
+            currency: DISPLAY_CURRENCY_NATIVE.to_string(),
             overscroll_status: OverscrollStatusMode::default(),
         }
     }
@@ -211,12 +228,38 @@ impl DisplayConfig {
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
     }
+
+    /// Whether `[display].currency` asks for no conversion at all.
+    pub fn currency_is_native(&self) -> bool {
+        self.currency.eq_ignore_ascii_case(DISPLAY_CURRENCY_NATIVE)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::DisplayConfig;
     use crate::ReasoningDisplayMode;
+
+    /// `Config::save` serializes the whole struct, so a default must not be
+    /// baked into the user's `config.toml`.
+    #[test]
+    fn a_default_currency_is_not_serialized() {
+        let json = serde_json::to_string(&DisplayConfig::default()).expect("serialize");
+        assert!(
+            !json.contains("currency"),
+            "a default currency must stay out of the user's config: {json}"
+        );
+    }
+
+    #[test]
+    fn a_configured_currency_is_serialized() {
+        let config = DisplayConfig {
+            currency: "CNY".to_string(),
+            ..DisplayConfig::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        assert!(json.contains("\"currency\":\"CNY\""), "{json}");
+    }
 
     #[test]
     fn thinking_is_shown_in_full_by_default() {

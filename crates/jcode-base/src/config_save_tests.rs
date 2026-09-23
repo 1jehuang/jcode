@@ -1,0 +1,607 @@
+//! Config-save tests for format preservation.
+//!
+//! `Config::save` overlays the serialized struct onto the parsed existing file
+//! instead of rewriting it wholesale, so the user's comments and any section a
+//! newer build wrote survive a settings change. A serialized struct can only
+//! express a removal by omitting a key, which at the file level is
+//! indistinguishable from "not modeled", so deliberate deletions are declared
+//! explicitly and applied on top of the overlay. These tests pin both halves:
+//! what must survive, and what a declared removal must actually delete.
+
+use super::Config;
+use std::ffi::OsString;
+
+/// Points `JCODE_HOME` at a fresh directory for the duration of a test.
+struct HomeGuard {
+    previous: Option<OsString>,
+    _dir: tempfile::TempDir,
+}
+
+impl HomeGuard {
+    fn new() -> Self {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", dir.path());
+        Config::invalidate_cache();
+        Self {
+            previous,
+            _dir: dir,
+        }
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        Config::path().expect("config path")
+    }
+
+    fn write(&self, content: &str) {
+        let path = self.path();
+        std::fs::create_dir_all(path.parent().expect("config parent")).expect("create parent");
+        std::fs::write(&path, content).expect("write config");
+        Config::invalidate_cache();
+    }
+
+    fn read(&self) -> String {
+        std::fs::read_to_string(self.path()).expect("read config")
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+        Config::invalidate_cache();
+    }
+}
+
+fn load_for_update() -> Config {
+    Config::load_for_update().expect("load config for update")
+}
+
+/// A settings write must not erase the user's comments.
+///
+/// `DisplayConfig.centered` has no `skip_serializing_if`, so it is always
+/// written back; the assertion is that the write happens *around* the comments
+/// instead of replacing the whole file.
+#[test]
+fn settings_write_preserves_comments() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("# my theme\n[display]\n# center everything\ncentered = false\n");
+
+    let mut cfg = load_for_update();
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert!(
+        written.contains("# my theme"),
+        "the comment above the section must survive: {written}"
+    );
+    assert!(
+        written.contains("# center everything"),
+        "the comment on the changed key must survive: {written}"
+    );
+    assert!(
+        written.contains("centered = true"),
+        "the change must still be persisted: {written}"
+    );
+}
+
+/// A section this build does not model must survive, because it may have been
+/// written by a newer build (or a plugin) that this one must not silently undo.
+#[test]
+fn undeclared_unmodeled_section_survives_a_save() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n\n[from_a_newer_build]\nshiny = true\n");
+
+    let mut cfg = load_for_update();
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert!(
+        written.contains("[from_a_newer_build]"),
+        "an unmodeled section must survive: {written}"
+    );
+    assert!(
+        written.contains("shiny = true"),
+        "its values must survive too: {written}"
+    );
+    assert!(written.contains("centered = true"));
+}
+
+/// `/colors reset` (all roles) declares `display.colors`; the emptied section
+/// must actually be gone from the file, or the next load restores it.
+#[test]
+fn declared_removal_deletes_a_section_from_the_file() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::update_removing(&["display.colors"], |cfg| cfg.display.colors.clear())
+        .expect("persist reset");
+
+    let written = home.read();
+    assert!(
+        !written.contains("#1050f0"),
+        "the reset color must be gone from the file: {written}"
+    );
+    assert!(
+        !written.contains("[display.colors]"),
+        "the emptied section must be gone from the file: {written}"
+    );
+    assert!(
+        written.contains("centered = false"),
+        "unrelated settings must still be present: {written}"
+    );
+}
+
+/// Resetting one role is deletion by omission for that key only: the key must
+/// disappear while the other roles stay.
+#[test]
+fn declared_removal_deletes_a_single_key() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display.colors]\nerror = \"#1050f0\"\nai = \"#ffaa00\"\n");
+
+    Config::update_removing(&["display.colors.error"], |cfg| {
+        cfg.display.colors.remove("error");
+    })
+    .expect("persist reset");
+
+    let written = home.read();
+    assert!(
+        !written.contains("#1050f0"),
+        "the reset role must be gone: {written}"
+    );
+    assert!(
+        written.contains("#ffaa00"),
+        "the untouched role must survive: {written}"
+    );
+}
+
+/// An explicit discovery opt-out is authoritative (upstream chose this over
+/// table-shape repair in #1188): the preserving save must keep the opt-out
+/// instead of resurrecting the default or dropping the section.
+#[test]
+fn sponsors_optout_survives_the_preserving_save() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[display]\ncentered = false\n\n[sponsors]\nenabled = false\nendpoint = \
+         \"https://api.jcode.sh/v1/discovery\"\n",
+    );
+
+    let loaded = Config::load();
+    assert!(
+        !loaded.sponsors.enabled,
+        "the explicit opt-out must be respected on load"
+    );
+    loaded.save().expect("save");
+
+    let written = home.read();
+    assert!(
+        written.contains("[sponsors]") && written.contains("enabled = false"),
+        "the preserving save must keep the explicit opt-out: {written}"
+    );
+
+    let reloaded = Config::load_strict().expect("reload");
+    assert!(
+        !reloaded.sponsors.enabled,
+        "the opt-out must survive a save/reload round trip"
+    );
+}
+
+/// Clearing a provider default is deletion by omission too: `None` is not
+/// serialized, so the setter has to declare the key or the file keeps it.
+#[test]
+fn clearing_the_default_model_removes_the_key_from_the_file() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[provider]\ndefault_model = \"claude-fable-5\"\n");
+
+    Config::set_default_model(None, None).expect("clear defaults");
+
+    let written = home.read();
+    assert!(
+        !written.contains("claude-fable-5"),
+        "the cleared default must be gone from the file: {written}"
+    );
+    assert!(
+        !written.contains("default_model"),
+        "the key itself must be gone, not just its value: {written}"
+    );
+}
+
+/// An unparseable file takes the plain-write fallback rather than being merged
+/// against a document that cannot be understood.
+#[test]
+fn unparseable_file_falls_back_to_a_plain_write() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    let broken = "[display\ncolors = {}\n";
+    home.write(broken);
+
+    let cfg = Config::default();
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert_ne!(
+        written, broken,
+        "the fallback must replace the unreadable file: {written}"
+    );
+    toml::from_str::<Config>(&written)
+        .unwrap_or_else(|err| panic!("fallback content must be valid TOML: {err}\n{written}"));
+}
+
+/// A declared removal is recorded for the active config path and consumed by
+/// the save that follows, so it cannot leak onto a later write.
+#[test]
+fn declared_removals_are_recorded_and_consumed() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n");
+
+    Config::declare_removal("display.colors");
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["display.colors".to_string()],
+        "the removal must be recorded for this config path"
+    );
+
+    Config::default().save().expect("save");
+    assert!(
+        Config::pending_removals().is_empty(),
+        "save must consume the declared removal"
+    );
+}
+
+/// A failed save must not consume the declared removal: once the file can be
+/// written again, a later successful save still deletes the declared key.
+#[test]
+fn a_failed_save_preserves_the_declared_removal() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+
+    // Make the config path unwritable by replacing the file with a directory:
+    // the atomic writer's final rename cannot replace a directory, so the save
+    // fails after it has already snapshotted the declaration.
+    let path = home.path();
+    std::fs::remove_file(&path).expect("remove the config file");
+    std::fs::create_dir(&path).expect("replace it with a directory");
+
+    assert!(Config::default().save().is_err(), "the save must fail");
+
+    // The declaration must survive the failed save.
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["display.colors".to_string()],
+        "a failed save must not consume the declared removal"
+    );
+
+    // Restore a parseable file carrying the key, then save again without
+    // re-declaring: the key must now actually disappear.
+    std::fs::remove_dir(&path).expect("remove the directory");
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::default().save().expect("save after the file is writable again");
+
+    let written = home.read();
+    assert!(
+        !written.contains("[display.colors]"),
+        "the declared key must be deleted by the eventual successful save: {written}"
+    );
+    assert!(
+        !written.contains("#1050f0"),
+        "the declared key's value must be gone too: {written}"
+    );
+}
+
+/// A successful save consumes the declaration exactly once: a later save, with
+/// no new declaration, must not re-apply the deletion to a key another build
+/// wrote back in between.
+#[test]
+fn a_successful_save_consumes_the_declaration_exactly_once() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+    Config::default().save().expect("save");
+    assert!(
+        Config::pending_removals().is_empty(),
+        "the successful save must consume the declaration"
+    );
+
+    // Another build (or user) writes the key back after the deletion.
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#00ff00\"\n");
+
+    // A second save with no new declaration must not delete it again.
+    Config::default().save().expect("save again");
+
+    let written = home.read();
+    assert!(
+        written.contains("[display.colors]"),
+        "a consumed declaration must not be re-applied by a later save: {written}"
+    );
+    assert!(
+        written.contains("#00ff00"),
+        "the re-added value must survive the later save: {written}"
+    );
+}
+
+/// A save must consume only the declarations it snapshotted, not every
+/// declaration that happens to be pending when it finishes.
+///
+/// Interleaving: save A snapshots `a`, then a concurrent caller declares `b`
+/// (for example revoking `auth.trusted_external_source_paths`), then A finishes
+/// and consumes. If A cleared the whole entry it would drop `b` too, and the
+/// next preserving save would keep the path the caller just revoked, leaving a
+/// revoked external credential source trusted. Consuming the snapshot keeps `b`
+/// pending for the next save.
+#[test]
+fn a_save_consumes_only_the_removals_it_snapshotted() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = HomeGuard::new();
+
+    Config::declare_removal("a");
+    let snapshot = Config::clone_declared_removals();
+    assert_eq!(snapshot, vec!["a".to_string()]);
+
+    // A declaration that arrives after the snapshot must not be covered by it.
+    Config::declare_removal("b");
+    Config::consume_declared_removals(&snapshot);
+
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["b".to_string()],
+        "a removal declared after the snapshot must survive this save's consume"
+    );
+}
+
+/// Two consecutive saves apply each declaration exactly once: after the first
+/// save consumes its snapshot, the second has nothing to apply and leaves a
+/// key another build wrote back in between alone.
+#[test]
+fn a_second_save_does_not_reapply_an_already_consumed_removal() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+    Config::default().save().expect("first save");
+    assert!(
+        Config::pending_removals().is_empty(),
+        "the first save must consume its snapshot"
+    );
+
+    // Another build writes the key back after the deletion.
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#00ff00\"\n");
+
+    Config::default().save().expect("second save");
+    assert_eq!(
+        Config::pending_removals(),
+        Vec::<String>::new(),
+        "the second save must not resurrect a consumed declaration"
+    );
+
+    let written = home.read();
+    assert!(
+        written.contains("#00ff00"),
+        "the re-added value must survive the second save: {written}"
+    );
+}
+
+/// Removals are keyed by config path: one recorded under a different
+/// `JCODE_HOME` must never be applied to another home's file.
+#[test]
+fn declared_removals_are_scoped_to_the_config_path() {
+    let _guard = crate::storage::lock_test_env();
+    let previous = std::env::var_os("JCODE_HOME");
+    let first = tempfile::TempDir::new().expect("tempdir");
+    let second = tempfile::TempDir::new().expect("tempdir");
+
+    // Record a removal under the first home.
+    crate::env::set_var("JCODE_HOME", first.path());
+    Config::invalidate_cache();
+    Config::declare_removal("display.colors");
+
+    // Saving under the second home must neither apply nor consume it.
+    crate::env::set_var("JCODE_HOME", second.path());
+    Config::invalidate_cache();
+    let path = Config::path().expect("config path");
+    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create parent");
+    std::fs::write(&path, "[display.colors]\nerror = \"#1050f0\"\n").expect("write config");
+    Config::load_for_update()
+        .expect("load")
+        .save()
+        .expect("save in the other home");
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("#1050f0"),
+        "the other home's file must keep its colors"
+    );
+
+    // Back in the first home, the declaration is still pending.
+    crate::env::set_var("JCODE_HOME", first.path());
+    Config::invalidate_cache();
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["display.colors".to_string()],
+        "the declaration must survive until its own home is saved"
+    );
+
+    match previous {
+        Some(prev) => crate::env::set_var("JCODE_HOME", prev),
+        None => crate::env::remove_var("JCODE_HOME"),
+    }
+    Config::invalidate_cache();
+}
+
+/// A `[[providers.<name>.models]]` entry may spell `context_window` with one of
+/// its serde aliases (`context-window`). The preserving save replaces an array
+/// of tables wholesale, so the alias cannot survive beside the canonical name:
+/// serde maps both to one field and reports `duplicate field`, which would make
+/// the saved file unparseable and revert every setting to its default.
+///
+/// The unmodeled section is asserted too, because it is what distinguishes a
+/// wholesale replacement from the plain-write fallback: the fallback would also
+/// drop the alias, but it would drop this section as well.
+#[test]
+fn alias_key_in_a_models_entry_is_normalized_by_a_save() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[display]\ncentered = false\n\n\
+         [from_a_newer_build]\nshiny = true\n\n\
+         [[providers.acme.models]]\n\
+         id = \"acme-large\"\n\
+         context-window = 200000\n",
+    );
+
+    let mut cfg = load_for_update();
+    assert_eq!(
+        cfg.providers["acme"].models[0].context_window,
+        Some(200000),
+        "the alias must parse on load"
+    );
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert_eq!(
+        written.matches("context_window").count(),
+        1,
+        "the canonical name must be present exactly once: {written}"
+    );
+    assert!(
+        !written.contains("context-window"),
+        "the alias key must not survive the wholesale replacement: {written}"
+    );
+    assert!(
+        written.contains("[from_a_newer_build]"),
+        "the merge must succeed rather than fall back to a plain write: {written}"
+    );
+
+    let parsed = Config::load_strict().expect("the saved config must parse");
+    assert_eq!(
+        parsed.providers["acme"].models[0].context_window,
+        Some(200000)
+    );
+}
+
+/// The safety net itself: a merged document the overlay cannot round-trip must
+/// be reported, so the caller writes the plain serialization instead.
+#[test]
+fn merged_document_that_serde_refuses_is_detected() {
+    let duplicate = "[[providers.acme.models]]\n\
+                     id = \"acme-large\"\n\
+                     context-window = 200000\n\
+                     context_window = 200000\n";
+    assert!(
+        !super::config_file::merged_document_parses(duplicate),
+        "a document carrying both an alias and its canonical name must be rejected"
+    );
+    assert!(
+        super::config_file::merged_document_parses("[display]\ncentered = true\n"),
+        "a plain valid document must be accepted"
+    );
+}
+
+/// A provider field written with a key-level alias (`extra-body`) must be
+/// *normalized*, not dropped: the preserving save writes the canonical name,
+/// removes the alias spelling, and keeps the user's comment and every unmodeled
+/// section. Falling back to the plain write would also drop the alias, but it
+/// would take the comment and the unmodeled section with it, which is exactly
+/// the loss this test rules out.
+#[test]
+fn a_provider_table_with_an_alias_key_keeps_its_comment_and_unmodeled_sections() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write(
+        "[display]\ncentered = false\n\n\
+         [from_a_newer_build]\nshiny = true\n\n\
+         [providers.acme]\n\
+         type = \"openai-compatible\"\n\
+         base_url = \"https://example.test/v1\"\n\
+         # keep this note\n\
+         extra-body = { thinking = true }\n",
+    );
+
+    let mut cfg = load_for_update();
+    assert!(
+        cfg.providers["acme"].extra_body.is_some(),
+        "the alias must parse on load"
+    );
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let written = home.read();
+    assert!(
+        !written.contains("extra-body"),
+        "the alias spelling must not survive: {written}"
+    );
+    assert_eq!(
+        written.matches("extra_body").count(),
+        1,
+        "the canonical name must be written exactly once: {written}"
+    );
+    assert!(
+        written.contains("# keep this note"),
+        "the comment attached to the alias key must survive the rename: {written}"
+    );
+    assert!(
+        written.contains("[from_a_newer_build]"),
+        "the merge must succeed rather than fall back to a plain write: {written}"
+    );
+
+    let parsed = Config::load_strict().expect("the saved config must parse");
+    assert!(parsed.providers["acme"].extra_body.is_some());
+    assert!(parsed.display.centered, "the write must still persist");
+}
+
+/// A config save must be atomic: a torn write would destroy the user's comments
+/// and every unmodeled section, which is the whole point of the preserving save.
+/// `storage::write_bytes` writes a temp file and renames it over the target, so
+/// the target's inode changes and the previous content is kept as `config.bak`.
+/// A plain `std::fs::write` would truncate the same inode in place.
+#[test]
+fn a_config_save_replaces_the_file_by_rename() {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n");
+    let path = home.path();
+    let before = std::fs::metadata(&path).expect("metadata before");
+
+    let mut cfg = load_for_update();
+    cfg.display.centered = true;
+    cfg.save().expect("save");
+
+    let after = std::fs::metadata(&path).expect("metadata after");
+    #[cfg(unix)]
+    assert_ne!(
+        after.ino(),
+        before.ino(),
+        "an atomic save renames a new file over the old one"
+    );
+    assert!(
+        path.with_extension("bak").exists(),
+        "the atomic writer keeps the previous file as `.bak`"
+    );
+    assert!(
+        Config::load_strict()
+            .expect("the saved config must parse")
+            .display
+            .centered
+    );
+}

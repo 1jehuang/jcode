@@ -1760,9 +1760,27 @@ fn format_swarm_model_list(
         } else {
             " [unavailable]"
         };
+        // The estimate carries the currency its rates are denominated in (a
+        // `[pricing.providers]` card can be CNY), and the rendering has to
+        // honour it: a hardcoded `$` relabels a CNY amount as dollars.
         let cost = route
-            .estimated_reference_cost_micros()
-            .map(|micros| format!(" ~${:.2}/ref-task", micros as f64 / 1_000_000.0))
+            .cheapness
+            .as_ref()
+            .and_then(|estimate| {
+                estimate
+                    .estimated_reference_cost_micros
+                    .map(|micros| (micros, estimate.currency.clone()))
+            })
+            .map(|(micros, currency)| {
+                format!(
+                    " ~{}/ref-task",
+                    jcode_base::money_display::format_amount(
+                        micros as f64 / 1_000_000.0,
+                        &currency,
+                        2
+                    )
+                )
+            })
             .unwrap_or_default();
         let detail = if route.detail.is_empty() {
             String::new()

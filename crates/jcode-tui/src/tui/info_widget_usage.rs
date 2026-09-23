@@ -27,7 +27,7 @@ pub(super) fn render_usage_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
                 Line::from(vec![
                     Span::styled("💰 ", Style::default().fg(rgb(140, 180, 255))),
                     Span::styled(
-                        format!("${:.4}", info.total_cost),
+                        crate::money_display::summarize(&info.cost_rows, 4),
                         Style::default().fg(rgb(180, 180, 190)).bold(),
                     ),
                 ]),
@@ -119,8 +119,8 @@ pub(super) fn render_usage_compact(
     if matches!(info.provider, UsageProvider::CostBased) {
         return vec![Line::from(vec![Span::styled(
             format!(
-                "${:.4} · {} in + {} out",
-                info.total_cost,
+                "{} · {} in + {} out",
+                crate::money_display::summarize(&info.cost_rows, 4),
                 format_tokens(info.input_tokens),
                 format_tokens(info.output_tokens)
             ),
@@ -259,12 +259,83 @@ fn render_labeled_bar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_provider_core::Currency;
+    use std::collections::BTreeMap;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn lines_text(lines: &[Line<'_>]) -> String {
+        lines.iter().map(line_text).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Session cost rows as the state layer would resolve them in native mode.
+    fn native_rows(buckets: &[(Currency, f32)]) -> Vec<crate::money_display::DisplayAmount> {
+        crate::money_display::DisplayTarget::native()
+            .resolve_buckets(&buckets.iter().cloned().collect::<BTreeMap<_, _>>())
+    }
+
+    fn cost_widget_data(rows: Vec<crate::money_display::DisplayAmount>) -> InfoWidgetData {
+        InfoWidgetData {
+            usage_info: Some(UsageInfo {
+                provider: UsageProvider::CostBased,
+                cost_rows: rows,
+                input_tokens: 12_345,
+                output_tokens: 678,
+                available: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_shows_original_currency() {
+        // Native mode converts nothing: a CNY-priced session is shown in CNY,
+        // never behind the `$` the widget used to hardcode.
+        let data = cost_widget_data(native_rows(&[(Currency::new("CNY"), 0.0123)]));
+
+        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)));
+        assert!(expanded.contains("CNY 0.0123"), "{expanded}");
+        assert!(
+            !expanded.contains('$'),
+            "a CNY amount must not be labelled with a dollar sign: {expanded}"
+        );
+
+        let info = data.usage_info.as_ref().expect("usage info");
+        let compact = lines_text(&render_usage_compact(info, 40, false));
+        assert!(compact.contains("CNY 0.0123"), "{compact}");
+        assert!(!compact.contains('$'), "{compact}");
+    }
+
+    #[test]
+    fn mixed_provider_session_never_relabels_other_currency() {
+        // F21: switching provider mid-session must not merge the two currencies
+        // into one sum, nor label one with the other's symbol.
+        let data = cost_widget_data(native_rows(&[
+            (Currency::new("CNY"), 8.0),
+            (Currency::usd(), 1.5),
+        ]));
+
+        let expanded = lines_text(&render_usage_widget(&data, Rect::new(0, 0, 40, 4)));
+        assert!(expanded.contains("CNY 8.0000 +1 more"), "{expanded}");
+        assert!(
+            !expanded.contains("$9.5000"),
+            "a cross-currency sum must never be rendered: {expanded}"
+        );
+        assert!(
+            !expanded.contains("$8.0000"),
+            "the CNY total must not be relabelled as dollars: {expanded}"
+        );
+
+        let info = data.usage_info.as_ref().expect("usage info");
+        let compact = lines_text(&render_usage_compact(info, 40, false));
+        assert!(compact.contains("CNY 8.0000 +1 more"), "{compact}");
+        assert!(!compact.contains('$'), "{compact}");
     }
 
     #[test]

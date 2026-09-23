@@ -411,14 +411,10 @@ fn enqueue_activity_sweeper_task(tasks: &mut tokio::task::JoinSet<Option<Provide
     for (source_key, entry) in leftover {
         tasks.spawn(async move {
             let mut extra_info = Vec::new();
-            if let Some(spend) = entry.spend {
-                extra_info.push((
-                    "Local spend (this machine)".to_string(),
-                    format!(
-                        "${:.2} today · ${:.2} this month · ${:.2} all-time",
-                        spend.day_usd, spend.month_usd, spend.all_time_usd
-                    ),
-                ));
+            // One row per currency in the window; the `*_usd` mirrors are a
+            // cross-currency sum and are never rendered.
+            if let Some(spend) = entry.spend.as_ref() {
+                extra_info.extend(crate::provider_activity::spend_summary_rows(spend));
             }
             let mut report = ProviderUsage {
                 provider_name: crate::provider_activity::display_name_for_source_key(&source_key),

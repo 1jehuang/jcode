@@ -31,14 +31,18 @@ use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
+
+use crate::model_pricing::PricingNotice;
+use jcode_provider_core::Currency;
+use misc_ui::PinnedCallPricing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppRuntimeMode {
@@ -60,6 +64,7 @@ mod commands_dispatch;
 mod commands_improve;
 mod commands_overnight;
 mod commands_plan;
+mod commands_pricing;
 mod commands_remote;
 mod commands_review;
 mod conversation_state;
@@ -818,20 +823,79 @@ struct StreamingProgress {
 
 /// Accumulated session cost and cached per-model pricing.
 ///
-/// Grouped out of [`App`]. `total_cost` accrues across the session; the cached
-/// price fields memoize the active model's pricing so they are re-resolved only
-/// when `cached_price_model` no longer matches the current model.
+/// Grouped out of [`App`]. Cost accrues per currency (F21): a session that
+/// switches between providers priced in different currencies keeps one bucket
+/// per currency, so the displayed total can never be relabelled as whatever was
+/// billed last. The cached price fields memoize the active model's pricing so
+/// they are re-resolved only when `cached_price_model` no longer matches the
+/// current model.
 #[derive(Clone, Debug, Default)]
 struct CostState {
-    // Total cost in USD (for API-key providers)
-    total_cost: f32,
+    /// Session cost accrued per currency, for API-key providers.
+    total_cost_by_currency: BTreeMap<Currency, f32>,
     // Cached pricing (input $/1M tokens, output $/1M tokens)
     cached_prompt_price: Option<f32>,
     cached_completion_price: Option<f32>,
     // Cached cache-read pricing ($/1M tokens), when known for the active model.
     cached_cache_read_price: Option<f32>,
+    // Currency the cached_*_price values are denominated in.
+    cached_price_currency: Option<Currency>,
     // Model the cached_*_price values were resolved for, so we re-resolve on switch.
     cached_price_model: Option<String>,
+    /// Instant the API call currently being accounted for started (F15). The
+    /// local billing path prices its call at this instant.
+    call_started_at: Option<SystemTime>,
+    /// Rate card pinned to the current API call (F16). It is resolved once, at
+    /// the call's own instant, so a call that straddles a peak/off-peak
+    /// boundary keeps the tier it started in. `None` until that call is first
+    /// priced.
+    pinned_call_pricing: Option<PinnedCallPricing>,
+    /// Why the *last priced call* was not priced the way the user's own
+    /// `[pricing]` configuration asked, in the form the cost line labels next to
+    /// the amount.
+    ///
+    /// Two cases reach here. A rule that was out of its validity window and
+    /// whose `on_rule_expiry = "fallback"` sent the call to the next layer
+    /// (F8/F20) - an inline card, or a `[pricing.providers.<vendor>].file` rule
+    /// labelled with the vendor name - makes the amount a fallback price. A
+    /// card that claims the pair but cannot price the call (spec 4.4) accrues
+    /// nothing, so the label is what stops a zero from reading as "free".
+    ///
+    /// This is what lets the display say so: without it a user sees a models.dev
+    /// number where their hand-written rule should apply and never learns the
+    /// rule stopped. It describes the most recent pricing decision (the widget's
+    /// amount is the whole session) and is cleared by every decision that is not
+    /// a fallback, so a fixed or in-window rule stops being labelled.
+    ///
+    /// Set at billing time, never at render time: the resolver logs a warning
+    /// when it detects the expiry, and the render path runs every frame.
+    pricing_notice: Option<PricingNotice>,
+}
+
+impl CostState {
+    /// Add `amount`, which the rate card denominated in `currency`.
+    fn accrue(&mut self, amount: f32, currency: &Currency) {
+        *self
+            .total_cost_by_currency
+            .entry(currency.clone())
+            .or_insert(0.0) += amount;
+    }
+
+    /// Replace the session total with a single `amount` in `currency`, used when
+    /// restored history is priced once instead of accrued call by call.
+    fn set_single_total(&mut self, amount: f32, currency: &Currency) {
+        self.total_cost_by_currency.clear();
+        self.total_cost_by_currency.insert(currency.clone(), amount);
+    }
+
+    /// Total accrued in one currency; `0.0` when nothing was billed in it.
+    #[cfg(test)]
+    fn total_in(&self, currency: &Currency) -> f32 {
+        self.total_cost_by_currency
+            .get(currency)
+            .copied()
+            .unwrap_or(0.0)
+    }
 }
 
 /// State for an in-progress OAuth/API-key login flow triggered by `/login`.
@@ -1469,6 +1533,10 @@ pub struct App {
     // Polled on idle ticks so config.toml keybinding edits hot-reload
     // without a restart.
     keybindings_config_generation: u64,
+    // Parse failure already reported for the current config file. Dedupes the
+    // "your settings stopped applying" notice so a broken file is announced
+    // once rather than on every tick.
+    reported_config_parse_error: Option<String>,
     // Active external dictation session, if one is running
     dictation_session: Option<dictation::ActiveDictation>,
     // Whether an external dictation command is currently running
@@ -1788,7 +1856,7 @@ impl App {
         );
         self.pause_streaming_tps(false);
         self.kv_cache.current_api_usage_recorded = false;
-        self.mark_stream_usage_call_boundary();
+        self.begin_api_call_accounting();
 
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
@@ -1840,7 +1908,7 @@ impl App {
         );
         self.pause_streaming_tps(false);
         self.kv_cache.current_api_usage_recorded = false;
-        self.mark_stream_usage_call_boundary();
+        self.begin_api_call_accounting();
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,

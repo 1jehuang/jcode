@@ -365,8 +365,13 @@ pub struct UsageInfo {
     pub spark: Option<f32>,
     /// Codex Spark reset timestamp (RFC3339), if known
     pub spark_resets_at: Option<String>,
-    /// Total cost in USD - for API-key providers (OpenRouter, direct API key)
-    pub total_cost: f32,
+    /// Session cost accrued per currency, resolved for display (largest
+    /// first) - for API-key providers (OpenRouter, direct API key).
+    ///
+    /// A single scalar plus "the currency of the last call" cannot describe a
+    /// session that billed in more than one currency (F21), so the buckets are
+    /// kept and this is what the display layer made of them.
+    pub cost_rows: Vec<crate::money_display::DisplayAmount>,
     /// Input tokens used - for cost calculation
     pub input_tokens: u64,
     /// Output tokens used - for cost calculation

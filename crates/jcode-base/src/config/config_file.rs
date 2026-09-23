@@ -1,6 +1,27 @@
 use super::*;
 use crate::storage::jcode_dir;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+
+/// Dotted config paths that a caller has declared as removals, keyed by the
+/// config file they belong to.
+///
+/// A serialized struct can only express a removal by omitting a key, and at the
+/// file level "we deliberately emptied this table" is indistinguishable from
+/// "a newer build wrote this section". So every path that deletes by omission
+/// must say so explicitly, and the save applies exactly those deletions.
+///
+/// Keying by config path keeps a removal recorded under one `JCODE_HOME` from
+/// ever touching another home's file (tests switch homes constantly).
+static DECLARED_REMOVALS: LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn declared_removals() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Vec<String>>> {
+    DECLARED_REMOVALS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 impl Config {
     /// Get the config file path
@@ -25,13 +46,35 @@ impl Config {
         Ok(config)
     }
 
+    /// Load the config plus the parse error that forced a fallback to defaults.
+    ///
+    /// [`Self::load`] answers a malformed file with defaults, which is right for
+    /// a caller that has to keep running, but it leaves the user with no idea why
+    /// every setting stopped applying. This reports the cause alongside the
+    /// fallback so callers can surface it.
+    pub fn load_with_parse_error() -> (Self, Option<String>) {
+        match Self::load_from_file_strict() {
+            Ok(found) => {
+                let mut config = found.unwrap_or_default();
+                config.apply_env_overrides();
+                (config, None)
+            }
+            Err(error) => {
+                crate::logging::error(&format!("Failed to parse config file: {}", error));
+                let mut config = Self::default();
+                config.apply_env_overrides();
+                (config, Some(error.to_string()))
+            }
+        }
+    }
+
     /// Load the on-disk config for a read-modify-write operation.
     ///
     /// Unlike [`Self::load`], this never converts a parse error into defaults.
     /// Saving those defaults would destroy the user's existing config. It also
     /// deliberately skips environment overrides so transient process settings
     /// are not baked into the file as a side effect of changing one preference.
-    fn load_for_update() -> anyhow::Result<Self> {
+    pub(crate) fn load_for_update() -> anyhow::Result<Self> {
         Ok(Self::load_from_file_strict()?.unwrap_or_default())
     }
 
@@ -66,8 +109,91 @@ impl Config {
         Ok(Some(config))
     }
 
+    /// Declare that `dotted` (e.g. `"display.colors"`) must disappear from the
+    /// active config file on the next **successful** save.
+    ///
+    /// This is the explicit half of the "a struct expresses deletion by
+    /// omission" problem: the save keeps every key the serialized struct does
+    /// not model (comments' anchors, sections written by a newer build), so a
+    /// deliberate deletion has to be announced here instead of being inferred
+    /// from absence. Declarations are keyed by config path and consumed once,
+    /// and only by a save that actually succeeded: a failed write leaves the
+    /// declaration in place so a later successful save still applies it.
+    pub fn declare_removal(dotted: &str) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        let mut pending = declared_removals();
+        let entry = pending.entry(path).or_default();
+        if !entry.iter().any(|declared| declared == dotted) {
+            entry.push(dotted.to_string());
+        }
+    }
+
+    /// Snapshot the removals declared for the active config path.
+    pub(crate) fn clone_declared_removals() -> Vec<String> {
+        let Some(path) = Self::path() else {
+            return Vec::new();
+        };
+        declared_removals().get(&path).cloned().unwrap_or_default()
+    }
+
+    /// Drop exactly the removals a save applied, for the active config path.
+    ///
+    /// Called only after a save actually succeeded, and only with the snapshot
+    /// that save wrote. A declaration made *after* the snapshot (for example a
+    /// concurrent revocation) is not in `removals`, so it stays pending for the
+    /// next save: dropping the whole entry here would silently discard it and
+    /// let the next preserving save keep an entry the user just revoked. A
+    /// failed write never reaches this call, so a declaration survives it for a
+    /// later successful save to apply.
+    pub(crate) fn consume_declared_removals(removals: &[String]) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        let mut pending = declared_removals();
+        if let Some(entry) = pending.get_mut(&path) {
+            entry.retain(|declared| !removals.iter().any(|applied| applied == declared));
+            if entry.is_empty() {
+                pending.remove(&path);
+            }
+        }
+    }
+
+    /// Removals currently pending for the active config path (inspection only).
+    #[cfg(test)]
+    pub(crate) fn pending_removals() -> Vec<String> {
+        let Some(path) = Self::path() else {
+            return Vec::new();
+        };
+        declared_removals().get(&path).cloned().unwrap_or_default()
+    }
+
     /// Save config to file
     pub fn save(&self) -> anyhow::Result<()> {
+        // Snapshot the declaration for this write and only consume that
+        // snapshot once the write has actually landed: a declaration belongs to
+        // the next *successful* save, so a failed write must leave it in place
+        // for a later save to apply (otherwise the declared key would never be
+        // deleted after the failure). Consuming only the snapshot also means a
+        // removal declared *after* it (a concurrent revocation) is not dropped
+        // by this save and is applied by the next one.
+        let removals = Self::clone_declared_removals();
+        self.save_with_removals(&removals)?;
+        Self::consume_declared_removals(&removals);
+        Ok(())
+    }
+
+    /// Save config, preserving what the serialized struct cannot express.
+    ///
+    /// A whole-file rewrite (`toml::to_string_pretty` + write) is destructive:
+    /// it drops the user's comments and every section a newer build wrote.
+    /// This overlays the serialized struct onto the parsed existing file
+    /// instead, keeping anything the struct does not model, and then applies
+    /// the declared removals. When the existing file cannot be parsed, fall
+    /// back to the plain write (callers normally reach `save` through
+    /// `load_for_update`, which refuses an unreadable config).
+    fn save_with_removals(&self, removals: &[String]) -> anyhow::Result<()> {
         let path = Self::path().ok_or_else(|| anyhow::anyhow!("No config path"))?;
 
         // Ensure parent directory exists
@@ -75,8 +201,28 @@ impl Config {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        let serialized = toml::to_string_pretty(self)?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(existing) => match merge_into_existing(&existing, &serialized, removals) {
+                Some(merged) => merged,
+                None => {
+                    // The merge could not be understood or would not parse back
+                    // (see `merged_document_parses`); a file jcode refuses is
+                    // worse than a file without comments, so write the plain
+                    // serialization instead.
+                    crate::logging::warn(
+                        "config: preserving save could not round-trip; writing the plain \
+                         serialization (comments in unmodeled sections are lost)",
+                    );
+                    serialized
+                }
+            },
+            Err(_) => serialized,
+        };
+        // A torn write here would destroy the user's comments and unmodeled
+        // sections, so use the atomic (temp file + rename, fsync'd) writer the
+        // storage layer documents for exactly this case.
+        crate::storage::write_bytes(&path, content.as_bytes())?;
         Self::invalidate_cache();
         Ok(())
     }
@@ -98,6 +244,9 @@ impl Config {
     pub fn set_copilot_premium(mode: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.copilot_premium = mode.map(|s| s.to_string());
+        if mode.is_none() {
+            Self::declare_removal("provider.copilot_premium");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved copilot_premium to config: {}",
@@ -112,6 +261,14 @@ impl Config {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.default_model = model.map(|s| s.to_string());
         cfg.provider.default_provider = provider.map(|s| s.to_string());
+        // Clearing a default is deletion by omission: `None` is not
+        // serialized, so the save has to be told to drop the file's key.
+        if model.is_none() {
+            Self::declare_removal("provider.default_model");
+        }
+        if provider.is_none() {
+            Self::declare_removal("provider.default_provider");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved default model: {}, provider: {}",
@@ -137,6 +294,9 @@ impl Config {
     pub fn set_openai_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_reasoning_effort = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_reasoning_effort");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_reasoning_effort to config: {}",
@@ -149,6 +309,9 @@ impl Config {
     pub fn set_anthropic_reasoning_effort(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.anthropic_reasoning_effort = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.anthropic_reasoning_effort");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved anthropic_reasoning_effort to config: {}",
@@ -161,6 +324,9 @@ impl Config {
     pub fn set_openai_transport(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_transport = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_transport");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_transport to config: {}",
@@ -173,6 +339,9 @@ impl Config {
     pub fn set_openai_service_tier(value: Option<&str>) -> anyhow::Result<()> {
         let mut cfg = Self::load_for_update()?;
         cfg.provider.openai_service_tier = value.map(|s| s.to_string());
+        if value.is_none() {
+            Self::declare_removal("provider.openai_service_tier");
+        }
         cfg.save()?;
         crate::logging::info(&format!(
             "Saved openai_service_tier to config: {}",
@@ -245,6 +414,41 @@ impl Config {
             show
         ));
         Ok(())
+    }
+
+    /// Read-modify-write the config file.
+    ///
+    /// Reloads before patching so a concurrent edit by another jcode session is
+    /// not clobbered, and so a config that cannot be parsed is reported instead
+    /// of being replaced by in-memory defaults. Those defaults would erase every
+    /// setting the file holds, not just the one being changed. Returns whatever
+    /// `mutate` returns.
+    pub fn update<R>(mutate: impl FnOnce(&mut Self) -> R) -> anyhow::Result<R> {
+        let mut cfg = Self::load_for_update()?;
+        let out = mutate(&mut cfg);
+        cfg.save()?;
+        Ok(out)
+    }
+
+    /// Read-modify-write the config file, declaring paths that must disappear.
+    ///
+    /// Same as [`Self::update`], but `removals` lists the dotted paths the
+    /// caller deliberately emptied (for example `"display.colors"` after a
+    /// palette reset). The serialized struct cannot express that deletion, so
+    /// it has to be stated; the next save applies exactly these removals and
+    /// keeps everything else, including comments and sections written by a
+    /// newer build. Returns whatever `mutate` returns.
+    pub fn update_removing<R>(
+        removals: &[&str],
+        mutate: impl FnOnce(&mut Self) -> R,
+    ) -> anyhow::Result<R> {
+        let mut cfg = Self::load_for_update()?;
+        for dotted in removals {
+            Self::declare_removal(dotted);
+        }
+        let out = mutate(&mut cfg);
+        cfg.save()?;
+        Ok(out)
     }
 
     /// Persist the baked global launch-hotkey mapping.
@@ -689,6 +893,11 @@ impl Config {
             .trusted_external_source_paths
             .retain(|value| !value.trim().eq_ignore_ascii_case(&entry));
         if cfg.auth.trusted_external_source_paths.len() != before {
+            // An empty list is omitted from the serialization, so revoking the
+            // last path has to be declared or the file keeps the old entry.
+            if cfg.auth.trusted_external_source_paths.is_empty() {
+                Self::declare_removal("auth.trusted_external_source_paths");
+            }
             cfg.save()?;
             crate::logging::info(&format!(
                 "Removed trusted external auth source path: {}",
@@ -718,6 +927,137 @@ impl Config {
             ));
         }
         Ok(())
+    }
+}
+
+/// Overlay `serialized` onto the parsed `existing` file, then apply `removals`.
+///
+/// Returns `None` when `existing` cannot be parsed as TOML, or when the merged
+/// result does not parse back into [`Config`]; the caller then writes
+/// `serialized` unchanged.
+pub(crate) fn merge_into_existing(
+    existing: &str,
+    serialized: &str,
+    removals: &[String],
+) -> Option<String> {
+    let mut document = existing.parse::<toml_edit::Document>().ok()?;
+    let serialized: toml_edit::Document = serialized.parse().ok()?;
+    merge_table(document.as_table_mut(), serialized.as_table());
+    for dotted in removals {
+        remove_dotted_path(document.as_table_mut(), dotted);
+    }
+    let merged = document.to_string();
+    merged_document_parses(&merged).then_some(merged)
+}
+
+/// Whether a merged document still round-trips back into [`Config`].
+///
+/// A preserving merge can assemble a file that jcode itself refuses, and the
+/// caller must never publish one: a merged document that does not parse makes
+/// every setting revert to its default. The alias hazard that originally
+/// motivated this is now handled directly (see [`field_aliases_for`] and
+/// [`merge_table`]), but the check stays as a general safety net for the next
+/// shape the overlay gets wrong.
+pub(crate) fn merged_document_parses(merged: &str) -> bool {
+    toml::from_str::<Config>(merged).is_ok()
+}
+
+/// Merge `source` into `target`, recursing table-to-table.
+///
+/// Keys only present in `target` are kept. They are either the anchor of the
+/// user's comments or a section a newer build wrote, and the serialized struct
+/// has no opinion about them. Keys the struct does model are overwritten by the
+/// serialized value. Nothing is deleted here: deletions are declared explicitly
+/// and applied by the caller, because absence from the serialized output cannot
+/// distinguish "deliberately emptied" from "not modeled".
+fn merge_table(target: &mut toml_edit::Table, source: &toml_edit::Table) {
+    for (key, source_item) in source.iter() {
+        // Reconcile any alias spelling of `key` before writing the canonical
+        // name, or both would survive and serde would report `duplicate field`
+        // (see `merged_document_parses`). The canonical-to-alias map lives in
+        // `jcode-config-types`, next to the `#[serde(alias = ...)]` attributes
+        // it mirrors.
+        //
+        // When the canonical name is not there yet, the alias entry is replaced
+        // by the *serialized* one (so its shape matches every other save) and
+        // the user's comment rides along: on the key for a key-value line, on
+        // the table for a nested `[header]` - a comment in a key's decor would
+        // otherwise be rendered *inside* the header and break the document.
+        for alias in field_aliases_for(key) {
+            if target.get(key).is_some() {
+                target.remove(alias);
+            } else if let Some((alias_key, _)) = target.remove_entry(alias) {
+                let comment = alias_key.decor().clone();
+                let mut canonical_key = toml_edit::Key::new(key);
+                let mut item = source_item.clone();
+                match &mut item {
+                    toml_edit::Item::Table(table) => *table.decor_mut() = comment,
+                    _ => *canonical_key.decor_mut() = comment,
+                }
+                target.insert_formatted(&canonical_key, item);
+            }
+        }
+        match target.get_mut(key) {
+            Some(target_item) => merge_item(target_item, source_item),
+            None => {
+                target.insert(key, source_item.clone());
+            }
+        }
+    }
+}
+
+/// The alias spellings serde accepts for the canonical config key `canonical`.
+fn field_aliases_for(canonical: &str) -> &'static [&'static str] {
+    jcode_config_types::field_aliases()
+        .iter()
+        .find(|(name, _)| *name == canonical)
+        .map(|(_, aliases)| *aliases)
+        .unwrap_or(&[])
+}
+
+fn merge_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
+    if let (toml_edit::Item::Table(target_table), toml_edit::Item::Table(source_table)) =
+        (&mut *target, source)
+    {
+        merge_table(target_table, source_table);
+        return;
+    }
+    // Arrays of tables are values, not mergeable containers. Merging them
+    // element by element can leave a file key beside the serialized canonical
+    // name for the same field (see `merged_document_parses`), so the array is
+    // replaced wholesale. Comments inside those entries are lost; that is
+    // acceptable where a config that jcode cannot parse is not.
+    replace_item_preserving_decor(target, source);
+}
+
+/// Replace `target`'s value with `source`'s while keeping `target`'s decor.
+///
+/// A comment attached to a key lives in that key's decor, so a plain
+/// assignment would erase the user's annotation on every settings change.
+fn replace_item_preserving_decor(target: &mut toml_edit::Item, source: &toml_edit::Item) {
+    match (target.as_value_mut(), source.as_value()) {
+        (Some(target_value), Some(source_value)) => {
+            let decor = target_value.decor().clone();
+            *target_value = source_value.clone();
+            *target_value.decor_mut() = decor;
+        }
+        _ => *target = source.clone(),
+    }
+}
+
+/// Remove a `"a.b.c"` dotted path from `table`, if present.
+fn remove_dotted_path(table: &mut toml_edit::Table, dotted: &str) {
+    match dotted.split_once('.') {
+        None => {
+            table.remove(dotted);
+        }
+        Some((head, rest)) => {
+            if let Some(item) = table.get_mut(head)
+                && let Some(child) = item.as_table_mut()
+            {
+                remove_dotted_path(child, rest);
+            }
+        }
     }
 }
 

@@ -615,7 +615,7 @@ fn swarm_plan_todos_render_safely_at_extreme_sizes() {
 fn cost_based_usage_widgets_show_price_and_tokens() {
     let usage = UsageInfo {
         provider: UsageProvider::CostBased,
-        total_cost: 0.01234,
+        cost_rows: vec![crate::money_display::DisplayAmount::usd(0.01234)],
         input_tokens: 12_345,
         output_tokens: 678,
         available: true,
@@ -1803,7 +1803,7 @@ fn compact_page_height_matches_for_cost_based_usage() {
         }),
         usage_info: Some(UsageInfo {
             provider: UsageProvider::CostBased,
-            total_cost: 0.42,
+            cost_rows: vec![crate::money_display::DisplayAmount::usd(0.42)],
             input_tokens: 10_000,
             output_tokens: 2_000,
             available: true,

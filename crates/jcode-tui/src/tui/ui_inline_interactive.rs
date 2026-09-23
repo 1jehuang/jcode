@@ -1014,6 +1014,7 @@ mod tests {
                     available: true,
                     detail: String::new(),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Model,
                 selected_option: 0,
@@ -1039,6 +1040,7 @@ mod tests {
                 available: true,
                 detail: String::new(),
                 estimated_reference_cost_micros: None,
+                comparable_reference_cost_micros: None,
             }],
             action: crate::tui::PickerAction::Account(crate::tui::AccountPickerAction::Switch {
                 provider_id: "claude".to_string(),
@@ -1065,6 +1067,7 @@ mod tests {
                     available: true,
                     detail: String::new(),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::Account(
                     crate::tui::AccountPickerAction::Switch {
@@ -1112,6 +1115,7 @@ mod tests {
                     available: true,
                     detail: "/agents swarm".to_string(),
                     estimated_reference_cost_micros: None,
+                    comparable_reference_cost_micros: None,
                 }],
                 action: crate::tui::PickerAction::AgentTarget(crate::tui::AgentModelTarget::Swarm),
                 selected_option: 0,

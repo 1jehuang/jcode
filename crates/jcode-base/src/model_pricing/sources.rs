@@ -1,0 +1,379 @@
+//! Hand-written price sources: the `[pricing.providers]` layer and the rules
+//! that decide which layer owns a `(provider, model)` pair.
+//!
+//! This is the highest-priority price source (spec 4.4): it outranks the
+//! vendor files ([`super::vendor_files`], which plug in between this layer and
+//! models.dev), the curated static tables, OpenRouter's own caches, and
+//! models.dev. The vendor files share this module's card resolver
+//! ([`resolve_card`]) so the two layers cannot disagree about merging or about
+//! currency.
+//!
+//! Three rules from the spec are enforced here and nowhere else:
+//!
+//! * rules are matched by **model id** by default: a vendor key is a label for
+//!   a group of rules, so `provider = OpenRouter, model = deepseek-flash` still
+//!   reaches DeepSeek's card (binding rules to a route would silently fall them
+//!   back to models.dev's USD numbers). A rule that opts into a `route = [...]`
+//!   filter narrows itself to those billing identities; a route it does not name
+//!   is skipped, never mispriced (see [`entry::route_matches`]);
+//! * **currency follows the price** (F1): a card in a currency other than the
+//!   next layer's never inherits that layer's numbers.
+
+use crate::config::CostFields;
+use crate::config::PricingConfig;
+use crate::config::pricing::{PricingConfigError, ProviderPricing, validate};
+use crate::model_pricing::entry::{self, ModelPricingEntry, RuleOutOfEffect};
+use crate::model_pricing::rules;
+use crate::model_pricing::{ModelCost, normalize_model_id};
+use jcode_provider_core::Currency;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+/// The config layer's answer for one `(provider, model)` pair.
+pub(super) enum ConfigPrice {
+    /// No `[pricing.providers]` rule claims this pair: ask the next layer.
+    Absent,
+    /// A rule claims it and these are its rates.
+    Hit {
+        entry: Box<ModelPricingEntry>,
+        currency: Currency,
+    },
+    /// A rule claims it but is out of effect with `on_rule_expiry = "no_price"`:
+    /// refuse to price rather than fall back to a worse estimate (spec 4.4).
+    NoPrice,
+    /// A rule claims it but its validity window does not cover `at`, and
+    /// `on_rule_expiry = "fallback"` sends the call to the next layer. That
+    /// layer prices it, and callers must label *that* price as the fallback
+    /// (spec F8/F20): the user wrote the rule and has to learn it stopped
+    /// applying, otherwise a models.dev number silently replaces their own.
+    OutOfEffect(RuleOutOfEffect),
+}
+
+/// What the memo stores: the config identity the view was built from, the
+/// validated view, and the reason validation rejected the section (if it did).
+type PricingConfigMemo = (usize, Arc<PricingConfig>, Option<Arc<PricingConfigError>>);
+
+/// Validated `[pricing]` snapshot, memoized against the loaded config instance.
+///
+/// Validation is pure but allocation-heavy, and the route catalog asks for a
+/// price once per route, so the parsed view is cached and invalidated whenever
+/// `config()` reloads (a reload leaks a brand-new `Config`, so its address is a
+/// stable identity for "the config the user currently has").
+///
+/// The rejection error is part of the memo, not recomputed per read: the display
+/// asks for it every frame, and neither the validation nor its warning line may
+/// happen more than once per loaded config.
+static PRICING_CONFIG: Mutex<Option<PricingConfigMemo>> = Mutex::new(None);
+
+/// The validated `[pricing]` view of the loaded config.
+///
+/// This is the one price-related view of the config that callers outside this
+/// module (currency display, for instance) should read: it is validated, memoized
+/// against the loaded config instance, and invalidated on reload.
+pub fn pricing_config() -> Arc<PricingConfig> {
+    let config = crate::config::config();
+    let identity = std::ptr::from_ref(config) as usize;
+    if let Ok(memo) = PRICING_CONFIG.lock()
+        && let Some((cached, parsed, _)) = memo.as_ref()
+        && *cached == identity
+    {
+        return Arc::clone(parsed);
+    }
+
+    let (parsed, error) = match validate(&config.pricing) {
+        Ok((parsed, warnings)) => {
+            for warning in warnings {
+                crate::logging::warn(&format!("pricing config: {warning}"));
+            }
+            (parsed, None)
+        }
+        Err(error) => {
+            // An invalid `[pricing]` section must never take pricing down with
+            // it: ignore it, keep the pre-feature behaviour, and say why.
+            crate::logging::warn(&format!(
+                "ignoring invalid [pricing] config ({error}); falling back to models.dev"
+            ));
+            // `validate` stops at the first error, so *every* rule in the
+            // section is dead, including the providers that were fine. The
+            // error is kept in the memo because a log file is not a user-facing
+            // signal: the display renders it next to the amount it changed (I-2).
+            (PricingConfig::default(), Some(Arc::new(error)))
+        }
+    };
+    let parsed = Arc::new(parsed);
+    if let Ok(mut memo) = PRICING_CONFIG.lock() {
+        // Only a *new* identity counts as a change, and the comparison is made
+        // against the entry being replaced: when two threads race the same
+        // reload the loser sees the winner's identity already stored and does
+        // not bump a second time.
+        let changed = memo.as_ref().map(|(cached, _, _)| *cached) != Some(identity);
+        *memo = Some((identity, Arc::clone(&parsed), error));
+        drop(memo);
+        if changed {
+            // This is the one place that observes "the config in force is not
+            // the one the priced view was built from", so it is the one place
+            // that can tell the price memos outside this module to re-derive.
+            super::generation::bump_pricing_generation();
+        }
+    }
+    parsed
+}
+
+/// Why the loaded `[pricing]` section was rejected, if it was.
+///
+/// A rejected section is dropped whole (see [`pricing_config`]), so every
+/// hand-written rule in it stopped applying and prices fall back to models.dev.
+/// That is the same silent-wrong-price class as an expired rule, and it used to
+/// be log-only; the error carries the config path that caused it so the display
+/// can say which line to fix.
+///
+/// Cheap and idempotent: `pricing_config` memoizes the parsed view *and* this
+/// error against the loaded config instance, so reading it on the render path
+/// re-validates nothing and logs nothing.
+pub fn pricing_config_error() -> Option<Arc<PricingConfigError>> {
+    // Refresh first: the memo is only in step with the *loaded* config after
+    // this call, and a stale memo would report the previous section's rejection
+    // (or none at all).
+    pricing_config();
+    let Ok(memo) = PRICING_CONFIG.lock() else {
+        return None;
+    };
+    memo.as_ref().and_then(|(_, _, error)| error.clone())
+}
+
+/// The config-authoritative card for `(source_key, model)`, if the user wrote
+/// one that is in effect at `at`.
+///
+/// Rules are matched by **model id, not route** (see
+/// `jcode_config_types::ProviderPricingFile`): a vendor namespace is a label for
+/// a group of rules, not a route binding. Vendors are consulted in `BTreeMap`
+/// (lexicographic) order and the first vendor that states a rule for the model
+/// decides; `source_key` is used only to resolve the models.dev fallback the
+/// card merges with.
+pub(super) fn config_price(source_key: &str, model: &str, at: SystemTime) -> ConfigPrice {
+    let config = pricing_config();
+    if config.providers.is_empty() {
+        return ConfigPrice::Absent;
+    }
+    let Some((_vendor, provider, rule)) = find_rule(&config, source_key, model) else {
+        return ConfigPrice::Absent;
+    };
+
+    let entry = ModelPricingEntry::from_rule(rule);
+    // Only the validity window is decided here. Peak/off-peak selection runs in
+    // `resolve_card`, *after* the field-level merge: a tariff scales the
+    // effective base card, so scaling before models.dev fills in the fields a
+    // partial card leaves out would scale the written fields and leave the
+    // merged ones behind.
+    if let Some(reason) = entry.out_of_effect_reason(at) {
+        return match entry.on_rule_expiry {
+            crate::config::OnRuleExpiry::Fallback => {
+                crate::logging::warn(&format!(
+                    "pricing rule for {source_key}/{model} is out of effect; \
+                     falling back to the next price source"
+                ));
+                ConfigPrice::OutOfEffect(reason)
+            }
+            crate::config::OnRuleExpiry::NoPrice => ConfigPrice::NoPrice,
+        };
+    }
+
+    ConfigPrice::Hit {
+        entry: Box::new(entry),
+        currency: provider.currency.clone().unwrap_or_else(Currency::usd),
+    }
+}
+
+/// Accept a price only if it is a finite, non-negative number.
+///
+/// The config layer's `validate` already rejects such a rate for the layers the
+/// user writes by hand, and a vendor file's rules go through the same
+/// `config::pricing::convert_rule`, so both sides are covered there too. This
+/// is the last-line guard on the resolved card, and it exists because a single
+/// `NaN` reaching `CostState::accrue` would poison a session total for good.
+fn sane_rate(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Merge what the card leaves out with the layers below it, honoring F1.
+///
+/// * A card already in USD (the next layer's currency) merges field by field,
+///   so "only `input` written" keeps models.dev's output price.
+/// * A card in any other currency never inherits USD numbers, because a USD
+///   figure would be relabelled as, say, CNY. If such a card cannot price the
+///   model on its own, the next layer wins outright.
+///
+/// `input_tokens` is the call's reported input token count from its first usage
+/// snapshot, if the caller has one: it decides the long-context overlay (see
+/// `rules::resolve_tier`). `None` prices at the base tier. models.dev's own
+/// `context_over_200k` rates are **not** merged into a hand-written card: a
+/// lower layer's absolute tier would silently overwrite the fields the user
+/// wrote, and the config layer is authoritative.
+pub(super) fn resolve_card(
+    mut entry: ModelPricingEntry,
+    mut currency: Currency,
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> ResolvedCard {
+    let models_dev = crate::model_pricing::lookup(provider, model);
+    let mut owns_price = true;
+    // What the `[pricing]` card states for cache writes *on its own*, asked
+    // before the merge below can fill the field from the next layer. Only a rate
+    // the user wrote may replace the billing premium (see
+    // `CallRateCard::cache_write_per_mtok`); a figure that arrived from
+    // models.dev belongs to that layer and must keep the pre-feature behaviour.
+    let declared_cache_write = declared_cache_write(&entry, at, input_tokens);
+
+    if currency.is_usd() {
+        // Same currency as the next layer, so missing fields merge per field.
+        if let Some(fallback) = models_dev {
+            merge_same_currency(&mut entry, &fallback);
+        }
+        // A rate that survived validation could still be non-finite if it
+        // arrived from a layer that did not go through `validate`; drop it here
+        // so it can never reach the session accumulator.
+        entry.cost = CostFields {
+            input: sane_rate(entry.cost.input),
+            output: sane_rate(entry.cost.output),
+            cache_read: sane_rate(entry.cost.cache_read),
+            cache_write: sane_rate(entry.cost.cache_write),
+        };
+    } else if entry.cost.input.is_some() && entry.cost.output.is_some() {
+        // A complete foreign-currency card stands on its own.
+    } else if let Some(fallback) = models_dev {
+        crate::logging::warn(&format!(
+            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}; \
+             using models.dev values (USD) instead of relabelling them"
+        ));
+        entry = ModelPricingEntry::from_model_cost(fallback);
+        currency = Currency::usd();
+        owns_price = false;
+    } else {
+        // Non-USD, incomplete, and nothing underneath it: neither direction may
+        // borrow the other layer's numbers (F1), so this card can never price
+        // the model. Warn rather than let a partial card read as a configured
+        // price (spec 4.4): billing refuses it and display must render
+        // "unknown" instead of a one-sided figure.
+        crate::logging::warn(&format!(
+            "pricing rule for {provider}/{model} is incomplete and denominated in {currency}, \
+             and no fallback price exists; this model cannot be priced until the rule supplies \
+             both input and output"
+        ));
+    }
+
+    // Peak/off-peak selection runs on the *effective* card, i.e. after any
+    // field-level merge above: a tariff scales the whole base, and running it
+    // first would scale only the fields the card happened to write. The
+    // long-context overlay is inside the same call so it applies after the
+    // window tariff, exactly as `rules` documents.
+    if let Some(selected) = rules::resolve_tier(&entry, at, input_tokens) {
+        crate::logging::debug(&format!(
+            "pricing: {provider}/{model} uses tariff `{}`{}",
+            selected.tariff.as_deref().unwrap_or("base"),
+            match selected.context_tier {
+                Some(threshold) => format!(" with the >{threshold} input-token tier"),
+                None => String::new(),
+            }
+        ));
+        entry.cost = selected.cost;
+    }
+
+    // A card that states its own cache-write rate keeps it through the merge
+    // (`or` never overwrites) and through the tariff (which scales or overrides
+    // that same card), so the effective rate is the one to honour.
+    let config_cache_write = declared_cache_write.and(entry.cost.cache_write);
+
+    ResolvedCard {
+        entry,
+        currency,
+        owns_price,
+        config_cache_write,
+    }
+}
+
+/// The cache-write rate the `[pricing]` entry states on its own, with the tariff
+/// it selects already applied, or `None` when the card leaves the field to the
+/// layer below.
+fn declared_cache_write(
+    entry: &ModelPricingEntry,
+    at: SystemTime,
+    input_tokens: Option<u64>,
+) -> Option<f64> {
+    match rules::resolve_tier(entry, at, input_tokens) {
+        Some(selected) => selected.cost.cache_write,
+        None => entry.cost.cache_write,
+    }
+}
+
+/// A resolved card, plus which layer actually supplied the rates.
+pub(super) struct ResolvedCard {
+    pub(super) entry: ModelPricingEntry,
+    pub(super) currency: Currency,
+    /// `false` when the card could not price the model and the rates are the
+    /// next layer's, so callers can keep labelling sources truthfully. The name
+    /// says "the layer this card came from is the one that set the price"; it is
+    /// the same question for an inline `[pricing.providers]` card and for a
+    /// `[pricing.providers.<vendor>].file` rule, which share this resolver.
+    pub(super) owns_price: bool,
+    /// The cache-write rate the `[pricing]` card itself states, when it states
+    /// one. `None` also covers "the merge filled the field from models.dev":
+    /// billing may only override its cache-write premium with a configured rate
+    /// (parity constraint, see `CallRateCard::cache_write_per_mtok`).
+    pub(super) config_cache_write: Option<f64>,
+}
+
+/// Fill unset fields from a fallback layer that is known to use the same
+/// currency.
+fn merge_same_currency(entry: &mut ModelPricingEntry, fallback: &ModelCost) {
+    entry.cost.input = entry.cost.input.or(Some(fallback.input_usd_per_mtok));
+    entry.cost.output = entry.cost.output.or(Some(fallback.output_usd_per_mtok));
+    entry.cost.cache_read = entry.cost.cache_read.or(fallback.cache_read_usd_per_mtok);
+    entry.cost.cache_write = entry.cost.cache_write.or(fallback.cache_write_usd_per_mtok);
+}
+
+/// The first `[pricing.providers.<vendor>]` section (in `BTreeMap` order) that
+/// declares an **applicable** rule for `model`, with the vendor key and section.
+///
+/// `source_key` is the call's billing identity. A rule whose `route` list does
+/// not name it is *skipped*, exactly as if the vendor had not written that
+/// model: resolution continues with the next vendor and then the next layer, so
+/// a route-scoped rule can never misprice a call on another route.
+///
+/// Callers may hand over ids carrying jcode-local decorations (`[1m]`, `@pin`);
+/// the catalog strips them, so config lookup does too. An OpenRouter-style
+/// prefixed id (`deepseek/deepseek-flash`) also retries on its bare tail, the
+/// same fallback `lookup_entry` and `vendor_files::vendor_rule` apply.
+fn find_rule<'a>(
+    config: &'a PricingConfig,
+    source_key: &str,
+    model: &str,
+) -> Option<(
+    &'a str,
+    &'a ProviderPricing,
+    &'a crate::config::ModelPricingRule,
+)> {
+    let normalized = normalize_model_id(model);
+    config.providers.iter().find_map(|(vendor, provider)| {
+        let rule = provider
+            .models
+            .get(model)
+            .or_else(|| {
+                (normalized != model)
+                    .then(|| provider.models.get(normalized))
+                    .flatten()
+            })
+            // OpenRouter-style ids may still carry their `provider/` prefix;
+            // retry on the bare model name, exactly as `lookup_entry` and
+            // `vendor_files::vendor_rule` do, so a bare card key reaches the
+            // same model the other two layers reach.
+            .or_else(|| {
+                normalized
+                    .rsplit_once('/')
+                    .and_then(|(_, bare)| provider.models.get(bare))
+            });
+        rule.filter(|rule| entry::route_matches(&rule.route, source_key))
+            .map(|rule| (vendor.as_str(), provider, rule))
+    })
+}

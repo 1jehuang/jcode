@@ -141,6 +141,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.onboarding_tick();
     needs_redraw |= app.progress_update_simulator();
     needs_redraw |= app.refresh_keybindings_if_config_reloaded();
+    needs_redraw |= app.refresh_config_parse_notice();
 
     let _ = check_debug_command(app, remote).await;
 

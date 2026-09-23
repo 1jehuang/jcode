@@ -5,14 +5,14 @@
 
 pub use jcode_config_types::{
     AgentsConfig, AmbientConfig, AuthConfig, AutoJudgeConfig, AutoReviewConfig, CompactionConfig,
-    CompactionMode, CrossProviderFailoverMode, DiagramDisplayMode, DiagramPanePosition,
-    DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig, HookCommands, HooksConfig,
-    KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry, LaunchHotkeysConfig,
-    MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig, NamedProviderModelConfig,
-    NamedProviderType, NativeScrollbarConfig, NotificationsConfig, OverscrollStatusMode,
-    PowerConfig, ProviderConfig, ReasoningDisplayMode, SafetyConfig, SessionPickerResumeAction,
-    SponsorsConfig, SwarmSpawnMode, SwarmStripLayout, TerminalConfig, UpdateChannel,
-    WebSearchConfig, WebSearchEngine,
+    CompactionMode, CrossProviderFailoverMode, DISPLAY_CURRENCY_NATIVE, DiagramDisplayMode,
+    DiagramPanePosition, DiffDisplayMode, DisplayConfig, FeatureConfig, GatewayConfig,
+    HookCommands, HooksConfig, KeybindingsConfig, LatexRenderingMode, LaunchHotkeyEntry,
+    LaunchHotkeysConfig, MarkdownSpacingMode, NamedProviderAuth, NamedProviderConfig,
+    NamedProviderModelConfig, NamedProviderType, NativeScrollbarConfig, NotificationsConfig,
+    OverscrollStatusMode, PowerConfig, PricingConfigFile, ProviderConfig, ReasoningDisplayMode,
+    SafetyConfig, SessionPickerResumeAction, SponsorsConfig, SwarmSpawnMode, SwarmStripLayout,
+    TerminalConfig, UpdateChannel, WebSearchConfig, WebSearchEngine,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -276,6 +276,7 @@ pub fn config() -> &'static Config {
     }
 
     let mut reload_reason = None;
+    let mut parse_error = None;
     let config = {
         let mut cache = CONFIG_CACHE
             .write()
@@ -296,7 +297,9 @@ pub fn config() -> &'static Config {
                 &cache.fingerprint,
                 &fingerprint,
             ));
-            cache.config = leak_config(Config::load());
+            let (loaded, error) = Config::load_with_parse_error();
+            cache.config = leak_config(loaded);
+            parse_error = error;
             // Loading applies env overrides that can themselves set env vars
             // (e.g. copilot_premium propagates config -> JCODE_COPILOT_PREMIUM).
             // Re-fingerprint after the load so those self-inflicted env changes
@@ -308,6 +311,10 @@ pub fn config() -> &'static Config {
     };
 
     if let Some(reason) = reload_reason {
+        // A config that stopped parsing is recorded so sessions can tell the
+        // user why their settings reverted, instead of the fallback to defaults
+        // being the only trace.
+        set_config_parse_error(parse_error);
         crate::logging::info(&format!("CONFIG_RELOAD {}", reason));
         // A config reload can change config-derived system prompt sections
         // (feature toggles, sponsors, ...), which legitimately invalidates the
@@ -446,6 +453,27 @@ pub fn config_reload_generation() -> u64 {
     CONFIG_RELOAD_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Parse failure from the most recent config reload, if the file was malformed.
+///
+/// `Config::load` answers a malformed file with defaults, so without this the
+/// only symptom of a broken config is that every setting quietly stopped
+/// applying. Sessions read this after a reload and tell the user.
+static CONFIG_PARSE_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Last config parse failure, if the active config file is currently malformed.
+pub fn config_parse_error() -> Option<String> {
+    CONFIG_PARSE_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn set_config_parse_error(error: Option<String>) {
+    *CONFIG_PARSE_ERROR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
+}
+
 /// Listeners invoked after the config cache reloads.
 ///
 /// Config is a foundational module, so instead of reaching up into higher-level
@@ -554,6 +582,15 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+
+    /// Hand-written per-provider pricing rules. Outranks every other source;
+    /// when empty the pricing path behaves exactly as before.
+    ///
+    /// Skipped when empty for the same reason as `sponsors` below: [`Self::save`]
+    /// serializes the whole struct, so without this an unconfigured `[pricing]`
+    /// would be baked into the user's `config.toml` the next time anything saves.
+    #[serde(skip_serializing_if = "PricingConfigFile::is_empty")]
+    pub pricing: PricingConfigFile,
 }
 
 /// Controls who owns autonomous wake execution.
@@ -822,6 +859,12 @@ mod config_file;
 mod default_file;
 mod display_summary;
 mod env_overrides;
+pub mod pricing;
+
+pub use pricing::{
+    ContextTier, CostFields, ModelPricingRule, OnRuleExpiry, PricingConfig, PricingConfigError,
+    ProviderPricing, ScheduleRule, Tariff, TimeWindow,
+};
 
 #[cfg(test)]
 #[path = "config_tests.rs"]
@@ -830,6 +873,14 @@ mod tests;
 #[cfg(test)]
 #[path = "config_color_tests.rs"]
 mod color_tests;
+
+#[cfg(test)]
+#[path = "config_save_tests.rs"]
+mod save_tests;
+
+#[cfg(test)]
+#[path = "config_pricing_provider_tests.rs"]
+mod pricing_provider_tests;
 
 /// Whether integration discovery settings carry no information beyond the shipped
 /// default, so `[sponsors]` can be left out of written config files.

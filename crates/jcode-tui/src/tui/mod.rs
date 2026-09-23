@@ -1753,7 +1753,15 @@ pub struct PickerOption {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    /// Reference cost in the route's own currency, for display and diagnostics.
     pub estimated_reference_cost_micros: Option<u64>,
+    /// The same reference cost converted into the FX base currency, for
+    /// ordering. Ordering on the raw estimate would compare unlike units: a CNY
+    /// card and a USD catalog sit side by side in this picker. `None` means the
+    /// route is unpriced or `[pricing].fx_rates` cannot convert its currency,
+    /// and it then sorts below every comparable route rather than being compared
+    /// as if the units matched.
+    pub comparable_reference_cost_micros: Option<u64>,
 }
 
 /// An SSH-backed socket is not a shared-filesystem local daemon. Keep this

@@ -1,8 +1,13 @@
 use serde::{Deserialize, Serialize};
 
 mod display;
-pub use display::DisplayConfig;
+pub use display::{DISPLAY_CURRENCY_NATIVE, DisplayConfig};
 pub mod keybindings;
+pub mod pricing;
+pub use pricing::{
+    ContextTierFile, CostFile, ModelPricingRuleFile, OnRuleExpiry, PricingConfigFile,
+    ProviderPricingFile, ScheduleRuleFile, TariffFile,
+};
 mod serde_lenient;
 pub use keybindings::{
     KEYBINDING_DEFAULTS, KeybindingDefault, KeybindingIssue, KeybindingIssueKind,
@@ -1641,6 +1646,41 @@ pub struct LaunchHotkeysConfig {
     /// Set true once auto-import has populated `entries`, so we only bake the
     /// per-repo mapping a single time and never clobber later user edits.
     pub imported: bool,
+}
+
+/// Canonical config key -> the additional key spelling(s) serde accepts for it.
+///
+/// Only *key-level* aliases matter here; enum-variant aliases describe values,
+/// not table keys. The preserving config save overlays the serialized struct
+/// onto the user's file, so a file that spelled one of these fields with an
+/// alias would end up carrying BOTH names after the overlay, and serde's derived
+/// deserializer maps both to one field and reports `duplicate field` - making
+/// the whole file unparseable. The merge consults this map to remove the alias
+/// spelling whenever it writes the canonical name.
+pub fn field_aliases() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        // `NamedProviderModelConfig`
+        ("reasoning_effort", &["reasoning-effort"]),
+        (
+            "context_window",
+            &[
+                "context_limit",
+                "context-length",
+                "context-window",
+                "context_length",
+            ],
+        ),
+        // `NamedProviderConfig`
+        ("extra_body", &["extra-body"]),
+        (
+            "supports_reasoning_effort",
+            &["supports-reasoning-effort", "reasoning_effort"],
+        ),
+        (
+            "disable_reasoning_heuristics",
+            &["disable-reasoning-heuristics"],
+        ),
+    ]
 }
 
 #[cfg(test)]

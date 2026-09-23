@@ -1452,7 +1452,19 @@ fn format_cache_stats(app: &App) -> String {
         "- client_observed_completed_output_tokens: {}",
         bold_count(app.token_accounting.total_output_tokens)
     ));
-    lines.push(format!("- total_cost_usd: {:.6}", app.cost.total_cost));
+    lines.push(format!(
+        "- total_cost_by_currency: {}",
+        if app.cost.total_cost_by_currency.is_empty() {
+            "none".to_string()
+        } else {
+            app.cost
+                .total_cost_by_currency
+                .iter()
+                .map(|(currency, amount)| format!("{currency} {amount:.6}"))
+                .collect::<Vec<_>>()
+                .join(" · ")
+        }
+    ));
     lines.push(format!(
         "- cached_prompt_price_per_1m: {}",
         app.cost

@@ -111,7 +111,7 @@ us.amazon.nova-lite-v1:0
 us.amazon.nova-micro-v1:0
 us.anthropic.claude-sonnet-4-6
 us.anthropic.claude-haiku-4-5-20251001-v1:0
-us.deepseek.r1-v1:0
+us.meta.llama3-3-70b-instruct-v1:0
 ```
 
 Prefer the region/profile ID such as `us.amazon.nova-2-lite-v1:0` when both a foundation model ID and a profile ID appear. Some Bedrock models do not support on-demand invocation and must be invoked through an inference profile.

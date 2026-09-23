@@ -127,6 +127,10 @@ timeout_secs = 90
 # Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
+# Cost display currency: "native" (default) shows every provider in its own
+# currency; any ISO 4217 code (e.g. "CNY") converts costs using [pricing].fx_rates
+currency = "native"
+
 # Center all content by default (default: false)
 centered = false
 
@@ -266,6 +270,63 @@ prompt_entry_animation = true
 # warning = "#ffc864"
 # error = "#ff6464"
 
+# Hand-written rate rules and per-vendor price files.
+#
+# A `[pricing.providers.<vendor>]` entry either writes rate cards inline or
+# points at a local JSON price file. The vendor key is your own label, not a
+# route: rules are matched by model id, so they price that model no matter which
+# route a call uses. A bare `file` name (`acme.json`) resolves under
+# ~/.jcode/cache/; anything else is a path (`~` expanded). The file is re-read
+# when it changes, so saving it takes effect at the next lookup, and a file that
+# cannot be read (missing, malformed) is skipped, never guessed at. It holds only
+# `{"models": {"<model-id>": {cost|tariffs|schedule|...}}}`, with no outer vendor
+# key.
+#
+# An inline card outranks the vendor's file. It is the only way to override one
+# rate field and keep the rest from the next layer, and the only way to refuse to
+# price a call with `on_rule_expiry = "no_price"`.
+#
+# Examples only — uncomment what you need. Every commented line below is valid
+# TOML on its own; `schedule` and `context_tiers` are written as arrays of
+# tables (`[[...]]`) because a multi-line inline table (`{ a = 1,\n b = 2 }`) is
+# invalid TOML and would make this whole file fail to parse.
+#
+# `context_tiers` are long-context rates: a call whose first usage snapshot
+# reports more than `min_input_tokens` input tokens is billed at the tier's
+# rates (a `multiplier`, or explicit prices) instead of the base rates. Tiers
+# are matched in declaration order, first match wins.
+#
+# `fx_base`/`fx_rates` only matter for a rule written in another currency.
+#
+# The card example below uses peak hours 01:00-04:00 / 06:00-10:00 UTC, Mon-Fri.
+[pricing]
+# fx_base = "USD"
+#
+# [pricing.fx_rates]
+# CNY = 7.20
+# EUR = 0.92
+# JPY = 150.0
+#
+# [pricing.providers."acme"]
+# file = "acme.json"
+# currency = "CNY"
+#
+# [pricing.providers."acme".models."acme-large"]
+# cost = { input = 4.5, output = 13.5, cache_read = 0.15 }
+# tariffs = { peak = { multiplier = 2.0 } }
+# effective_until = "2026-12-31T23:59:59Z"
+# on_rule_expiry = "fallback"
+#
+# [[pricing.providers."acme".models."acme-large".schedule]]
+# tariff = "peak"
+# utc_offset_minutes = 0
+# weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+# windows = [["01:00", "04:00"], ["06:00", "10:00"]]
+#
+# [[pricing.providers."acme".models."acme-large".context_tiers]]
+# min_input_tokens = 200_000
+# multiplier = 2.0
+
 [features]
 # Check for and install updates during startup. Set to false for the persistent
 # equivalent of passing --no-update on every invocation.
@@ -386,7 +447,7 @@ cross_provider_failover = "countdown"
 # stay visible. Unset or empty = show everything.
 # model_picker_providers = ["myprofile", "openrouter"]
 # Max seconds to wait for streaming data before timing out a request with no
-# data received. Raise this for slow reasoning models (e.g. DeepSeek) that think
+# data received. Raise this for slow reasoning models that think
 # silently for minutes before emitting tokens. Default: 180.
 # Applies to every streaming provider path (OpenAI native, Anthropic, Copilot,
 # OpenRouter/OpenAI-compatible). The TUI's client-side stall guard also extends
@@ -780,5 +841,104 @@ mod tests {
             );
             assert_eq!(value.len(), 7, "{role} example should be #rrggbb: {value}");
         }
+    }
+
+    /// Uncommenting the documented `[pricing]` example must actually work, the
+    /// same contract the colors example above is held to.
+    ///
+    /// This is not academic: a multi-line inline table (`{ a = 1,\n b = 2 }`)
+    /// is invalid TOML, and a single invalid byte makes `config.toml` fail to
+    /// parse as a whole — so the user's entire config silently reverts to
+    /// defaults. Shipping such a shape in the template would hand every user
+    /// that trap the first time they uncomment it.
+    #[test]
+    fn documented_pricing_example_is_valid_when_uncommented() {
+        let template = Config::default_config_file_contents();
+        // Unlike the colors example below, this section's header is a real
+        // table header, so keep it and uncomment only the body that follows.
+        let header = "[pricing]\n";
+        let body_start = template
+            .find(header)
+            .expect("template documents a [pricing] section")
+            + header.len();
+        let body: String = template[body_start..]
+            .lines()
+            .take_while(|line| line.starts_with("# ") || line == &"#")
+            .map(|line| {
+                format!(
+                    "{}\n",
+                    line.trim_start_matches("# ").trim_start_matches('#')
+                )
+            })
+            .collect();
+        let example = format!("{header}{body}");
+
+        let parsed: Config =
+            toml::from_str(&example).expect("uncommented [pricing] example must parse");
+        let vendor = parsed
+            .pricing
+            .providers
+            .get("acme")
+            .expect("the example configures the acme vendor");
+        assert!(
+            vendor
+                .models
+                .values()
+                .any(|model| !model.schedule.is_empty()),
+            "the example should demonstrate a schedule rule, got {vendor:?}"
+        );
+        assert!(
+            vendor
+                .models
+                .values()
+                .any(|model| !model.context_tiers.is_empty()),
+            "the example should demonstrate a long-context tier, got {vendor:?}"
+        );
+        assert_eq!(
+            vendor.file.as_deref(),
+            Some("acme.json"),
+            "the example should demonstrate a vendor price file, got {vendor:?}"
+        );
+        assert_eq!(
+            vendor.currency.as_deref(),
+            Some("CNY"),
+            "the example should state the file's currency, got {vendor:?}"
+        );
+
+        // Field placement matters: `effective_until`/`on_rule_expiry` must land
+        // on the *model rule*, not be swallowed by the `[[...schedule]]` entry
+        // that follows them. `ScheduleRuleFile` has no `deny_unknown_fields`, so
+        // putting these lines after the schedule header silently drops them
+        // once the example is uncommented; this asserts WHERE they land, on
+        // both the typed parse and the raw TOML.
+        let model_rule = parsed
+            .pricing
+            .providers
+            .get("acme")
+            .and_then(|provider| provider.models.get("acme-large"))
+            .expect("the example configures the acme-large model rule");
+        assert_eq!(
+            model_rule.effective_until.as_deref(),
+            Some("2026-12-31T23:59:59Z"),
+            "effective_until must land on the model rule, got {:?}",
+            model_rule.effective_until
+        );
+        assert_eq!(
+            model_rule.on_rule_expiry,
+            Some(crate::config::OnRuleExpiry::Fallback),
+            "on_rule_expiry must land on the model rule, got {:?}",
+            model_rule.on_rule_expiry
+        );
+
+        let raw: toml::Value =
+            toml::from_str(&example).expect("uncommented [pricing] example must parse");
+        let models = &raw["pricing"]["providers"]["acme"]["models"]["acme-large"];
+        let schedule = &models["schedule"]
+            .as_array()
+            .expect("the example demonstrates a schedule array")[0];
+        assert!(
+            schedule.get("effective_until").is_none() && schedule.get("on_rule_expiry").is_none(),
+            "the schedule entry must not carry the rule-level fields, got {schedule:?}"
+        );
     }
 }

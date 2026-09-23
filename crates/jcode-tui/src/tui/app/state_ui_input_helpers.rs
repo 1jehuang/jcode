@@ -155,6 +155,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/info", "Show session info and tokens"),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
+        "/pricing",
+        "Explain which layer prices the current model, and why",
+    ),
+    RegisteredCommand::public(
         "/productivity",
         "Generate a shareable usage report + dashboard image",
     ),
@@ -2111,6 +2115,10 @@ mod external_cli_suggestion_tests {
             "/resume-all",
             "/hotkeys",
             "/keys",
+            // Not an alias, but the same failure mode: `/pricing` dispatched
+            // correctly while autocomplete silently omitted it, because only
+            // the dispatcher had learned about it.
+            "/pricing",
         ] {
             assert!(names.contains(alias), "{alias} is not registered");
         }

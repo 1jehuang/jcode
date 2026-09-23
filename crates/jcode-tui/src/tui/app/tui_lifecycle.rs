@@ -120,6 +120,33 @@ impl App {
         true
     }
 
+    /// Tell the user when the config file stops parsing.
+    ///
+    /// A malformed config silently reverts every setting to its default, so the
+    /// failure has to be visible without the user going looking for it. Called
+    /// from the same ticks as the keybinding refresh; deduped on the error text
+    /// so a broken file is announced once instead of on every tick. Returns true
+    /// when a new failure was reported.
+    pub(super) fn refresh_config_parse_notice(&mut self) -> bool {
+        crate::config::config();
+        let current = crate::config::config_parse_error();
+        if current == self.reported_config_parse_error {
+            return false;
+        }
+        self.reported_config_parse_error = current.clone();
+        let Some(error) = current else {
+            return false;
+        };
+        let path = crate::config::Config::path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "config.toml".to_string());
+        self.push_display_message(DisplayMessage::error(format!(
+            "**{path} no longer parses as TOML.** jcode is running on default settings and every \
+             setting in that file is being ignored. Fix the syntax error:\n\n```\n{error}\n```"
+        )));
+        true
+    }
+
     pub(super) async fn begin_remote_send(
         &mut self,
         remote: &mut backend::RemoteConnection,
@@ -672,6 +699,7 @@ impl App {
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
+            reported_config_parse_error: None,
             dictation_session: None,
             dictation_in_flight: false,
             dictation_request_id: None,
@@ -1125,6 +1153,7 @@ impl App {
             fallback_switch_key: keybind::load_fallback_switch_key(),
             scroll_keys: keybind::load_scroll_keys(),
             keybindings_config_generation: crate::config::config_reload_generation(),
+            reported_config_parse_error: None,
             dictation_session: None,
             dictation_in_flight: false,
             dictation_request_id: None,
