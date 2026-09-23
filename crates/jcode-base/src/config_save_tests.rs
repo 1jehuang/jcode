@@ -336,6 +336,68 @@ fn a_successful_save_consumes_the_declaration_exactly_once() {
     );
 }
 
+/// A save must consume only the declarations it snapshotted, not every
+/// declaration that happens to be pending when it finishes.
+///
+/// Interleaving: save A snapshots `a`, then a concurrent caller declares `b`
+/// (for example revoking `auth.trusted_external_source_paths`), then A finishes
+/// and consumes. If A cleared the whole entry it would drop `b` too, and the
+/// next preserving save would keep the path the caller just revoked, leaving a
+/// revoked external credential source trusted. Consuming the snapshot keeps `b`
+/// pending for the next save.
+#[test]
+fn a_save_consumes_only_the_removals_it_snapshotted() {
+    let _guard = crate::storage::lock_test_env();
+    let _home = HomeGuard::new();
+
+    Config::declare_removal("a");
+    let snapshot = Config::clone_declared_removals();
+    assert_eq!(snapshot, vec!["a".to_string()]);
+
+    // A declaration that arrives after the snapshot must not be covered by it.
+    Config::declare_removal("b");
+    Config::consume_declared_removals(&snapshot);
+
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["b".to_string()],
+        "a removal declared after the snapshot must survive this save's consume"
+    );
+}
+
+/// Two consecutive saves apply each declaration exactly once: after the first
+/// save consumes its snapshot, the second has nothing to apply and leaves a
+/// key another build wrote back in between alone.
+#[test]
+fn a_second_save_does_not_reapply_an_already_consumed_removal() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+    Config::default().save().expect("first save");
+    assert!(
+        Config::pending_removals().is_empty(),
+        "the first save must consume its snapshot"
+    );
+
+    // Another build writes the key back after the deletion.
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#00ff00\"\n");
+
+    Config::default().save().expect("second save");
+    assert_eq!(
+        Config::pending_removals(),
+        Vec::<String>::new(),
+        "the second save must not resurrect a consumed declaration"
+    );
+
+    let written = home.read();
+    assert!(
+        written.contains("#00ff00"),
+        "the re-added value must survive the second save: {written}"
+    );
+}
+
 /// Removals are keyed by config path: one recorded under a different
 /// `JCODE_HOME` must never be applied to another home's file.
 #[test]
