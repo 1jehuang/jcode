@@ -87,6 +87,39 @@ pub struct VoiceAnswer {
 pub struct VoiceClassification {
     pub intent: VoiceIntent,
     pub answers: Vec<VoiceAnswer>,
+    /// Provider-reported token usage summed over every batch. `None` when no
+    /// request was sent or any batch omitted usage, so totals are never partial.
+    pub usage: Option<VoiceUsage>,
+}
+
+/// Published Jev 1.13 list price. Output tokens are free.
+/// Source: <https://docs.typesafe.ai/models> (checked 2026-09-22).
+pub const JEV_USD_PER_MILLION_INPUT_TOKENS: f64 = 0.042;
+
+/// Provider-reported Jev token usage for one voice classification.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VoiceUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Number of Jev requests (batches) that were sent.
+    pub requests: u32,
+}
+
+impl VoiceUsage {
+    /// Estimated cost at the published list price. Subscription access may
+    /// be included in a plan, in which case this is the upstream-equivalent.
+    pub fn estimated_usd(&self) -> f64 {
+        self.input_tokens as f64 * JEV_USD_PER_MILLION_INPUT_TOKENS / 1_000_000.0
+    }
+
+    fn from_response(value: &Value) -> Option<Self> {
+        let usage = value.get("usage")?;
+        Some(Self {
+            input_tokens: usage.get("input_tokens")?.as_u64()?,
+            output_tokens: usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+            requests: 1,
+        })
+    }
 }
 
 /// Describe the exact questions without credentials or network access.
@@ -151,6 +184,7 @@ pub async fn classify_with_report(
         return Ok(VoiceClassification {
             intent: VoiceIntent::Uncertain,
             answers: vec![],
+            usage: None,
         });
     }
     classify_with_client(transcript, candidates, &crate::jev::JevClient::for_voice()?).await
@@ -164,6 +198,7 @@ pub(crate) async fn classify_with_client(
     let (state, questions) = build_request(transcript, candidates)?;
     let entries: Vec<_> = questions.iter().collect();
     let mut answers = Map::new();
+    let mut usage = Some(VoiceUsage::default());
     for chunk in entries.chunks(crate::jev::MAX_QUESTIONS) {
         let batch = chunk
             .iter()
@@ -172,6 +207,11 @@ pub(crate) async fn classify_with_client(
         // evaluate validates the exact batch IDs and typed probabilities before
         // anything is merged. Never feed previous answers into subsequent state.
         let response = client.evaluate(state.clone(), batch).await?;
+        usage = usage.zip(VoiceUsage::from_response(&response)).map(|(total, batch)| VoiceUsage {
+            input_tokens: total.input_tokens + batch.input_tokens,
+            output_tokens: total.output_tokens + batch.output_tokens,
+            requests: total.requests + 1,
+        });
         answers.extend(
             response["answers"]
                 .as_object()
@@ -190,7 +230,11 @@ pub(crate) async fn classify_with_client(
                 .expect("validated probability"),
         })
         .collect();
-    Ok(VoiceClassification { intent, answers })
+    Ok(VoiceClassification {
+        intent,
+        answers,
+        usage,
+    })
 }
 
 const POLICY: &str = "Classify state.transcript as Desktop voice input. \
@@ -726,6 +770,7 @@ mod tests {
             VoiceClassification {
                 intent: VoiceIntent::Uncertain,
                 answers: vec![],
+                usage: None,
             }
         );
         assert!(
@@ -734,6 +779,19 @@ mod tests {
                 .is_err()
         );
         assert!(classify("", &candidates(21)).await.is_err());
+    }
+
+    #[test]
+    fn usage_is_parsed_and_priced_at_published_rate() {
+        let usage = VoiceUsage::from_response(
+            &json!({"answers": {}, "usage": {"input_tokens": 2_000_000, "output_tokens": 27}}),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, 2_000_000);
+        assert_eq!(usage.output_tokens, 27);
+        assert_eq!(usage.requests, 1);
+        assert!((usage.estimated_usd() - 0.084).abs() < 1e-12);
+        assert_eq!(VoiceUsage::from_response(&json!({"answers": {}})), None);
     }
 
     #[test]

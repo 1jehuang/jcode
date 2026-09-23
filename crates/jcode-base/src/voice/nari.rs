@@ -26,6 +26,14 @@ const END: &str = "jcode_end";
 const IO_TIMEOUT: Duration = Duration::from_secs(15);
 const FINAL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const NARI_PCM_CHUNK_SAMPLES: usize = 6400;
+/// Published `qwen3-asr-fast` list price per input audio hour.
+/// Source: <https://docs.narilabs.com/models-and-pricing> (checked 2026-09-22).
+pub const NARI_USD_PER_AUDIO_HOUR: f64 = 0.12;
+
+/// Estimated Nari transcription cost for the given streamed audio duration.
+pub fn estimated_transcription_usd(audio: Duration) -> f64 {
+    audio.as_secs_f64() / 3600.0 * NARI_USD_PER_AUDIO_HOUR
+}
 
 /// Full aggregate revisions, not deltas. Finished is emitted exactly once by run().
 #[derive(Clone, PartialEq, Eq)]
@@ -400,6 +408,12 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn transcription_cost_uses_published_hourly_rate() {
+        assert_eq!(estimated_transcription_usd(Duration::from_secs(3600)), 0.12);
+        assert!((estimated_transcription_usd(Duration::from_secs(30)) - 0.001).abs() < 1e-12);
+    }
+
     #[test]
     fn prompt_merges_user_terms_dedupes_and_stays_bounded() {
         let prompt = build_prompt(&[
