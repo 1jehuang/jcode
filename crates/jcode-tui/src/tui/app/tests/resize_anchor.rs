@@ -109,9 +109,9 @@ fn resize_back_to_the_original_width_returns_to_the_same_message() {
     assert!(app.reconcile_resize_anchor());
 
     // Clear the resize debounce so the second resize commits immediately.
-    app.last_resize_redraw =
-        Some(std::time::Instant::now() - std::time::Duration::from_millis(40));
-    let mut wide_again = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    app.last_resize_redraw = Some(std::time::Instant::now() - std::time::Duration::from_millis(40));
+    let mut wide_again =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
     assert!(app.should_redraw_after_resize());
     render_and_snap(&app, &mut wide_again);
 
@@ -189,5 +189,139 @@ fn resuming_the_tail_drops_a_pending_resize_anchor() {
         crate::tui::ui::last_resolved_chat_scroll(),
         crate::tui::ui::last_max_scroll(),
         "resuming the tail must land at the bottom, not the anchored message"
+    );
+}
+
+#[test]
+fn a_prepend_invalidates_a_pending_resize_anchor() {
+    // A resize anchor captured before older history is prepended has a stale
+    // occurrence ordinal: a prepended duplicate becomes occurrence zero, so the
+    // resolver would name that older message instead of the reader's. The
+    // prepend anchor is authoritative and must supersede it.
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = anchored_scroll_test_app();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.scroll_up(20);
+    render_and_snap(&app, &mut terminal);
+
+    assert!(app.should_redraw_after_resize());
+    assert!(app.pending_resize_anchor.is_some());
+
+    app.capture_history_anchor(0);
+    assert!(app.pending_history_anchor.is_some());
+    assert!(
+        app.pending_resize_anchor.is_none(),
+        "a prepend supersedes the resize anchor"
+    );
+}
+
+#[test]
+fn a_prepend_in_flight_blocks_a_resize_anchor() {
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+    let mut app = anchored_scroll_test_app();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.scroll_up(20);
+    render_and_snap(&app, &mut terminal);
+
+    app.capture_history_anchor(0);
+    assert!(app.pending_history_anchor.is_some());
+
+    assert!(app.should_redraw_after_resize());
+    assert!(
+        app.pending_resize_anchor.is_none(),
+        "a prepend in flight must block a resize anchor capture"
+    );
+}
+
+/// A transcript body long enough to wrap into several rows at 60 and 100 cols.
+fn resize_anchor_filler(index: usize) -> DisplayMessage {
+    DisplayMessage::assistant(format!("FILLER{index:02} - {}", "filler ".repeat(20)))
+}
+
+/// The owed regression for the reviewer finding: a resize anchor held across a
+/// prepend used to resolve its duplicate-content ordinal against the prepended
+/// message, teleporting the reader to the top of the transcript. The prepend
+/// must win instead.
+#[test]
+fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::None;
+    app.diagram_pane_enabled = false;
+    app.status = ProcessingStatus::Idle;
+    app.session.short_name = Some("test".to_string());
+
+    // Visible window: filler, with TARGET deep enough that its row is well below
+    // the transcript top. The identical duplicate is not in this window yet.
+    let target_body = format!("TOKENsame - {}", "identical body ".repeat(8));
+    let mut visible: Vec<DisplayMessage> = (0..30).map(resize_anchor_filler).collect();
+    visible.insert(8, DisplayMessage::assistant(target_body.clone()));
+    app.display_messages = visible.clone();
+    app.bump_display_messages_version();
+    app.compacted_history_lazy = super::CompactedHistoryLazyState {
+        total_messages: visible.len() + 2,
+        visible_messages: visible.len(),
+        remaining_messages: 2,
+        hidden_user_prompts: 0,
+        pending_request_visible: None,
+    };
+
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+
+    // Park the reader with TARGET at the top of the viewport.
+    let target_row = {
+        let frame = crate::tui::ui::last_chat_frame().expect("frame");
+        (0..frame.total_wrapped_lines())
+            .find(|row| {
+                frame
+                    .wrapped_plain_line(*row)
+                    .is_some_and(|text| text.contains("TOKENsame"))
+            })
+            .expect("target row")
+    };
+    app.scroll_offset = target_row;
+    app.auto_scroll_paused = true;
+    render_and_snap(&app, &mut terminal);
+    let before = crate::tui::ui::last_resolved_chat_scroll();
+    assert_eq!(
+        before, target_row,
+        "fixture must park the reader on TARGET without clamping"
+    );
+
+    // Resize: captures a resize anchor naming TARGET.
+    assert!(app.should_redraw_after_resize());
+    assert!(app.pending_resize_anchor.is_some());
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    // What the tick loop would have adopted before the prepend lands.
+    app.scroll_offset = crate::tui::ui::last_resolved_chat_scroll();
+
+    // Older history containing an identical duplicate of TARGET is prepended.
+    let mut older: Vec<DisplayMessage> = vec![resize_anchor_filler(100)];
+    older.push(DisplayMessage::assistant(target_body.clone()));
+    older.extend(visible.iter().cloned());
+    let total = older.len();
+    app.capture_history_anchor(0);
+    app.apply_compacted_history_window(older, Vec::new(), total, total, 0, 0);
+    render_and_snap(&app, &mut narrow);
+
+    let after = crate::tui::ui::last_resolved_chat_scroll();
+    assert!(
+        after >= before,
+        "the reader must not teleport up to the prepended duplicate: before={before} after={after}"
+    );
+
+    // The invariant behind that outcome: the prepend's anchor is authoritative,
+    // so the stale-ordinal resize anchor is gone.
+    assert!(
+        app.pending_resize_anchor.is_none(),
+        "the prepend must supersede the resize anchor"
     );
 }

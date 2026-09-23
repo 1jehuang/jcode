@@ -650,6 +650,10 @@ impl App {
         // render map it back to an absolute offset against the larger total.
         let scroll = self.scroll_offset.min(total);
         let lines_from_bottom = total.saturating_sub(scroll).saturating_add(overshoot);
+        // A prepend shifts content ordinals, so a resize anchor captured against
+        // the pre-prepend frame can no longer be trusted to name the same
+        // message. Drop it; this prepend anchor is authoritative.
+        self.pending_resize_anchor = None;
         self.pending_history_anchor = Some(super::HistoryScrollAnchor {
             lines_from_bottom,
             base_total: total,
@@ -681,6 +685,14 @@ impl App {
     /// following the tail the resize snaps to the new bottom instead.
     pub(super) fn capture_resize_anchor(&mut self) {
         if !self.auto_scroll_paused {
+            return;
+        }
+        // A prepend is already in flight. Its distance-from-bottom anchor is
+        // invariant under the insert, while a content anchor's occurrence
+        // ordinal is not (a prepended duplicate shifts it), so it wins. The two
+        // must never be alive at once or the stale ordinal resolves to the
+        // wrong message.
+        if self.pending_history_anchor.is_some() {
             return;
         }
         let Some(frame) = crate::tui::ui::last_chat_frame() else {
