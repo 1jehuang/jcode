@@ -43,11 +43,21 @@ pub enum NariEvent {
     Finished(Result<String, VoiceError>),
 }
 
+/// Describes the assistant name in context. Qwen3-ASR uses the prompt as
+/// biasing context, and a descriptive sentence with example addresses beats a
+/// bare term list: on noisy synthetic speech it doubled exact "Jev" (12/18 vs
+/// 6/18, repeatable), recovering "Jen", "Gem", "Kim" and dropped names.
+const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
+Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
+Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
+Other names: ";
+
 /// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
+/// "Jev" is covered by `NAME_CONTEXT`, so it is deduplicated from this list.
 const BUILTIN_VOCABULARY: &[&str] = &[
+    "Jev",
     "Jcode",
     "Jcode Desktop",
-    "Jev",
     "Handterm",
     "Nari",
     "TypeSafe",
@@ -107,7 +117,7 @@ pub fn recognition_prompt() -> String {
 }
 
 fn build_prompt(extra: &[String]) -> String {
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::from(["jev".to_string()]);
     let mut prompt = String::new();
     let terms = BUILTIN_VOCABULARY
         .iter()
@@ -126,13 +136,14 @@ fn build_prompt(extra: &[String]) -> String {
             continue;
         }
         let sep = if prompt.is_empty() { "" } else { ", " };
-        if prompt.chars().count() + sep.len() + term.chars().count() > MAX_PROMPT_CHARS {
+        let used = NAME_CONTEXT.chars().count() + prompt.chars().count() + 1;
+        if used + sep.len() + term.chars().count() > MAX_PROMPT_CHARS {
             break;
         }
         prompt.push_str(sep);
         prompt.push_str(term);
     }
-    prompt
+    format!("{NAME_CONTEXT}{prompt}.")
 }
 
 pub fn nari_api_key() -> Option<String> {
@@ -480,14 +491,21 @@ mod tests {
             "bad\nterm".into(),
             ",Kubernetes,".into(),
         ]);
-        assert!(prompt.starts_with("Jcode, Jcode Desktop, Jev, Handterm"));
-        assert!(prompt.ends_with(", Alice Zhang, Kubernetes"));
-        assert_eq!(prompt.matches("code").count(), 2, "jcode deduped: {prompt}");
+        assert!(prompt.starts_with(NAME_CONTEXT));
+        assert!(prompt.contains("sounds like Jeff. Write it as Jev."));
+        let terms = prompt.strip_prefix(NAME_CONTEXT).unwrap();
+        assert!(terms.starts_with("Jcode, Jcode Desktop, Handterm"));
+        assert!(terms.ends_with(", Alice Zhang, Kubernetes."));
+        assert!(!terms.contains("Jev"), "Jev lives in the context: {terms}");
+        assert_eq!(terms.matches("code").count(), 2, "jcode deduped: {prompt}");
         assert!(!prompt.contains("bad"));
         let long = build_prompt(&(0..500).map(|i| format!("term{i}")).collect::<Vec<_>>());
         assert!(long.chars().count() <= MAX_PROMPT_CHARS);
         assert!(
-            long.split(", ")
+            long.strip_prefix(NAME_CONTEXT)
+                .unwrap()
+                .trim_end_matches('.')
+                .split(", ")
                 .all(|t| t.starts_with("term") || BUILTIN_VOCABULARY.contains(&t))
         );
     }
@@ -505,7 +523,7 @@ mod tests {
                 config["session"]["prompt"]
                     .as_str()
                     .unwrap()
-                    .starts_with("Jcode, ")
+                    .starts_with(NAME_CONTEXT)
             );
             ws.send(Message::Text(
                 json!({"type":"session.configured"}).to_string(),
