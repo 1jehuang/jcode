@@ -64,10 +64,11 @@ Model selection, reasoning effort, failover, and retry behavior.
 | `max_retries` | int | `8` | Total attempts on transient provider errors, including the first |
 | `retry_backoff_cap_secs` | int | `30` | Max exponential backoff between retries |
 
-## `[providers.<name>]`
+## `[providers]`
 
 Named profiles for OpenAI-compatible, Anthropic-compatible, and OpenRouter
-endpoints. Each profile becomes selectable as `<name>:<model>`.
+endpoints, one sub-table per profile (`[providers.<name>]`). Each profile
+becomes selectable as `<name>:<model>`.
 
 ```toml
 [providers.my-gateway]
@@ -130,7 +131,7 @@ TUI presentation. Most of these have a matching slash command or hotkey.
 | `idle_animation` | bool | `false` | Animation before the first prompt |
 | `prompt_entry_animation` | bool | `true` | Animate a prompt line entering the viewport |
 | `disabled_animations` | array | `[]` | Disable variants by name, e.g. `["donut", "orbit_rings"]` |
-| `performance` | string | auto | `auto`, `full`, `reduced`, `minimal` |
+| `performance` | string | `""` (auto) | `""`/`auto`, `full`, `reduced`, `minimal` |
 | `animation_fps` | int | `60` | 1-120 |
 | `redraw_fps` | int | `60` | 1-120 |
 | `prompt_preview` | bool | `true` | Truncated preview of the previous prompt once it scrolls away |
@@ -140,7 +141,7 @@ TUI presentation. Most of these have a matching slash command or hotkey.
 | `show_bash_output` | bool | `false` | Last few bash output lines under the tool summary |
 | `tool_call_details` | bool | `false` | Show command/path detail after the model's stated intent |
 | `keybinding_hints` | bool | `true` | Occasional "there is a shortcut for this" nudges |
-| `theme` | string | `auto` | `auto` (OSC 11 background detection), `dark`, `light` |
+| `theme` | string | `""` (auto) | `""`/`auto` (OSC 11 background detection), `dark`, `light` |
 | `active_sessions_manager` | bool | `false` | Left arrow on empty input opens the live-session picker |
 | `external_sessions` | bool | `true` | Include Claude Code / Codex / Pi / OpenCode / Cursor transcripts in `/resume` |
 | `usage_display` | string | `left` | `left` or `used` wording for the usage percentage |
@@ -163,21 +164,22 @@ it, `/colors export` prints the TOML.
 ## `[keybindings]`
 
 Chord syntax is `modifier+key`, e.g. `"ctrl+k"`, `"alt+shift+up"`, `"pageup"`.
-Empty string unbinds. Defaults differ per platform (macOS prefers `cmd`).
+Empty string unbinds. Defaults differ per platform; where they differ, both are
+shown as macOS / other.
 
 | Key | Default | Action |
 | --- | --- | --- |
-| `scroll_up` / `scroll_down` | `ctrl+k` / `ctrl+j` | Line scroll |
+| `scroll_up` / `scroll_down` | `ctrl+shift+k` / `ctrl+shift+j` | Line scroll |
 | `scroll_page_up` / `scroll_page_down` | `alt+u` / `alt+d` | Page scroll |
-| `scroll_up_fallback` / `scroll_down_fallback` | unset | Secondary scroll chords |
-| `scroll_prompt_up` / `scroll_prompt_down` | `ctrl+[` / `ctrl+]` | Jump between prompts |
+| `scroll_up_fallback` / `scroll_down_fallback` | `""` / `""` | Secondary scroll chords, unbound by default |
+| `scroll_prompt_up` / `scroll_prompt_down` | `ctrl+k` / `ctrl+j` | Jump between prompts |
 | `scroll_bookmark` | `ctrl+g` | Stash position, jump to bottom, press again to return |
 | `model_switch_next` / `model_switch_prev` | `ctrl+tab` / `ctrl+shift+tab` | Cycle models |
 | `fallback_switch` | `ctrl+y` | Accept the post-error fallback offer and resend |
-| `effort_increase` / `effort_decrease` | `cmd+right` / `cmd+left` (macOS), `alt+...` elsewhere | Reasoning effort |
+| `effort_increase` / `effort_decrease` | `cmd+right` / `cmd+left` (macOS), `alt+right` / `alt+left` elsewhere | Reasoning effort |
 | `centered_toggle` | `alt+c` | Centered layout |
 | `auto_poke_toggle` | `ctrl+p` | Auto follow-up on incomplete todos |
-| `workspace_left/down/up/right` | `alt+h/j/k/l` | Workspace navigation |
+| `workspace_left` / `workspace_down` / `workspace_up` / `workspace_right` | `alt+h` / `alt+j` / `alt+k` / `alt+l` | Workspace navigation |
 | `side_panel_toggle` | `alt+m` | Side panel |
 | `copy_selection_toggle` | `alt+y` | Copy/selection mode |
 | `diagram_pane_toggle` | `alt+t` | Diagram pane position |
@@ -186,9 +188,13 @@ Empty string unbinds. Defaults differ per platform (macOS prefers `cmd`).
 | `info_widget_toggle` | `alt+i` | Info widget |
 | `todo_card_toggle` | `alt+x` | Inline todo card |
 | `swarm_panel_focus` | `alt+n` | Focus the inline swarm panel (inline spawn mode only) |
-| `new_terminal` | unset | Spawn a fresh session in a new terminal window |
+| `new_terminal` | `cmd+shift+;` (macOS), `alt+shift+;` elsewhere | Spawn a fresh session in a new terminal window |
 | `open_resume` | `cmd+b` (macOS), `alt+r` elsewhere | Open the `/resume` picker |
 | `session_picker_enter` | `current-terminal` | Enter action in the picker; `new-terminal` swaps it. Ctrl+Enter always does the other one. |
+
+Note that `scroll_up`/`scroll_down` scroll by line while `scroll_prompt_up`/
+`scroll_prompt_down` jump between prompts, and the prompt-jump pair owns the
+plainer `ctrl+k`/`ctrl+j` chords.
 
 Conflict detection is described in `docs/KEYMAP_CONFLICTS.md`.
 
@@ -210,7 +216,7 @@ Conflict detection is described in `docs/KEYMAP_CONFLICTS.md`.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `profile` | string | `full` | `full`, `acp`, `minimal`/`lite`, `none` |
+| `profile` | string | `""` (full) | `""`/`full`, `acp`, `minimal`/`lite`/`small`, `none`/`off`/`disabled` |
 | `enabled` | array | `[]` | Allow-list; when set only these tools are exposed. `"*"` or `"all"` exposes everything. |
 | `disabled` | array | `[]` | Removed after profile/allow-list resolution |
 | `disable_base_tools` | bool | `false` | Drop all built-ins unless `enabled` is given |
@@ -341,14 +347,37 @@ Background autonomous work. See `docs/AMBIENT_MODE.md`.
 Remote notification and reply channels used mainly by ambient mode. Prefer env
 vars for every secret. See `docs/SAFETY_SYSTEM.md`.
 
-| Group | Keys |
-| --- | --- |
-| ntfy | `ntfy_topic`, `ntfy_server` (default `https://ntfy.sh`) |
-| Desktop | `desktop_notifications` (default `true`) |
-| Email | `email_enabled`, `email_to`, `email_from`, `email_smtp_host`, `email_smtp_port` (587), `email_password` (prefer `JCODE_SMTP_PASSWORD`), `email_imap_host`, `email_imap_port` (993), `email_reply_enabled` |
-| Telegram | `telegram_enabled`, `telegram_bot_token`, `telegram_chat_id`, `telegram_reply_enabled` |
-| Discord | `discord_enabled`, `discord_bot_token`, `discord_channel_id`, `discord_bot_user_id`, `discord_reply_enabled` |
-| Jade relay | `jade_relay_enabled`, `jade_relay_api_base`, `jade_relay_token` (prefer `JCODE_JADE_RELAY_TOKEN`), `jade_relay_token_id`, `jade_relay_user_id`, `jade_relay_session_id`, `jade_relay_reply_enabled`, `jade_relay_launch_enabled`, `jade_relay_launch_working_dir` |
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ntfy_topic` | string | unset | ntfy.sh topic; required for push notifications |
+| `ntfy_server` | string | `https://ntfy.sh` | ntfy server URL |
+| `desktop_notifications` | bool | `true` | Local desktop notifications |
+| `email_enabled` | bool | `false` | Email notifications |
+| `email_to` / `email_from` | string | unset | Recipient and sender addresses |
+| `email_smtp_host` | string | unset | e.g. `smtp.gmail.com` |
+| `email_smtp_port` | int | `587` | |
+| `email_password` | string | unset | Prefer `JCODE_SMTP_PASSWORD` |
+| `email_imap_host` | string | unset | e.g. `imap.gmail.com`, for receiving replies |
+| `email_imap_port` | int | `993` | |
+| `email_reply_enabled` | bool | `false` | Treat email replies as agent directives |
+| `telegram_enabled` | bool | `false` | Telegram notifications |
+| `telegram_bot_token` | string | unset | From @BotFather |
+| `telegram_chat_id` | string | unset | Target chat |
+| `telegram_reply_enabled` | bool | `false` | Treat Telegram replies as agent directives |
+| `discord_enabled` | bool | `false` | Discord notifications |
+| `discord_bot_token` | string | unset | |
+| `discord_channel_id` | string | unset | Target channel |
+| `discord_bot_user_id` | string | unset | Used to filter the bot's own messages |
+| `discord_reply_enabled` | bool | `false` | Treat Discord replies as agent directives |
+| `jade_relay_enabled` | bool | `false` | Jade cloud relay channel (remote control via cloud mailbox) |
+| `jade_relay_api_base` | string | unset | Relay API base URL |
+| `jade_relay_token` | string | unset | Prefer `JCODE_JADE_RELAY_TOKEN` |
+| `jade_relay_token_id` | string | unset | Sent as `x-jade-token-id` for fast lookup |
+| `jade_relay_user_id` | string | unset | Channel scope; defaults to the token's user |
+| `jade_relay_session_id` | string | unset | Session this listener binds to |
+| `jade_relay_reply_enabled` | bool | `false` | Treat relay prompts as agent directives |
+| `jade_relay_launch_enabled` | bool | `false` | Allow relay commands to open headed local sessions |
+| `jade_relay_launch_working_dir` | string | unset | Default cwd for remotely launched sessions |
 
 The `*_reply_enabled` and `jade_relay_launch_enabled` flags turn an inbound
 message into an agent directive or a local session launch. All default to
@@ -379,12 +408,19 @@ WebSocket gateway for the iOS and web clients.
 | `key` | string | `off` | In-app hotkey |
 | `timeout_secs` | int | `90` | `0` = no timeout |
 
-## `[autoreview]` and `[autojudge]`
+## `[autoreview]`
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Automatic end-of-turn review / execution judging |
-| `model` | string | unset | Model override for those sessions |
+| `enabled` | bool | `false` | Automatic end-of-turn code review |
+| `model` | string | unset | Model override for reviewer sessions |
+
+## `[autojudge]`
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Automatic end-of-turn execution judging |
+| `model` | string | unset | Model override for judge sessions |
 
 ## `[sponsors]`
 
