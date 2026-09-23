@@ -3279,6 +3279,8 @@ impl App {
         // position in content coordinates before the rewrap, so the same
         // message stays under the reader (issue #1412, persistent half).
         self.capture_resize_anchor();
+        // Same for an in-progress transcript selection.
+        self.capture_selection_rebase();
         self.handle_diagram_geometry_change();
         // A resize rewraps the transcript, so the wrapped-line extent changes
         // without the user scrolling. While following the tail that reads as a

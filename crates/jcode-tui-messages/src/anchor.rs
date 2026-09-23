@@ -66,15 +66,26 @@ pub fn anchor_at_row(frame: &PreparedChatFrame, row: usize) -> Option<Anchor> {
 /// or the frame carries no boundaries, so the caller can keep its current
 /// position instead of jumping.
 pub fn resolve(anchor: &Anchor, frame: &PreparedChatFrame, max_scroll: usize) -> Option<usize> {
+    let (start, len) = resolve_range(anchor, frame)?;
+    if len == 0 {
+        return Some(start.min(max_scroll));
+    }
+    let row = start + anchor.row_within_item.min(len - 1);
+    Some(row.min(max_scroll))
+}
+
+/// Row range `(start, len)` of the message an anchor points at, in the frame's
+/// flat wrapped row vector.
+///
+/// Callers that need more precision than [`resolve`] - the transcript selection
+/// maps a display column inside the message, not just a row - use this to walk
+/// the message's rows.
+pub fn resolve_range(anchor: &Anchor, frame: &PreparedChatFrame) -> Option<(usize, usize)> {
     for (item_id, start, len) in message_row_ranges(frame) {
         if item_id != anchor.item_id {
             continue;
         }
-        if len == 0 {
-            return Some(start.min(max_scroll));
-        }
-        let row = start + anchor.row_within_item.min(len - 1);
-        return Some(row.min(max_scroll));
+        return Some((start, len));
     }
     None
 }

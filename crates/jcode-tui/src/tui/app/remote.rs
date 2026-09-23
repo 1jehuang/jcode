@@ -143,6 +143,8 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     needs_redraw |= app.reconcile_history_anchor();
     // Same for a resize: adopt the resolved row once the rewrap has rendered.
     needs_redraw |= app.reconcile_resize_anchor();
+    // And re-base a transcript selection captured before the rewrap.
+    needs_redraw |= app.rebase_selection_after_resize();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
     // same as the local turn loop. When Done arrived with a backlog, leave one
     // rendered live frame after the final reveal before committing the turn.

@@ -669,6 +669,21 @@ pub(super) struct PendingResizeAnchor {
     pub captured_scroll: usize,
 }
 
+/// A transcript selection captured against the pre-resize geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PendingSelectionRebase {
+    pub anchor: jcode_tui_messages::Anchor,
+    pub cursor: jcode_tui_messages::Anchor,
+    /// Display column of each endpoint measured from the start of its logical
+    /// line rather than its wrapped row, so a rewrap that splits the row still
+    /// resolves to the same character.
+    pub anchor_column: usize,
+    pub cursor_column: usize,
+    /// Viewport width at capture; the frame that resolves these is laid out at
+    /// a different one.
+    pub captured_width: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct OvernightAutoPokeFingerprint {
     pub run_id: String,
@@ -1193,6 +1208,10 @@ pub struct App {
     copy_selection_mode: bool,
     copy_selection_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_cursor: Option<crate::tui::CopySelectionPoint>,
+    /// Transcript selection endpoints captured in content coordinates across a
+    /// resize, so the reader's selection still covers the text they dragged
+    /// over instead of being reinterpreted as a new wrapped line index.
+    pending_selection_rebase: Option<PendingSelectionRebase>,
     copy_selection_pending_anchor: Option<crate::tui::CopySelectionPoint>,
     copy_selection_dragging: bool,
     copy_selection_goal_column: Option<usize>,

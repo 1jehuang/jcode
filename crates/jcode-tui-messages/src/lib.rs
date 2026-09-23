@@ -8,7 +8,7 @@ mod wrapped_line_map;
 
 pub use anchor::{
     Anchor, ContentPos, anchor_at_row, content_pos_at_row, message_row_ranges, resolve,
-    resolve_content_pos,
+    resolve_content_pos, resolve_range,
 };
 pub use cache::{
     MessageCacheContext, centered_wrap_width, get_cached_message_lines,
