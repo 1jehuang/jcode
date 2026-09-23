@@ -4,8 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
-pub const DEFAULT_MODEL: &str = "gemini-2.5-pro";
+// Non-dated server-side alias: always resolves to the newest stable pro
+// model, so the default can never go stale or 404 into a downgrade chain
+// (2026-09-19: a transient NOT_FOUND on gemini-3.1-pro-preview silently
+// pinned every session to gemini-2.5-pro for days).
+pub const DEFAULT_MODEL: &str = "gemini-pro-latest";
 pub const AVAILABLE_MODELS: &[&str] = &[
+    "gemini-pro-latest",
+    "gemini-flash-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-3-flash-preview",
@@ -16,6 +22,7 @@ pub const AVAILABLE_MODELS: &[&str] = &[
     "gemini-1.5-flash",
 ];
 pub const FALLBACK_MODELS: &[&str] = &[
+    "gemini-pro-latest",
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
     "gemini-2.5-pro",
@@ -719,6 +726,7 @@ mod tests {
         assert_eq!(
             gemini_fallback_models("gemini-2.5-flash"),
             vec![
+                "gemini-pro-latest",
                 "gemini-3.1-pro-preview",
                 "gemini-3-pro-preview",
                 "gemini-2.5-pro",
