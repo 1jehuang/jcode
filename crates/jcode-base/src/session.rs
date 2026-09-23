@@ -2,8 +2,8 @@ use crate::id::{extract_session_name, new_id, new_memorable_session_id_avoiding}
 use crate::message::{ContentBlock, Message, Role};
 pub use crate::storage::{
     SessionCounts, SessionPresence, active_session_ids, find_active_session_id_by_pid,
-    mark_streaming, session_counts, session_presence, unmark_streaming, user_session_counts,
-    user_session_presence,
+    mark_streaming, session_counts, session_presence, streaming_session_ids, unmark_streaming,
+    user_session_counts, user_session_presence,
 };
 use crate::storage::{active_pids_dir, register_active_pid, unregister_active_pid};
 
