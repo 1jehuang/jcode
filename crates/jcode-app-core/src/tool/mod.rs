@@ -34,12 +34,9 @@ mod open;
 mod panel;
 mod patch;
 mod read;
-<<<<<<< HEAD
 mod replace;
 pub(crate) mod sdk;
-=======
 mod repomap;
->>>>>>> f3def83bc (feat: opt-in structural repo map provider)
 pub mod selfdev;
 pub(crate) mod serde_coerce;
 mod session_search;
