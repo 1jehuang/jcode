@@ -157,7 +157,7 @@ pub fn parse_markdown(text: &str) -> Document {
     // mistaken for a price by the currency guard.
     let escaped = crate::preprocess::escape_currency_dollars(text);
     let normalized = crate::preprocess::normalize_latex_math(&escaped);
-    let parser = Parser::new_ext(&normalized, options);
+    let parser = Parser::new_ext(&normalized, options).into_offset_iter();
 
     let mut doc = Document::default();
 
@@ -231,7 +231,7 @@ pub fn parse_markdown(text: &str) -> Document {
         push_block(doc, kind, vec![line]);
     };
 
-    for event in parser {
+    for (event, source_range) in parser {
         // How deep in lists we were before and after this event. Blocks a
         // single event emits belong to the *shallower* of the two: the
         // paragraph flushed when a nested list opens is the parent item's
@@ -449,14 +449,18 @@ pub fn parse_markdown(text: &str) -> Document {
                 } else if in_code_block {
                     code_buf.push_str(&t);
                 } else {
-                    if t.contains(crate::REASONING_SENTINEL) {
-                        // `reasoning_line_markup` wraps a live reasoning line in
-                        // emphasis and places sentinels around its text. Keep
-                        // the semantic role across text-event splits until the
-                        // matching emphasis end, while removing the markers.
+                    let reasoning_text = crate::reasoning::reasoning_text_event(
+                        &normalized,
+                        source_range.clone(),
+                        &t,
+                    );
+                    if reasoning_text.is_some() {
+                        // Keep the semantic role across text-event splits until
+                        // the matching emphasis end. Only a complete generated
+                        // wrapper is interpreted as reasoning metadata.
                         style.reasoning = true;
                     }
-                    let text = t.replace(crate::REASONING_SENTINEL, "");
+                    let text = reasoning_text.unwrap_or_else(|| t.to_string());
                     if let Some(marker) = pending_item_marker.take() {
                         spans.push(StyledSpan::new(marker, StyleRole::Dim));
                     }
