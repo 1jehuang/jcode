@@ -1207,6 +1207,8 @@ fn test_chat_overscroll_reveals_status_line_then_rebounds() {
     let _lock = scroll_render_test_lock();
 
     let (mut app, mut terminal) = create_scroll_test_app(80, 14, 0, 36);
+    // Exercise the elastic reveal explicitly (the default pins the line on).
+    app.overscroll_status_mode = crate::config::OverscrollStatusMode::Overscroll;
 
     // Give the app some context so the overscroll line has a percentage to show.
     app.context_info = crate::prompt::ContextInfo {

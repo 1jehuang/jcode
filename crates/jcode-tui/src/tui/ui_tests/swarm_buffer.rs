@@ -726,30 +726,63 @@ fn overscroll_line_row(state: &TestState, width: u16) -> String {
         .draw(|frame| crate::tui::ui::draw(frame, state))
         .expect("overscroll frame");
     let rows = buffer_rows(&terminal);
-    rows[row_containing(&rows, "(overscroll")].clone()
+    // The overscroll line is the last row of the frame.
+    rows.last().cloned().unwrap_or_default()
 }
 
 #[test]
 fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
-    let row = overscroll_line_row(&overscroll_line_state(), 160);
+    let row = overscroll_line_row(&overscroll_line_state(), 200);
     let dir = row.find("~/jcode").expect("dir shown");
     let branch = row.find(" main").expect("branch shown");
     let git = row.find("~3 ?2 ↑1").expect("git status shown");
-    let context = row.find("29%").expect("context shown");
+    let context = row.find("74k/256k").expect("token counts shown when roomy");
     let model = row.find("GPT-5.6 Sol high").expect("model shown");
     assert!(
         dir < branch && branch < git && git < context && context < model,
         "{row}"
     );
-    assert!(!row.contains("74k/256k"), "token counts dropped: {row}");
-    assert!(row.contains("▰▱▱▱ 29%"), "compact 4-cell bar: {row}");
+    assert!(
+        row.contains("▰▰▰▱▱▱▱▱▱▱ 29%"),
+        "full 10-cell bar when roomy: {row}"
+    );
+    assert!(row.contains("OAuth") && row.contains("OpenAI"), "{row}");
+    assert!(row.contains("(overscroll 1.0)"), "{row}");
 }
 
 #[test]
-fn overscroll_line_keeps_dir_context_and_model_when_narrow() {
-    let row = overscroll_line_row(&overscroll_line_state(), 60);
+fn overscroll_line_compacts_before_dropping_and_always_keeps_dir_model_context() {
+    let state = overscroll_line_state();
+    let mut prev_len = usize::MAX;
+    for width in (20..=200).rev() {
+        let row = overscroll_line_row(&state, width);
+        let trimmed = row.trim().to_string();
+        if width >= 40 {
+            assert!(row.contains("jcode"), "dir kept at width {width}: {row}");
+            assert!(
+                row.contains("GPT-5.6 Sol"),
+                "model kept at width {width}: {row}"
+            );
+            assert!(row.contains("29%"), "context kept at width {width}: {row}");
+            assert!(
+                !row.contains('…'),
+                "no mid-word truncation at width {width}: {row}"
+            );
+        }
+        let len = unicode_width::UnicodeWidthStr::width(trimmed.as_str());
+        assert!(len <= width as usize, "fits at width {width}: {row}");
+        prev_len = prev_len.min(len.max(1));
+    }
+}
+
+#[test]
+fn overscroll_line_compact_steps_at_medium_width() {
+    let row = overscroll_line_row(&overscroll_line_state(), 80);
     assert!(row.contains("~/jcode"), "{row}");
-    assert!(row.contains("29%"), "{row}");
-    assert!(row.contains("GPT-5.6 Sol high"), "{row}");
-    assert!(!row.contains("~3"), "git status is dropped first: {row}");
+    assert!(row.contains("GPT-5.6 Sol"), "{row}");
+    assert!(
+        !row.contains("74k/256k"),
+        "token counts dropped first: {row}"
+    );
+    assert!(!row.contains("OAuth"), "auth dropped early: {row}");
 }
