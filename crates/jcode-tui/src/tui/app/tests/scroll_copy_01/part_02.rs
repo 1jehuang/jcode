@@ -247,6 +247,42 @@ fn test_ctrl_up_from_draft_can_be_undone() {
 }
 
 #[test]
+fn test_undo_after_ctrl_up_drops_stale_history_draft() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("older prompt"),
+        DisplayMessage::assistant("older response"),
+        DisplayMessage::user("newer prompt"),
+    ];
+    app.input = "v1".to_string();
+    app.cursor_pos = app.input.len();
+
+    // Ctrl+Up stashes the draft; Ctrl+Z brings it back.
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    app.handle_key(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .unwrap();
+    assert_eq!(app.input, "v1");
+
+    // The user keeps editing, then accepts a match through Ctrl+R.
+    app.input = "v2".to_string();
+    app.cursor_pos = app.input.len();
+    app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .unwrap();
+    for c in "newer".chars() {
+        app.handle_key(KeyCode::Char(c), KeyModifiers::empty())
+            .unwrap();
+    }
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty())
+        .unwrap();
+    assert_eq!(app.input, "newer prompt");
+
+    // The stale draft from before the edit must not come back.
+    app.handle_key(KeyCode::Down, KeyModifiers::CONTROL)
+        .unwrap();
+    assert_ne!(app.input, "v1");
+}
+
+#[test]
 fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
