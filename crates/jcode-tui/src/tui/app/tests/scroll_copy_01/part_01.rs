@@ -1297,3 +1297,42 @@ fn renderer_publishes_the_prepared_frame_as_geometry() {
         frame.total_wrapped_lines()
     );
 }
+
+#[test]
+fn retained_frame_row_matches_the_rendered_screen() {
+    // Integration check across the draw boundary: a consumer outside `draw`
+    // resolves a row index against the retained frame, so that row has to be
+    // what is actually rendered at the top of the chat viewport.
+    let _lock = scroll_render_test_lock();
+    let (mut app, mut terminal) = create_scroll_test_app(100, 30, 0, 60);
+    app.auto_scroll_paused = false;
+    render_and_snap(&app, &mut terminal);
+    app.scroll_up(20);
+    render_and_snap(&app, &mut terminal);
+
+    let scroll = crate::tui::ui::last_resolved_chat_scroll();
+    assert!(scroll > 0, "fixture must be scrolled into history");
+    let frame = crate::tui::ui::last_chat_frame().expect("frame published after a render");
+    let top_row = frame
+        .wrapped_plain_line(scroll)
+        .expect("resolved row is in range")
+        .trim()
+        .to_string();
+
+    let area = crate::tui::ui::last_layout_snapshot()
+        .expect("layout snapshot")
+        .messages_area;
+    let first_chat_line = buffer_to_text(&terminal)
+        .lines()
+        .skip(area.y as usize)
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    assert!(!top_row.is_empty(), "frame row must carry text");
+    assert_eq!(
+        first_chat_line, top_row,
+        "the retained frame's row must be the line rendered at the top of the viewport"
+    );
+}
