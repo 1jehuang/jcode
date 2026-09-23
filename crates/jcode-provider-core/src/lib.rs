@@ -6,6 +6,7 @@ pub mod failover;
 pub mod fallback_pick;
 pub mod fingerprint;
 pub mod model_id;
+pub mod model_names;
 pub mod models;
 pub mod openai_schema;
 pub mod pricing;
