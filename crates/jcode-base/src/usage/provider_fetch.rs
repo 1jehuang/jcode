@@ -46,8 +46,26 @@ pub(super) async fn fetch_anthropic_usage_for_token(
     };
 
     let cache_key = anthropic_usage_cache_key(&access_token, Some(&account_label));
-    match fetch_anthropic_usage_data(access_token, cache_key).await {
-        Ok(data) => provider_report_from_usage_data(display_name, &data),
+    match fetch_anthropic_usage_data(access_token.clone(), cache_key).await {
+        Ok(data) => {
+            let mut report = provider_report_from_usage_data(display_name, &data);
+            // The session reset only applies at the five-hour wall, and the
+            // server declines the lookup elsewhere. Read-only either way.
+            if report.error.is_none() && data.five_hour >= 0.99 {
+                // External Claude Code logins report as "default" but are not
+                // stored accounts. Pin those to the default scope instead.
+                let stored = auth::claude::list_accounts()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|account| account.label == account_label);
+                report.anthropic_limit_reset = super::anthropic_reset::fetch_limit_reset_offer(
+                    &access_token,
+                    stored.then_some(account_label.as_str()),
+                )
+                .await;
+            }
+            report
+        }
         Err(e) => ProviderUsage {
             provider_name: display_name,
             error: Some(e.to_string()),
@@ -286,6 +304,7 @@ pub(super) async fn fetch_openai_usage_for_account(
                 ordinary_usage_allowed: parsed.ordinary_usage_allowed,
             }
         }),
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     };
@@ -396,6 +415,7 @@ pub(super) async fn fetch_openrouter_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -494,6 +514,7 @@ pub(super) async fn fetch_antigravity_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -535,6 +556,7 @@ pub(super) async fn fetch_gemini_usage_report() -> Option<ProviderUsage> {
         extra_info: vec![("Key status".to_string(), status)],
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -598,6 +620,7 @@ pub(super) async fn fetch_cursor_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })
@@ -720,6 +743,7 @@ pub(super) async fn fetch_copilot_usage_report() -> Option<ProviderUsage> {
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     })

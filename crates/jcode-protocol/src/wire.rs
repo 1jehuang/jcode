@@ -432,6 +432,15 @@ pub enum Request {
         account_label: Option<String>,
     },
 
+    /// Invalidate daemon-local usage and quota cooldown state after a Claude
+    /// session-limit reset. Like the OpenAI variant it never claims a reset.
+    /// `None` pins the default account scope.
+    #[serde(rename = "invalidate_anthropic_usage")]
+    InvalidateAnthropicUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
+
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
     StdinResponse {

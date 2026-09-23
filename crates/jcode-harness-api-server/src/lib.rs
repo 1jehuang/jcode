@@ -319,6 +319,7 @@ where
                 "runtime_info",
                 "api_key_provisioning",
                 "auth_changed_notification",
+                "usage_invalidation",
                 "session_archive",
                 "session_retention",
                 "session_files",

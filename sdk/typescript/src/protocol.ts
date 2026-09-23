@@ -176,6 +176,7 @@ export type ApiRequest =
   | { req: "get_runtime_info"; session_id: string }
   | { req: "set_api_key"; provider: string; api_key: string }
   | { req: "notify_auth_changed"; provider: string }
+  | { req: "invalidate_usage"; provider: string; account_label?: string }
   | { req: "clear_api_key"; provider: string }
   | { req: "read_file"; session_id: string; path: string; max_bytes?: number }
   | { req: "find_files"; session_id: string; query: string; limit?: number }
@@ -423,6 +424,7 @@ export const KNOWN_REQUEST_KINDS = [
   "set_api_key",
   "clear_api_key",
   "notify_auth_changed",
+  "invalidate_usage",
   "read_file",
   "find_files",
   "search_text",

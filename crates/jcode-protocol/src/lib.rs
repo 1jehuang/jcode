@@ -619,6 +619,7 @@ impl Request {
             Request::SwitchAnthropicAccount { id, .. } => *id,
             Request::SwitchOpenAiAccount { id, .. } => *id,
             Request::InvalidateOpenAiUsage { id, .. } => *id,
+            Request::InvalidateAnthropicUsage { id, .. } => *id,
             Request::StdinResponse { id, .. } => *id,
             Request::AgentRegister { id, .. } => *id,
             Request::AgentTask { id, .. } => *id,
@@ -660,6 +661,10 @@ impl Request {
         matches!(
             self,
             Request::Ping { .. }
+                // Usage invalidation only touches process-wide caches, so a
+                // one-shot client can send it without subscribing to a session.
+                | Request::InvalidateOpenAiUsage { .. }
+                | Request::InvalidateAnthropicUsage { .. }
                 | Request::NotifySession { .. }
                 | Request::CommShare { .. }
                 | Request::CommRead { .. }

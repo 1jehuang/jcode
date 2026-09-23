@@ -122,11 +122,30 @@ struct UsageLimitReport {
     reset_in: Option<String>,
 }
 
+/// A banked usage reset a client can offer for this login. Read-only facts:
+/// redeeming always needs a separate, explicitly confirmed request.
+#[derive(Debug, Serialize, PartialEq)]
+struct UsageBankedResetReport {
+    /// `openai` (Codex banked resets) or `claude` (session-limit resets).
+    provider: &'static str,
+    /// Login label the reset is pinned to. `None` is the default login.
+    account_label: Option<String>,
+    /// Resets that can be redeemed now.
+    available_count: u64,
+    /// OpenAI: the limit is actually enforced, so redeeming is useful now.
+    /// Claude: always true, since the offer only exists at the session wall.
+    limit_reached: bool,
+    /// RFC3339 time the next reset becomes available when none is available.
+    next_available_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct UsageProviderReport {
     provider_name: String,
     limits: Vec<UsageLimitReport>,
     extra_info: Vec<(String, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    banked_reset: Option<UsageBankedResetReport>,
     error: Option<String>,
 }
 
@@ -554,8 +573,44 @@ fn usage_provider_report(provider: &crate::usage::ProviderUsage) -> UsageProvide
             })
             .collect(),
         extra_info: provider.extra_info.clone(),
+        banked_reset: banked_reset_report(provider),
         error: provider.error.clone(),
     }
+}
+
+fn banked_reset_report(provider: &crate::usage::ProviderUsage) -> Option<UsageBankedResetReport> {
+    if provider.error.is_some() {
+        return None;
+    }
+    if let Some(credits) = &provider.openai_reset_credits {
+        let limit_reached = match credits.ordinary_usage_allowed {
+            Some(allowed) => !allowed,
+            None => {
+                provider.hard_limit_reached
+                    || provider
+                        .limits
+                        .iter()
+                        .any(|limit| limit.usage_percent >= 100.0)
+            }
+        };
+        return (credits.available_count > 0).then(|| UsageBankedResetReport {
+            provider: "openai",
+            account_label: credits.account_label.clone(),
+            available_count: credits.available_count,
+            limit_reached,
+            next_available_at: None,
+        });
+    }
+    provider
+        .anthropic_limit_reset
+        .as_ref()
+        .map(|offer| UsageBankedResetReport {
+            provider: "claude",
+            account_label: offer.account_label.clone(),
+            available_count: u64::from(offer.available),
+            limit_reached: true,
+            next_available_at: offer.next_available_at.clone(),
+        })
 }
 
 pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
@@ -631,6 +686,55 @@ fn auth_state_label(state: crate::auth::AuthState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_json_reports_only_redeemable_banked_resets() {
+        use crate::usage::{AnthropicLimitResetOffer, OpenAiResetCredits, ProviderUsage};
+        let openai = |available_count, allowed| ProviderUsage {
+            provider_name: "OpenAI - work".into(),
+            openai_reset_credits: Some(OpenAiResetCredits {
+                available_count,
+                available_expirations: Vec::new(),
+                account_label: Some("work".into()),
+                ordinary_usage_allowed: allowed,
+            }),
+            ..Default::default()
+        };
+        let report = banked_reset_report(&openai(2, Some(false))).unwrap();
+        assert_eq!(report.provider, "openai");
+        assert_eq!(report.account_label.as_deref(), Some("work"));
+        assert_eq!(report.available_count, 2);
+        assert!(report.limit_reached);
+        assert!(
+            !banked_reset_report(&openai(2, Some(true)))
+                .unwrap()
+                .limit_reached
+        );
+        assert!(banked_reset_report(&openai(0, Some(false))).is_none());
+        let mut failed = openai(2, Some(false));
+        failed.error = Some("HTTP 500".into());
+        assert!(banked_reset_report(&failed).is_none());
+
+        let claude = |available| ProviderUsage {
+            provider_name: "Anthropic (Claude)".into(),
+            anthropic_limit_reset: Some(AnthropicLimitResetOffer {
+                account_label: None,
+                available,
+                next_available_at: (!available).then(|| "2099-01-08T00:00:00Z".into()),
+                resets_per_week: 1,
+            }),
+            ..Default::default()
+        };
+        let ready = banked_reset_report(&claude(true)).unwrap();
+        assert_eq!((ready.provider, ready.available_count), ("claude", 1));
+        let spent = banked_reset_report(&claude(false)).unwrap();
+        assert_eq!(spent.available_count, 0);
+        assert!(spent.next_available_at.is_some());
+        let json = serde_json::to_value(usage_provider_report(&claude(true))).unwrap();
+        assert_eq!(json["banked_reset"]["provider"], "claude");
+        let plain = serde_json::to_value(usage_provider_report(&ProviderUsage::default())).unwrap();
+        assert!(plain.get("banked_reset").is_none());
+    }
 
     #[test]
     fn provider_list_includes_novita_api_key_login() {

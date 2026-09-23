@@ -319,7 +319,14 @@ impl BridgeState {
             if let Outbound::Legacy(value) = action
                 && matches!(
                     value["type"].as_str(),
-                    Some("subscribe" | "clear" | "prepare_disconnect" | "notify_auth_changed")
+                    Some(
+                        "subscribe"
+                            | "clear"
+                            | "prepare_disconnect"
+                            | "notify_auth_changed"
+                            | "invalidate_openai_usage"
+                            | "invalidate_anthropic_usage"
+                    )
                 )
                 && let Some(id) = value["id"].as_u64()
             {
@@ -862,6 +869,34 @@ impl BridgeState {
                 self.pending_simple.push((id, api_id, SimpleKind::Ok));
                 vec![Outbound::Legacy(json!({
                     "type": "notify_auth_changed", "id": id, "provider": provider
+                }))]
+            }
+            "invalidate_usage" => {
+                let legacy_type = match request["provider"].as_str().unwrap_or_default() {
+                    "claude" | "anthropic" => "invalidate_anthropic_usage",
+                    "openai" => "invalidate_openai_usage",
+                    _ => {
+                        return Self::error_reply(
+                            api_id,
+                            ErrorCode::InvalidRequest,
+                            "unsupported usage provider; supported: claude, openai",
+                        );
+                    }
+                };
+                let account_label = request["account_label"].as_str();
+                if account_label.is_some_and(|label| {
+                    label.is_empty() || label.len() > 128 || label.chars().any(char::is_control)
+                }) {
+                    return Self::error_reply(
+                        api_id,
+                        ErrorCode::InvalidRequest,
+                        "invalid account label",
+                    );
+                }
+                let id = self.legacy_id();
+                self.pending_simple.push((id, api_id, SimpleKind::Ok));
+                vec![Outbound::Legacy(json!({
+                    "type": legacy_type, "id": id, "account_label": account_label
                 }))]
             }
             "set_api_key" | "clear_api_key" => {

@@ -1013,6 +1013,15 @@ pub fn clear_openai_provider_unavailability_for_account_label(account_label: Opt
     }
 }
 
+/// Clear the quota cooldown for the exact Claude login whose limits were reset.
+/// `None` refers to the active (or default) login.
+pub fn clear_claude_provider_unavailability_for_account_label(account_label: Option<&str>) {
+    let key = provider_runtime_scope_key("claude", account_label);
+    if let Ok(mut unavailable) = ACCOUNT_RUNTIME_UNAVAILABLE_PROVIDERS.write() {
+        unavailable.remove(&key);
+    }
+}
+
 /// Clear all runtime model unavailability markers.
 pub fn clear_all_model_unavailability_for_account() {
     let scope = current_openai_account_scope();

@@ -1056,6 +1056,22 @@ impl JcodeClient {
         }
     }
 
+    /// Tell the daemon a banked usage reset was redeemed for one subscription
+    /// login (`claude` or `openai`), so it refetches quota instead of keeping a
+    /// pre-reset cooldown. Carries no credentials and never redeems anything.
+    pub fn invalidate_usage(&self, provider: &str, account_label: Option<&str>) -> Result<()> {
+        match self
+            .request_ok(ApiRequest::InvalidateUsage {
+                provider: provider.to_string(),
+                account_label: account_label.map(str::to_string),
+            })?
+            .event
+        {
+            ApiEvent::Ok => Ok(()),
+            other => Err(unexpected("ok", &other)),
+        }
+    }
+
     /// Remove a persisted API-key credential and hot-reload provider
     /// credentials.
     pub fn clear_api_key(&self, provider: &str) -> Result<()> {

@@ -1845,6 +1845,51 @@ fn notify_auth_changed_is_secret_free_and_acknowledged() {
 }
 
 #[test]
+fn usage_invalidation_maps_each_provider_and_rejects_bad_input() {
+    for (provider, legacy_type) in [
+        ("claude", "invalidate_anthropic_usage"),
+        ("openai", "invalidate_openai_usage"),
+    ] {
+        for label in [None, Some("work")] {
+            let mut state = BridgeState::default();
+            let mut request = json!({"req": "invalidate_usage", "id": 7, "provider": provider});
+            if let Some(label) = label {
+                request["account_label"] = json!(label);
+            }
+            let outbound = state.api_request_to_legacy(&request);
+            let [Outbound::Legacy(legacy)] = outbound.as_slice() else {
+                panic!("expected one control request");
+            };
+            assert_eq!(legacy["type"], legacy_type);
+            assert_eq!(legacy["account_label"].as_str(), label);
+            let frames = state.legacy_event_to_api(&json!({"type": "ack", "id": legacy["id"]}));
+            assert_eq!(frames[0].reply_to, Some(7));
+            assert!(matches!(frames[0].event, ApiEvent::Ok));
+            // The daemon's trailing `done` must not be mistaken for a turn ending.
+            assert!(
+                state
+                    .legacy_event_to_api(&json!({"type": "done", "id": legacy["id"]}))
+                    .is_empty()
+            );
+        }
+    }
+    for request in [
+        json!({"req": "invalidate_usage", "id": 8, "provider": "gemini"}),
+        json!({"req": "invalidate_usage", "id": 9, "provider": "claude", "account_label": ""}),
+        json!({"req": "invalidate_usage", "id": 10, "provider": "openai", "account_label": "a\nb"}),
+    ] {
+        let event = only_reply_event(BridgeState::default().api_request_to_legacy(&request));
+        assert!(matches!(
+            event,
+            ApiEvent::Error {
+                code: ErrorCode::InvalidRequest,
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn credential_provisioning_normalizes_gemini_and_supports_jcode() {
     let home = ScopedJcodeHome::new("credentials");
     let config = home.path.join("config/jcode");

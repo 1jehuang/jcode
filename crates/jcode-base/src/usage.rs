@@ -4,6 +4,7 @@
 
 use crate::auth;
 mod accessors;
+mod anthropic_reset;
 mod api_keys;
 mod cache;
 mod display;
@@ -12,6 +13,11 @@ mod openai_helpers;
 mod openai_reset;
 mod provider_fetch;
 pub use accessors::*;
+pub use anthropic_reset::{
+    AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
+    PendingAnthropicLimitReset, consume_anthropic_limit_reset,
+    invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
+};
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
 pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
@@ -19,6 +25,7 @@ pub use model::*;
 pub use openai_reset::{
     OpenAiUsageResetOutcome, PendingOpenAiUsageReset, consume_openai_usage_reset,
     invalidate_openai_usage_cache, invalidate_openai_usage_reset_state, prepare_openai_usage_reset,
+    prepare_openai_usage_reset_for_account,
 };
 use provider_fetch::*;
 

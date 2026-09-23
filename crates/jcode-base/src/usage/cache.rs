@@ -53,6 +53,28 @@ pub(super) fn invalidate_openai_usage_after_reset(access_token: &str, account_la
     }
 }
 
+/// Forget one Claude login's quota after a session-limit reset so the next
+/// check fetches fresh limits. `None` clears token-keyed (unlabelled) entries.
+pub(super) fn invalidate_anthropic_usage_after_reset(account_label: Option<&str>) {
+    if let Ok(mut map) = anthropic_usage_cache().lock() {
+        match account_label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+        {
+            Some(label) => {
+                map.remove(&format!("label:{label}"));
+            }
+            None => map.retain(|key, _| !key.starts_with("token:") && key != "label:default"),
+        }
+    }
+    if let Some(cache) = super::PROVIDER_USAGE_CACHE.get()
+        && let Ok(mut map) = cache.lock()
+    {
+        // As for OpenAI: a partially cleared aggregate would skip the refetch.
+        map.clear();
+    }
+}
+
 pub(super) fn anthropic_usage_cache_key(access_token: &str, account_label: Option<&str>) -> String {
     if let Some(label) = account_label
         .map(str::trim)
@@ -210,6 +232,7 @@ pub(super) fn provider_report_from_usage_data(
         extra_info,
         hard_limit_reached: false,
         openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     }
@@ -330,6 +353,7 @@ pub(super) fn provider_report_from_openai_usage_data(
         extra_info: Vec::new(),
         hard_limit_reached: data.hard_limit_reached,
         openai_reset_credits: data.openai_reset_credits.clone(),
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     }

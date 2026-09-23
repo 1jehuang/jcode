@@ -1287,6 +1287,16 @@ pub(super) async fn handle_invalidate_openai_usage(
     let _ = client_event_tx.send(ServerEvent::Done { id });
 }
 
+pub(super) async fn handle_invalidate_anthropic_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Local cache and cooldown state only, so retries cannot spend a reset.
+    crate::usage::invalidate_anthropic_usage_reset_state(account_label.as_deref());
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,

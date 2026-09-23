@@ -39,11 +39,11 @@ use super::comm_sync::{
     handle_comm_resync_plan, handle_comm_status, handle_comm_summary,
 };
 use super::provider_control::{
-    handle_cycle_model, handle_invalidate_openai_usage, handle_notify_auth_changed,
-    handle_refresh_models, handle_set_compaction_mode, handle_set_model, handle_set_premium_mode,
-    handle_set_reasoning_effort, handle_set_route, handle_set_service_tier, handle_set_transport,
-    handle_switch_anthropic_account, handle_switch_openai_account,
-    try_available_models_updated_event,
+    handle_cycle_model, handle_invalidate_anthropic_usage, handle_invalidate_openai_usage,
+    handle_notify_auth_changed, handle_refresh_models, handle_set_compaction_mode,
+    handle_set_model, handle_set_premium_mode, handle_set_reasoning_effort, handle_set_route,
+    handle_set_service_tier, handle_set_transport, handle_switch_anthropic_account,
+    handle_switch_openai_account, try_available_models_updated_event,
 };
 use super::{
     AwaitMembersRuntime, ClientConnectionInfo, ClientDebugState, FileTouchService,
@@ -2159,6 +2159,10 @@ pub(super) async fn handle_client(
 
             Request::InvalidateOpenAiUsage { id, account_label } => {
                 handle_invalidate_openai_usage(id, account_label, &client_event_tx).await;
+            }
+
+            Request::InvalidateAnthropicUsage { id, account_label } => {
+                handle_invalidate_anthropic_usage(id, account_label, &client_event_tx).await;
             }
 
             Request::SetFeature {

@@ -769,6 +769,19 @@ export class JcodeClient extends EventEmitter {
     await this.expectReply({ req: "notify_auth_changed", provider }, "ok");
   }
 
+  /**
+   * Tell the daemon a banked usage reset was redeemed for one subscription
+   * login (`claude` or `openai`) so it refetches quota. Carries no credentials.
+   */
+  async invalidateUsage(provider: string, accountLabel?: string): Promise<void> {
+    await this.expectReply(
+      accountLabel === undefined
+        ? { req: "invalidate_usage", provider }
+        : { req: "invalidate_usage", provider, account_label: accountLabel },
+      "ok",
+    );
+  }
+
   async readFile(sessionId: string, path: string, maxBytes?: number): Promise<FileContent> {
     const frame = await this.expectReply(
       { req: "read_file", session_id: sessionId, path, max_bytes: maxBytes },
