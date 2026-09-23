@@ -19,6 +19,7 @@ Hesitate for destructive or non-reversible actions. Examples: Completing a payme
 Commit as you go.
 Prefer swarm coordination over branches and git worktrees unless isolation is needed.
 You can't interact with interactive commands. Use non-interactive instead.
+Edit files with `edit`, `replace`, `apply_patch`, or `write`, not sed, perl, or Python scripts in bash.
 
 ## Dont
 

@@ -1100,3 +1100,18 @@ mod session_search_tests {
         assert!(fenced.ends_with("\n````"));
     }
 }
+
+/// Why a turn stopped abnormally. Natural completion has no stop reason.
+/// Unknown future reasons remain decodable by older clients.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStopReason {
+    Interrupted,
+    Failure,
+    /// A caught runtime panic, not an inference from a lost connection.
+    Crash,
+    ProviderGuardrail,
+    LimitReached,
+    #[serde(other)]
+    Unknown,
+}

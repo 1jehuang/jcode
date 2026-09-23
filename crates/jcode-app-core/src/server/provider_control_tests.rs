@@ -9,6 +9,34 @@ use std::sync::RwLock as StdRwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard, OnceLock};
 
+#[tokio::test]
+async fn invalidate_openai_usage_acknowledges_after_clearing_pinned_daemon_cooldown() {
+    let _guard = crate::storage::lock_test_env();
+    let target = "daemon-reset-target";
+    let other = "daemon-reset-other";
+    crate::auth::codex::set_active_account_override(Some(target.to_string()));
+    crate::provider::record_provider_unavailable_for_account("openai", "target quota exhausted");
+    crate::auth::codex::set_active_account_override(Some(other.to_string()));
+    crate::provider::record_provider_unavailable_for_account("openai", "other quota exhausted");
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for id in [51, 52] {
+        handle_invalidate_openai_usage(id, Some(target.to_string()), &tx).await;
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Done { id: ack }) if ack == id));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            crate::auth::codex::active_account_label().as_deref(),
+            Some(other)
+        );
+        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_some());
+        crate::auth::codex::set_active_account_override(Some(target.to_string()));
+        assert!(crate::provider::provider_unavailability_detail_for_account("openai").is_none());
+        crate::auth::codex::set_active_account_override(Some(other.to_string()));
+    }
+    crate::provider::clear_openai_provider_unavailability_for_account_label(Some(other));
+    crate::auth::codex::set_active_account_override(None);
+}
+
 async fn recv_final_catalog_notification(rx: &mut mpsc::UnboundedReceiver<ServerEvent>) -> String {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {

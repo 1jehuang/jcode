@@ -411,7 +411,14 @@ pub async fn run_login_provider(
         notify_running_server_auth_changed_best_effort(Some(provider.id)).await;
         return Ok(());
     }
-    if let Err(err) = super::commands::run_post_login_validation(provider).await {
+    // Scriptable callers require exactly one JSON object on stdout. The human
+    // validation report belongs only to interactive login, including failures.
+    let validation = if options.json {
+        super::auth_test::run_post_login_validation_quiet(provider).await
+    } else {
+        super::commands::run_post_login_validation(provider).await
+    };
+    if let Err(err) = validation {
         let error_message = err.to_string();
         let reason = crate::auth::login_diagnostics::classify_auth_failure_message(&error_message);
         crate::telemetry::record_auth_failed_reason(

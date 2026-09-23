@@ -1686,3 +1686,42 @@ fn anthropic_cache_preference_persists_and_preserves_other_settings() {
     restore_env_var("JCODE_HOME", prev_home);
     Config::invalidate_cache();
 }
+
+#[test]
+fn cli_config_save_round_trips_desktop_tables() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[display]\ncentered = false\n\n[desktop.voice]\nglobal_hold = true\n\
+         global_devices = [\"/dev/input/event3\"]\n\n[desktop.appearance]\ntheme = \"warm-neutral\"\n",
+    )
+    .unwrap();
+
+    // A CLI read-modify-write must not drop Desktop-owned settings.
+    Config::set_default_model(Some("gpt-test"), None).expect("save");
+    let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let desktop = saved["desktop"].as_table().expect("desktop table kept");
+    assert_eq!(desktop["voice"]["global_hold"].as_bool(), Some(true));
+    assert_eq!(
+        desktop["voice"]["global_devices"][0].as_str(),
+        Some("/dev/input/event3")
+    );
+    assert_eq!(
+        desktop["appearance"]["theme"].as_str(),
+        Some("warm-neutral")
+    );
+
+    // Configs without Desktop tables stay free of an empty [desktop] header.
+    std::fs::write(&path, "[display]\ncentered = false\n").unwrap();
+    Config::set_default_model(Some("gpt-test"), None).expect("save");
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("[desktop"));
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}

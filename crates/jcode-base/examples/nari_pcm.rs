@@ -48,7 +48,9 @@ async fn run() -> Result<(), VoiceError> {
     let sender = tokio::spawn(async move {
         for chunk in bytes.chunks(3200) {
             let samples = chunk
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|s| i16::from_le_bytes([s[0], s[1]]))
                 .collect();
             if tx.send(samples).await.is_err() {

@@ -120,7 +120,7 @@ pub struct DisplayConfig {
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
     /// When to show the overscroll status line below the input
-    /// (off/on/overscroll, default: overscroll). "overscroll" is the elastic
+    /// (off/on/overscroll, default: on). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
     #[serde(default, deserialize_with = "crate::serde_lenient::lenient_enum")]
     pub overscroll_status: OverscrollStatusMode,

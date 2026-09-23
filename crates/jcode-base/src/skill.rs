@@ -50,6 +50,14 @@ pub struct SkillRegistry {
 /// defensively but with a bound to avoid walking arbitrarily deep trees.
 const PLUGIN_SCAN_MAX_DEPTH: usize = 5;
 
+/// Outcome of importing one external skills directory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SkillCopyStats {
+    copied: usize,
+    skipped: usize,
+    failed: usize,
+}
+
 impl SkillRegistry {
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
@@ -116,7 +124,7 @@ impl SkillRegistry {
         if let Ok(claude_skills) = crate::storage::user_home_path(".claude/skills")
             && claude_skills.is_dir()
         {
-            let count = Self::copy_skills_dir(&claude_skills, &jcode_skills);
+            let count = Self::copy_skills_dir(&claude_skills, &jcode_skills).copied;
             if count > 0 {
                 sources.push(format!("{} from Claude Code", count));
                 copied.extend(Self::list_skill_names(&jcode_skills));
@@ -127,7 +135,7 @@ impl SkillRegistry {
         if let Ok(codex_skills) = crate::storage::user_home_path(".codex/skills")
             && codex_skills.is_dir()
         {
-            let count = Self::copy_skills_dir(&codex_skills, &jcode_skills);
+            let count = Self::copy_skills_dir(&codex_skills, &jcode_skills).copied;
             if count > 0 {
                 sources.push(format!("{} from Codex CLI", count));
                 copied.extend(Self::list_skill_names(&jcode_skills));
@@ -147,14 +155,14 @@ impl SkillRegistry {
         }
     }
 
-    /// Copy skill directories from src to dst. Returns count of skills copied.
-    fn copy_skills_dir(src: &Path, dst: &Path) -> usize {
+    /// Copy skill directories from src to dst.
+    fn copy_skills_dir(src: &Path, dst: &Path) -> SkillCopyStats {
+        let mut stats = SkillCopyStats::default();
         let entries = match std::fs::read_dir(src) {
             Ok(e) => e,
-            Err(_) => return 0,
+            Err(_) => return stats,
         };
 
-        let mut count = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -176,13 +184,22 @@ impl SkillRegistry {
             }
 
             let dest = dst.join(&name);
-            if let Err(e) = Self::copy_dir_recursive(&path, &dest) {
-                crate::logging::error(&format!("Failed to copy skill '{}': {}", name, e));
+            // An earlier source (e.g. ~/.claude/skills) may already have imported
+            // this skill, often because ~/.codex/skills links to the same
+            // directory. Copying over it fails on read-only files such as
+            // `.git/objects/**` (issue #1404), and the first copy wins anyway.
+            if dest.exists() {
+                stats.skipped += 1;
                 continue;
             }
-            count += 1;
+            if let Err(e) = Self::copy_dir_recursive(&path, &dest) {
+                crate::logging::error(&format!("Failed to copy skill '{}': {}", name, e));
+                stats.failed += 1;
+                continue;
+            }
+            stats.copied += 1;
         }
-        count
+        stats
     }
 
     /// Recursively copy a directory
@@ -991,6 +1008,37 @@ mod tests {
         let path = dir.join("SKILL.md");
         std::fs::write(&path, content).expect("write skill");
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_skills_dir_skips_skill_already_imported_from_linked_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let claude = temp.path().join("claude-skills");
+        let skill = claude.join("s");
+        std::fs::create_dir_all(skill.join("sub")).expect("create skill");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: s\ndescription: test skill\n---\nbody\n",
+        )
+        .expect("write skill");
+        let readonly = skill.join("sub").join("obj");
+        std::fs::write(&readonly, "x").expect("write obj");
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        let codex = temp.path().join("codex-skills");
+        std::os::unix::fs::symlink(&claude, &codex).expect("symlink");
+        let dest = temp.path().join("jcode-skills");
+
+        let first = SkillRegistry::copy_skills_dir(&claude, &dest);
+        assert_eq!((first.copied, first.skipped, first.failed), (1, 0, 0));
+        let second = SkillRegistry::copy_skills_dir(&codex, &dest);
+        assert_eq!((second.copied, second.skipped, second.failed), (0, 1, 0));
+        assert_eq!(
+            std::fs::read_to_string(dest.join("s").join("sub").join("obj")).expect("read obj"),
+            "x"
+        );
     }
 
     #[test]

@@ -97,6 +97,32 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
             .is_some_and(|state| state.kind == crate::tui::PickerKind::Model),
     });
     let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    needs_redraw |= app.poll_usage_reset();
+    if let Some(account) = app.usage_reset.invalidate_account.take() {
+        match remote.invalidate_openai_usage(account).await {
+            Ok(id) => {
+                app.usage_reset.invalidate_requests.insert(id, Some(Instant::now()));
+            }
+            Err(error) => app.push_display_message(DisplayMessage::error(format!(
+                "Reset result is unchanged, but the daemon usage cache could not be refreshed: {error}. Reconnect to refresh daemon state."
+            ))),
+        }
+        needs_redraw = true;
+    }
+    let mut refresh_timed_out = false;
+    for sent_at in app.usage_reset.invalidate_requests.values_mut() {
+        if sent_at.is_some_and(|sent| sent.elapsed() >= Duration::from_secs(10)) {
+            // Retain the ID so a late control acknowledgement never ends an agent turn.
+            *sent_at = None;
+            refresh_timed_out = true;
+        }
+    }
+    if refresh_timed_out {
+        app.push_display_message(DisplayMessage::system(
+            "Reset result is unchanged, but the daemon usage refresh has not been acknowledged. Reconnect if usage stays stale.".to_string(),
+        ));
+        needs_redraw = true;
+    }
     needs_redraw |= app.poll_ssh_login(remote).await;
     needs_redraw |= app.poll_ssh_login_onboarding();
     needs_redraw |= app.flush_pending_resize_redraw();

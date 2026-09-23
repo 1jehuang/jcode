@@ -759,10 +759,18 @@ async fn consume_native_stream(
 
     tokio::time::timeout(timeout, async move {
         let mut outcome = NativeClaudeStreamOutcome::default();
-        let mut pending_tool: Option<NativeClaudeToolCall> = None;
+        let mut current_tool: Option<String> = None;
+        let mut pending_tools = std::collections::HashMap::<String, NativeClaudeToolCall>::new();
         while let Some(event) = stream.next().await {
             outcome.total_events += 1;
-            match event.context("native provider stream event error")? {
+            let event = event.context("native provider stream event error")?;
+            let input_id = match &event {
+                StreamEvent::ToolInputDeltaFor { id, .. } | StreamEvent::ToolUseEndFor { id } => {
+                    Some(id.clone())
+                }
+                _ => current_tool.clone(),
+            };
+            match event {
                 StreamEvent::TextDelta(text) => {
                     outcome.chunk_count += 1;
                     outcome.text.push_str(&text);
@@ -782,21 +790,39 @@ async fn consume_native_stream(
                     outcome.saw_reasoning_signal = true;
                 }
                 StreamEvent::ToolUseStart { id, name } => {
-                    pending_tool = Some(NativeClaudeToolCall {
-                        id,
-                        name,
-                        input_json: String::new(),
-                        thought_signature: None,
-                    });
+                    current_tool = Some(id.clone());
+                    pending_tools.insert(
+                        id.clone(),
+                        NativeClaudeToolCall {
+                            id,
+                            name,
+                            input_json: String::new(),
+                            thought_signature: None,
+                        },
+                    );
                 }
-                StreamEvent::ToolInputDelta(fragment) => {
-                    if let Some(tool) = pending_tool.as_mut() {
+                StreamEvent::ToolInputDelta(fragment)
+                | StreamEvent::ToolInputDeltaFor {
+                    delta: fragment, ..
+                } => {
+                    if let Some(tool) = input_id.as_ref().and_then(|id| pending_tools.get_mut(id)) {
                         tool.input_json.push_str(&fragment);
                     }
                 }
-                StreamEvent::ToolUseEnd => {
-                    if let Some(tool) = pending_tool.take() {
+                StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                    if let Some(tool) = input_id.as_ref().and_then(|id| pending_tools.remove(id)) {
                         outcome.tool_calls.push(tool);
+                    }
+                }
+                StreamEvent::ToolUseSignatureFor { id, signature } => {
+                    if !signature.is_empty() {
+                        if let Some(tool) = pending_tools.get_mut(&id) {
+                            tool.thought_signature = Some(signature);
+                        } else if let Some(tool) =
+                            outcome.tool_calls.iter_mut().find(|tool| tool.id == id)
+                        {
+                            tool.thought_signature = Some(signature);
+                        }
                     }
                 }
                 // Emitted after the matching `ToolUseEnd`; attach it to the most

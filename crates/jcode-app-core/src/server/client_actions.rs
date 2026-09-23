@@ -298,6 +298,7 @@ pub(super) fn handle_run_subagent(
             name: tool_name.clone(),
         });
         let _ = tx.send(ServerEvent::ToolInput {
+            id: Some(tool_call_id.clone()),
             delta: tool_input.to_string(),
         });
         let _ = tx.send(ServerEvent::ToolExec {
@@ -676,6 +677,7 @@ fn clone_split_session(
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.replace_messages(parent.messages.clone());
     child.compaction = parent.compaction.clone();
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.status = crate::session::SessionStatus::Closed;
@@ -710,6 +712,7 @@ fn create_transfer_child_session(
     let mut child = Session::create(Some(parent_session_id.to_string()), None);
     child.messages.clear();
     child.compaction = compaction;
+    child.system_prompt = parent.system_prompt.clone();
     child.working_dir = parent.working_dir.clone();
     child.model = parent.model.clone();
     child.provider_key = parent.provider_key.clone();

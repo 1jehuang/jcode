@@ -1684,6 +1684,23 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id)
             .to_string();
+        let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
+        let plan = crate::todo::load_plan(&todo_session_id).unwrap_or_default();
+        let todo_fingerprint =
+            serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
+        if self.final_response_todo_fingerprint.is_some() {
+            if self.final_response_todo_fingerprint == todo_fingerprint {
+                // Check before timed reviews and deferred digests too: neither
+                // elapsed time nor a stale observation starts a new todo cycle.
+                return false;
+            }
+            self.final_response_todo_fingerprint = None;
+            self.todo_final_response_requested = false;
+            self.todo_gate_digest_delivered = false;
+            self.todo_completion_gate_attempts = 0;
+            self.todo_confidence_spike_challenged = false;
+            self.last_todo_ownership_fingerprint = None;
+        }
         if !todos.is_empty()
             && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
@@ -1725,7 +1742,6 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
-            let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
@@ -1824,6 +1840,7 @@ impl App {
             self.todo_completion_gate_attempts = 0;
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
+                self.final_response_todo_fingerprint = todo_fingerprint;
                 self.push_display_message(DisplayMessage::system(format!(
                     "✅ All todos done. Completion confidence: {}.",
                     confidence_label

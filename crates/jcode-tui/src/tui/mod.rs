@@ -856,8 +856,30 @@ pub trait TuiState {
     fn suggestion_prompts(&self) -> Vec<(String, String)>;
     /// Cache TTL status - shows whether the prompt cache is warm/cold based on idle time
     fn cache_ttl_status(&self) -> Option<CacheTtlInfo>;
+    /// Read-only reset guidance for the active OpenAI OAuth account.
+    fn openai_reset_hint(&self) -> Option<String> {
+        // SSH sessions may use a different login on the remote host. Local
+        // cached credits cannot establish reset availability for that account.
+        if self.is_processing() || is_ssh_remote() {
+            return None;
+        }
+        let auth_method = self.info_widget_data().auth_method;
+        if auth_method != info_widget::AuthMethod::OpenAIOAuth {
+            return None;
+        }
+        let usage = crate::usage::get_openai_usage_sync();
+        let account_label = crate::auth::codex::active_account_label();
+        crate::tui::ui::input_ui::openai_reset_status_hint(
+            auth_method,
+            &usage,
+            account_label.as_deref(),
+        )
+    }
     /// Whether the notification line has content to show
     fn has_notification(&self) -> bool {
+        if self.openai_reset_hint().is_some() {
+            return true;
+        }
         if self.copy_selection_status().is_some() {
             return true;
         }

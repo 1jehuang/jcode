@@ -1,9 +1,21 @@
+/// Read-only banked reset metadata from the ChatGPT usage response, pinned to
+/// the login whose usage was fetched. `None` label denotes the default scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiResetCredits {
+    pub available_count: u64,
+    /// One expiry per available reset, in RFC3339. Missing entries are unknown.
+    pub available_expirations: Vec<Option<String>>,
+    pub account_label: Option<String>,
+    pub ordinary_usage_allowed: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderUsage {
     pub provider_name: String,
     pub limits: Vec<UsageLimit>,
     pub extra_info: Vec<(String, String)>,
     pub hard_limit_reached: bool,
+    pub openai_reset_credits: Option<OpenAiResetCredits>,
     pub error: Option<String>,
     /// When jcode last successfully used this login/credential (unix seconds).
     /// Drives most-recently-used-first ordering in `/usage`. `None` sorts last.
@@ -88,7 +100,9 @@ pub fn classify_telemetry_tool_category(name: &str) -> TelemetryToolCategory {
         | "ls"
         | "conversation_search"
         | "session_search" => TelemetryToolCategory::ReadSearch,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch" => TelemetryToolCategory::Write,
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace" => {
+            TelemetryToolCategory::Write
+        }
         "bash" | "bg" | "schedule" => TelemetryToolCategory::Shell,
         "webfetch" | "websearch" | "codesearch" | "open" => TelemetryToolCategory::Web,
         "memory" => TelemetryToolCategory::Memory,

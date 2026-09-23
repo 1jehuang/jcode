@@ -114,6 +114,29 @@ fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
 }
 
 #[test]
+fn test_invalidate_openai_usage_roundtrip_pins_account_scope() -> Result<()> {
+    for account_label in [None, Some("reset-target".to_string())] {
+        let request = Request::InvalidateOpenAiUsage {
+            id: 41,
+            account_label: account_label.clone(),
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"type\":\"invalidate_openai_usage\""));
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 41);
+        let Request::InvalidateOpenAiUsage {
+            account_label: decoded_label,
+            ..
+        } = decoded
+        else {
+            return Err(anyhow!("wrong request type"));
+        };
+        assert_eq!(decoded_label, account_label);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_notify_auth_changed_typed_auth_payload_roundtrip() -> Result<()> {
     let req = Request::NotifyAuthChanged {
         id: 11,

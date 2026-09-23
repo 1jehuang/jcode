@@ -97,6 +97,7 @@ mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
+mod usage_reset;
 pub(crate) use state_ui_input_helpers::registered_command_entries;
 mod state_ui_maintenance;
 mod state_ui_messages;
@@ -967,6 +968,9 @@ pub struct App {
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,
+    /// Todo state at the final-response handoff. Unchanged finished work must
+    /// not re-enter quality gates on later turn-end or timer callbacks.
+    final_response_todo_fingerprint: Option<String>,
     /// Exact continuation sent for the last incomplete todo state. An unchanged
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
@@ -1657,6 +1661,7 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    usage_reset: usage_reset::ResetState,
     /// Whether a `/productivity` report generation is currently in flight.
     productivity_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.

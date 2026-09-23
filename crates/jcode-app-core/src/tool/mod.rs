@@ -19,7 +19,10 @@ mod edit;
 mod edit_stats;
 mod feedback;
 mod file_diff;
+pub(crate) mod file_lock;
 mod gmail;
+// The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+#[allow(dead_code)]
 mod goal;
 pub mod inflight;
 mod invalid;
@@ -27,11 +30,12 @@ mod jcode_docs;
 mod ls;
 pub mod mcp;
 mod memory;
-mod multiedit;
 mod open;
 mod panel;
 mod patch;
 mod read;
+mod replace;
+pub(crate) mod sdk;
 pub mod selfdev;
 pub(crate) mod serde_coerce;
 mod session_search;
@@ -108,6 +112,7 @@ impl Drop for SessionToolPolicyRegistration {
             .is_some_and(|policy| policy.owner == Some(self.owner))
         {
             policies.remove(&self.session_id);
+            sdk::remove_session(&self.session_id);
         }
     }
 }
@@ -163,11 +168,23 @@ pub(crate) fn clear_session_tool_policy(session_id: &str) {
 }
 
 fn session_tool_policy(session_id: &str) -> Option<SessionToolPolicy> {
-    SESSION_TOOL_POLICIES
+    let mut policy = SESSION_TOOL_POLICIES
         .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|e| e.into_inner())
         .get(session_id)
-        .cloned()
+        .cloned();
+    if let Some(config) = sdk::config(session_id) {
+        let policy = policy.get_or_insert_with(SessionToolPolicy::default);
+        if let Some(enabled) = config.enabled {
+            policy.allowed_tools = Some(enabled.into_iter().collect());
+            policy.disabled_tools.clear();
+        }
+        policy.disabled_tools.extend(config.disabled);
+        if let Some(allowed) = policy.allowed_tools.as_mut() {
+            allowed.extend(config.custom.into_iter().map(|t| t.name));
+        }
+    }
+    policy
 }
 
 #[cfg(test)]
@@ -367,13 +384,9 @@ impl Registry {
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
-            Self::insert_tool_timed(
-                &mut m,
-                &mut timings,
-                "multiedit",
-                multiedit::MultiEditTool::new,
-            );
-            Self::insert_tool_timed(&mut m, &mut timings, "patch", patch::PatchTool::new);
+            // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
+            // Both old names still resolve through `resolve_tool_name`.
+            Self::insert_tool_timed(&mut m, &mut timings, "replace", replace::ReplaceTool::new);
             Self::insert_tool_timed(
                 &mut m,
                 &mut timings,
@@ -815,6 +828,18 @@ impl Registry {
         )
     }
 
+    /// Resolve a model-supplied tool name for a session: strips a
+    /// `functions.` namespace and maps aliases, but leaves SDK custom tool
+    /// names untouched so they are never rewritten to a built-in.
+    pub(crate) fn resolve_tool_name_for_session<'a>(session_id: &str, name: &'a str) -> &'a str {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        if sdk::custom(session_id, unqualified_name) {
+            unqualified_name
+        } else {
+            Self::resolve_tool_name(unqualified_name)
+        }
+    }
+
     /// Execute a tool by name
     pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         // Mark this call in-flight for the whole execution so the missing
@@ -823,13 +848,24 @@ impl Registry {
         // `tool::inflight`.
         let _in_flight = inflight::mark_tool_in_flight(&ctx.tool_call_id);
         let tools = self.tools.read().await;
-        let resolved_name = Self::resolve_tool_name(name);
+        let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
+        let is_custom = sdk::custom(&ctx.session_id, resolved_name);
+        if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.tool_is_disabled(&disabled, resolved_name),
+                "Tool '{}' is disabled",
+                resolved_name
+            );
+        }
         // Enforce product separation here too: batch/subcalls dispatch through
         // the registry without going through Agent::validate_tool_allowed.
-        if matches!(
-            resolved_name,
-            "selfdev" | "debug_socket" | "desktop_selfdev" | "jcode_docs"
-        ) {
+        if !is_custom
+            && matches!(
+                resolved_name,
+                "selfdev" | "debug_socket" | "desktop_selfdev" | "jcode_docs"
+            )
+        {
             let desktop = ctx
                 .working_dir
                 .as_deref()
@@ -850,7 +886,7 @@ impl Registry {
                 anyhow::bail!("Tool 'desktop_selfdev' requires a Jcode Desktop source checkout.");
             }
         }
-        if let Some(policy) = session_tool_policy(&ctx.session_id) {
+        if !is_custom && let Some(policy) = session_tool_policy(&ctx.session_id) {
             if let Some(allowed) = policy.allowed_tools.as_ref()
                 && !self.tool_is_allowed(allowed, resolved_name)
             {
@@ -860,20 +896,24 @@ impl Registry {
                 return Err(anyhow::anyhow!("Tool '{}' is disabled", resolved_name));
             }
         }
-        let tool = match tools.get(resolved_name) {
-            Some(tool) => tool.clone(),
-            None => {
-                // List available tools so the model can recover instead of
-                // spiraling through hallucinated names like "ToolSearch" (#104).
-                let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
-                available.sort_unstable();
-                let suggestions = Self::closest_tool_names(name, &available);
-                let mut msg = format!("Unknown tool: {name}.");
-                if !suggestions.is_empty() {
-                    msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+        let tool: Arc<dyn Tool> = if is_custom {
+            Arc::new(sdk::CallbackTool(resolved_name.into()))
+        } else {
+            match tools.get(resolved_name) {
+                Some(tool) => tool.clone(),
+                None => {
+                    // List available tools so the model can recover instead of
+                    // spiraling through hallucinated names like "ToolSearch" (#104).
+                    let mut available: Vec<&str> = tools.keys().map(|k| k.as_str()).collect();
+                    available.sort_unstable();
+                    let suggestions = Self::closest_tool_names(name, &available);
+                    let mut msg = format!("Unknown tool: {name}.");
+                    if !suggestions.is_empty() {
+                        msg.push_str(&format!(" Did you mean: {}?", suggestions.join(", ")));
+                    }
+                    msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
+                    return Err(anyhow::anyhow!(msg));
                 }
-                msg.push_str(&format!(" Available tools: {}.", available.join(", ")));
-                return Err(anyhow::anyhow!(msg));
             }
         };
 

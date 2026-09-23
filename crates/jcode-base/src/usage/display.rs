@@ -59,6 +59,10 @@ impl OpenAIUsageData {
 
         if cleared_any_window {
             snapshot.hard_limit_reached = false;
+            // The old server `allowed` flag is no longer authoritative after
+            // rollover. Wait for the existing usage refresh before suggesting
+            // an irreversible banked reset.
+            snapshot.openai_reset_credits = None;
         }
 
         snapshot

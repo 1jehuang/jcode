@@ -1,5 +1,5 @@
 /// Quality-first default for Claude-capable routes.
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Quality-first default for OpenAI-capable routes.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
@@ -8,10 +8,12 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 ///
 /// NOTE: The Mythos preview family was retired by Anthropic and 404s, so it is
 /// intentionally NOT listed here. `claude-fable-5` was briefly retired but is
-/// live again. `claude-fable-5-1` went live 2026-08-28. The list is curated best-first; position 0 is the flagship
-/// used for post-login default selection.
+/// live again. Opus 5.5 launched 2026-09-22. The list is curated best-first;
+/// position 0 is the flagship used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
+    "claude-opus-5-5",
     DEFAULT_CLAUDE_MODEL,
+    "claude-opus-5",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",
@@ -389,6 +391,11 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(131_072);
     }
 
+    // --- Xiaomi MiMo V2.6 (Pro, Flash, Ultraspeed): 1 Mi tokens (issue #1401) ---
+    if m.contains("mimo-v2.6") || m.contains("mimo-v2-6") {
+        return Some(1_048_576);
+    }
+
     // --- Xiaomi MiMo V2 family: 256K context ---
     if m.contains("mimo") {
         return Some(262_144);
@@ -517,10 +524,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quality_first_defaults_are_first_in_curated_model_orders() {
+    fn newest_claude_is_listed_first_and_is_the_default() {
+        assert_eq!(ALL_CLAUDE_MODELS.first().copied(), Some("claude-opus-5-5"));
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-opus-5-5");
+        assert!(ALL_CLAUDE_MODELS.contains(&"claude-opus-5"));
+        assert!(ALL_CLAUDE_MODELS.contains(&DEFAULT_CLAUDE_MODEL));
+        assert!(!ALL_CLAUDE_MODELS.contains(&"claude-opus-5-5[1m]"));
         assert_eq!(
-            ALL_CLAUDE_MODELS.first().copied(),
-            Some(DEFAULT_CLAUDE_MODEL)
+            context_limit_for_model_with_provider("claude-opus-5-5", Some("claude")),
+            Some(1_000_000)
         );
         assert_eq!(
             ALL_OPENAI_MODELS.first().copied(),

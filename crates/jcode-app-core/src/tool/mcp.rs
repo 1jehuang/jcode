@@ -247,6 +247,25 @@ impl Tool for McpCallTool {
             params.arguments = Value::Object(serde_json::Map::new());
         }
 
+        // Deferred dispatch must honor the same session-local replacement as
+        // eager and batched dispatch. Never fall through to the real MCP server
+        // when the SDK owner has replaced this identity.
+        let custom_name = if super::sdk::custom(&ctx.session_id, alias) {
+            Some(alias)
+        } else if super::sdk::custom(&ctx.session_id, &dispatched_name) {
+            Some(dispatched_name.as_str())
+        } else {
+            None
+        };
+        if let Some(custom_name) = custom_name {
+            let registry = self
+                .registry
+                .as_ref()
+                .and_then(|r| r.upgrade())
+                .ok_or_else(|| anyhow::anyhow!("SDK MCP override requires a live registry"))?;
+            return registry.execute(custom_name, params.arguments, ctx).await;
+        }
+
         let manager = self.manager.read().await;
         let result = manager
             .call_tool(&params.server, &params.tool, params.arguments)

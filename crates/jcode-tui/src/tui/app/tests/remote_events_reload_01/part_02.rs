@@ -21,6 +21,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
     );
     app.handle_server_event(
         crate::protocol::ServerEvent::ToolInput {
+            id: None,
             delta: r#"{"file_path":"src/main.rs","start_line":1,"end_line":2}"#.to_string(),
         },
         &mut remote,

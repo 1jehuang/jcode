@@ -1159,7 +1159,7 @@ impl MemoryManager {
                 return Ok(Vec::new());
             }
             let client = crate::jev::JevClient::new()?;
-            crate::memory_jev::select(&client, &query, entries, 5).await
+            crate::memory_jev::select(&client, query, entries, 5).await
         }
         .await;
         let relevant: Vec<MemoryEntry> = match result {

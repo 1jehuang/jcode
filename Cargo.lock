@@ -3155,7 +3155,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jcode"
-version = "0.86.0"
+version = "0.88.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3240,6 +3240,7 @@ dependencies = [
  "futures",
  "glob",
  "global-hotkey",
+ "ignore",
  "jcode-agent-runtime",
  "jcode-ambient-types",
  "jcode-base",
@@ -3321,6 +3322,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "dirs",
+ "flate2",
  "futures",
  "global-hotkey",
  "hex",
@@ -3477,6 +3479,7 @@ dependencies = [
 name = "jcode-harness-api"
 version = "0.1.0"
 dependencies = [
+ "jcode-session-types",
  "jcode-side-panel-types",
  "jcode-usage-types",
  "serde",
@@ -4336,6 +4339,7 @@ dependencies = [
 name = "jcode-tui-tool-display"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "unicode-width",
 ]
 

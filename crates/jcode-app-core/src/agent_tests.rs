@@ -8,6 +8,9 @@ use async_trait::async_trait;
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+#[path = "agent_tests/tool_streaming.rs"]
+mod tool_streaming;
+
 #[path = "agent_tests/concurrency.rs"]
 mod concurrency;
 
@@ -1208,7 +1211,9 @@ async fn restore_session_resets_runtime_interrupt_and_queue_state() {
         None,
         None,
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     seed_transient_session_state(&mut agent);
     assert_eq!(agent.soft_interrupt_count(), 1);
@@ -1243,6 +1248,12 @@ async fn explicit_provider_pin_is_persisted_and_reapplied_on_restore() {
     let provider_dyn: Arc<dyn Provider> = provider.clone();
     let registry = Registry::new(provider_dyn.clone()).await;
     let mut agent = Agent::new(provider_dyn, registry);
+    // Untouched sessions are not persisted (783c979a0); materialize the
+    // snapshot so the pin written by set_model lands on disk.
+    agent
+        .session
+        .save_prepared()
+        .expect("materialize session snapshot");
 
     agent
         .set_model("z-ai/glm-5.2@Novita")
@@ -1289,7 +1300,9 @@ async fn restore_session_rehydrates_injected_memory_ids() {
         5,
         vec!["memory-persisted".to_string()],
     );
-    restored_session.save().expect("save restored session");
+    restored_session
+        .save_prepared()
+        .expect("save restored session");
 
     crate::memory::mark_memories_injected(&restored_session.id, &["memory-stale".to_string()]);
 
@@ -1474,7 +1487,7 @@ async fn mark_closed_persists_soft_interrupts_for_restore_after_reload() {
     let registry = Registry::new(provider.clone()).await;
     let mut agent = Agent::new(provider.clone(), registry.clone());
     let session_id = agent.session_id().to_string();
-    agent.session.save().expect("save active session");
+    agent.session.save_prepared().expect("save active session");
     agent.queue_soft_interrupt(
         "resume me after reload".to_string(),
         Vec::new(),
@@ -2381,4 +2394,82 @@ async fn fable_guardrail_reconsideration_recovers_the_streaming_turn() {
         text.contains("Reconsidered and completed safely"),
         "{text:?}"
     );
+}
+
+#[tokio::test]
+async fn sdk_custom_compile_remote_schema_survives_locked_refresh() {
+    let _lock = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SignatureSessionProvider::default());
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider, registry);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::tool::sdk::configure(
+        agent.session_id(),
+        "cache-owner",
+        crate::protocol::SessionToolConfig {
+            enabled: Some(vec![]),
+            disabled: vec![],
+            custom: vec![crate::protocol::SessionToolDefinition {
+                name: "compile_remote".into(),
+                description: "SDK override".into(),
+                parameters: serde_json::json!({"type":"object", "additionalProperties":false}),
+            }],
+        },
+        tx,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let definitions = agent.tool_definitions().await;
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].description, "SDK override");
+        assert_eq!(
+            definitions[0].input_schema,
+            serde_json::json!({"type":"object", "additionalProperties":false})
+        );
+    }
+}
+
+#[test]
+fn system_prompt_override_restores_and_does_not_leak_across_sessions() {
+    let _lock = crate::storage::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    struct RestoreHome(Option<std::ffi::OsString>);
+    impl Drop for RestoreHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => crate::env::set_var("JCODE_HOME", home),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+        }
+    }
+    let _restore = RestoreHome(std::env::var_os("JCODE_HOME"));
+    crate::env::set_var("JCODE_HOME", home.path());
+    for prompt in ["custom system prompt", ""] {
+        let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);
+        let mut agent = Agent::new(provider.clone(), Registry::empty());
+        agent.set_system_prompt(prompt);
+        let id = agent.session_id().to_string();
+        let split = agent.build_system_prompt_split(Some("memory must not be appended"));
+        assert_eq!(split.static_part, prompt);
+        assert!(split.dynamic_part.is_empty());
+        assert_eq!(
+            Session::load(&id).unwrap().system_prompt.as_deref(),
+            Some(prompt)
+        );
+
+        agent.clear();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        agent.restore_session(&id).unwrap();
+        assert_eq!(agent.build_system_prompt_split(None).static_part, prompt);
+
+        let mut other = Session::create(None, Some("plain session".into()));
+        other.save().unwrap();
+        agent.restore_session(&other.id).unwrap();
+        assert_eq!(agent.session.system_prompt, None);
+        assert_ne!(agent.build_system_prompt_split(None).static_part, prompt);
+        let loaded = Session::load(&id).unwrap();
+        let attached = Agent::new_with_session(provider, Registry::empty(), loaded, None);
+        assert_eq!(attached.build_system_prompt_split(None).static_part, prompt);
+    }
 }

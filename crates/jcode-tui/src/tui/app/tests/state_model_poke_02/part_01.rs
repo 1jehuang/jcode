@@ -1043,14 +1043,14 @@ fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
             })
             .unwrap();
         }
-        crate::auth::claude::set_active_account("claude-3").unwrap();
+        crate::auth::claude::set_active_account("claude-panda").unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
             .unwrap()
             .into_iter()
             .map(|account| account.label)
             .collect();
-        assert_eq!(labels, vec!["claude-1", "claude-2", "claude-3"]);
+        assert_eq!(labels, vec!["claude-otter", "claude-fox", "claude-panda"]);
 
         assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
         assert!(crate::auth::claude::list_accounts().unwrap().is_empty());
