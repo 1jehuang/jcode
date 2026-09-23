@@ -259,6 +259,83 @@ fn declared_removals_are_recorded_and_consumed() {
     );
 }
 
+/// A failed save must not consume the declared removal: once the file can be
+/// written again, a later successful save still deletes the declared key.
+#[test]
+fn a_failed_save_preserves_the_declared_removal() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+
+    // Make the config path unwritable by replacing the file with a directory:
+    // the atomic writer's final rename cannot replace a directory, so the save
+    // fails after it has already snapshotted the declaration.
+    let path = home.path();
+    std::fs::remove_file(&path).expect("remove the config file");
+    std::fs::create_dir(&path).expect("replace it with a directory");
+
+    assert!(Config::default().save().is_err(), "the save must fail");
+
+    // The declaration must survive the failed save.
+    assert_eq!(
+        Config::pending_removals(),
+        vec!["display.colors".to_string()],
+        "a failed save must not consume the declared removal"
+    );
+
+    // Restore a parseable file carrying the key, then save again without
+    // re-declaring: the key must now actually disappear.
+    std::fs::remove_dir(&path).expect("remove the directory");
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::default().save().expect("save after the file is writable again");
+
+    let written = home.read();
+    assert!(
+        !written.contains("[display.colors]"),
+        "the declared key must be deleted by the eventual successful save: {written}"
+    );
+    assert!(
+        !written.contains("#1050f0"),
+        "the declared key's value must be gone too: {written}"
+    );
+}
+
+/// A successful save consumes the declaration exactly once: a later save, with
+/// no new declaration, must not re-apply the deletion to a key another build
+/// wrote back in between.
+#[test]
+fn a_successful_save_consumes_the_declaration_exactly_once() {
+    let _guard = crate::storage::lock_test_env();
+    let home = HomeGuard::new();
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#1050f0\"\n");
+
+    Config::declare_removal("display.colors");
+    Config::default().save().expect("save");
+    assert!(
+        Config::pending_removals().is_empty(),
+        "the successful save must consume the declaration"
+    );
+
+    // Another build (or user) writes the key back after the deletion.
+    home.write("[display]\ncentered = false\n[display.colors]\nerror = \"#00ff00\"\n");
+
+    // A second save with no new declaration must not delete it again.
+    Config::default().save().expect("save again");
+
+    let written = home.read();
+    assert!(
+        written.contains("[display.colors]"),
+        "a consumed declaration must not be re-applied by a later save: {written}"
+    );
+    assert!(
+        written.contains("#00ff00"),
+        "the re-added value must survive the later save: {written}"
+    );
+}
+
 /// Removals are keyed by config path: one recorded under a different
 /// `JCODE_HOME` must never be applied to another home's file.
 #[test]
