@@ -247,7 +247,7 @@ pub struct SkillInfo {
 
 const SKILL_DESC_MAX_CHARS: usize = 120;
 
-fn clip_skill_description(description: &str) -> String {
+pub fn clip_skill_description(description: &str) -> String {
     let one_line = description.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= SKILL_DESC_MAX_CHARS {
         return one_line;

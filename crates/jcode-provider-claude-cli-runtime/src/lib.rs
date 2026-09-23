@@ -27,7 +27,10 @@ use tokio_stream::wrappers::ReceiverStream;
 /// that occur when multiple CLI instances run concurrently
 static CLAUDE_CLI_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-const DEFAULT_MODEL: &str = "claude-opus-4-6";
+/// Single source of truth for the Claude default (non-dated), shared with the
+/// native Anthropic provider so this deprecated CLI transport can never lag
+/// behind on an old hardcoded snapshot.
+const DEFAULT_MODEL: &str = jcode_provider_core::DEFAULT_CLAUDE_MODEL;
 const DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 /// Maximum number of retries for transient errors.
@@ -45,11 +48,10 @@ const RETRY_BASE_DELAY_MS: u64 = 1000;
 const TRANSPORT_ERROR_DELAY_MS: u64 = 2000;
 
 /// Available Claude models
-const AVAILABLE_MODELS: &[&str] = &[
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-opus-4-5-20251101",
-];
+/// Static offline picker list. Runtime switching validates against the live
+/// catalog (`known_anthropic_model_ids`), so this only seeds the UI when no
+/// catalog has been fetched yet.
+const AVAILABLE_MODELS: &[&str] = &[DEFAULT_MODEL, "claude-opus-4-6", "claude-sonnet-4-6"];
 
 /// Native tools that jcode handles locally (not Claude Code built-ins)
 const NATIVE_TOOL_NAMES: &[&str] = &["selfdev", "communicate", "memory", "session_search", "bg"];
@@ -137,7 +139,13 @@ impl ClaudeCliConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        if !AVAILABLE_MODELS.contains(&model.as_str()) {
+        // Validate against the same catalog-backed id list `set_model` uses,
+        // not the small static picker list, so a newer model set via env is
+        // not silently downgraded to the default.
+        if !jcode_base::provider::known_anthropic_model_ids()
+            .iter()
+            .any(|known| known == &model)
+        {
             jcode_base::logging::info(&format!(
                 "Warning: '{}' is not supported; falling back to '{}'",
                 model, DEFAULT_MODEL

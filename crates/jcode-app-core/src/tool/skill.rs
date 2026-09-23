@@ -182,15 +182,22 @@ impl SkillTool {
             # Skill content here\n"
                 .to_string()
         } else {
-            let mut output = format!("Loaded skills: {}\n\n", skills.len());
+            // With hundreds of installed skills a full listing (multi-line
+            // descriptions, paths, tool lists) is ~170KB of tool result that
+            // permanently enters the transcript and never compacts out — one
+            // observed `list` call added ~42k tokens to every subsequent turn
+            // of the session. Keep the browsing view to one clipped line per
+            // skill; `read`/`load` still expose full details for one skill.
+            let mut output = format!(
+                "Loaded skills: {} (one line each; use action=read for full details)\n\n",
+                skills.len()
+            );
             for skill in &skills {
-                output.push_str(&format!("## /{}\n", skill.name));
-                output.push_str(&format!("  {}\n", skill.description));
-                output.push_str(&format!("  Path: {}\n", skill.path.display()));
-                if let Some(ref tools) = skill.allowed_tools {
-                    output.push_str(&format!("  Tools: {}\n", tools.join(", ")));
-                }
-                output.push('\n');
+                output.push_str(&format!(
+                    "- /{} — {}\n",
+                    skill.name,
+                    jcode_base::prompt::clip_skill_description(&skill.description)
+                ));
             }
             output
         };
@@ -462,6 +469,41 @@ mod tests {
         }
         // No skills are loaded in this tool, so they should be "not installed".
         assert!(result.output.contains("[not installed]"));
+    }
+
+    #[tokio::test]
+    async fn test_list_is_compact_one_line_per_skill() {
+        // Regression: with hundreds of skills the old multi-line listing
+        // (description + Path + Tools per skill) was a ~170KB tool result
+        // that bloated every subsequent turn. The browsing view must stay
+        // one clipped line per skill with no path dumps.
+        let long_description = "word ".repeat(200);
+        let temp_dir = tempfile::tempdir().unwrap();
+        let skill_dir = temp_dir.path().join(".jcode").join("skills").join("wordy");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: wordy\ndescription: \"{long_description}\"\n---\n\n# Wordy\n"),
+        )
+        .unwrap();
+        let registry = SkillRegistry::load_for_working_dir(Some(temp_dir.path())).unwrap();
+        let tool = SkillTool::new(Arc::new(RwLock::new(registry)));
+        let ctx = create_test_context();
+
+        let result = tool
+            .execute(json!({"action": "list"}), ctx)
+            .await
+            .unwrap();
+        let line = result
+            .output
+            .lines()
+            .find(|line| line.starts_with("- /wordy"))
+            .expect("skill line present");
+        assert!(line.chars().count() < 160, "line too long: {line}");
+        assert!(
+            !result.output.contains(&temp_dir.path().display().to_string()),
+            "listing must not dump per-skill paths"
+        );
     }
 
     #[tokio::test]

@@ -731,6 +731,135 @@ async fn run_turn_streaming_mpsc_emits_model_changed_on_midstream_switch() {
     );
 }
 
+/// Provider that starts on a fallback model and accepts `set_model` back to
+/// the preferred one, emulating recovery of a transient outage.
+struct SwitchableProvider {
+    model: std::sync::Mutex<String>,
+}
+
+#[async_trait]
+impl Provider for SwitchableProvider {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _system: &str,
+        _resume_session_id: Option<&str>,
+    ) -> Result<EventStream> {
+        let (tx, rx) = tokio_mpsc::channel::<Result<StreamEvent>>(8);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(StreamEvent::TextDelta("ok".to_string()))).await;
+            let _ = tx
+                .send(Ok(StreamEvent::MessageEnd {
+                    stop_reason: Some("end_turn".to_string()),
+                }))
+                .await;
+        });
+        Ok(Box::pin(ReceiverStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "claude"
+    }
+
+    fn model(&self) -> String {
+        self.model.lock().unwrap().clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<()> {
+        *self.model.lock().unwrap() = model.to_string();
+        Ok(())
+    }
+
+    fn fork(&self) -> Arc<dyn Provider> {
+        Arc::new(Self {
+            model: std::sync::Mutex::new(self.model.lock().unwrap().clone()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn due_fallback_repromotion_reselects_preferred_model_before_request() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableProvider {
+        model: std::sync::Mutex::new("claude-opus-4-5".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider.clone(), registry);
+    agent.arm_fallback_repromotion_for_test("claude-opus-4-6");
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move { agent.run_turn_streaming_mpsc(tx).await });
+
+    let mut repromoted_model = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            Ok(Some(ServerEvent::ModelChanged { model, .. })) => {
+                repromoted_model = Some(model);
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => {
+                if task.is_finished() {
+                    break;
+                }
+            }
+        }
+    }
+
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        repromoted_model.as_deref(),
+        Some("claude-opus-4-6"),
+        "expected the due re-promotion to move back to the preferred model"
+    );
+    assert_eq!(provider.model(), "claude-opus-4-6");
+}
+
+#[tokio::test]
+async fn user_model_selection_cancels_pending_fallback_repromotion() {
+    let _guard = crate::storage::lock_test_env();
+    let provider: Arc<dyn Provider> = Arc::new(SwitchableProvider {
+        model: std::sync::Mutex::new("claude-opus-4-5".to_string()),
+    });
+    let registry = Registry::new(provider.clone()).await;
+    let mut agent = Agent::new(provider.clone(), registry);
+    agent.arm_fallback_repromotion_for_test("claude-opus-4-6");
+    // The user explicitly picks a model after the demotion: their choice wins.
+    agent.set_model("claude-haiku-4-5").unwrap();
+    agent.add_message(
+        Role::User,
+        vec![ContentBlock::Text {
+            text: "test".to_string(),
+            cache_control: None,
+        }],
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        let result = agent.run_turn_streaming_mpsc(tx).await;
+        (agent, result)
+    });
+    // Drain events so the sender never blocks.
+    while rx.recv().await.is_some() {}
+    let (agent, result) = task.await.unwrap();
+    result.unwrap();
+    assert!(
+        !agent.fallback_repromotion_pending_for_test(),
+        "user selection must cancel the pending re-promotion"
+    );
+    assert_eq!(provider.model(), "claude-haiku-4-5");
+}
+
 #[tokio::test]
 async fn messages_for_provider_replays_persisted_native_compaction_in_auto_mode() {
     let provider: Arc<dyn Provider> = Arc::new(NativeAutoCompactionProvider);

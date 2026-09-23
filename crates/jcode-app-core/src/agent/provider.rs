@@ -208,6 +208,23 @@ impl Agent {
         self.provider_runtime_state.user_selected_after(generation)
     }
 
+    /// Test-only: arm a due fallback re-promotion as if the provider had
+    /// demoted from `preferred_model` earlier and the cooldown has elapsed.
+    #[cfg(test)]
+    pub(crate) fn arm_fallback_repromotion_for_test(&mut self, preferred_model: &str) {
+        self.fallback_repromotion = Some(super::FallbackRepromotion {
+            preferred_model: preferred_model.to_string(),
+            selection_generation: self.provider_runtime_state.selection_generation(),
+            next_attempt_at: Instant::now() - Duration::from_secs(1),
+        });
+    }
+
+    /// Test-only: whether a fallback re-promotion is still pending.
+    #[cfg(test)]
+    pub(crate) fn fallback_repromotion_pending_for_test(&self) -> bool {
+        self.fallback_repromotion.is_some()
+    }
+
     pub fn restore_reasoning_effort_from_session(&mut self) {
         if let Some(effort) = self.session.reasoning_effort.clone() {
             if let Err(e) = self.provider.set_reasoning_effort(&effort) {

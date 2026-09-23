@@ -44,7 +44,24 @@ use tokio::sync::mpsc;
 #[cfg(feature = "aws-sdk")]
 use tokio_stream::wrappers::ReceiverStream;
 
+/// Last-resort default when no catalog (cached or live) is available yet.
+/// Kept deliberately old-but-universally-enabled; `resolve_default_model`
+/// upgrades to the best catalog model as soon as one is known, and a live
+/// catalog refresh re-runs that upgrade (see `maybe_upgrade_default_model`).
 const DEFAULT_MODEL: &str = "anthropic.claude-3-5-sonnet-20241022-v2:0";
+
+/// Substring preference order for picking a default from the live/cached
+/// catalog: newest Anthropic tier first. Matching is case-insensitive on the
+/// model id (which also matches inference-profile ids like
+/// `us.anthropic.claude-sonnet-4-...`).
+const DEFAULT_MODEL_PREFERENCE: &[&str] = &[
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-opus-4",
+    "claude-sonnet-4",
+    "claude-3-7-sonnet",
+    "claude-3-5-sonnet",
+];
 const DEFAULT_MAX_OUTPUT_TOKENS: usize = 4096;
 pub const ENV_FILE: &str = "bedrock.env";
 pub const API_KEY_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
@@ -88,8 +105,13 @@ pub struct BedrockProvider {
 
 impl BedrockProvider {
     pub fn new() -> Self {
-        let model =
-            std::env::var("JCODE_BEDROCK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+        let explicit_model = std::env::var("JCODE_BEDROCK_MODEL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        let model = explicit_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let provider = Self {
             model: Arc::new(RwLock::new(model)),
             fetched_models: Arc::new(RwLock::new(Vec::new())),
@@ -99,6 +121,12 @@ impl BedrockProvider {
             legacy_models: Arc::new(RwLock::new(HashSet::new())),
         };
         provider.seed_cached_catalog();
+        // Without an explicit model override, prefer the newest Anthropic
+        // model this account can actually use (from the cached catalog) over
+        // the hardcoded last-resort default, which by definition goes stale.
+        if explicit_model.is_none() {
+            provider.maybe_upgrade_default_model();
+        }
         provider
     }
 
@@ -273,6 +301,54 @@ impl BedrockProvider {
     fn load_persisted_catalog() -> Option<PersistedCatalog> {
         let path = Self::persisted_catalog_path().ok()?;
         jcode_storage::read_json(&path).ok()
+    }
+
+    /// Upgrade off the hardcoded last-resort default onto the newest
+    /// Anthropic model the catalog says this account can use. Only acts when
+    /// the current model is still exactly `DEFAULT_MODEL` (an env override or
+    /// user selection is never touched). Skips models the account has had
+    /// marked legacy.
+    fn maybe_upgrade_default_model(&self) {
+        let current = self.model();
+        if current != DEFAULT_MODEL {
+            return;
+        }
+        let legacy = self
+            .legacy_models
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        // Only consider models/profiles the account's catalog actually
+        // listed. The static `known_models()` picker entries are not proof of
+        // account access, so they never drive an automatic upgrade.
+        let mut candidates: Vec<String> = self
+            .fetched_inference_profiles
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        if let Ok(fetched) = self.fetched_models.read() {
+            candidates.extend(fetched.iter().cloned());
+        }
+        candidates.retain(|model| !legacy.contains(model));
+        for preference in DEFAULT_MODEL_PREFERENCE {
+            if let Some(best) = candidates
+                .iter()
+                .find(|model| model.to_ascii_lowercase().contains(preference))
+            {
+                if best.as_str() == DEFAULT_MODEL {
+                    return;
+                }
+                jcode_logging::info(&format!(
+                    "Bedrock default model upgraded from '{}' to catalog best '{}'",
+                    DEFAULT_MODEL, best
+                ));
+                let routed = self
+                    .profile_route_for_model(best)
+                    .unwrap_or_else(|| best.clone());
+                *self.model.write().unwrap_or_else(|p| p.into_inner()) = routed;
+                return;
+            }
+        }
     }
 
     // Only written from aws-sdk catalog refreshes, but kept ungated so cached
@@ -1140,6 +1216,11 @@ impl BedrockProvider {
             &inference_profile_routes,
             &legacy_models,
         );
+        // A fresher catalog may reveal a newer default-worthy model (first
+        // run has no cache, so `new()` could not upgrade yet).
+        if std::env::var("JCODE_BEDROCK_MODEL").is_err() {
+            self.maybe_upgrade_default_model();
+        }
         Ok((models, profiles))
     }
 }
@@ -1496,6 +1577,63 @@ mod tests {
     use super::*;
     use std::ffi::{OsStr, OsString};
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn provider_on_default() -> BedrockProvider {
+        BedrockProvider {
+            model: Arc::new(RwLock::new(DEFAULT_MODEL.to_string())),
+            fetched_models: Arc::new(RwLock::new(Vec::new())),
+            fetched_inference_profiles: Arc::new(RwLock::new(Vec::new())),
+            profile_required_models: Arc::new(RwLock::new(HashSet::new())),
+            inference_profile_routes: Arc::new(RwLock::new(HashMap::new())),
+            legacy_models: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    #[test]
+    fn default_model_upgrades_to_newest_catalog_anthropic() {
+        let provider = provider_on_default();
+        *provider.fetched_models.write().unwrap() = vec![
+            "amazon.nova-pro-v1:0".to_string(),
+            "anthropic.claude-3-5-sonnet-20241022-v2:0".to_string(),
+            "anthropic.claude-sonnet-4-20250514-v1:0".to_string(),
+        ];
+        provider.maybe_upgrade_default_model();
+        assert_eq!(provider.model(), "anthropic.claude-sonnet-4-20250514-v1:0");
+    }
+
+    #[test]
+    fn default_model_upgrade_prefers_inference_profiles_and_skips_legacy() {
+        let provider = provider_on_default();
+        *provider.fetched_inference_profiles.write().unwrap() =
+            vec!["us.anthropic.claude-opus-4-20250514-v1:0".to_string()];
+        *provider.fetched_models.write().unwrap() =
+            vec!["anthropic.claude-sonnet-4-20250514-v1:0".to_string()];
+        provider
+            .legacy_models
+            .write()
+            .unwrap()
+            .insert("us.anthropic.claude-opus-4-20250514-v1:0".to_string());
+        provider.maybe_upgrade_default_model();
+        // Legacy-marked opus profile skipped; catalog sonnet chosen.
+        assert_eq!(provider.model(), "anthropic.claude-sonnet-4-20250514-v1:0");
+    }
+
+    #[test]
+    fn default_model_upgrade_never_touches_non_default_selection() {
+        let provider = provider_on_default();
+        *provider.model.write().unwrap() = "amazon.nova-pro-v1:0".to_string();
+        *provider.fetched_models.write().unwrap() =
+            vec!["anthropic.claude-sonnet-4-20250514-v1:0".to_string()];
+        provider.maybe_upgrade_default_model();
+        assert_eq!(provider.model(), "amazon.nova-pro-v1:0");
+    }
+
+    #[test]
+    fn default_model_upgrade_no_catalog_is_a_noop() {
+        let provider = provider_on_default();
+        provider.maybe_upgrade_default_model();
+        assert_eq!(provider.model(), DEFAULT_MODEL);
+    }
 
     #[cfg(feature = "aws-sdk")]
     #[test]

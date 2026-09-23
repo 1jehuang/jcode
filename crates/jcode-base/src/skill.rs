@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[cfg(not(test))]
@@ -384,8 +384,15 @@ impl SkillRegistry {
             return Vec::new();
         }
 
-        let mut roots: Vec<PathBuf> =
-            Self::installed_plugin_paths(&plugins_root.join("installed_plugins.json"));
+        let disabled = Self::disabled_plugins_from_settings(
+            crate::storage::user_home_path(".claude/settings.json")
+                .ok()
+                .as_deref(),
+        );
+        let mut roots: Vec<PathBuf> = Self::installed_plugin_paths(
+            &plugins_root.join("installed_plugins.json"),
+            &disabled,
+        );
         if roots.is_empty() {
             let cache = plugins_root.join("cache");
             if cache.is_dir() {
@@ -404,10 +411,39 @@ impl SkillRegistry {
         dirs.into_iter().collect()
     }
 
+    /// Plugins the user explicitly disabled in Claude Code's
+    /// `~/.claude/settings.json` (`"enabledPlugins": {"name@marketplace":
+    /// false}`). Claude Code stops mounting a disabled plugin's skills;
+    /// honoring the same switch keeps jcode's skill set (and its system-prompt
+    /// "Available Skills" section) consistent with what the user chose instead
+    /// of silently re-enabling dozens of unwanted skills. Absent file, absent
+    /// key, or `true` all mean enabled, matching Claude Code's default.
+    fn disabled_plugins_from_settings(settings: Option<&Path>) -> HashSet<String> {
+        let mut disabled = HashSet::new();
+        let Some(settings) = settings else {
+            return disabled;
+        };
+        let Ok(raw) = std::fs::read_to_string(settings) else {
+            return disabled;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return disabled;
+        };
+        if let Some(enabled) = value.get("enabledPlugins").and_then(|p| p.as_object()) {
+            for (name, flag) in enabled {
+                if flag.as_bool() == Some(false) {
+                    disabled.insert(name.clone());
+                }
+            }
+        }
+        disabled
+    }
+
     /// Parse install paths from a Claude Code `installed_plugins.json`
     /// manifest. Tolerates both a list of installs per plugin (version 2) and
-    /// a single install object, and skips paths that no longer exist.
-    fn installed_plugin_paths(manifest: &Path) -> Vec<PathBuf> {
+    /// a single install object, and skips paths that no longer exist or whose
+    /// `plugin@marketplace` key is in `disabled`.
+    fn installed_plugin_paths(manifest: &Path, disabled: &HashSet<String>) -> Vec<PathBuf> {
         let Ok(raw) = std::fs::read_to_string(manifest) else {
             return Vec::new();
         };
@@ -419,7 +455,10 @@ impl SkillRegistry {
         };
 
         let mut paths = Vec::new();
-        for installs in plugins.values() {
+        for (name, installs) in plugins {
+            if disabled.contains(name) {
+                continue;
+            }
             let installs: Vec<&serde_json::Value> = match installs {
                 serde_json::Value::Array(list) => list.iter().collect(),
                 other => vec![other],
@@ -1464,6 +1503,68 @@ mod tests {
         assert_eq!(count, 2);
         assert!(registry.contains("ai-gateway"));
         assert!(registry.contains("benchmark-agents"));
+    }
+
+    #[test]
+    fn disabled_plugins_are_skipped_from_manifest_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plugins_root = temp.path();
+
+        let enabled_install = plugins_root.join("cache/test-marketplace/enabled-plugin/1.0.0");
+        write_plugin_skill(&enabled_install, "enabled-skill");
+        let disabled_install = plugins_root.join("cache/test-marketplace/disabled-plugin/1.0.0");
+        write_plugin_skill(&disabled_install, "disabled-skill");
+        std::fs::write(
+            plugins_root.join("installed_plugins.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "enabled-plugin@test-marketplace":
+                        [{ "scope": "user", "installPath": enabled_install, "version": "1.0.0" }],
+                    "disabled-plugin@test-marketplace":
+                        [{ "scope": "user", "installPath": disabled_install, "version": "1.0.0" }],
+                },
+            }))
+            .expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let disabled: HashSet<String> =
+            ["disabled-plugin@test-marketplace".to_string()].into();
+        let paths = SkillRegistry::installed_plugin_paths(
+            &plugins_root.join("installed_plugins.json"),
+            &disabled,
+        );
+
+        assert_eq!(paths, vec![enabled_install]);
+    }
+
+    #[test]
+    fn disabled_plugins_parse_from_claude_settings() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let settings = temp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "enabledPlugins": {
+                    "on@market": true,
+                    "off@market": false,
+                },
+                "otherSetting": 1,
+            }))
+            .expect("serialize settings"),
+        )
+        .expect("write settings");
+
+        let disabled = SkillRegistry::disabled_plugins_from_settings(Some(&settings));
+        assert_eq!(disabled, ["off@market".to_string()].into());
+
+        // Missing file and no settings at all mean nothing is disabled.
+        assert!(
+            SkillRegistry::disabled_plugins_from_settings(Some(&temp.path().join("nope.json")))
+                .is_empty()
+        );
+        assert!(SkillRegistry::disabled_plugins_from_settings(None).is_empty());
     }
 
     #[test]
