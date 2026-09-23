@@ -114,6 +114,38 @@ fn core_marks_bold_and_code_styling() {
 }
 
 #[test]
+fn core_adapter_preserves_reasoning_role_and_default_dim_appearance() {
+    let markup = jcode_render_core::reasoning_line_markup("thinking");
+    let document = jcode_render_core::parse_markdown(&markup);
+    let reasoning_model_span = document
+        .blocks
+        .iter()
+        .flat_map(|block| block.lines.iter())
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.text.contains("thinking"))
+        .expect("reasoning model span present");
+    assert_eq!(
+        reasoning_model_span.role,
+        jcode_render_core::StyleRole::Reasoning
+    );
+    assert!(reasoning_model_span.attrs.italic);
+
+    let reasoning = render_markdown_via_core(&markup);
+    let reasoning_span = reasoning
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains("thinking"))
+        .expect("reasoning span present");
+    assert_eq!(reasoning_span.style.fg, Some(crate::md_dim_color()));
+    assert!(
+        reasoning_span
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::ITALIC)
+    );
+}
+
+#[test]
 fn parity_table() {
     let md = "\
 | A | B |

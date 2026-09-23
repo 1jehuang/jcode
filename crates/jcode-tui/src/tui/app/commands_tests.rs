@@ -291,6 +291,35 @@ mod colors {
     }
 
     #[test]
+    fn reasoning_color_command_persists_and_applies_independently() {
+        with_clean_config(|| {
+            let mut app = create_test_app();
+            assert!(dispatch_local_command(
+                &mut app,
+                "/colors reasoning #123456"
+            ));
+
+            let saved = crate::config::Config::load();
+            assert_eq!(
+                saved.display.colors.get("reasoning").map(String::as_str),
+                Some("#123456")
+            );
+
+            let palette = jcode_tui_style::palette();
+            assert_eq!(palette.rgb(jcode_tui_style::Role::Reasoning), (18, 52, 86));
+            assert!(palette.is_overridden(jcode_tui_style::Role::Reasoning));
+            assert_eq!(
+                palette.rgb(jcode_tui_style::Role::Dim),
+                jcode_tui_style::Role::Dim.default_rgb()
+            );
+            assert!(!palette.is_overridden(jcode_tui_style::Role::Dim));
+
+            assert!(dispatch_local_command(&mut app, "/colors reset"));
+            assert!(crate::config::Config::load().display.colors.is_empty());
+        });
+    }
+
+    #[test]
     fn generate_writes_a_complete_palette_and_scores_it() {
         with_clean_config(|| {
             let mut app = create_test_app();

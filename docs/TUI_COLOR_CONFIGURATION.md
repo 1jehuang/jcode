@@ -31,6 +31,8 @@ error = "#ff6464"
 Run `/colors` in the TUI to list every role with its current value. Changes
 apply immediately; no restart.
 
+Reasoning text has an independent `reasoning` color role, defaulting to its current `#646464` appearance.
+
 | Command | Effect |
 | --- | --- |
 | `/colors` | List every configurable role |
@@ -42,7 +44,7 @@ apply immediately; no restart.
 
 ## How every color became configurable
 
-The TUI does not have one palette. It has ~22 named semantic roles plus roughly
+The TUI does not have one palette. It has ~23 named semantic roles plus roughly
 250 distinct ad hoc `rgb(...)` literals spread across widgets, plus ratatui's
 named colors (`Color::Red`, `Color::White`, ...). Editing every call site would
 have been a large, permanently fragile change.
@@ -104,7 +106,7 @@ users see no change.
 That claim is checked rather than asserted. `palette_literals.rs` holds every
 distinct `rgb(...)` literal the TUI crates render (222 of them), and a test
 requires **all** of them to be reachable from some role: an unclaimed literal is
-a color a user cannot change. A second test requires every one of the 22 roles to
+a color a user cannot change. A second test requires every one of the 23 roles to
 claim at least one real literal (so no role is dead weight in `/colors`) and none
 to claim more than half (so the family radius still tells roles apart). The
 current spread runs from 2 literals (`header_session`) to 28 (`warning`).
@@ -167,7 +169,7 @@ self-consistent test suite would have happily accepted forever.
 
 ## Generating a palette
 
-Hand-tuning 22 roles is what stops most people from theming at all, so
+Hand-tuning 23 roles is what stops most people from theming at all, so
 `/colors generate <#rrggbb>` derives a complete palette from one seed color and
 reports the resulting score.
 

@@ -42,6 +42,8 @@ pub enum Role {
     FileLink,
     /// Low-emphasis text (hints, separators).
     Dim,
+    /// Model reasoning text.
+    Reasoning,
     /// Primary brand accent (headers, highlights).
     Accent,
     /// System / harness notices.
@@ -86,6 +88,7 @@ pub const ALL_ROLES: &[Role] = &[
     Role::Tool,
     Role::FileLink,
     Role::Dim,
+    Role::Reasoning,
     Role::Accent,
     Role::System,
     Role::Queued,
@@ -114,6 +117,7 @@ impl Role {
             Role::Tool => "tool",
             Role::FileLink => "file_link",
             Role::Dim => "dim",
+            Role::Reasoning => "reasoning",
             Role::Accent => "accent",
             Role::System => "system",
             Role::Queued => "queued",
@@ -151,6 +155,7 @@ impl Role {
             Role::Tool => (120, 120, 120),
             Role::FileLink => (180, 200, 255),
             Role::Dim => (80, 80, 80),
+            Role::Reasoning => (100, 100, 100),
             Role::Accent => (186, 139, 255),
             Role::System => (255, 170, 220),
             Role::Queued => (255, 193, 7),
@@ -335,6 +340,24 @@ pub(crate) fn configured_palette() -> Option<Palette> {
 /// Resolve an override from the original, native-palette color, before light
 /// contrast repair can collapse two distinct muted roles to the same ink.
 pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option<Color> {
+    configured_native_color_for_context(palette, color, false)
+}
+
+/// Resolve a foreground with its render context. Reasoning uses the same
+/// historical gray as markdown's dim role, so its italic modifier preserves
+/// the semantic distinction after spans enter ratatui's color-only buffer.
+pub(crate) fn configured_native_color_for_context(
+    palette: &Palette,
+    color: Color,
+    italic: bool,
+) -> Option<Color> {
+    let (reasoning_r, reasoning_g, reasoning_b) = Role::Reasoning.default_rgb();
+    let reasoning_default = crate::color::rgb(reasoning_r, reasoning_g, reasoning_b);
+    if italic && palette.is_overridden(Role::Reasoning) && color == reasoning_default {
+        let (r, g, b) = palette.rgb(Role::Reasoning);
+        return Some(crate::color::rgb(r, g, b));
+    }
+
     let source = match color {
         Color::Reset => return None,
         Color::Rgb(r, g, b) => (r, g, b),
@@ -344,8 +367,13 @@ pub(crate) fn configured_native_color(palette: &Palette, color: Color) -> Option
             return (mapped != named).then_some(mapped);
         }
     };
-    remap_literal_using(palette, source, Role::default_rgb)
-        .map(|(r, g, b)| crate::color::rgb(r, g, b))
+    remap_literal_using_excluding(
+        palette,
+        source,
+        Role::default_rgb,
+        (!italic).then_some(Role::Reasoning),
+    )
+    .map(|(r, g, b)| crate::color::rgb(r, g, b))
 }
 
 /// Resolve a role to a renderable color.
@@ -514,10 +542,19 @@ fn remap_literal_using(
     rgb: (u8, u8, u8),
     target_default: fn(Role) -> (u8, u8, u8),
 ) -> Option<(u8, u8, u8)> {
+    remap_literal_using_excluding(palette, rgb, target_default, None)
+}
+
+fn remap_literal_using_excluding(
+    palette: &Palette,
+    rgb: (u8, u8, u8),
+    target_default: fn(Role) -> (u8, u8, u8),
+    excluded_role: Option<Role>,
+) -> Option<(u8, u8, u8)> {
     let source = crate::harmony::Oklab::from_rgb(rgb);
     let mut best: Option<(f32, Role)> = None;
     for role in ALL_ROLES.iter().copied() {
-        if !palette.is_overridden(role) {
+        if !palette.is_overridden(role) || excluded_role == Some(role) {
             continue;
         }
         let default = crate::harmony::Oklab::from_rgb(target_default(role));
@@ -587,7 +624,19 @@ mod tests {
     fn default_palette_matches_historical_values() {
         let palette = Palette::default();
         assert_eq!(palette.rgb(Role::User), (138, 180, 248));
+        assert_eq!(palette.rgb(Role::Reasoning), (100, 100, 100));
+        assert_eq!(Role::Reasoning.key(), "reasoning");
         assert!(!palette.has_overrides());
+    }
+
+    #[test]
+    fn reasoning_override_does_not_override_dim() {
+        let (palette, errors) = Palette::from_pairs([("reasoning", "#123456")]);
+        assert!(errors.is_empty());
+        assert_eq!(palette.rgb(Role::Reasoning), (18, 52, 86));
+        assert!(palette.is_overridden(Role::Reasoning));
+        assert_eq!(palette.rgb(Role::Dim), Role::Dim.default_rgb());
+        assert!(!palette.is_overridden(Role::Dim));
     }
 
     #[test]
@@ -989,6 +1038,7 @@ mod default_palette_is_frozen {
         (Role::Tool, (120, 120, 120)),
         (Role::FileLink, (180, 200, 255)),
         (Role::Dim, (80, 80, 80)),
+        (Role::Reasoning, (100, 100, 100)),
         (Role::Accent, (186, 139, 255)),
         (Role::System, (255, 170, 220)),
         (Role::Queued, (255, 193, 7)),

@@ -21,6 +21,7 @@ struct InlineStyle {
     bold: bool,
     italic: bool,
     strike: bool,
+    reasoning: bool,
     /// Whether this text is the label of a link. Carried here rather than
     /// inferred at the end tag because the label's spans are emitted while the
     /// link is open, and a front-end cannot tell a link's text from ordinary
@@ -41,7 +42,9 @@ impl InlineStyle {
     }
 
     fn role(self) -> StyleRole {
-        if self.link {
+        if self.reasoning {
+            StyleRole::Reasoning
+        } else if self.link {
             StyleRole::Link
         } else if self.bold {
             StyleRole::Strong
@@ -446,16 +449,26 @@ pub fn parse_markdown(text: &str) -> Document {
                 } else if in_code_block {
                     code_buf.push_str(&t);
                 } else {
+                    if t.contains(crate::REASONING_SENTINEL) {
+                        // `reasoning_line_markup` wraps a live reasoning line in
+                        // emphasis and places sentinels around its text. Keep
+                        // the semantic role across text-event splits until the
+                        // matching emphasis end, while removing the markers.
+                        style.reasoning = true;
+                    }
+                    let text = t.replace(crate::REASONING_SENTINEL, "");
                     if let Some(marker) = pending_item_marker.take() {
                         spans.push(StyledSpan::new(marker, StyleRole::Dim));
                     }
-                    spans.push(StyledSpan {
-                        text: t.to_string(),
-                        latex: None,
-                        role: style.role(),
-                        fill: FillRole::None,
-                        attrs: style.attrs(),
-                    });
+                    if !text.is_empty() {
+                        spans.push(StyledSpan {
+                            text,
+                            latex: None,
+                            role: style.role(),
+                            fill: FillRole::None,
+                            attrs: style.attrs(),
+                        });
+                    }
                 }
             }
             Event::Code(t) => {
@@ -675,7 +688,10 @@ pub fn parse_markdown(text: &str) -> Document {
                 in_code_block = false;
                 code_buf.clear();
             }
-            Event::End(TagEnd::Emphasis) => style.italic = false,
+            Event::End(TagEnd::Emphasis) => {
+                style.italic = false;
+                style.reasoning = false;
+            }
             Event::End(TagEnd::Strong) => style.bold = false,
             Event::End(TagEnd::Strikethrough) => style.strike = false,
             Event::End(TagEnd::Link) => {
