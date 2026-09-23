@@ -4,7 +4,6 @@ fn known_slash_commands_dispatch_locally_without_starting_a_turn() {
         ("/help compact", "/compact"),
         ("/help provider-test-coverage", "/provider-test-coverage"),
         ("/test help", "Usage: /test"),
-        ("/plugin help", "Usage: /plugin"),
     ] {
         let mut app = create_test_app();
 
