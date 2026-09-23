@@ -37,6 +37,9 @@ const PAYLOAD_ENV_LIMIT: usize = 16 * 1024;
 const TOOL_INPUT_ENV_LIMIT: usize = 16 * 1024;
 /// Maximum chars of hook stderr used as a block reason.
 const BLOCK_REASON_LIMIT: usize = 2000;
+/// Maximum chars of `turn_start` hook stdout injected into the turn's system
+/// reminder. Keeps a runaway hook from flooding context.
+pub const TURN_START_OUTPUT_LIMIT: usize = 4000;
 
 /// Decision returned by the `pre_tool` gate hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -360,6 +363,51 @@ pub fn dispatch_observer(event: HookEvent) {
             )),
         }
     }
+}
+
+/// Run the `turn_start` hook synchronously and collect stdout for context
+/// injection. Unlike `dispatch_observer` (fire-and-forget, stdout discarded),
+/// this returns up to [`TURN_START_OUTPUT_LIMIT`] chars of stdout so the turn
+/// can surface hook output (e.g. alert markers) in its system reminder.
+/// Never fails the turn: any error yields `None`.
+pub fn run_turn_start_collecting() -> Option<String> {
+    let command_lines = hook_commands("turn_start");
+    if command_lines.is_empty() {
+        return None;
+    }
+    let mut collected: Vec<String> = Vec::new();
+    for command_line in command_lines {
+        let event = HookEvent::new("turn_start");
+        match build_hook_process(&command_line, &event) {
+            Ok(mut cmd) => {
+                cmd.stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                match cmd.output() {
+                    Ok(output) => {
+                        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !text.is_empty() {
+                            collected.push(text);
+                        }
+                    }
+                    Err(error) => crate::logging::warn(&format!(
+                        "turn_start hook '{command_line}' failed to run: {error}"
+                    )),
+                }
+            }
+            Err(error) => crate::logging::warn(&format!(
+                "turn_start hook '{command_line}' is invalid: {error}"
+            )),
+        }
+    }
+    if collected.is_empty() {
+        return None;
+    }
+    let mut text = collected.join("\n---\n");
+    if text.len() > TURN_START_OUTPUT_LIMIT {
+        text.truncate(TURN_START_OUTPUT_LIMIT);
+        text.push_str("\n[truncated]");
+    }
+    Some(text)
 }
 
 /// Run the `pre_tool` gate hook for a tool call, if configured.

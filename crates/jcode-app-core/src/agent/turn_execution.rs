@@ -114,8 +114,22 @@ impl Agent {
             );
         }
 
-        self.current_turn_system_reminder =
-            system_reminder.filter(|value| !value.trim().is_empty());
+        // Base reminder from the caller, if any.
+        let mut reminder = system_reminder.filter(|value| !value.trim().is_empty());
+
+        // Fire the turn_start hook first (synchronous so its stdout can be
+        // collected), then fold any hook stdout into this turn's system
+        // reminder so hook-emitted context (e.g. alert markers) is visible to
+        // the model. Hook failure never blocks the turn.
+        let hook_output = crate::hooks::run_turn_start_collecting();
+        if let Some(text) = hook_output {
+            let banner = format!("[HOOK TURN_START]\n{}", text);
+            reminder = Some(match reminder {
+                Some(existing) => format!("{}\n\n{}", existing, banner),
+                None => banner,
+            });
+        }
+        self.current_turn_system_reminder = reminder;
 
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
