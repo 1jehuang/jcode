@@ -335,8 +335,8 @@ Background autonomous work. See `docs/AMBIENT_MODE.md`.
 | `provider` / `model` | string | auto | Overrides for ambient cycles |
 | `allow_api_keys` | bool | `false` | When false, OAuth credentials only |
 | `api_daily_budget` | int | unset | Daily token budget when API keys are allowed |
-| `min_interval_minutes` | int | `5` | |
-| `max_interval_minutes` | int | `120` | |
+| `min_interval_minutes` | int | `5` | Lower bound on the gap between cycles |
+| `max_interval_minutes` | int | `120` | Upper bound, and the interval used when no rate-limit information is available. Keep it at or above `min_interval_minutes`; the maximum wins if they are inverted |
 | `pause_on_active_session` | bool | `true` | |
 | `proactive_work` | bool | `true` | False = garden-only (memory maintenance, no code changes) |
 | `work_branch_prefix` | string | `ambient/` | |

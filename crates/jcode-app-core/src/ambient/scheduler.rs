@@ -272,6 +272,13 @@ impl AdaptiveScheduler {
         let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60);
         let max = Duration::from_secs(self.config.max_interval_minutes as u64 * 60);
         let adjusted = interval.saturating_mul(self.backoff_multiplier);
+        // `Duration::clamp` panics when min > max, and both bounds come
+        // straight from unvalidated user config. A swapped pair
+        // (`min_interval_minutes = 60`, `max_interval_minutes = 30`) or a zero
+        // maximum would otherwise panic the ambient run loop rather than
+        // degrade. Treat the configured maximum as authoritative and let the
+        // minimum collapse to it.
+        let min = min.min(max);
         adjusted.clamp(min, max)
     }
 }
@@ -493,5 +500,66 @@ mod tests {
         log.prune();
         assert_eq!(log.records.len(), 1);
         assert_eq!(log.records[0].total_tokens(), 200);
+    }
+    /// `calculate_interval(None)` falls back to `max_interval_minutes`, and
+    /// nothing validates that value as non-zero. The ambient run loop therefore
+    /// floors it with `MAX_IDLE_POLL_SECS` before sleeping. These tests pin the
+    /// two facts that floor depends on, so a later change to the fallback (say,
+    /// clamping to `min_interval_minutes` instead) cannot silently turn the
+    /// runner's idle sleep into a zero-second busy spin.
+    #[test]
+    fn interval_without_rate_limit_info_is_the_configured_maximum() {
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            max_interval_minutes: 120,
+            ..AmbientSchedulerConfig::default()
+        });
+        assert_eq!(
+            scheduler.calculate_interval(None),
+            Duration::from_secs(120 * 60)
+        );
+    }
+
+    #[test]
+    fn degenerate_interval_bounds_do_not_panic() {
+        // `Duration::clamp` panics when min > max, and both bounds are
+        // unvalidated user config, so a swapped or zeroed pair used to abort
+        // the ambient run loop instead of degrading. These are the two
+        // realistic ways to get there.
+        for (min_minutes, max_minutes) in [(5u32, 0u32), (60, 30)] {
+            let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+                min_interval_minutes: min_minutes,
+                max_interval_minutes: max_minutes,
+                ..AmbientSchedulerConfig::default()
+            });
+            let interval = scheduler.calculate_interval(None);
+            assert_eq!(
+                interval,
+                Duration::from_secs(max_minutes as u64 * 60),
+                "min={min_minutes} max={max_minutes} should clamp to the \
+                 configured maximum without panicking"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_max_interval_is_floored_by_the_runner_not_the_scheduler() {
+        // With a zero maximum the scheduler legitimately returns zero; the
+        // ambient run loop is what applies MAX_IDLE_POLL_SECS so the idle
+        // sleep cannot become a busy spin.
+        let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+            max_interval_minutes: 0,
+            ..AmbientSchedulerConfig::default()
+        });
+        assert_eq!(scheduler.calculate_interval(None), Duration::ZERO);
+
+        const MAX_IDLE_POLL_SECS: u64 = 30;
+        let floored = scheduler
+            .calculate_interval(None)
+            .as_secs()
+            .max(MAX_IDLE_POLL_SECS);
+        assert_eq!(
+            floored, MAX_IDLE_POLL_SECS,
+            "the runner's floor is what keeps a zero interval from busy-spinning"
+        );
     }
 }
