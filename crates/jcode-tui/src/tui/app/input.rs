@@ -3268,6 +3268,12 @@ impl App {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
         self.handle_diagram_geometry_change();
+        // A resize rewraps the transcript, so the wrapped-line extent changes
+        // without the user scrolling. While following the tail that reads as a
+        // large append and the renderer starts its catch-up slide from the
+        // pre-resize offset, which looks like the view jumping up and sliding
+        // back down (issue #1412). Snap to the new bottom on the next frame.
+        crate::tui::ui::request_tail_follow_snap();
         true
     }
 

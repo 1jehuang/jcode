@@ -510,9 +510,11 @@ pub(crate) fn set_tail_catchup_active(active: bool) {
 
 /// Request that the next tail-follow render land at the exact bottom.
 ///
-/// This is reserved for explicit navigation or composer actions. Automatic
-/// transcript growth does not set it, so large committed blocks still use the
-/// bounded catch-up animation.
+/// Set by explicit navigation and composer actions, and by a terminal resize,
+/// which rewraps the transcript and would otherwise look like a large append
+/// that the catch-up animation slides through. Automatic transcript growth does
+/// not set it, so large committed blocks still use the bounded catch-up
+/// animation.
 pub(crate) fn request_tail_follow_snap() {
     #[cfg(test)]
     {
