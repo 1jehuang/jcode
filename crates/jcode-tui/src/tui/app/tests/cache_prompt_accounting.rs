@@ -84,6 +84,8 @@ fn cache_accounting_remote_snapshots_count_openai_prompt_once() {
                 output: 100,
                 cache_read_input: Some(read),
                 cache_creation_input: write,
+                cost: None,
+                currency: None,
             },
             &mut remote,
         );

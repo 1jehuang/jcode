@@ -392,6 +392,31 @@ impl App {
         self.record_api_key_spend(call_cost, &currency);
     }
 
+    /// Accrue a dollar cost the *server* resolved for a completed remote call.
+    ///
+    /// A newer server prices each call itself, with the same `model_pricing`
+    /// path this client would, and reports the amount (and its currency) on the
+    /// usage event. The client prefers that value over pricing locally, so two
+    /// clients with different cards/currency/vendor files/schedules cannot bill
+    /// the same call differently. `amount` is denominated in `currency`, both
+    /// reported by the server (never assumed to be USD).
+    pub(super) fn accrue_server_resolved_call_cost(&mut self, amount: f64, currency: &Currency) {
+        if !amount.is_finite() || amount <= 0.0 {
+            return;
+        }
+        // The server withholds the cost for a subscription (OAuth) session, but
+        // a provider with no OAuth/API-key ambiguity reports no credential
+        // server-side. Re-apply the same metered gate the local path uses, so an
+        // inherently non-metered route is never billed from a server figure
+        // either.
+        if !self.remote_call_is_metered() {
+            return;
+        }
+        let amount = amount as f32;
+        self.cost.accrue(amount, currency);
+        self.record_api_key_spend(amount, currency);
+    }
+
     /// Seed the session cost from token totals restored when resuming a
     /// session, so the cost widget reflects prior spend instead of showing `$0`
     /// until a new call happens.

@@ -195,6 +195,8 @@ fn remote_first_snapshot_is_priced_at_the_call_start_not_arrival() {
                 output: 0,
                 cache_read_input: None,
                 cache_creation_input: None,
+                cost: None,
+                currency: None,
             },
             &mut remote,
         );
@@ -226,6 +228,8 @@ fn remote_first_snapshot_without_a_recorded_start_falls_back_to_now() {
                 output: 0,
                 cache_read_input: None,
                 cache_creation_input: None,
+                cost: None,
+                currency: None,
             },
             &mut remote,
         );
@@ -842,6 +846,73 @@ fn a_vendor_file_schedule_is_read_at_each_calls_instant_not_the_memo_window() {
             (session_cost_usd(&app) - before - 1.0).abs() < 1e-4,
             "back off-peak the vendor file's base rate applies again, got ${:.4}",
             session_cost_usd(&app) - before
+        );
+    });
+}
+
+/// The client's own card, deliberately far from the server's: this call (1M in
+/// + 1M out) would cost $298.00 locally, while the server priced the same call
+/// at $3.00. The reproduction from the bug report.
+const CLIENT_EXPENSIVE_CARD_CONFIG: &str = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 99.0
+output = 199.0
+"#;
+
+#[test]
+fn server_resolved_cost_wins_over_the_clients_local_card() {
+    // Greptile P1/P2: the server resolves the call's dollar cost itself and
+    // reports it on the usage event. The client must prefer that value over
+    // re-pricing the same tokens with its own card/currency, so two clients
+    // cannot bill the same call differently.
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        write_pricing_config(CLIENT_EXPENSIVE_CARD_CONFIG);
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+        // The server priced this call at $3.00 (its own $1/$2 card).
+        let mut app = remote_deepseek_app();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::TokenUsage {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read_input: None,
+                cache_creation_input: None,
+                cost: Some(3.0),
+                currency: Some("USD".to_string()),
+            },
+            &mut remote,
+        );
+        let cost = session_cost_usd(&app);
+        assert!(
+            (cost - 3.0).abs() < 1e-4,
+            "the server-resolved $3.00 must win over the client's local $298.00 card, got ${cost:.4}"
+        );
+        assert!(
+            (cost - 298.0).abs() > 1.0,
+            "the client's local card must not price a call the server already priced"
+        );
+
+        // Without a server value the local compatibility fallback still prices
+        // the call at the client's own card, so the assertion above reflects a
+        // real preference rather than a vacuous zero.
+        let mut local_only = remote_deepseek_app();
+        local_only.handle_server_event(
+            crate::protocol::ServerEvent::TokenUsage {
+                input: 1_000_000,
+                output: 1_000_000,
+                cache_read_input: None,
+                cache_creation_input: None,
+                cost: None,
+                currency: None,
+            },
+            &mut remote,
+        );
+        let local_cost = session_cost_usd(&local_only);
+        assert!(
+            (local_cost - 298.0).abs() < 1e-3,
+            "with no server cost the client's own $99/$199 card bills $298.00, got ${local_cost:.4}"
         );
     });
 }

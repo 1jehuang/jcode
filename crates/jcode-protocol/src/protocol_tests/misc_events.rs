@@ -612,3 +612,53 @@ fn test_native_ssh_pong_capability_is_backward_compatible() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn test_token_usage_cost_fields_are_backward_compatible() -> Result<()> {
+    // An older server reports tokens with no resolved cost. The event must still
+    // parse, and the two new fields must come back absent (never invented).
+    let legacy: ServerEvent = serde_json::from_str(r#"{"type":"tokens","input":1000000,"output":1000000}"#)?;
+    assert!(matches!(
+        legacy,
+        ServerEvent::TokenUsage {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read_input: None,
+            cache_creation_input: None,
+            cost: None,
+            currency: None,
+        }
+    ));
+
+    // A newer server that priced the call carries the amount and its currency,
+    // and both survive a full round trip.
+    let modern = ServerEvent::TokenUsage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read_input: None,
+        cache_creation_input: None,
+        cost: Some(3.0),
+        currency: Some("USD".to_string()),
+    };
+    let json = serde_json::to_value(&modern)?;
+    assert_eq!(json["cost"], 3.0);
+    assert_eq!(json["currency"], "USD");
+    match serde_json::from_value::<ServerEvent>(json)? {
+        ServerEvent::TokenUsage {
+            cost: Some(amount),
+            currency: Some(code),
+            ..
+        } => {
+            assert!((amount - 3.0).abs() < 1e-9);
+            assert_eq!(code, "USD");
+        }
+        other => return Err(anyhow!("expected a TokenUsage event, got {other:?}")),
+    }
+
+    // The legacy event is serialized without the cost fields, so an old client
+    // never sees a shape it does not understand.
+    let legacy_json = serde_json::to_value(&legacy)?;
+    assert!(legacy_json.get("cost").is_none());
+    assert!(legacy_json.get("currency").is_none());
+    Ok(())
+}

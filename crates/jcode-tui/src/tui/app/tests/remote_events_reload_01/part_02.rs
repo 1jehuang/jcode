@@ -38,6 +38,8 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
             output: 45,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );

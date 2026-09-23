@@ -1682,6 +1682,8 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
             output: 2_000,
             cache_read_input: Some(40_000),
             cache_creation_input: Some(100_000),
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -1710,6 +1712,8 @@ fn test_remote_anthropic_api_key_accrues_cost_from_token_usage() {
             output: 2_000,
             cache_read_input: Some(40_000),
             cache_creation_input: Some(100_000),
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -1806,6 +1810,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
             output: 1_000,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -1824,6 +1830,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
             output: 1_000,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -1843,6 +1851,8 @@ fn test_remote_fast_mode_tier_bills_premium_rates_and_reprices_on_toggle() {
             output: 1_000,
             cache_read_input: None,
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );

@@ -767,6 +767,8 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
             output: 153,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );
@@ -790,6 +792,8 @@ fn remote_token_usage_records_cache_stats_before_done_and_dedupes_snapshots() {
             output: 153,
             cache_read_input: Some(0),
             cache_creation_input: None,
+            cost: None,
+            currency: None,
         },
         &mut remote,
     );

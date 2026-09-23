@@ -220,6 +220,11 @@ impl Agent {
                 tools.len()
             ));
             let api_start = Instant::now();
+            // The wall-clock instant this call was issued. The server prices the
+            // call at this instant (F15) when it reports a resolved cost on the
+            // usage event, so a call that crosses a peak/off-peak boundary keeps
+            // the tariff it started in.
+            let call_started_at = std::time::SystemTime::now();
 
             let stamped = crate::config::config()
                 .features
@@ -1013,11 +1018,67 @@ impl Agent {
                 || usage_cache_read.is_some()
                 || usage_cache_creation.is_some()
             {
+                // Resolve the call's dollar cost with the same `model_pricing`
+                // path the remote client would, at the call's own start instant
+                // and under the provider/model the server actually used. When it
+                // resolves, the client prefers this value, so clients with
+                // different cards/currency/vendor files/schedules cannot bill the
+                // same call differently (Greptile P1/P2). An unpriced call (a
+                // `no_price` rule, an incomplete foreign-currency card, or a model
+                // unknown to every source) reports neither field, and the client
+                // prices locally as before.
+                //
+                // A subscription (OAuth) session is not metered per token, so it
+                // must not advertise a cost: the credential is resolved here,
+                // authoritatively. Providers with no OAuth/API-key ambiguity
+                // return `None` and are metered when their route is API-key based
+                // (the client applies the same distinction on receipt).
+                let metered = match self.provider.active_resolved_credential() {
+                    Some(jcode_provider_core::ResolvedCredential::Oauth) => false,
+                    _ => true,
+                };
+                let (cost, currency) = if metered {
+                    let display_name = self.provider.display_name();
+                    let runtime_provider = std::env::var("JCODE_RUNTIME_PROVIDER")
+                        .ok()
+                        .map(|value| value.trim().to_ascii_lowercase())
+                        .filter(|value| !value.is_empty());
+                    let source_key = crate::provider_activity::source_key_for_provider_label(
+                        &display_name,
+                        runtime_provider.as_deref(),
+                    );
+                    let provider_lower = display_name.to_ascii_lowercase();
+                    let is_anthropic =
+                        provider_lower.contains("anthropic") || provider_lower.contains("claude");
+                    let is_openai = provider_lower.contains("openai");
+                    match crate::model_pricing::call_cost(
+                        &source_key,
+                        &model_at_request_start,
+                        call_started_at,
+                        self.provider.service_tier().as_deref(),
+                        usage_input.unwrap_or(0),
+                        usage_output.unwrap_or(0),
+                        usage_cache_read.unwrap_or(0),
+                        usage_cache_creation.unwrap_or(0),
+                        is_anthropic,
+                        is_openai,
+                    ) {
+                        Some((amount, currency)) => {
+                            (Some(amount), Some(currency.as_str().to_string()))
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                };
+
                 let _ = event_tx.send(ServerEvent::TokenUsage {
                     input: usage_input.unwrap_or(0),
                     output: usage_output.unwrap_or(0),
                     cache_read_input: usage_cache_read,
                     cache_creation_input: usage_cache_creation,
+                    cost,
+                    currency,
                 });
             }
 

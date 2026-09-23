@@ -204,3 +204,150 @@ pub fn vendor_file_rule_out_of_effect(
     let (vendor, reason) = super::vendor_file_out_of_effect(provider, model, at)?;
     Some(PricingNotice::VendorFile { vendor, reason })
 }
+
+/// The dollar cost of one call's reported usage, resolved at the call's own
+/// instant with the same two-layer path the client's billing uses.
+///
+/// A remote client normally prices each call itself, from its own
+/// configuration. That makes the displayed and accrued figure depend on the
+/// *client's* cards/currency/vendor files/schedules, so the same call can be
+/// billed two different ways by two clients (Greptile P1/P2). A server that
+/// resolves the cost itself and reports it on the usage event removes that
+/// ambiguity: every client shows and accrues the server's answer.
+///
+/// `provider` is the activity source key the billing path uses
+/// (`claude:api-key`, `openai-compatible:deepseek`, ...); `model` is the model
+/// id the request was issued with; `at` is the call's own start instant (F15),
+/// so the peak/off-peak tariff is the one in effect for that call;
+/// `service_tier` is the active tier (`/fast on`, OpenAI flex), which only the
+/// derived layers honour.
+///
+/// The resolution order is exactly the client's: the hand-written
+/// `[pricing.providers]` layer first (it may price the call, or refuse to), then
+/// the derived layers (vendor file, curated tables, OpenRouter, models.dev) via
+/// the same [`crate::provider::pricing::derived_pricing_for_source_at_size`] the
+/// client calls. Returns `None` when no layer can price the call (a `no_price`
+/// rule, an incomplete foreign-currency card, or a model unknown to every
+/// source): the caller must then leave the call unpriced rather than substitute
+/// an estimate (spec 4.4).
+#[allow(clippy::too_many_arguments)]
+pub fn call_cost(
+    provider: &str,
+    model: &str,
+    at: SystemTime,
+    service_tier: Option<&str>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    is_anthropic: bool,
+    is_openai: bool,
+) -> Option<(f64, Currency)> {
+    // Config layer first: a hand-written card states its rates (and, crucially,
+    // its own cache-write rate) exactly, and can refuse to price the call.
+    match config_call_rates(provider, model, at, Some(input_tokens)) {
+        ConfigCallRates::Priced(card) => {
+            let amount = usage_cost(
+                card.input_per_mtok,
+                card.output_per_mtok,
+                card.cache_read_per_mtok,
+                card.cache_write_per_mtok,
+                is_anthropic,
+                is_openai,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            );
+            return Some((amount, card.currency));
+        }
+        ConfigCallRates::ConfiguredWithoutPrice => return None,
+        ConfigCallRates::OutOfEffect(_) | ConfigCallRates::Absent => {}
+    }
+
+    // Derived layers: the same entry point the client's `refresh_cached_pricing`
+    // falls through to. Those layers state no cache-write rate, so cache writes
+    // keep the premium heuristic below.
+    let estimate = crate::provider::pricing::derived_pricing_for_source_at_size(
+        provider,
+        model,
+        service_tier,
+        at,
+        Some(input_tokens),
+    )?;
+    let micros_to_rate = |micros: u64| micros as f64 / 1_000_000.0;
+    let amount = usage_cost(
+        micros_to_rate(estimate.input_price_per_mtok_micros?),
+        micros_to_rate(estimate.output_price_per_mtok_micros?),
+        estimate
+            .cache_read_price_per_mtok_micros
+            .map(micros_to_rate),
+        None,
+        is_anthropic,
+        is_openai,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+    );
+    Some((amount, estimate.currency))
+}
+
+/// Turn per-million-token rates into one call's dollar cost, mirroring the
+/// client's split-accounting math (Anthropic excludes cache counts from input;
+/// OpenAI-style reports them as a subset of input).
+#[allow(clippy::too_many_arguments)]
+fn usage_cost(
+    input_per_mtok: f64,
+    output_per_mtok: f64,
+    cache_read_per_mtok: Option<f64>,
+    cache_write_per_mtok: Option<f64>,
+    is_anthropic: bool,
+    is_openai: bool,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+) -> f64 {
+    let split_accounting = is_anthropic
+        || (!is_openai && (cache_creation_tokens > 0 || cache_read_tokens > input_tokens));
+
+    let fresh_input_tokens = if split_accounting {
+        input_tokens
+    } else {
+        input_tokens
+            .saturating_sub(cache_read_tokens)
+            .saturating_sub(cache_creation_tokens)
+    };
+
+    let prompt_cost = fresh_input_tokens as f64 * input_per_mtok / 1_000_000.0;
+    let completion_cost = output_tokens as f64 * output_per_mtok / 1_000_000.0;
+    let cache_read_cost = match cache_read_per_mtok {
+        Some(price) => cache_read_tokens as f64 * price / 1_000_000.0,
+        None => cache_read_tokens as f64 * input_per_mtok / 1_000_000.0,
+    };
+    let cache_write_cost = if cache_creation_tokens > 0 {
+        let price = match cache_write_per_mtok {
+            Some(price) => price,
+            None => {
+                let multiplier = if is_anthropic {
+                    if crate::provider::anthropic::is_cache_ttl_1h() {
+                        2.0
+                    } else {
+                        1.25
+                    }
+                } else if is_openai {
+                    1.25
+                } else {
+                    1.0
+                };
+                input_per_mtok * multiplier
+            }
+        };
+        cache_creation_tokens as f64 * price / 1_000_000.0
+    } else {
+        0.0
+    };
+
+    prompt_cost + completion_cost + cache_read_cost + cache_write_cost
+}
