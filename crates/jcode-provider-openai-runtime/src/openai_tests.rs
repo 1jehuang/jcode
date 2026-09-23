@@ -10,6 +10,27 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
+
+/// Accept the next WebSocket upgrade on a loopback fixture listener.
+///
+/// The fixture stands in for the OpenAI API base, which in production also
+/// receives plain HTTP alongside the websocket, e.g. the background
+/// `GET /v1/models` catalog refresh fired while the account's model
+/// availability is unknown. Such requests are incidental to the websocket
+/// protocol under test, so a failed upgrade handshake is dropped and the next
+/// connection accepted. I/O errors stay fatal.
+async fn accept_fixture_websocket(
+    listener: &tokio::net::TcpListener,
+) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+    loop {
+        let (stream, _) = listener.accept().await.expect("accept fixture client");
+        match tokio_tungstenite::accept_async(stream).await {
+            Ok(ws) => return ws,
+            Err(tokio_tungstenite::tungstenite::Error::Protocol(_)) => continue,
+            Err(err) => panic!("fixture websocket handshake failed: {err}"),
+        }
+    }
+}
 const BRIGHT_PEARL_WRAPPED_TOOL_CALL_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../tests/fixtures/openai/bright_pearl_wrapped_tool_call.txt"
@@ -56,10 +77,7 @@ pub(super) async fn test_persistent_ws_state() -> (PersistentWsState, tokio::tas
         .expect("bind test websocket listener");
     let addr = listener.local_addr().expect("listener local addr");
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept websocket client");
-        let mut ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .expect("accept websocket handshake");
+        let mut ws = accept_fixture_websocket(&listener).await;
         while let Some(message) = ws.next().await {
             match message {
                 Ok(WsMessage::Ping(payload)) => {
@@ -107,10 +125,7 @@ async fn test_persistent_ws_state_with_ping_notify() -> (
     let pong_notify = Arc::new(tokio::sync::Notify::new());
     let server_pong_notify = Arc::clone(&pong_notify);
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept websocket client");
-        let mut ws = tokio_tungstenite::accept_async(stream)
-            .await
-            .expect("accept websocket handshake");
+        let mut ws = accept_fixture_websocket(&listener).await;
         while let Some(message) = ws.next().await {
             match message {
                 Ok(WsMessage::Ping(payload)) => {

@@ -221,8 +221,7 @@ async fn unfinished_or_incompatible_prewarm_is_cancelled_without_foreground_wait
     let accepted = Arc::new(tokio::sync::Notify::new());
     let server_accepted = Arc::clone(&accepted);
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut socket = accept_fixture_websocket(&listener).await;
         let _ = socket.next().await;
         server_accepted.notify_one();
         let closed = tokio::time::timeout(Duration::from_secs(1), socket.next()).await;
@@ -259,8 +258,7 @@ async fn ready_prewarm_with_different_settings_is_invalidated() {
         "model": "gpt-5.6-sol", "instructions": "original", "tools": [], "input": []
     });
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut socket = accept_fixture_websocket(&listener).await;
         let _ = socket.next().await;
         socket
             .send(WsMessage::Text(
@@ -293,8 +291,7 @@ async fn rejected_warmup_is_not_adopted() {
     let request =
         serde_json::json!({"model":"gpt-5.6-sol","instructions":"system","tools":[],"input":[]});
     let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut socket = accept_fixture_websocket(&listener).await;
         let _ = socket.next().await;
         socket
             .send(WsMessage::Text(
