@@ -1089,6 +1089,144 @@ Assert-JcodeBinaryCandidate -BinaryPath $DestBin -ExpectedVersion $Version | Out
 $StableBin = Join-Path $StableDir "jcode.exe"
 Copy-Item -Path $DestBin -Destination $StableBin -Force
 Set-Content -Path (Join-Path $BuildsDir "stable-version") -Value $VersionNum
+
+# Keep builds/manifest.json's "stable" field in sync with the stable-version
+# marker and symlink. Nothing else writes this field (the selfdev promote flow
+# that did was removed), so without this the manifest drifts stale and points
+# at a pruned version. Patch the raw text instead of a ConvertFrom/To-Json
+# round-trip: Windows PowerShell 5.1 re-serializes ISO timestamps (e.g.
+# history[].built_at) as \/Date(...)\/, which the Rust reader cannot parse.
+# Read and write explicitly as UTF-8 without a BOM: Windows PowerShell 5.1
+# defaults Get-Content/Set-Content to ANSI, which corrupts non-ASCII manifest
+# text (commit messages, crash stderr, diffs), and `-Encoding UTF8` there
+# emits a BOM that the Rust JSON reader (read_to_string + serde) cannot
+# parse.
+# Best-effort: skip silently when the manifest is missing or has no match.
+#
+# The patch runs under a cross-process lock (manifest.json.lock): a plain
+# lock file created with exclusive-create semantics. Today only the installers
+# take this lock (master's runtime BuildManifest::save is an unlocked write),
+# so this serializes concurrent installs; the holder format and prove-gone
+# recovery rule are kept compatible with the cross-runtime file-lock protocol
+# proposed for the jcode-storage side, so the runtime can adopt the same lock
+# later without changing the installers. Best-effort: skip the whole sync on
+# lock timeout. Recovery never guesses from age alone: the holder records its
+# PID in the lock, and a lock is broken only when that PID no longer runs
+# (Get-Process fails); PID-less locks fall back to the 60s age rule, so a live
+# holder's slow critical section is never intruded on.
+$ManifestPath = Join-Path $BuildsDir "manifest.json"
+if (Test-Path -LiteralPath $ManifestPath) {
+    try {
+        $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $ManifestLockPath = "$ManifestPath.lock"
+        $LockStream = $null
+        $lockDeadline = [DateTime]::UtcNow.AddSeconds(65)
+        while ($true) {
+            try {
+                # Exclusive-create on the lock path; fails while another
+                # process (a concurrent installer, or any future runtime
+                # writer adopting the same protocol) holds it. Record our PID
+                # so recovery can tell a crashed holder from a live one.
+                $LockStream = [System.IO.File]::Open(
+                    $ManifestLockPath,
+                    [System.IO.FileMode]::CreateNew,
+                    [System.IO.FileAccess]::ReadWrite,
+                    [System.IO.FileShare]::None
+                )
+                $pidBytes = $Utf8NoBom.GetBytes("pid=$PID`n")
+                $LockStream.Write($pidBytes, 0, $pidBytes.Length)
+                $LockStream.Flush()
+                break
+            } catch [System.IO.IOException] {
+                # Break a lock whose holder is provably gone: a recorded PID
+                # that no longer runs (Get-Process throws), or a PID-less
+                # lock older than 60s. A live holder's lock is never broken,
+                # however old.
+                if (Test-Path -LiteralPath $ManifestLockPath) {
+                    $breakIt = $false
+                    try {
+                        $lockRaw = [System.IO.File]::ReadAllText($ManifestLockPath, $Utf8NoBom)
+                    } catch { $lockRaw = $null }
+                    $holderPid = $null
+                    if ($lockRaw -and $lockRaw -match '(?m)^pid=(\d+)') {
+                        # Parse as long (a corrupted pid=4294967295 must not
+                        # overflow [int]); values outside the process-id
+                        # range count as no recorded holder.
+                        $parsed = [long]$Matches[1]
+                        if ($parsed -gt 0 -and $parsed -le [int]::MaxValue) {
+                            $holderPid = [int]$parsed
+                        }
+                    }
+                    if ($holderPid) {
+                        try {
+                            # Throws when the PID no longer runs.
+                            Get-Process -Id $holderPid -ErrorAction Stop | Out-Null
+                        } catch {
+                            $breakIt = $true
+                        }
+                    } else {
+                        $lockAge = ([DateTime]::UtcNow - (Get-Item -LiteralPath $ManifestLockPath).LastWriteTimeUtc).TotalSeconds
+                        if ($lockAge -ge 60) { $breakIt = $true }
+                    }
+                    if ($breakIt) {
+                        Remove-Item -LiteralPath $ManifestLockPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+                }
+                if ([DateTime]::UtcNow -ge $lockDeadline) { break }
+                Start-Sleep -Milliseconds 25
+            }
+        }
+        if ($LockStream) {
+            try {
+                $ManifestRaw = [System.IO.File]::ReadAllText($ManifestPath, $Utf8NoBom)
+                $Patched = [regex]::Replace(
+                    $ManifestRaw,
+                    '(["'']stable["'']\s*:\s*)("[^"]*"|null)',
+                    '$1"' + $VersionNum + '"'
+                )
+                if ($Patched -ne $ManifestRaw) {
+                    # Write via a temp file and atomic replace, mirroring the
+                    # shell installers' tmp+mv: WriteAllText truncates the live
+                    # manifest first, so an interrupted or failed write would
+                    # leave it empty/partial for lock-less readers.
+                    $TempManifestPath = "$ManifestPath.tmp"
+                    [System.IO.File]::WriteAllText($TempManifestPath, $Patched, $Utf8NoBom)
+                    $Replaced = $false
+                    try {
+                        # File.Replace is atomic on NTFS and preserves the
+                        # destination for concurrent open handles.
+                        [System.IO.File]::Replace($TempManifestPath, $ManifestPath, $null)
+                        $Replaced = $true
+                    } catch {
+                        # Non-NTFS (FAT32, network share) or destination missing:
+                        # fall back to Move-Item -Force. It drives
+                        # MoveFileEx(REPLACE_EXISTING) - atomic on the same
+                        # volume - and is available on Windows PowerShell 5.1,
+                        # whose .NET Framework lacks the 3-arg File.Move
+                        # overwrite overload.
+                        try {
+                            Move-Item -LiteralPath $TempManifestPath -Destination $ManifestPath -Force -ErrorAction Stop
+                            $Replaced = $true
+                        } catch {
+                            Write-Output "warning: could not update manifest stable field: $($_.Exception.Message)"
+                        }
+                    }
+                    if ($Replaced) {
+                        Write-Output "manifest stable field synced to $VersionNum"
+                    }
+                }
+            } finally {
+                $LockStream.Close()
+                Remove-Item -LiteralPath $ManifestLockPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {
+        # Corrupt manifest or lock failure: leave untouched rather than
+        # failing the install.
+    }
+}
+
 Install-JcodeLauncher -SourcePath $StableBin -LauncherPath $LauncherPath | Out-Null
 } finally {
     Get-Item -LiteralPath $TempDir -ErrorAction SilentlyContinue |
