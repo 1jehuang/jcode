@@ -521,9 +521,9 @@ mod buffer_tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    /// The active palette is process-global, so palette tests must not run
-    /// concurrently with each other.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The active palette and theme mode are process-global; the crate-level
+    // lock serializes every test that touches them.
+    use crate::STYLE_TEST_LOCK as TEST_LOCK;
 
     /// Install `palette` for the duration of `body`, always restoring the
     /// default so a failure cannot leak state into another test.
@@ -630,6 +630,9 @@ mod light_theme_interaction {
     /// behavior.
     #[test]
     fn configured_colors_survive_the_light_theme_pass() {
+        let _lock = crate::STYLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         struct Restore;
         impl Drop for Restore {
             fn drop(&mut self) {
