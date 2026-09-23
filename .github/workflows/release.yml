@@ -21,6 +21,14 @@ permissions:
 jobs:
   create-release:
     name: Create release
+    # Publish only from the canonical repository. A fork that runs this
+    # workflow on a `v*` tag would otherwise create a release carrying that
+    # upstream version number with binaries built from the fork, which is the
+    # same class of accidental-publication path as a fork pushing a package.
+    # Every other job in this workflow needs `create-release`, directly or
+    # transitively, so gating this one job skips the whole workflow: a skipped
+    # dependency skips its dependents.
+    if: github.repository == '1jehuang/jcode'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
