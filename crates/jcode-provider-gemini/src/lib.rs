@@ -8,18 +8,32 @@ pub const DEFAULT_MODEL: &str = "gemini-2.5-pro";
 pub const AVAILABLE_MODELS: &[&str] = &[
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
     "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
 ];
+// Ordered newest-generation first. Google periodically retires Code Assist
+// model IDs server-side (2026-09-23: every pro-tier ID including the
+// gemini-pro-latest alias started 404ing), so the ladder must reach the
+// current-generation GA flash models (gemini-3.8/3.5/3-flash, shipped by
+// gemini-cli as its flash tier) before it ever lands on the previous
+// generation. Otherwise sessions silently pin to gemini-2.5-pro and both
+// quality and style regress.
 pub const FALLBACK_MODELS: &[&str] = &[
     "gemini-3.1-pro-preview",
     "gemini-3-pro-preview",
-    "gemini-2.5-pro",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
     "gemini-3-flash-preview",
+    "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
 ];
@@ -721,8 +735,11 @@ mod tests {
             vec![
                 "gemini-3.1-pro-preview",
                 "gemini-3-pro-preview",
-                "gemini-2.5-pro",
+                "gemini-3.8-flash",
+                "gemini-3.5-flash",
+                "gemini-3-flash",
                 "gemini-3-flash-preview",
+                "gemini-2.5-pro",
                 "gemini-2.0-flash",
             ]
         );
