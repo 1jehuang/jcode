@@ -2775,7 +2775,14 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
+            } else if !app.input.is_empty() {
+                // First Ctrl+C: clear the input box
+                app.input.clear();
+                app.pending_images.clear();
+                app.cursor_pos = 0;
+                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
+                // Second Ctrl+C (input already empty): proceed with quit
                 app.handle_quit_request();
             }
             true
