@@ -322,9 +322,12 @@ fn non_usd_spend_lands_in_its_own_ledger_bucket() {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
+        // The `*_usd` mirror holds the USD bucket only, never a cross-currency
+        // sum: a CNY-only window must leave it at zero rather than re-labelling
+        // the CNY amount as USD after a rollback.
         assert_eq!(
-            recorded["day_usd"], 7.0,
-            "the USD mirror tracks the single CNY bucket"
+            recorded["day_usd"], 0.0,
+            "the USD-only mirror stays zero for a CNY-only window"
         );
     });
 }
