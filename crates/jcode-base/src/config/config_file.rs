@@ -110,13 +110,15 @@ impl Config {
     }
 
     /// Declare that `dotted` (e.g. `"display.colors"`) must disappear from the
-    /// active config file on the next save.
+    /// active config file on the next **successful** save.
     ///
     /// This is the explicit half of the "a struct expresses deletion by
     /// omission" problem: the save keeps every key the serialized struct does
     /// not model (comments' anchors, sections written by a newer build), so a
     /// deliberate deletion has to be announced here instead of being inferred
-    /// from absence. Declarations are keyed by config path and consumed once.
+    /// from absence. Declarations are keyed by config path and consumed once,
+    /// and only by a save that actually succeeded: a failed write leaves the
+    /// declaration in place so a later successful save still applies it.
     pub fn declare_removal(dotted: &str) {
         let Some(path) = Self::path() else {
             return;
@@ -128,12 +130,24 @@ impl Config {
         }
     }
 
-    /// Drain the removals declared for the active config path.
-    fn take_declared_removals() -> Vec<String> {
+    /// Snapshot the removals declared for the active config path.
+    fn clone_declared_removals() -> Vec<String> {
         let Some(path) = Self::path() else {
             return Vec::new();
         };
-        declared_removals().remove(&path).unwrap_or_default()
+        declared_removals().get(&path).cloned().unwrap_or_default()
+    }
+
+    /// Drop the removals declared for the active config path.
+    ///
+    /// Called only after a save actually succeeded: a declaration belongs to
+    /// the next *successful* save, so a failed write must leave it in place for
+    /// a later save to apply.
+    fn clear_declared_removals() {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        declared_removals().remove(&path);
     }
 
     /// Removals currently pending for the active config path (inspection only).
@@ -147,10 +161,15 @@ impl Config {
 
     /// Save config to file
     pub fn save(&self) -> anyhow::Result<()> {
-        // Drain first: a declaration belongs to exactly one save, so a failed
-        // write cannot leak it onto an unrelated later save.
-        let removals = Self::take_declared_removals();
-        self.save_with_removals(&removals)
+        // Snapshot the declaration for this write and only drop it once the
+        // write has actually landed: a declaration belongs to the next
+        // *successful* save, so a failed write must leave it in place for a
+        // later save to apply (otherwise the declared key would never be
+        // deleted after the failure).
+        let removals = Self::clone_declared_removals();
+        self.save_with_removals(&removals)?;
+        Self::clear_declared_removals();
+        Ok(())
     }
 
     /// Save config, preserving what the serialized struct cannot express.
