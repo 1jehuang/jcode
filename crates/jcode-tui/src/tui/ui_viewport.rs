@@ -372,7 +372,6 @@ pub(super) fn draw_messages(
     );
 
     super::set_last_max_scroll(max_scroll);
-    update_user_prompt_positions(wrapped_user_prompt_starts);
 
     // When older compacted history is being loaded in, the app hands us the
     // reader's distance-from-bottom instead of an absolute offset. Distance from
