@@ -956,6 +956,10 @@ mod tests {
                         Err(error) => panic!("accept: {error}"),
                     }
                 };
+                // On BSD/macOS an accepted socket inherits the listener's
+                // non-blocking flag, so without this the timed read below
+                // returns WouldBlock instead of waiting for the request.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
