@@ -1511,14 +1511,23 @@ impl Provider for AnthropicProvider {
     }
 
     async fn prefetch_models(&self) -> Result<()> {
-        if self.direct_transport.api_url != API_URL {
-            // Never send named gateway credentials to Anthropic's catalog.
-            return Ok(());
-        }
+        // A custom messages URL (ANTHROPIC_BASE_URL / named profile) must not
+        // leak gateway API keys to Anthropic's official model-catalog
+        // endpoint. Genuine Anthropic OAuth credentials are a different case:
+        // users often route /v1/messages through a local proxy (e.g. a
+        // caching proxy) while authenticating with their real subscription,
+        // and skipping the refresh for them silently freezes the model list
+        // at the last disk snapshot, hiding newly released models. The
+        // catalog fetch itself always goes directly to api.anthropic.com.
+        let custom_gateway = self.direct_transport.api_url != API_URL;
         // Discovery is independent of the selected chat credential mode. Do not
         // mutate that mode on this shared provider just to inspect another route.
         // API discovery gets first opportunity, OAuth still runs on API failure.
         for oauth in [false, true] {
+            if custom_gateway && !oauth {
+                // Never send named gateway API keys to Anthropic's catalog.
+                continue;
+            }
             let configured = if oauth {
                 auth::claude::load_credentials().is_ok()
             } else {
