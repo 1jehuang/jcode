@@ -1,5 +1,5 @@
 /// Quality-first default for Claude-capable routes.
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Quality-first default for OpenAI-capable routes.
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
@@ -11,8 +11,8 @@ pub const DEFAULT_OPENAI_MODEL: &str = "gpt-6-astra";
 /// live again. Opus 5.5 launched 2026-09-22. The list is curated best-first;
 /// position 0 is the flagship used for post-login default selection.
 pub const ALL_CLAUDE_MODELS: &[&str] = &[
-    "claude-opus-5-5",
     DEFAULT_CLAUDE_MODEL,
+    "claude-opus-5",
     "claude-fable-5-1",
     "claude-fable-5",
     "claude-opus-4-8",
@@ -518,9 +518,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn newest_claude_is_listed_without_changing_existing_default() {
+    fn newest_claude_is_listed_first_and_is_the_default() {
         assert_eq!(ALL_CLAUDE_MODELS.first().copied(), Some("claude-opus-5-5"));
-        assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-opus-5");
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-opus-5-5");
+        assert!(ALL_CLAUDE_MODELS.contains(&"claude-opus-5"));
         assert!(ALL_CLAUDE_MODELS.contains(&DEFAULT_CLAUDE_MODEL));
         assert!(!ALL_CLAUDE_MODELS.contains(&"claude-opus-5-5[1m]"));
         assert_eq!(
