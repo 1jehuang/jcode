@@ -1126,7 +1126,7 @@ mod tests {
         let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["model"], "jev-latest");
         assert_eq!(body["state"]["transcript"], transcript);
-        assert_eq!(body["questions"].as_object().unwrap().len(), 7);
+        assert_eq!(body["questions"].as_object().unwrap().len(), 6);
     }
 
     #[tokio::test]
@@ -1143,7 +1143,7 @@ mod tests {
             .collect();
         let transcript = "Open conversation 19";
         let questions = describe_questions(transcript, &offered).unwrap();
-        assert_eq!(questions.len(), 27);
+        assert_eq!(questions.len(), 26);
         // Exercise both object-state and string-state providers, including the
         // gateway's real entitlement preflight on every bounded evaluation.
         for provider in [
@@ -1168,7 +1168,7 @@ mod tests {
                         .map(|q| {
                             let probability = match q.id.as_str() {
                                 "navigation" | "candidate_19" => 0.99,
-                                "uncertain" => competing,
+                                "coding_agent" => competing,
                                 _ => 0.01,
                             };
                             (q.id.clone(), json!({"type": "noul", "noul": probability}))
@@ -1186,10 +1186,10 @@ mod tests {
                     if competing < 0.99 {
                         VoiceIntent::OpenSession(offered[19].id.clone())
                     } else {
-                        VoiceIntent::Uncertain
+                        VoiceIntent::CodingAgent
                     }
                 );
-                assert_eq!(result.answers.len(), 27);
+                assert_eq!(result.answers.len(), 26);
                 assert_eq!(
                     result.answers.iter().map(|a| &a.id).collect::<Vec<_>>(),
                     questions.iter().map(|q| &q.id).collect::<Vec<_>>()
