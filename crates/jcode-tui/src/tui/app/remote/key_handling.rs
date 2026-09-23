@@ -1893,6 +1893,9 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    // The daemon's in-memory session owns later writes. Without
+                    // this it would persist `saved: false` on its next save.
+                    remote.set_session_saved(true, label.clone()).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     if app.memory_enabled
                         && let Err(err) = remote.trigger_memory_extraction().await
@@ -1929,6 +1932,7 @@ async fn handle_remote_key_internal(
                         )));
                         return Ok(());
                     }
+                    remote.set_session_saved(false, None).await?;
                     crate::tui::session_picker::invalidate_session_list_cache();
                     let name = app.session.display_name().to_string();
                     app.push_display_message(DisplayMessage::system(format!(

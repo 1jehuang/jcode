@@ -1020,3 +1020,48 @@ async fn resume_all_skips_session_with_completed_turn() {
         crate::env::remove_var("JCODE_HOME");
     }
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daemon_saved_flag_survives_later_session_writes() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
+    let registry = Registry::new(provider.clone()).await;
+    let agent = Arc::new(Mutex::new(Agent::new(provider, registry)));
+    let session_id = agent.lock().await.session_id().to_string();
+
+    let label = agent
+        .lock()
+        .await
+        .set_session_saved(true, Some("investor catch up".to_string()))
+        .expect("save session");
+    assert_eq!(label.as_deref(), Some("investor catch up"));
+    // A later daemon-owned write, such as the next turn, must keep the bookmark.
+    agent
+        .lock()
+        .await
+        .set_autoreview_enabled(true)
+        .expect("later write");
+    let loaded = crate::session::Session::load(&session_id).expect("load saved session");
+    assert!(loaded.saved);
+    assert_eq!(loaded.save_label.as_deref(), Some("investor catch up"));
+
+    agent
+        .lock()
+        .await
+        .set_session_saved(false, None)
+        .expect("unsave session");
+    let loaded = crate::session::Session::load(&session_id).expect("load unsaved session");
+    assert!(!loaded.saved);
+    assert!(loaded.save_label.is_none());
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}

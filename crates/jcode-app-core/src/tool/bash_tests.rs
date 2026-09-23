@@ -74,7 +74,7 @@ async fn bash_executes_with_null_optional_arguments() {
         )
         .await
         .unwrap();
-    assert!(output.content.contains("null-options-ok"));
+    assert!(output.output.contains("null-options-ok"));
 }
 
 #[test]

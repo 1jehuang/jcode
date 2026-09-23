@@ -365,6 +365,17 @@ pub enum Request {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`, optional label) or unbookmark the active
+    /// session. Routed through the daemon so its in-memory session, which
+    /// owns later writes, does not overwrite the flag.
+    #[serde(rename = "set_session_saved")]
+    SetSessionSaved {
+        id: u64,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },

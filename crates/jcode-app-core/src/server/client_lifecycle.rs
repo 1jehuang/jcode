@@ -2081,6 +2081,33 @@ pub(super) async fn handle_client(
                 handle_set_compaction_mode(id, mode, &agent, &client_event_tx).await;
             }
 
+            Request::SetSessionSaved { id, saved, label } => {
+                if reject_if_agent_busy_for_request(
+                    id,
+                    "set_session_saved",
+                    &client_session_id,
+                    client_is_processing,
+                    &agent,
+                    &client_event_tx,
+                ) {
+                    continue;
+                }
+                let result = agent.lock().await.set_session_saved(saved, label);
+                match result {
+                    Ok(_) => {
+                        crate::session_list_cache::invalidate();
+                        let _ = client_event_tx.send(ServerEvent::Done { id });
+                    }
+                    Err(error) => {
+                        let _ = client_event_tx.send(ServerEvent::Error {
+                            id,
+                            message: crate::util::format_error_chain(&error),
+                            retry_after_secs: None,
+                        });
+                    }
+                }
+            }
+
             Request::RenameSession { id, title } => {
                 if reject_if_agent_busy_for_request(
                     id,

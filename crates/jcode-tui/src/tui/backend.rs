@@ -874,6 +874,16 @@ impl RemoteConnection {
     }
 
     /// Set or clear the custom session display title on the server.
+    pub async fn set_session_saved(&mut self, saved: bool, label: Option<String>) -> Result<()> {
+        let request = Request::SetSessionSaved {
+            id: self.next_request_id,
+            saved,
+            label,
+        };
+        self.next_request_id += 1;
+        self.send_request(request).await
+    }
+
     pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
         let request = Request::RenameSession {
             id: self.next_request_id,
