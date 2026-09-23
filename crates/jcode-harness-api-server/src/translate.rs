@@ -300,6 +300,18 @@ enum SimpleKind {
     },
 }
 
+/// Whether translating this daemon event may perform synchronous file I/O.
+///
+/// Keep in sync with the arms of [`BridgeState::legacy_event_to_api`] that
+/// read persisted session records or side-panel files. Everything else is
+/// pure in-memory translation and must not pay for `block_in_place`.
+pub fn legacy_event_may_block(event: &Value) -> bool {
+    matches!(
+        event["type"].as_str(),
+        Some("state" | "side_panel_state" | "split_response" | "history")
+    )
+}
+
 impl BridgeState {
     fn legacy_id(&mut self) -> u64 {
         NEXT_LEGACY_ID.fetch_add(1, Ordering::Relaxed)
@@ -2553,9 +2565,12 @@ impl BridgeState {
         // `stat` is the dominant cost with 100k+ sessions. Match the TUI picker
         // by doing those independent filesystem calls concurrently rather than
         // serially blocking the API reply long enough for clients to time out.
+        // Stat is I/O-bound, so a few threads capture the parallelism; one per
+        // core only multiplied allocator arenas in this long-lived process.
         let workers = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
+            .min(4)
             .min(candidates.len().max(1));
         let chunk_size = candidates.len().div_ceil(workers);
         let mut ids = std::thread::scope(|scope| {
