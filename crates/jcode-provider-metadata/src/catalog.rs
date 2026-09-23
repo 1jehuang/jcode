@@ -1254,7 +1254,27 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
+pub const COMMAND_CODE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "command-code",
+    display_name: "Command Code",
+    auth_kind: LoginProviderAuthKind::OAuth,
+    auth_state_key: LoginProviderAuthStateKey::ExternalImport,
+    auth_status_method: "OAuth",
+    aliases: &["commandcode", "cmdc"],
+    menu_detail: "Command Code OAuth login via ~/.commandcode/auth.json",
+    recommended: false,
+    target: LoginProviderTarget::AutoImport,
+    order: LoginProviderSurfaceOrder::new(Some(14), Some(14), None, Some(14), Some(14)),
+};
+
+/// Supported Command Code model identifiers registered in the provider catalog table.
+pub const COMMAND_CODE_MODELS: &[&str] = &[
+    "zai-org/GLM-5.3",
+    "deepseek/deepseek-v4-flash",
+    "moonshotai/Kimi-K3",
+];
+
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1309,4 +1329,5 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 54] = [
     GEMINI_API_LOGIN_PROVIDER,
     ANTIGRAVITY_LOGIN_PROVIDER,
     GOOGLE_LOGIN_PROVIDER,
+    COMMAND_CODE_LOGIN_PROVIDER,
 ];

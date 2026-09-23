@@ -59,6 +59,8 @@ members = [
     "crates/jcode-provider-gemini-runtime",
     "crates/jcode-provider-cursor-runtime",
     "crates/jcode-provider-antigravity-runtime",
+    "crates/jcode-provider-command-code",
+    "crates/jcode-provider-command-code-runtime",
     "crates/jcode-provider-copilot-runtime",
     "crates/jcode-provider-claude-cli-runtime",
     "crates/jcode-provider-openrouter-runtime",
@@ -195,6 +197,7 @@ jcode-provider-doctor = { path = "crates/jcode-provider-doctor" }
 jcode-provider-gemini-runtime = { path = "crates/jcode-provider-gemini-runtime" }
 jcode-provider-cursor-runtime = { path = "crates/jcode-provider-cursor-runtime" }
 jcode-provider-antigravity-runtime = { path = "crates/jcode-provider-antigravity-runtime" }
+jcode-provider-command-code-runtime = { path = "crates/jcode-provider-command-code-runtime" }
 jcode-provider-copilot-runtime = { path = "crates/jcode-provider-copilot-runtime" }
 jcode-provider-claude-cli-runtime = { path = "crates/jcode-provider-claude-cli-runtime" }
 jcode-provider-openrouter-runtime = { path = "crates/jcode-provider-openrouter-runtime" }

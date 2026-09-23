@@ -3174,6 +3174,7 @@ dependencies = [
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
  "jcode-provider-claude-cli-runtime",
+ "jcode-provider-command-code-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-core",
  "jcode-provider-cursor-runtime",
@@ -3724,6 +3725,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jcode-provider-command-code"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jcode-provider-command-code-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "futures",
+ "jcode-base",
+ "jcode-message-types",
+ "jcode-provider-command-code",
+ "jcode-provider-core",
+ "rand 0.9.3",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "jcode-provider-copilot"
 version = "0.1.0"
 dependencies = [
@@ -3809,6 +3840,7 @@ dependencies = [
  "jcode-base",
  "jcode-provider-anthropic-runtime",
  "jcode-provider-antigravity-runtime",
+ "jcode-provider-command-code-runtime",
  "jcode-provider-copilot-runtime",
  "jcode-provider-cursor-runtime",
  "jcode-provider-gemini-runtime",

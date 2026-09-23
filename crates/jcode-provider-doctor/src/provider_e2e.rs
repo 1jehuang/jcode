@@ -1313,6 +1313,7 @@ pub enum NativeProviderKind {
     Bedrock,
     Jcode,
     Azure,
+    CommandCode,
 }
 
 impl NativeProviderKind {
@@ -1326,6 +1327,7 @@ impl NativeProviderKind {
             "bedrock" => Some(Self::Bedrock),
             "jcode" => Some(Self::Jcode),
             "azure-openai" => Some(Self::Azure),
+            "command-code" | "commandcode" | "cmdc" => Some(Self::CommandCode),
             _ => None,
         }
     }
@@ -1439,6 +1441,20 @@ impl NativeProviderKind {
                 auth_env_key: Some("AZURE_OPENAI_API_KEY"),
                 login_hint: "jcode login --provider azure",
             },
+            Self::CommandCode => NativeProviderSpec {
+                provider_id: "command-code",
+                label: "Command Code",
+                contract: WiringContract {
+                    api_method: "command-code".to_string(),
+                    route_provider: "Command Code".to_string(),
+                    expected_runtime: "command-code",
+                    expected_namespace: None,
+                    switch_prefix: "command-code:".to_string(),
+                },
+                auth_source: "Command Code OAuth via ~/.commandcode/auth.json",
+                auth_env_key: None,
+                login_hint: "jcode login --provider command-code",
+            },
         }
     }
 
@@ -1508,6 +1524,27 @@ impl NativeProviderKind {
                 if let Some(model) = jcode_base::auth::azure::load_model() {
                     let _ = runtime.set_model(&model);
                 }
+                std::sync::Arc::new(runtime)
+            }
+            Self::CommandCode => {
+                jcode_provider_command_code_runtime::auth::import_snapshot_at_startup();
+                let store_path = jcode_provider_command_code_runtime::auth::auth_store_path().ok();
+                let store = store_path
+                    .as_ref()
+                    .map(|p| jcode_provider_command_code_runtime::auth::CommandCodeStore::load(p.as_path()))
+                    .unwrap_or_default();
+                let model = std::env::var("JCODE_COMMAND_CODE_MODEL")
+                    .unwrap_or_else(|_| "zai-org/GLM-5.3".to_string());
+                let runtime = jcode_provider_command_code_runtime::integration::compose_provider_from_store(
+                    &store,
+                    &model,
+                ).unwrap_or_else(|_| {
+                    jcode_provider_command_code_runtime::CommandCodeProvider::new(
+                        String::new(),
+                        "command-code-offline".to_string(),
+                        "zai-org/GLM-5.3".to_string(),
+                    )
+                });
                 std::sync::Arc::new(runtime)
             }
         };
@@ -1583,6 +1620,22 @@ impl NativeProviderKind {
                     jcode_base::auth::azure::method_detail()
                 ))
             }
+            Self::CommandCode => {
+                let store_path = jcode_provider_command_code_runtime::auth::auth_store_path()
+                    .context("resolve Command Code auth store path")?;
+                let store = jcode_provider_command_code_runtime::auth::CommandCodeStore::load(store_path.as_path());
+                let account = store
+                    .accounts
+                    .iter()
+                    .find(|a| store.active.as_deref() == a.label.as_deref())
+                    .or_else(|| store.accounts.first());
+                if let Some(acc) = account {
+                    if !acc.user_id.trim().is_empty() && !acc.api_key.trim().is_empty() {
+                        return Ok(format!("Command Code account {} resolved", acc.user_id));
+                    }
+                }
+                anyhow::bail!("no active Command Code credentials found in store");
+            }
         }
     }
 
@@ -1603,6 +1656,7 @@ impl NativeProviderKind {
             Self::Bedrock => &["haiku", "micro", "lite", "mini", "flash"],
             Self::Jcode => &["mini", "flash", "haiku", "lite", "nano"],
             Self::Azure => &["mini", "nano", "flash", "haiku"],
+            Self::CommandCode => &["flash", "mini", "fast"],
         };
         for marker in cheap_markers {
             if let Some(model) = catalog
@@ -2446,6 +2500,7 @@ mod tests {
             ("bedrock", NativeProviderKind::Bedrock),
             ("jcode", NativeProviderKind::Jcode),
             ("azure-openai", NativeProviderKind::Azure),
+            ("command-code", NativeProviderKind::CommandCode),
         ] {
             assert_eq!(NativeProviderKind::from_normalized(id), Some(expected));
         }
@@ -2467,6 +2522,7 @@ mod tests {
             NativeProviderKind::Bedrock,
             NativeProviderKind::Jcode,
             NativeProviderKind::Azure,
+            NativeProviderKind::CommandCode,
         ] {
             let spec = kind.spec();
             assert!(!spec.provider_id.is_empty(), "{kind:?} has empty id");
@@ -2572,6 +2628,7 @@ mod tests {
             NativeProviderKind::Bedrock,
             NativeProviderKind::Jcode,
             NativeProviderKind::Azure,
+            NativeProviderKind::CommandCode,
         ] {
             let id = kind.spec().provider_id;
             assert!(

@@ -908,6 +908,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         "copilot" => Some("copilot"),
         "gemini" => Some("gemini"),
         "antigravity" => Some("antigravity"),
+        "command-code" | "commandcode" | "cmdc" => Some("command-code"),
         _ => None,
     }
 }
@@ -1196,6 +1197,7 @@ pub fn model_switch_request_for_provider_id(
         Some("copilot") => format!("copilot:{}", model),
         Some("gemini") => format!("gemini:{}", model),
         Some("antigravity") => format!("antigravity:{}", model),
+        Some("command-code") => format!("command-code:{}", model),
         _ => model.to_string(),
     }
 }

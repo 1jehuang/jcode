@@ -564,6 +564,7 @@ pub(super) fn list_cli_providers() -> Vec<ProviderListEntry> {
         ProviderChoice::Claude,
         ProviderChoice::Openai,
         ProviderChoice::Openrouter,
+        ProviderChoice::CommandCode,
         ProviderChoice::Azure,
         ProviderChoice::Opencode,
         ProviderChoice::OpencodeGo,
