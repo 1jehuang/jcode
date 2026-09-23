@@ -2124,10 +2124,10 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         )
     });
 
-    // Each fact is its own group so the line can be assembled in reverse
-    // order (most important fact, the model, sits at the right edge) and so
-    // narrow terminals drop whole facts from the left instead of mid-word.
-    let mut groups: Vec<Vec<Span<'static>>> = Vec::new();
+    // Each fact is its own group tagged with a keep-priority (higher survives
+    // longer). Narrow terminals drop whole low-priority facts instead of
+    // truncating mid-word, while the visual order stays fixed.
+    let mut groups: Vec<(u8, Vec<Span<'static>>)> = Vec::new();
 
     // Model (muted, not colored, so the line stays quiet)
     let model = data
@@ -2151,7 +2151,7 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
                 Style::default().fg(rgb(140, 140, 150)),
             ));
         }
-        groups.push(group);
+        groups.push((5, group));
     }
 
     // Provider
@@ -2161,51 +2161,57 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
         .filter(|p| !p.is_empty())
         .unwrap_or_else(|| app.provider_name());
     if !provider.is_empty() && !overscroll_is_runtime_placeholder(&provider) {
-        groups.push(vec![Span::styled(
-            overscroll_provider_display(&provider),
-            Style::default().fg(rgb(140, 140, 150)),
-        )]);
+        groups.push((
+            2,
+            vec![Span::styled(
+                overscroll_provider_display(&provider),
+                Style::default().fg(rgb(140, 140, 150)),
+            )],
+        ));
     }
 
     // Access method (auth)
     if let Some((label, color)) = overscroll_auth_label(data.auth_method) {
-        groups.push(vec![Span::styled(
-            label.to_string(),
-            Style::default().fg(color),
-        )]);
+        groups.push((
+            0,
+            vec![Span::styled(label.to_string(), Style::default().fg(color))],
+        ));
     }
 
-    // Context usage as a rounded bar
+    // Context usage as a compact bar plus percentage (no token counts, so it
+    // stays small enough to share the row with the directory and model).
     if let Some((used, limit)) = overscroll_context_usage(&data) {
-        let mut group = vec![Span::styled(
-            format!(
-                "{}/{} ",
-                overscroll_format_tokens(used),
-                overscroll_format_tokens(limit)
-            ),
-            Style::default().fg(rgb(140, 140, 150)),
-        )];
-        group.extend(overscroll_context_bar(used, limit, 10));
-        groups.push(group);
+        groups.push((
+            3,
+            overscroll_context_bar(used, limit, OVERSCROLL_CONTEXT_CELLS),
+        ));
     }
 
-    // Working directory, shown as a home-relative path, with the git branch
-    // alongside when available.
+    // Working directory (home-relative), then git branch and status as their
+    // own lower-priority facts so git detail never pushes the directory out.
     if let Some(dir) = app.working_dir().and_then(|d| overscroll_dir_label(&d)) {
-        let mut group = vec![
-            Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
-            Span::styled(dir, Style::default().fg(rgb(140, 140, 150))),
-        ];
+        if let Some(git) = overscroll_git_status_spans(&data) {
+            groups.push((1, git));
+        }
         if let Some(branch) = overscroll_git_branch(&data) {
-            group.push(Span::styled(
-                format!("  {branch}"),
-                Style::default().fg(rgb(150, 170, 140)),
+            groups.push((
+                2,
+                vec![Span::styled(
+                    format!(" {branch}"),
+                    Style::default().fg(rgb(150, 170, 140)),
+                )],
             ));
         }
-        groups.push(group);
+        groups.push((
+            4,
+            vec![
+                Span::styled(" ", Style::default().fg(rgb(140, 180, 255))),
+                Span::styled(dir, Style::default().fg(rgb(140, 140, 150))),
+            ],
+        ));
     }
 
-    // Reverse: directory first, model last (right edge).
+    // Reverse: branch/directory first, model last (right edge).
     groups.reverse();
 
     let total_width = area.width as usize;
@@ -2263,18 +2269,18 @@ pub(super) fn draw_overscroll_status(frame: &mut Frame, app: &dyn TuiState, area
     frame.render_widget(Paragraph::new(countdown_line), right_area);
 }
 
-/// Join fact groups with separators, dropping whole groups from the left
-/// (least important end) until the line fits `max_width`. Falls back to
+/// Join fact groups with separators, dropping the lowest-priority group (the
+/// leftmost among ties) until the line fits `max_width`. Falls back to
 /// character truncation when even the last remaining group is too wide.
 fn overscroll_fit_groups(
-    mut groups: Vec<Vec<Span<'static>>>,
+    mut groups: Vec<(u8, Vec<Span<'static>>)>,
     max_width: usize,
     sep: impl Fn() -> Span<'static>,
 ) -> Vec<Span<'static>> {
     use unicode_width::UnicodeWidthStr;
-    let join = |groups: &[Vec<Span<'static>>]| {
+    let join = |groups: &[(u8, Vec<Span<'static>>)]| {
         let mut out: Vec<Span<'static>> = Vec::new();
-        for group in groups {
+        for (_, group) in groups {
             if !out.is_empty() {
                 out.push(sep());
             }
@@ -2288,7 +2294,13 @@ fn overscroll_fit_groups(
         if width <= max_width || groups.len() <= 1 {
             return overscroll_truncate_spans(spans, max_width);
         }
-        groups.remove(0);
+        let drop_idx = groups
+            .iter()
+            .enumerate()
+            .min_by_key(|(idx, (priority, _))| (*priority, *idx))
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        groups.remove(drop_idx);
     }
 }
 
@@ -2350,6 +2362,35 @@ fn overscroll_git_branch(data: &crate::tui::info_widget::InfoWidgetData) -> Opti
         label.push('…');
     }
     Some(label)
+}
+
+/// Compact git status counts (`~modified +staged ?untracked ↑ahead ↓behind`)
+/// using the git widget palette. `None` when the tree is clean and in sync.
+fn overscroll_git_status_spans(
+    data: &crate::tui::info_widget::InfoWidgetData,
+) -> Option<Vec<Span<'static>>> {
+    let info = data.git_info.as_ref()?;
+    let parts = [
+        (info.modified, "~", rgb(240, 200, 80)),
+        (info.staged, "+", rgb(100, 200, 100)),
+        (info.untracked, "?", rgb(140, 140, 150)),
+        (info.ahead, "↑", rgb(100, 200, 100)),
+        (info.behind, "↓", rgb(255, 140, 100)),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (count, symbol, color) in parts {
+        if count == 0 {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            format!("{symbol}{count}"),
+            Style::default().fg(color),
+        ));
+    }
+    (!spans.is_empty()).then_some(spans)
 }
 
 fn overscroll_dir_label(path: &str) -> Option<String> {
@@ -2499,6 +2540,9 @@ fn overscroll_context_bar(used: usize, limit: usize, cells: usize) -> Vec<Span<'
     spans
 }
 
+/// Context bar width in the overscroll status line (kept small so the
+/// directory and model fit alongside it).
+const OVERSCROLL_CONTEXT_CELLS: usize = 4;
 const RIGHT_FACT_CONTEXT_CELLS: usize = 6;
 const RIGHT_FACT_GAP: u16 = 2;
 const RIGHT_FACT_PAD: u16 = 1;

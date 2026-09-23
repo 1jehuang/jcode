@@ -701,3 +701,55 @@ fn draw_notification_clips_overwide_notice_at_area_width() {
         "expected clipped notice text inside area, got: {inside:?}"
     );
 }
+
+fn overscroll_line_state() -> TestState {
+    let mut state = fact_test_state(String::new(), false);
+    state.chat_overscroll_active = true;
+    state.info_widget_data.git_info = Some(info_widget::GitInfo {
+        branch: "main".to_string(),
+        modified: 3,
+        untracked: 2,
+        staged: 0,
+        ahead: 1,
+        behind: 0,
+        dirty_files: Vec::new(),
+    });
+    state
+}
+
+fn overscroll_line_row(state: &TestState, width: u16) -> String {
+    let _lock = viewport_snapshot_test_lock();
+    clear_flicker_frame_history_for_tests();
+    let backend = TestBackend::new(width, 18);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| crate::tui::ui::draw(frame, state))
+        .expect("overscroll frame");
+    let rows = buffer_rows(&terminal);
+    rows[row_containing(&rows, "(overscroll")].clone()
+}
+
+#[test]
+fn overscroll_line_orders_dir_git_context_then_model_on_the_right() {
+    let row = overscroll_line_row(&overscroll_line_state(), 160);
+    let dir = row.find("~/jcode").expect("dir shown");
+    let branch = row.find(" main").expect("branch shown");
+    let git = row.find("~3 ?2 ↑1").expect("git status shown");
+    let context = row.find("29%").expect("context shown");
+    let model = row.find("GPT-5.6 Sol high").expect("model shown");
+    assert!(
+        dir < branch && branch < git && git < context && context < model,
+        "{row}"
+    );
+    assert!(!row.contains("74k/256k"), "token counts dropped: {row}");
+    assert!(row.contains("▰▱▱▱ 29%"), "compact 4-cell bar: {row}");
+}
+
+#[test]
+fn overscroll_line_keeps_dir_context_and_model_when_narrow() {
+    let row = overscroll_line_row(&overscroll_line_state(), 60);
+    assert!(row.contains("~/jcode"), "{row}");
+    assert!(row.contains("29%"), "{row}");
+    assert!(row.contains("GPT-5.6 Sol high"), "{row}");
+    assert!(!row.contains("~3"), "git status is dropped first: {row}");
+}
