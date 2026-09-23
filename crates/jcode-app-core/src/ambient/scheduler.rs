@@ -186,8 +186,14 @@ impl AdaptiveScheduler {
 
     /// Core interval calculation following the algorithm in AMBIENT_MODE.md.
     pub fn calculate_interval(&self, rate_limit_info: Option<&RateLimitInfo>) -> Duration {
+        // `Duration::clamp` panics when min > max, and both bounds come straight
+        // from unvalidated user config, so a swapped pair
+        // (`min_interval_minutes = 60`, `max_interval_minutes = 30`) or a zero
+        // maximum would abort the ambient run loop rather than degrade. Treat
+        // the configured maximum as authoritative and let the minimum collapse
+        // to it, once, for every clamp in this function and in `apply_backoff`.
         let max = Duration::from_secs(self.config.max_interval_minutes as u64 * 60);
-        let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60);
+        let min = Duration::from_secs(self.config.min_interval_minutes as u64 * 60).min(max);
 
         // If no rate limit info, fall back to max interval.
         let info = match rate_limit_info {
@@ -517,6 +523,35 @@ mod tests {
             scheduler.calculate_interval(None),
             Duration::from_secs(120 * 60)
         );
+    }
+
+    #[test]
+    fn degenerate_bounds_do_not_panic_with_rate_limit_info() {
+        // `calculate_interval` has a second `clamp(min, max)` on the path taken
+        // when rate-limit info IS present, which the no-info tests never reach.
+        // It reads the same unvalidated config bounds, so it panics on the same
+        // degenerate pairs.
+        for (min_minutes, max_minutes) in [(5u32, 0u32), (60, 30)] {
+            let scheduler = AdaptiveScheduler::new(AmbientSchedulerConfig {
+                min_interval_minutes: min_minutes,
+                max_interval_minutes: max_minutes,
+                ..AmbientSchedulerConfig::default()
+            });
+            let info = RateLimitInfo {
+                limit_tokens: Some(1_000_000),
+                remaining_tokens: Some(500_000),
+                limit_requests: None,
+                remaining_requests: None,
+                reset_at: Some(Utc::now() + ChronoDuration::hours(1)),
+            };
+            let interval = scheduler.calculate_interval(Some(&info));
+            assert_eq!(
+                interval,
+                Duration::from_secs(max_minutes as u64 * 60),
+                "min={min_minutes} max={max_minutes} with rate-limit info must \
+                 clamp to the configured maximum without panicking"
+            );
+        }
     }
 
     #[test]
