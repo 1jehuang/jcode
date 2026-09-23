@@ -675,6 +675,11 @@ impl BridgeState {
                 let limit = request["limit"].as_u64().map(|limit| limit as usize);
                 let mut ids: BTreeSet<String> =
                     Self::stored_session_ids(limit).into_iter().collect();
+                if limit.is_some() {
+                    // Bookmarks are how users find old work, so a recency
+                    // limit must never hide them from pickers.
+                    ids.extend(Self::saved_session_ids());
+                }
                 let ids_loaded = list_started.elapsed();
                 ids.extend(self.known_sessions.iter().cloned());
                 if let Some(attached) = self.session_id.clone() {
@@ -2419,6 +2424,24 @@ impl BridgeState {
                     save_label: row.get(8)?,
                 })
             })
+            .and_then(|rows| rows.collect())
+            .unwrap_or_default()
+    }
+
+    fn saved_session_ids() -> Vec<String> {
+        let Some(path) = Self::recent_session_index_path() else {
+            return Vec::new();
+        };
+        let Ok(connection) = Connection::open(path) else {
+            return Vec::new();
+        };
+        let Ok(mut statement) =
+            connection.prepare("SELECT session_id FROM recent_sessions WHERE saved != 0")
+        else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| row.get(0))
             .and_then(|rows| rows.collect())
             .unwrap_or_default()
     }

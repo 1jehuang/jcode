@@ -3639,3 +3639,37 @@ fn session_list_recovers_save_label_missing_from_older_index_rows() {
     assert!(labelled.saved);
     assert_eq!(labelled.save_label.as_deref(), Some("investor catch up work"));
 }
+
+#[test]
+fn limited_session_list_always_includes_saved_sessions() {
+    let home = ScopedJcodeHome::new("saved-beyond-limit");
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    for index in 0..5 {
+        connection
+            .execute(
+                "INSERT INTO recent_sessions (session_id, saved, save_label, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    format!("indexed_{index}"),
+                    index == 0,
+                    (index == 0).then_some("old bookmark"),
+                    index,
+                ],
+            )
+            .unwrap();
+    }
+
+    let event = only_reply_event(
+        BridgeState::default()
+            .api_request_to_legacy(&json!({"req": "list_sessions", "id": 1, "limit": 2})),
+    );
+    let ApiEvent::Sessions { sessions } = event else {
+        panic!("expected sessions reply, got {event:?}");
+    };
+    let saved = sessions
+        .iter()
+        .find(|session| session.session_id == "indexed_0")
+        .expect("saved session beyond the limit is listed");
+    assert_eq!(saved.save_label.as_deref(), Some("old bookmark"));
+}
