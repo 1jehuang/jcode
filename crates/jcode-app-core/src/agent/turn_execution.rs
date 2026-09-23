@@ -19,6 +19,22 @@ impl Agent {
         )
     }
 
+    /// Fire the turn_start hook synchronously and fold its stdout into
+    /// `current_turn_system_reminder` for this turn. Used by the non-streaming
+    /// turn entries so `jcode run`, ambient cycles, debug exec and swarm
+    /// workers see hook-emitted context (e.g. alert banners) exactly like the
+    /// streaming entry point. Hook failure never blocks the turn.
+    fn fire_turn_start_hook_into_reminder(&mut self) {
+        if let Some(text) = crate::hooks::run_turn_start_collecting() {
+            let banner = format!("[HOOK TURN_START]\n{}", text);
+            self.current_turn_system_reminder = Some(match self.current_turn_system_reminder.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{}\n\n{}", existing, banner)
+                }
+                _ => banner,
+            });
+        }
+    }
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
         self.run_once_with_optional_hook_banner(user_message, true).await
@@ -53,16 +69,7 @@ impl Agent {
         // reminder (same as the streaming entry point), so non-streaming
         // consumers (`jcode run`, ambient cycles, debug exec) also see
         // hook-emitted context such as alert banners.
-        let hook_output = crate::hooks::run_turn_start_collecting();
-        if let Some(text) = hook_output {
-            let banner = format!("[HOOK TURN_START]\n{}", text);
-            self.current_turn_system_reminder = Some(match self.current_turn_system_reminder.take() {
-                Some(existing) if !existing.trim().is_empty() => {
-                    format!("{}\n\n{}", existing, banner)
-                }
-                _ => banner,
-            });
-        }
+        self.fire_turn_start_hook_into_reminder();
         self.run_turn(print_output).await?;
         Ok(())
     }
@@ -94,6 +101,10 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
+        // Fold turn_start hook stdout into this turn's system reminder so
+        // non-streaming consumers (`jcode run --json`, ambient cycles, swarm
+        // workers) also see hook-emitted context such as alert banners.
+        self.fire_turn_start_hook_into_reminder();
         self.run_turn(false).await
     }
 
