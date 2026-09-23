@@ -294,7 +294,7 @@ fn smoothness_benchmark_mid_transcript_growth_settles_quickly() {
         .map(|i| format!("todo: item {i}"))
         .collect::<Vec<_>>()
         .join("\n");
-    app.display_messages[todo_idx].content = grown;
+    app.display_messages.get_mut(todo_idx).unwrap().content = grown;
     app.bump_display_messages_version();
 
     // Render until motion settles (tail catch-up slide runs at frame cadence).

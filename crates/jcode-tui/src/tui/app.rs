@@ -4,6 +4,7 @@ use super::keybind::{
 };
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
+use self::transcript::Transcript;
 use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::compaction::CompactionEvent;
 use crate::config::config;
@@ -111,6 +112,7 @@ mod terminal_liveness;
 mod terminal_setup_command;
 mod terminal_title;
 mod todos_view;
+mod transcript;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
 mod tui_state;
@@ -871,7 +873,7 @@ pub struct App {
     mcp_manager: Arc<RwLock<McpManager>>,
     messages: Vec<Message>,
     session: Session,
-    display_messages: Vec<DisplayMessage>,
+    display_messages: Transcript,
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,

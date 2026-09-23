@@ -295,7 +295,7 @@ impl App {
             let new_string = (0..24)
                 .map(|idx| format!("new fixture line {idx}\n"))
                 .collect::<String>();
-            self.display_messages = vec![
+            self.display_messages.replace(vec![
                 DisplayMessage::user("please edit demo.txt"),
                 DisplayMessage::tool(
                     "Edited demo.txt".to_string(),
@@ -311,7 +311,7 @@ impl App {
                         thought_signature: None,
                     },
                 ),
-            ];
+            ]);
             self.bump_display_messages_version();
             self.diff_mode = crate::config::DiffDisplayMode::Inline;
             self.scroll_offset = 0;
@@ -337,7 +337,7 @@ impl App {
             })
             .to_string()
         } else if cmd == "gmail-draft-fixture" {
-            self.display_messages = vec![
+            self.display_messages.replace(vec![
                 DisplayMessage::user("Draft a launch update for the team"),
                 DisplayMessage::tool(
                     "Draft created successfully.\nDraft ID: draft_visual_123\nTo: team@example.com\nSubject: Launch update\nAttachments: 1"
@@ -357,7 +357,7 @@ impl App {
                         thought_signature: None,
                     },
                 ),
-            ];
+            ]);
             self.bump_display_messages_version();
             self.scroll_offset = 0;
             self.auto_scroll_paused = false;

@@ -570,6 +570,10 @@ impl crate::tui::TuiState for App {
         &self.display_messages
     }
 
+    fn display_message_item_id(&self, idx: usize) -> Option<jcode_tui_messages::ItemId> {
+        self.display_messages.id_at(idx)
+    }
+
     fn display_user_message_count(&self) -> usize {
         self.display_user_message_count
     }

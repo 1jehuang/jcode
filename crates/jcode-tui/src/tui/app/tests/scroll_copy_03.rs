@@ -114,7 +114,7 @@ fn test_scroll_render_scrolled_up() {
 fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
     let _render_lock = scroll_render_test_lock();
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage {
             role: "user".to_string(),
             content: "This is a deliberately long prompt preview that should wrap into two preview rows at the top of the viewport".to_string(),
@@ -131,7 +131,7 @@ fn test_prompt_preview_reserves_rows_without_overwriting_visible_history() {
             title: None,
             tool_data: None,
         },
-    ];
+    ]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -1657,10 +1657,10 @@ fn test_click_on_swarm_expand_badge_toggles_tldr_collapse() {
     let body = "The flaky test was caused by a race in the setup helper. \
                 I rewrote it to use a barrier and verified 200 consecutive runs pass.";
     let content = jcode_tui_messages::encode_collapsible_swarm_content("fixed the flaky test", body);
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("hi"),
         DisplayMessage::swarm("DM from sheep", content),
-    ];
+    ]);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;

@@ -11,9 +11,9 @@ fn anchored_scroll_test_app() -> crate::tui::app::App {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = (0..40)
+    app.display_messages.replace((0..40)
         .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
-        .collect();
+        .collect());
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
@@ -266,9 +266,9 @@ fn resize_during_a_pending_prepend_keeps_the_same_message() {
     app.diagram_pane_enabled = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
-    app.display_messages = (0..30)
+    app.display_messages.replace((0..30)
         .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(20))))
-        .collect();
+        .collect());
     app.bump_display_messages_version();
 
     let mut wide = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -319,7 +319,7 @@ fn resize_then_prepend_of_a_duplicate_does_not_teleport_the_reader() {
     let target_body = format!("TOKENsame - {}", "identical body ".repeat(8));
     let mut visible: Vec<DisplayMessage> = (0..30).map(resize_anchor_filler).collect();
     visible.insert(8, DisplayMessage::assistant(target_body.clone()));
-    app.display_messages = visible.clone();
+    app.display_messages.replace(visible.clone());
     app.bump_display_messages_version();
     app.compacted_history_lazy = super::CompactedHistoryLazyState {
         total_messages: visible.len() + 2,

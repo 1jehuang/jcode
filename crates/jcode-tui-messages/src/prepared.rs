@@ -1,4 +1,4 @@
-use crate::WrappedLineMap;
+use crate::{ItemId, WrappedLineMap};
 use jcode_tui_markdown::CopyTargetKind;
 use ratatui::text::Line;
 use std::sync::Arc;
@@ -58,8 +58,10 @@ pub struct EditToolRange {
 /// matching message boundary and only the changed/new tail re-rendered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MessageBoundary {
-    /// `stable_cache_hash()` of the source `DisplayMessage`.
-    pub msg_hash: u64,
+    /// Stable identity of the source `DisplayMessage`, minted when it entered
+    /// the transcript. Survives prepends, removals and compaction re-syncs, so
+    /// it names the message where a content hash could only name its content.
+    pub item_id: ItemId,
     /// Cumulative `wrapped_lines` length after this message was rendered
     /// (including any blank separator line that preceded it).
     pub wrapped_len: usize,

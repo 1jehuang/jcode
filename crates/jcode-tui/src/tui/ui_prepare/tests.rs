@@ -183,7 +183,7 @@ fn wrapped_copy_rows_match_visible_content_at_reported_widths() {
 /// the whole transcript per chunk.
 #[test]
 fn matching_suffix_len_detects_prepended_history() {
-    use jcode_tui_messages::MessageBoundary;
+    use jcode_tui_messages::{ItemId, MessageBoundary};
 
     let old: Vec<DisplayMessage> = (0..4)
         .map(|i| DisplayMessage::system(format!("msg {i}")))
@@ -206,7 +206,7 @@ fn matching_suffix_len_detects_prepended_history() {
         message_boundaries: old
             .iter()
             .map(|m| MessageBoundary {
-                msg_hash: m.stable_cache_hash(),
+                item_id: ItemId(m.stable_cache_hash()),
                 wrapped_len: 0,
                 raw_len: 0,
                 user_prompt_len: 0,
@@ -221,15 +221,28 @@ fn matching_suffix_len_detects_prepended_history() {
         DisplayMessage::system("older history b"),
     ];
     new_msgs.extend(old.iter().cloned());
-    assert_eq!(matching_suffix_len(&base, &new_msgs), 4);
+    assert_eq!(
+        matching_suffix_len(&base, new_msgs.len(), |i| ItemId(
+            new_msgs[i].stable_cache_hash()
+        )),
+        4
+    );
 
     // Changed tail: no suffix reuse.
     let mut changed = new_msgs.clone();
     changed.last_mut().unwrap().content = "edited".to_string();
-    assert_eq!(matching_suffix_len(&base, &changed), 0);
+    assert_eq!(
+        matching_suffix_len(&base, changed.len(), |i| ItemId(
+            changed[i].stable_cache_hash()
+        )),
+        0
+    );
 
     // Identical transcript: full suffix match.
-    assert_eq!(matching_suffix_len(&base, &old), 4);
+    assert_eq!(
+        matching_suffix_len(&base, old.len(), |i| ItemId(old[i].stable_cache_hash())),
+        4
+    );
 }
 
 /// The prepared-header cache trades staleness for avoiding a bundle of disk

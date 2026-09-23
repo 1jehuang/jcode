@@ -988,10 +988,16 @@ impl App {
                                         });
 
                                         // Update the tool's DisplayMessage with the output (if it exists)
-                                        if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
-                                            dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
-                                        }) {
-                                            dm.content = content.clone();
+                                        let tool_output_applied =
+                                            if let Some(dm) = self.display_messages.iter_mut().rev().find(|dm| {
+                                                dm.tool_data.as_ref().map(|td| &td.id) == Some(&tool_use_id)
+                                            }) {
+                                                dm.content = content.clone();
+                                                true
+                                            } else {
+                                                false
+                                            };
+                                        if tool_output_applied {
                                             self.bump_display_messages_version();
                                         }
 

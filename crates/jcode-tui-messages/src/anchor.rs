@@ -7,7 +7,7 @@
 //! (which message, which row inside it) and is resolved against the geometry of
 //! the frame being drawn.
 //!
-//! Identity is the [`MessageBoundary::msg_hash`] already carried by the frame,
+//! Identity is the [`MessageBoundary::item_id`] already carried by the frame,
 //! plus an occurrence index to disambiguate messages with identical content.
 //!
 //! Ceiling: the occurrence is an ordinal counted from the start of *one* frame.
@@ -41,7 +41,7 @@ pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(u64, usize, usize)>
         for boundary in &section.prepared.message_boundaries {
             let end = boundary.wrapped_len;
             ranges.push((
-                boundary.msg_hash,
+                boundary.item_id.0,
                 section.line_start + prev,
                 end.saturating_sub(prev),
             ));
@@ -98,6 +98,7 @@ pub fn resolve(anchor: &Anchor, frame: &PreparedChatFrame, max_scroll: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ItemId;
     use crate::prepared::{MessageBoundary, PreparedMessages, PreparedSectionKind};
     use ratatui::text::Line;
     use std::sync::Arc;
@@ -111,7 +112,7 @@ mod tests {
         for (hash, rows) in messages {
             cumulative += rows;
             boundaries.push(MessageBoundary {
-                msg_hash: *hash,
+                item_id: ItemId(*hash),
                 wrapped_len: cumulative,
                 raw_len: 0,
                 user_prompt_len: 0,

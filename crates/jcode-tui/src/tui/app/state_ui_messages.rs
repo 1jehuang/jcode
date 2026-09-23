@@ -129,7 +129,7 @@ impl App {
     pub(super) fn replace_display_messages(&mut self, mut messages: Vec<DisplayMessage>) {
         messages.retain(|message| !is_background_task_lifecycle_message(&message.content));
         compact_display_messages_for_storage(&mut messages);
-        self.display_messages = messages;
+        self.display_messages.replace(messages);
         self.attempt_committed_assistant_messages = 0;
         self.sync_compacted_history_lazy_from_display_messages();
         self.bump_display_messages_version();
@@ -411,7 +411,9 @@ impl App {
             .iter()
             .rposition(Self::is_reload_message)
         {
-            let msg = &mut self.display_messages[idx];
+            let Some(msg) = self.display_messages.get_mut(idx) else {
+                return;
+            };
             if !msg.content.is_empty() {
                 msg.content.push('\n');
             }
@@ -580,7 +582,7 @@ impl App {
         hidden_user_prompts: usize,
     ) {
         compact_display_messages_for_storage(&mut messages);
-        self.display_messages = messages;
+        self.display_messages.replace(messages);
         self.remote_side_pane_images = images;
         self.invalidate_side_pane_images_signature();
         self.compacted_history_lazy = CompactedHistoryLazyState {

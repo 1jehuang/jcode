@@ -69,7 +69,9 @@ impl App {
             .iter()
             .rposition(|message| Self::is_client_maintenance_message(message, &title))
         {
-            let message = &mut self.display_messages[idx];
+            let Some(message) = self.display_messages.get_mut(idx) else {
+                return;
+            };
             let title_changed = message.title.as_deref() != Some(title.as_str());
             if title_changed {
                 message.title = Some(title);

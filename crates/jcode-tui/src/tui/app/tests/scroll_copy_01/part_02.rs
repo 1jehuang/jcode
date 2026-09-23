@@ -75,11 +75,11 @@ fn test_ctrl_l_renders_clear_screen_with_history_in_scrollback() {
 #[test]
 fn test_empty_prompt_up_down_browses_previous_prompts() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second prompt"),
-    ];
+    ]);
     app.bump_display_messages_version();
 
     app.handle_key(KeyCode::Up, KeyModifiers::empty()).unwrap();
@@ -105,11 +105,11 @@ fn test_empty_prompt_up_down_browses_previous_prompts() {
 #[test]
 fn test_ctrl_up_browses_history_when_no_pending_message() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second prompt"),
-    ];
+    ]);
     app.bump_display_messages_version();
 
     app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
@@ -122,7 +122,7 @@ fn test_ctrl_up_browses_history_when_no_pending_message() {
 #[test]
 fn test_prompt_history_up_does_not_replace_unmatched_draft() {
     let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous prompt")]);
     app.input = "draft".to_string();
     app.cursor_pos = app.input.len();
 
@@ -153,11 +153,11 @@ fn test_multiline_prompt_up_down_moves_cursor_within_input() {
 #[test]
 fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("line one\nline two"),
-    ];
+    ]);
     app.input = "line one\nline two".to_string();
     app.cursor_pos = app.input.len();
 
@@ -173,11 +173,11 @@ fn test_multiline_history_prompt_prioritizes_cursor_until_boundary() {
 #[test]
 fn test_ctrl_up_down_always_browses_prompt_history() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("line one\nline two"),
-    ];
+    ]);
     app.input = "line one\nline two".to_string();
     app.cursor_pos = app.input.len();
 
@@ -198,11 +198,11 @@ fn test_ctrl_up_down_always_browses_prompt_history() {
 #[test]
 fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("newer prompt"),
-    ];
+    ]);
     app.input = "draft line one\ndraft line two".to_string();
     app.cursor_pos = "draft line".len();
 
@@ -233,7 +233,7 @@ fn test_ctrl_up_from_draft_restores_it_walking_back_down() {
 #[test]
 fn test_ctrl_up_from_draft_can_be_undone() {
     let mut app = create_test_app();
-    app.display_messages = vec![DisplayMessage::user("previous prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous prompt")]);
     app.input = "draft".to_string();
     app.cursor_pos = 2;
 
@@ -249,11 +249,11 @@ fn test_ctrl_up_from_draft_can_be_undone() {
 #[test]
 fn test_undo_after_ctrl_up_drops_stale_history_draft() {
     let mut app = create_test_app();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("older prompt"),
         DisplayMessage::assistant("older response"),
         DisplayMessage::user("newer prompt"),
-    ];
+    ]);
     app.input = "v1".to_string();
     app.cursor_pos = app.input.len();
 
@@ -288,11 +288,11 @@ fn test_remote_empty_prompt_up_down_browses_previous_prompts() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.display_messages = vec![
+    app.display_messages.replace(vec![
         DisplayMessage::user("first remote prompt"),
         DisplayMessage::assistant("first response"),
         DisplayMessage::user("second remote prompt"),
-    ];
+    ]);
 
     rt.block_on(app.handle_remote_key(KeyCode::Up, KeyModifiers::empty(), &mut remote))
         .unwrap();
@@ -317,7 +317,7 @@ fn test_remote_ctrl_up_retrieves_pending_queue_before_prompt_history() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _guard = rt.enter();
     let mut remote = crate::tui::backend::RemoteConnection::dummy();
-    app.display_messages = vec![DisplayMessage::user("previous remote prompt")];
+    app.display_messages.replace(vec![DisplayMessage::user("previous remote prompt")]);
     app.queued_messages.push("queued followup".to_string());
     app.pending_queued_dispatch = true;
 
@@ -564,7 +564,7 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
                 .join("\n"),
         ));
     }
-    app.display_messages = messages;
+    app.display_messages.replace(messages);
     app.bump_display_messages_version();
     app.scroll_offset = 0;
     app.auto_scroll_paused = false;
