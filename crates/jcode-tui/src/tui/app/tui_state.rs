@@ -680,7 +680,7 @@ impl crate::tui::TuiState for App {
         self.pending_resize_anchor.map(|pending| pending.anchor)
     }
 
-        fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
+    fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
         self.pending_history_anchor
             .map(|anchor| anchor.lines_from_bottom)
     }
