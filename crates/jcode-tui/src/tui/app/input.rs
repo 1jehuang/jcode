@@ -321,12 +321,26 @@ fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
 }
 
 fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
-    read_clipboard_for_paste_with(
-        kind,
-        read_clipboard_text,
-        super::clipboard_image,
-        download_image_url_content,
-    )
+    match kind {
+        ClipboardPasteKind::Smart => {
+            // Use native-only image reader to avoid discarding text when HTML contains images
+            read_clipboard_for_paste_with(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image_native,
+                download_image_url_content,
+            )
+        }
+        _ => {
+            // ImageOnly and ImageUrl can use full clipboard_image with HTML fallback
+            read_clipboard_for_paste_with(
+                kind,
+                read_clipboard_text,
+                super::clipboard_image,
+                download_image_url_content,
+            )
+        }
+    }
 }
 
 fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
@@ -342,10 +356,11 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
-            // Prioritize images over text to match Claude Code behavior.
-            // When you copy an image, macOS clipboard often contains both the
-            // image data and text (like a file path), but users expect the
-            // image to be pasted.
+            // Prioritize native images (screenshots, direct copies) over text.
+            // This handles the common case where copying an image also puts
+            // metadata like file paths in the text clipboard.
+            // The native-only image reader skips HTML fallback, so text with
+            // HTML-embedded images stays as text.
             if let Some((media_type, base64_data)) = read_image() {
                 return image_content(media_type, base64_data);
             }

@@ -70,8 +70,8 @@ ClipboardPasteKind::Smart => {
 ## Testing
 
 ```bash
-# Build the updated version
-cd /Users/siavash/Projects/jcode
+# Build the updated version (run from your jcode checkout)
+cd <path-to-jcode-repository>
 cargo build --release -p jcode --bin jcode
 
 # Run tests
