@@ -90,6 +90,16 @@ impl ExternalAuthReviewCandidate {
         &self.source_name
     }
 
+    /// Canonical Jcode provider ids (`claude`, `openai`, ...) this source would
+    /// sign in, matching `jcode auth status --json` ids. Lets a UI tell which
+    /// detected logins Jcode already has.
+    pub fn provider_ids(&self) -> Vec<&'static str> {
+        self.provider_summary
+            .split(',')
+            .filter_map(|label| provider_id_for_label(label.trim()))
+            .collect()
+    }
+
     /// Where the detected credential lives, for display only.
     pub fn path(&self) -> &std::path::Path {
         &self.path
@@ -143,7 +153,12 @@ impl ExternalAuthReviewCandidate {
 /// [`auth::external::source_provider_labels`]) to the canonical telemetry
 /// provider id used by the activation funnel.
 fn telemetry_provider_id_for_label(label: &str) -> Option<&'static str> {
+    provider_id_for_label(label).filter(|id| *id != "cursor")
+}
+
+fn provider_id_for_label(label: &str) -> Option<&'static str> {
     match label {
+        "Cursor" => Some("cursor"),
         "OpenAI/Codex" => Some("openai"),
         "Claude" => Some("claude"),
         "Gemini" => Some("gemini"),
@@ -772,6 +787,26 @@ mod render_markdown_tests {
         assert_eq!(
             candidate.telemetry_auth_labels(),
             vec![("openai", "import")]
+        );
+    }
+
+    #[test]
+    fn provider_ids_match_auth_status_ids() {
+        use super::ExternalAuthReviewCandidate;
+        let candidate = ExternalAuthReviewCandidate::fixture(
+            "OpenAI/Codex, Claude, OpenRouter/API-key providers",
+            "OpenCode",
+        );
+        assert_eq!(
+            candidate.provider_ids(),
+            vec!["openai", "claude", "openrouter"]
+        );
+        let cursor = ExternalAuthReviewCandidate::fixture("Cursor", "Cursor");
+        assert_eq!(cursor.provider_ids(), vec!["cursor"]);
+        assert!(
+            ExternalAuthReviewCandidate::fixture("Unknown", "x")
+                .provider_ids()
+                .is_empty()
         );
     }
 }
