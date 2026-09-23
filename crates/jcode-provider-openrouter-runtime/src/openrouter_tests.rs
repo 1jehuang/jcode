@@ -1357,6 +1357,49 @@ fn autodetected_profile_seeds_default_model_and_cache_namespace() {
 }
 
 #[test]
+fn configured_builtin_profile_uses_its_default_model_in_picker() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp config dir");
+    let _xdg = EnvVarGuard::set("XDG_CONFIG_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _env = isolate_openrouter_autodetect_env();
+
+    let profile = jcode_base::provider_catalog::openai_compatible_profile_by_id("xiaomi-mimo")
+        .expect("built-in Xiaomi MiMo profile");
+    let expected_model = jcode_base::provider_catalog::resolve_openai_compatible_profile(profile)
+        .default_model
+        .expect("Xiaomi MiMo profile default model");
+    let _api_key = EnvVarGuard::set("XIAOMI_MIMO_API_KEY", "test-xiaomi-key");
+
+    jcode_base::provider_catalog::apply_openai_compatible_profile_env(Some(profile));
+    let _model_catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "false");
+
+    let provider = OpenRouterProvider::new().expect("configured built-in profile provider");
+    assert_eq!(provider.model(), expected_model);
+
+    let models = provider.available_models_display();
+    assert!(models.contains(&expected_model));
+    assert!(
+        !models
+            .iter()
+            .any(|model| model == "anthropic/claude-sonnet-4")
+    );
+
+    let routes = provider.model_routes();
+    assert!(
+        routes
+            .iter()
+            .any(|route| route.model == expected_model && route.available)
+    );
+    assert!(
+        !routes
+            .iter()
+            .any(|route| route.model == "anthropic/claude-sonnet-4")
+    );
+}
+
+#[test]
 fn test_parse_model_spec() {
     let (model, provider) = parse_model_spec("anthropic/claude-sonnet-4@Fireworks");
     assert_eq!(model, "anthropic/claude-sonnet-4");

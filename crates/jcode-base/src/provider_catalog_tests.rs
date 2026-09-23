@@ -469,7 +469,11 @@ fn auth_profile_env_application_flushes_stale_openrouter_catalog_state() {
     );
     assert!(std::env::var_os("JCODE_OPENROUTER_ALLOW_NO_AUTH").is_none());
     assert!(std::env::var_os("JCODE_OPENROUTER_MODEL_CATALOG").is_none());
-    assert!(std::env::var_os("JCODE_OPENROUTER_MODEL").is_none());
+    assert_eq!(
+        std::env::var("JCODE_OPENROUTER_MODEL").ok(),
+        resolve_openai_compatible_profile(CEREBRAS_PROFILE).default_model,
+        "a built-in profile should replace stale model state with its own default"
+    );
     assert!(std::env::var_os("JCODE_OPENROUTER_AUTH_HEADER").is_none());
     assert!(std::env::var_os("JCODE_OPENROUTER_AUTH_HEADER_NAME").is_none());
     assert!(std::env::var_os("JCODE_OPENROUTER_DYNAMIC_BEARER_PROVIDER").is_none());
