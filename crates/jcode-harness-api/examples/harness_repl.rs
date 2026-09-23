@@ -134,6 +134,7 @@ fn run_demo() {
                             last_active_at_ms: None,
                             archived: false,
                             archived_at_ms: None,
+                            save_label: None,
                         },
                     },
                 )),

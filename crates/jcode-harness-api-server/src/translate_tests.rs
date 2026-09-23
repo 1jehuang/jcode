@@ -1642,13 +1642,15 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
         transaction
             .execute(
                 "INSERT INTO recent_sessions (
-                     session_id, working_dir, todo_title, saved, updated_at_ms, last_active_at_ms
-                 ) VALUES (?1, '/indexed/project', ?2, ?4, ?3, ?3)",
+                     session_id, working_dir, todo_title, saved, updated_at_ms,
+                     last_active_at_ms, save_label
+                 ) VALUES (?1, '/indexed/project', ?2, ?4, ?3, ?3, ?5)",
                 params![
                     format!("indexed_{index:03}"),
                     format!("Indexed goal {index}"),
                     index,
                     index == 99,
+                    (index == 99).then_some("investor catch up"),
                 ],
             )
             .unwrap();
@@ -1668,6 +1670,7 @@ fn limited_session_list_reads_compact_index_without_transcript_records() {
         .find(|session| session.session_id == "indexed_099")
         .expect("indexed newest session");
     assert!(newest.saved);
+    assert_eq!(newest.save_label.as_deref(), Some("investor catch up"));
     assert_eq!(newest.updated_at_ms, Some(99));
     assert_eq!(newest.last_active_at_ms, Some(99));
     assert!(sessions.iter().all(|session| {
@@ -3595,4 +3598,44 @@ fn transport_bookkeeping_does_not_start_a_turn() {
     state.legacy_event_to_api(&json!({"type":"ack", "id":999999}));
     assert!(!state.observed_turn_active);
     assert_eq!(state.activity_version, 0);
+}
+
+#[test]
+fn session_list_recovers_save_label_missing_from_older_index_rows() {
+    let home = ScopedJcodeHome::new("save-label-fallback");
+    let sessions_dir = home.path.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join("session_labelled.json"),
+        json!({
+            "title": "Fundraising catch-up",
+            "messages": [{"role": "user", "content": "hello"}],
+            "saved": true,
+            "save_label": "investor catch up work",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(BridgeState::recent_session_index_entries().is_empty());
+    let connection = Connection::open(home.path.join("session-metadata-v1.sqlite3")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO recent_sessions (session_id, generated_title, saved, updated_at_ms)
+             VALUES ('session_labelled', 'Fundraising catch-up', 1, 5)",
+            [],
+        )
+        .unwrap();
+
+    let event = only_reply_event(
+        BridgeState::default().api_request_to_legacy(&json!({"req": "list_sessions", "id": 1})),
+    );
+    let ApiEvent::Sessions { sessions } = event else {
+        panic!("expected sessions reply, got {event:?}");
+    };
+    let labelled = sessions
+        .iter()
+        .find(|session| session.session_id == "session_labelled")
+        .expect("labelled session listed");
+    assert!(labelled.saved);
+    assert_eq!(labelled.save_label.as_deref(), Some("investor catch up work"));
 }

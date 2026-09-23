@@ -218,6 +218,8 @@ struct PersistedSessionMetadata {
     todo_title: Option<String>,
     #[serde(default)]
     saved: bool,
+    #[serde(default)]
+    save_label: Option<String>,
     #[serde(skip)]
     updated_at_ms: Option<i64>,
     #[serde(skip)]
@@ -231,6 +233,12 @@ impl PersistedSessionMetadata {
             .and_then(Self::normalized_title)
             .or_else(|| self.todo_title.as_deref().and_then(Self::normalized_title))
             .or_else(|| self.title.as_deref().and_then(Self::normalized_title))
+    }
+
+    fn save_label(&self) -> Option<String> {
+        self.saved
+            .then(|| self.save_label.as_deref().and_then(Self::normalized_title))
+            .flatten()
     }
 
     fn normalized_title(title: &str) -> Option<String> {
@@ -247,6 +255,7 @@ struct RecentSessionIndexEntry {
     custom_title: Option<String>,
     todo_title: Option<String>,
     saved: bool,
+    save_label: Option<String>,
     updated_at_ms: i64,
     last_active_at_ms: Option<i64>,
 }
@@ -259,6 +268,7 @@ impl From<&RecentSessionIndexEntry> for PersistedSessionMetadata {
             custom_title: entry.custom_title.clone(),
             todo_title: entry.todo_title.clone(),
             saved: entry.saved,
+            save_label: entry.save_label.clone(),
             updated_at_ms: Some(entry.updated_at_ms),
             last_active_at_ms: entry.last_active_at_ms,
         }
@@ -691,7 +701,17 @@ impl BridgeState {
                     .filter_map(|id| {
                         indexed_metadata
                             .get(id)
-                            .map(PersistedSessionMetadata::from)
+                            .map(|entry| {
+                                let mut metadata = PersistedSessionMetadata::from(entry);
+                                // Rows indexed before labels were tracked have
+                                // no label. Only saved sessions can carry one,
+                                // so the record read stays rare.
+                                if metadata.saved && metadata.save_label.is_none() {
+                                    metadata.save_label = Self::resolve_session_metadata(id)
+                                        .and_then(|record| record.save_label);
+                                }
+                                metadata
+                            })
                             .or_else(|| Self::resolve_session_metadata(id))
                             .map(|metadata| (id.clone(), metadata))
                     })
@@ -747,6 +767,9 @@ impl BridgeState {
                         },
                         transcript_bytes: Self::transcript_bytes(&session_id),
                         saved: metadata.get(&session_id).is_some_and(|value| value.saved),
+                        save_label: metadata
+                            .get(&session_id)
+                            .and_then(PersistedSessionMetadata::save_label),
                         updated_at_ms: metadata
                             .get(&session_id)
                             .and_then(|value| value.updated_at_ms)
@@ -1364,6 +1387,9 @@ impl BridgeState {
                                 },
                                 archived: false,
                                 archived_at_ms: None,
+                                save_label: metadata
+                                    .as_ref()
+                                    .and_then(PersistedSessionMetadata::save_label),
                             },
                         },
                     )];
@@ -1638,6 +1664,9 @@ impl BridgeState {
                             status: "idle".into(),
                             archived: false,
                             archived_at_ms: None,
+                            save_label: metadata
+                                .as_ref()
+                                .and_then(PersistedSessionMetadata::save_label),
                         },
                     },
                 )]
@@ -2249,6 +2278,8 @@ impl BridgeState {
             saved: Self::metadata_bool(&tail, "saved", true)
                 .or_else(|| Self::metadata_bool(&head, "saved", false))
                 .unwrap_or(false),
+            save_label: Self::metadata_string(&tail, "save_label", true)
+                .or_else(|| Self::metadata_string(&head, "save_label", true)),
             updated_at_ms: None,
             last_active_at_ms: None,
             working_dir: Self::metadata_string(&tail, "working_dir", true)
@@ -2347,7 +2378,8 @@ impl BridgeState {
                      todo_title TEXT,
                      updated_at_ms INTEGER NOT NULL,
                      last_active_at_ms INTEGER,
-                     saved INTEGER NOT NULL DEFAULT 0
+                     saved INTEGER NOT NULL DEFAULT 0,
+                     save_label TEXT
                  );
                  CREATE INDEX IF NOT EXISTS recent_sessions_activity
                  ON recent_sessions(COALESCE(last_active_at_ms, updated_at_ms) DESC);",
@@ -2360,9 +2392,13 @@ impl BridgeState {
             "ALTER TABLE recent_sessions ADD COLUMN saved INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        let _ = connection.execute(
+            "ALTER TABLE recent_sessions ADD COLUMN save_label TEXT",
+            [],
+        );
         let Ok(mut statement) = connection.prepare(
             "SELECT session_id, working_dir, generated_title, custom_title,
-                    todo_title, saved, updated_at_ms, last_active_at_ms
+                    todo_title, saved, updated_at_ms, last_active_at_ms, save_label
              FROM recent_sessions
              ORDER BY COALESCE(last_active_at_ms, updated_at_ms) DESC
              LIMIT 500",
@@ -2380,6 +2416,7 @@ impl BridgeState {
                     saved: row.get(5)?,
                     updated_at_ms: row.get(6)?,
                     last_active_at_ms: row.get(7)?,
+                    save_label: row.get(8)?,
                 })
             })
             .and_then(|rows| rows.collect())

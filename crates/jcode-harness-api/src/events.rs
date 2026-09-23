@@ -389,6 +389,10 @@ pub struct SessionInfo {
     /// ordinary sessions in every first-party session picker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
+    /// Optional label given with `/save <label>`. Pickers display and search it
+    /// alongside the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_label: Option<String>,
     /// Persisted transcript update time, used for newest-first ordering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<i64>,
