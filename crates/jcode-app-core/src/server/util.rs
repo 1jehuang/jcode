@@ -120,9 +120,14 @@ pub(crate) fn reload_exec_target(is_selfdev_session: bool) -> Option<(PathBuf, &
     // stays the original candidate path (the wrapper), which is what sets up
     // `LD_LIBRARY_PATH` correctly.
     let candidate_canonical = build::resolve_binary_payload(&candidate.0);
-    let current_canonical = current_exe
-        .as_ref()
-        .map(|p| build::resolve_binary_payload(p));
+    // Identity comes from the startup snapshot, not a fresh canonicalization of
+    // `current_exe()`: on macOS that path is the launch symlink, which now
+    // points at the new build (see `build::running_binary`).
+    let current_canonical = build::running_binary().or_else(|| {
+        current_exe
+            .as_ref()
+            .map(|p| build::resolve_binary_payload(p))
+    });
 
     let current_mtime = current_canonical.as_deref().and_then(binary_mtime);
     let candidate_mtime = binary_mtime(candidate_canonical.as_path());
@@ -465,10 +470,14 @@ pub(crate) fn server_has_newer_binary() -> bool {
     // running payload compared two different files with unrelated mtimes, which
     // could report a phantom update forever and wedge clients into an infinite
     // reload loop right after `/update`.
-    let current_exe = std::env::current_exe().ok().map(strip_deleted_suffix);
-    let current_canonical = current_exe
-        .as_ref()
-        .map(|path| build::resolve_binary_payload(path));
+    // Pinned at startup: re-canonicalizing `current_exe()` here would follow a
+    // promoted channel symlink to the *new* build and hide the update.
+    let current_canonical = build::running_binary().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .map(strip_deleted_suffix)
+            .map(|path| build::resolve_binary_payload(&path))
+    });
     let current_mtime = current_canonical
         .as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
@@ -1141,3 +1150,7 @@ mod deleted_suffix_tests {
         assert_eq!(strip_deleted_suffix(p.clone()), p);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "util_pinned_binary_tests.rs"]
+mod pinned_running_binary_tests;

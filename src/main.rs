@@ -103,6 +103,9 @@ fn main() -> Result<()> {
 }
 
 fn run_main() -> Result<()> {
+    // Pin the running binary's identity before any channel symlink can move
+    // (see `build::capture_running_binary`).
+    jcode::build::capture_running_binary();
     configure_system_allocator();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
