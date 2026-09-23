@@ -38,7 +38,9 @@ fn is_dotted_numeric_version(value: &str) -> bool {
 pub fn claude_code_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| {
-        let raw = std::env::var(CLAUDE_CODE_VERSION_ENV).ok();
+        // `var_os` so a non-UTF-8 value is reported below instead of silently dropped.
+        let raw =
+            std::env::var_os(CLAUDE_CODE_VERSION_ENV).map(|v| v.to_string_lossy().into_owned());
         let resolved = resolve_claude_code_version(raw.as_deref());
         if let Some(raw) = raw.as_deref().map(str::trim).filter(|raw| !raw.is_empty())
             && raw != resolved
