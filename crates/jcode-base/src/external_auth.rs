@@ -90,6 +90,11 @@ impl ExternalAuthReviewCandidate {
         &self.source_name
     }
 
+    /// Where the detected credential lives, for display only.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// Build a synthetic candidate for tests / UI fixtures. The resulting
     /// candidate points at the legacy Codex action so it can be summarized and
     /// rendered, but is not expected to actually import successfully.

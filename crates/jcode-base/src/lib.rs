@@ -29,6 +29,7 @@ pub mod claude_live;
 pub mod client_input;
 pub mod compaction;
 pub mod config;
+pub mod external_auth;
 pub mod console;
 pub mod copilot_usage;
 pub mod dictation;
