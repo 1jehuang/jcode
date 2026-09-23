@@ -62,6 +62,38 @@ const BUILTIN_VOCABULARY: &[&str] = &[
     "OpenAI",
     "Anthropic",
 ];
+/// Mishearings the recognition prompt cannot fix, because the audio is
+/// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
+/// transcript revision as whole-word, case-insensitive replacements.
+const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
+    (r"jeff", "Jev"),
+    (r"j[\s.-]?code", "Jcode"),
+    (r"jay[\s-]?code", "Jcode"),
+];
+
+fn corrections() -> &'static [(regex::Regex, &'static str)] {
+    static CORRECTIONS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    CORRECTIONS.get_or_init(|| {
+        BUILTIN_CORRECTIONS
+            .iter()
+            .map(|(pattern, fixed)| {
+                let pattern = format!(r"(?i)\b{pattern}\b");
+                (regex::Regex::new(&pattern).expect("valid correction"), *fixed)
+            })
+            .collect()
+    })
+}
+
+/// Apply product-name corrections to a transcript.
+pub fn correct_transcript(text: &str) -> String {
+    corrections()
+        .iter()
+        .fold(text.to_owned(), |text, (pattern, fixed)| {
+            pattern.replace_all(&text, *fixed).into_owned()
+        })
+}
+
 /// Conservative bound on the recognition context sent per session.
 const MAX_PROMPT_CHARS: usize = 1000;
 
@@ -338,12 +370,15 @@ struct TranscriptState {
 }
 impl TranscriptState {
     fn text(&self) -> String {
-        self.items
-            .iter()
-            .map(|(_, text)| text.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+        correct_transcript(
+            &self
+                .items
+                .iter()
+                .map(|(_, text)| text.trim())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
     }
     fn apply(&mut self, event: &Value, stopping: bool) -> Result<bool, VoiceError> {
         let kind = event["type"].as_str().ok_or(VoiceError::InvalidResponse)?;
@@ -412,6 +447,18 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn product_name_mishearings_are_corrected() {
+        assert_eq!(
+            correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
+            "Hey, Jev. Open the Jcode desktop and ask Jev's route."
+        );
+        assert_eq!(correct_transcript("J code, j-code, Jay code"), "Jcode, Jcode, Jcode");
+        // Whole words only.
+        assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
+        assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
+    }
+
     #[test]
     fn transcription_cost_uses_published_hourly_rate() {
         assert_eq!(estimated_transcription_usd(Duration::from_secs(3600)), 0.12);

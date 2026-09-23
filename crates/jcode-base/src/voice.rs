@@ -14,7 +14,8 @@ mod nari;
 pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession,
-    estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,
+    correct_transcript, estimated_transcription_usd, nari_api_key, nari_pcm_channel,
+    recognition_prompt,
 };
 #[cfg(any(feature = "voice-capture", test))]
 mod resample;
@@ -219,7 +220,7 @@ async fn transcribe_with(
     }
     let transcript: Transcript = serde_json::from_slice(&response_bytes(response).await?)
         .map_err(|_| VoiceError::InvalidResponse)?;
-    Ok(transcript.text)
+    Ok(nari::correct_transcript(&transcript.text))
 }
 
 /// Validate the PCM16 mono WAV format emitted by capture, including duration.
