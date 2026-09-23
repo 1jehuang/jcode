@@ -141,7 +141,6 @@ pub(crate) use messages::{
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
-use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -150,6 +149,7 @@ pub(crate) use pinned_ui::{
     clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
     reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
 };
+use pinned_ui::draw_side_panel_markdown;
 #[cfg(test)]
 use transitions::extract_line_text;
 #[cfg(test)]
@@ -556,9 +556,6 @@ use layout_support::{
 };
 #[cfg(test)]
 pub(crate) use status_support::calculate_input_lines;
-
-/// Minimum number of rows reserved for the composer input, even when empty.
-const MIN_INPUT_ROWS: usize = 2;
 use status_support::{
     format_status_for_debug, is_running_stable_release, semver, shorten_model_name,
 };
@@ -3000,9 +2997,9 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let next_prompt = user_count + 1;
 
     // Calculate input height based on the same wrapping logic used for rendering
-    // (min 2 rows so the composer reads as a text box, max 10 visible, scrolls if more).
-    let base_input_height = input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt)
-        .clamp(MIN_INPUT_ROWS, 10) as u16;
+    // (max 10 lines visible, scrolls if more).
+    let base_input_height =
+        input_ui::wrapped_input_line_count(app, chat_area.width, next_prompt).min(10) as u16;
     // Add 1 line for command suggestions, shell mode hints, or the Ctrl+Enter hint.
     let hint_line_height = input_ui::input_hint_line_height(app);
     let inline_block_height: u16 = inline_ui_height(app);
@@ -3067,8 +3064,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
-    let notification_height =
-        input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
+    let notification_height = input_ui::notification_height(app, chat_area.width)
+        .min(chat_area.height.saturating_sub(4));
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };

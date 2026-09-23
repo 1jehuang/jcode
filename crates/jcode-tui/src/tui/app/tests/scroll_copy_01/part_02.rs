@@ -501,10 +501,7 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
     let rows: Vec<&str> = after.lines().collect();
     let prompt_row = rows
         .iter()
-        .position(|row| {
-            let digits = row.trim_start().trim_start_matches(|c: char| c.is_ascii_digit());
-            digits.len() < row.trim_start().len() && digits.starts_with('>')
-        })
+        .position(|row| row.trim_end().ends_with('>'))
         .unwrap_or_else(|| panic!("no prompt indicator row found:\n{after}"));
     assert!(
         prompt_row <= 2,
