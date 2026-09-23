@@ -193,13 +193,17 @@ fn build_contents_replays_thought_signature_on_function_call() {
     ];
 
     let contents = build_contents(&messages);
+    // The two consecutive assistant messages merge into one model turn (the
+    // backend rejects split same-role turns), so both calls land in
+    // contents[0].
+    assert_eq!(contents.len(), 1, "consecutive model turns must merge");
     assert_eq!(
         contents[0].parts[0].thought_signature.as_deref(),
         Some("SIGNATURE_ABC"),
         "signature must be replayed on the matching function call part"
     );
     assert_eq!(
-        contents[1].parts[0].thought_signature.as_deref(),
+        contents[0].parts[1].thought_signature.as_deref(),
         Some("SIGNATURE_ABC"),
         "an unsigned later call must inherit the most recent real signature so \
          the backend does not reject a fully-unsigned turn"
@@ -1162,4 +1166,76 @@ fn ensure_state_replaces_oauth_cache_when_switching_to_api_key() {
             state.session_id
         );
     });
+}
+
+#[test]
+fn build_contents_merges_split_tool_results_into_one_function_response_turn() {
+    // A parallel multi-call assistant turn stores each tool result as its own
+    // user message, so the transcript arrives as model[call,call] followed by
+    // user[response], user[response]. The Cloud Code backend requires the
+    // function-response turn to have exactly as many functionResponse parts as
+    // the call turn had functionCall parts, and 400s the split form with
+    // "Please ensure that the number of function response parts is equal to
+    // the number of function call parts" (live-verified 2026-09-23 by
+    // replaying a real failing session both ways against v1internal). The
+    // split shape also mislabels the turn boundary for interleaved text.
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call_a".to_string(),
+                    name: "search".to_string(),
+                    input: json!({ "q": "x" }),
+                    thought_signature: Some("SIG".to_string()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_b".to_string(),
+                    name: "grep".to_string(),
+                    input: json!({ "q": "y" }),
+                    thought_signature: None,
+                },
+            ],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_a".to_string(),
+                content: "result a".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_b".to_string(),
+                content: "result b".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let contents = build_contents(&messages);
+    assert_eq!(
+        contents.len(),
+        2,
+        "consecutive same-role contents must merge into one turn: {contents:?}"
+    );
+    assert_eq!(contents[0].role, "model");
+    assert_eq!(contents[1].role, "user");
+    assert_eq!(
+        contents[1]
+            .parts
+            .iter()
+            .filter(|part| part.function_response.is_some())
+            .count(),
+        2,
+        "the merged user turn must carry both functionResponse parts"
+    );
 }

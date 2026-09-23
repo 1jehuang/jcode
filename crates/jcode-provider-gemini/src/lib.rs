@@ -314,7 +314,7 @@ pub fn build_contents_with_signature_policy(
     // conversation onto any function call that lacks one. This keeps multi-call
     // turns and synthesized/imported histories replayable instead of hard-failing.
     let mut last_signature: Option<String> = None;
-    messages
+    let contents: Vec<GeminiContent> = messages
         .iter()
         .filter_map(|message| {
             let role = match message.role {
@@ -427,7 +427,32 @@ pub fn build_contents_with_signature_policy(
                 })
             }
         })
-        .collect()
+        .collect();
+    merge_consecutive_same_role(contents)
+}
+
+/// Collapse consecutive same-role contents into one turn.
+///
+/// A parallel multi-call assistant turn stores each tool result as its own
+/// user message, so the transcript reaches here as `model[call,call]`,
+/// `user[response]`, `user[response]`. The Cloud Code backend requires the
+/// function-response turn to carry exactly as many `functionResponse` parts
+/// as the call turn had `functionCall` parts and rejects the split form with
+/// HTTP 400 "Please ensure that the number of function response parts is
+/// equal to the number of function call parts" (live-verified 2026-09-23 by
+/// replaying a failing session both ways). Merging adjacent same-role turns
+/// restores the accepted shape and is also what the Anthropic path does.
+fn merge_consecutive_same_role(contents: Vec<GeminiContent>) -> Vec<GeminiContent> {
+    let mut merged: Vec<GeminiContent> = Vec::with_capacity(contents.len());
+    for content in contents {
+        match merged.last_mut() {
+            Some(previous) if previous.role == content.role => {
+                previous.parts.extend(content.parts);
+            }
+            _ => merged.push(content),
+        }
+    }
+    merged
 }
 
 fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {
