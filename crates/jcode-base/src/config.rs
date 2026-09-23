@@ -554,6 +554,12 @@ pub struct Config {
 
     /// Global "launch a new jcode" hotkeys (macOS). Baked once by auto-import.
     pub launch_hotkeys: LaunchHotkeysConfig,
+
+    /// `[desktop.*]` tables owned by Jcode Desktop (voice, workspace,
+    /// appearance, ...). The CLI never interprets them, but it must round-trip
+    /// them verbatim so a CLI settings save never wipes Desktop preferences.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<toml::Table>,
 }
 
 /// Controls who owns autonomous wake execution.
