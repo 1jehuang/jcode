@@ -229,7 +229,7 @@ async fn apply_patch_with_diff(
             let old_content = old.as_deref().unwrap_or("");
             tokio::fs::remove_file(path).await?;
             super::edit_stats::record(ctx, old_content, "", old.is_none()).await;
-            let diff = generate_diff(&old_content, "", 1);
+            let diff = generate_diff(old_content, "", 1);
             return Ok(("deleted".to_string(), diff));
         } else {
             return Err(anyhow::anyhow!("file does not exist"));

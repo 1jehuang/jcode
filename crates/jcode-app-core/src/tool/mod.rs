@@ -21,6 +21,8 @@ mod feedback;
 mod file_diff;
 pub(crate) mod file_lock;
 mod gmail;
+// The initiative tool is intentionally unregistered (4928a1c92) but kept for re-enable.
+#[allow(dead_code)]
 mod goal;
 pub mod inflight;
 mod invalid;
@@ -848,15 +850,13 @@ impl Registry {
         let tools = self.tools.read().await;
         let resolved_name = Self::resolve_tool_name_for_session(&ctx.session_id, name);
         let is_custom = sdk::custom(&ctx.session_id, resolved_name);
-        if is_custom {
-            if let Some(config) = sdk::config(&ctx.session_id) {
-                let disabled = config.disabled.into_iter().collect();
-                anyhow::ensure!(
-                    !self.tool_is_disabled(&disabled, resolved_name),
-                    "Tool '{}' is disabled",
-                    resolved_name
-                );
-            }
+        if is_custom && let Some(config) = sdk::config(&ctx.session_id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.tool_is_disabled(&disabled, resolved_name),
+                "Tool '{}' is disabled",
+                resolved_name
+            );
         }
         // Enforce product separation here too: batch/subcalls dispatch through
         // the registry without going through Agent::validate_tool_allowed.

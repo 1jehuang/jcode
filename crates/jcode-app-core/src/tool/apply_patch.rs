@@ -192,7 +192,7 @@ impl Tool for ApplyPatchTool {
                     let old_contents = old.as_deref().unwrap_or("");
                     if tokio::fs::remove_file(&resolved).await.is_ok() {
                         super::edit_stats::record(&ctx, old_contents, "", old.is_none()).await;
-                        let diff = generate_diff_summary(&old_contents, "");
+                        let diff = generate_diff_summary(old_contents, "");
                         publish_file_touch(
                             &ctx,
                             &resolved,

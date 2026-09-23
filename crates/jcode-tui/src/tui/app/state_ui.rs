@@ -1926,10 +1926,7 @@ pub(super) fn handle_info_command(app: &mut App, trimmed: &str) -> bool {
                 app.set_status_notice("Cache stats");
             }
             "extend" | "1h" | "1hour" | "extended" | "5m" | "5min" | "default" | "reset" => {
-                let enabled = match arg {
-                    "5m" | "5min" | "default" | "reset" => false,
-                    _ => true,
-                };
+                let enabled = !matches!(arg, "5m" | "5min" | "default" | "reset");
                 match crate::config::Config::set_anthropic_cache_ttl_1h(enabled) {
                     Ok(()) => {
                         let message = if enabled {

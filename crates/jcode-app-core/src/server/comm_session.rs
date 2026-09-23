@@ -552,10 +552,6 @@ async fn register_visible_spawned_member(
     broadcast_swarm_status(swarm_id, swarm_members, swarms_by_id).await;
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
-)]
 /// Resolve the reasoning effort for a spawned swarm worker (#1165).
 ///
 /// Precedence mirrors the model path: an explicit `effort` on the spawn call
@@ -574,6 +570,10 @@ pub(super) fn resolve_swarm_spawn_effort(
     clean(requested_effort).or_else(|| clean(configured_swarm_effort))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "server-side swarm spawning needs session, swarm state, provider, and event sinks together"
+)]
 pub(super) async fn spawn_swarm_agent(
     req_session_id: &str,
     swarm_id: &str,

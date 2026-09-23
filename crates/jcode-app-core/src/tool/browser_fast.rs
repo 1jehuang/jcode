@@ -104,9 +104,14 @@ fn redact_credentials(value: &mut Value) -> bool {
                 false
             }
         }
-        Value::Array(items) => items
-            .iter_mut()
-            .fold(false, |found, item| redact_credentials(item) || found),
+        Value::Array(items) => {
+            // Visit every item: redaction mutates in place, so do not short-circuit.
+            let mut found = false;
+            for item in items.iter_mut() {
+                found |= redact_credentials(item);
+            }
+            found
+        }
         Value::Object(items) => items.iter_mut().fold(false, |found, (key, item)| {
             let key = key.to_ascii_lowercase().replace('-', "_");
             if matches!(
