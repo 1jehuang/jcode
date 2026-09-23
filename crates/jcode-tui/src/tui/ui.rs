@@ -1523,6 +1523,8 @@ pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
 }
 
 /// The prepared transcript frame the renderer last drew, if any.
+// First production consumer lands in epic #1411 phase 4/5a.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
     #[cfg(test)]
     {
