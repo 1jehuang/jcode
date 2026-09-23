@@ -127,11 +127,12 @@ impl Stream for AuthRetryStream {
             }
             match this.inner.poll_next_unpin(cx) {
                 Poll::Ready(Some(item)) => {
-                    if !this.saw_output && is_unauthorized_item(&item) {
-                        if let Some(retry) = this.retry.take() {
-                            this.pending = Some(retry());
-                            continue;
-                        }
+                    if !this.saw_output
+                        && is_unauthorized_item(&item)
+                        && let Some(retry) = this.retry.take()
+                    {
+                        this.pending = Some(retry());
+                        continue;
                     }
                     if let Ok(event) = &item
                         && produces_output(event)
