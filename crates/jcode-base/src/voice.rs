@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::{fmt, time::Duration};
 
 mod nari;
+pub mod timing;
 pub use nari::{
     NARI_PCM_CHUNK_SAMPLES, NARI_USD_PER_AUDIO_HOUR, NariEvent, NariSession,
     estimated_transcription_usd, nari_api_key, nari_pcm_channel, recognition_prompt,

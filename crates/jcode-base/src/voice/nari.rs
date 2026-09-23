@@ -111,6 +111,13 @@ pub fn nari_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) 
     mpsc::channel(16)
 }
 
+/// Microphone-owned channel. Holds 100 ms chunks for longer than the setup
+/// timeout so audio captured during the handshake is buffered, never dropped.
+#[cfg(feature = "voice-capture")]
+pub(super) fn capture_pcm_channel() -> (mpsc::Sender<Vec<i16>>, mpsc::Receiver<Vec<i16>>) {
+    mpsc::channel((IO_TIMEOUT.as_secs() as usize + 5) * 10)
+}
+
 pub(super) async fn cancelled(cancel: &AtomicBool) {
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -169,11 +176,15 @@ impl NariSession {
                 tokio_tungstenite::connect_async_with_config(request, Some(config), false)
                     .await
                     .map_err(handshake_error)?;
+            super::timing::mark("nari websocket connected");
             send(&mut socket, json!({"type":"session.configure", "session":{"model":"qwen3-asr-fast", "turn_detection":null, "language":"en", "prompt":prompt}})).await?;
             loop {
                 let event = receive(&mut socket).await?;
                 match event["type"].as_str() {
-                    Some("session.configured") => return Ok(socket),
+                    Some("session.configured") => {
+                        super::timing::mark("nari session configured");
+                        return Ok(socket);
+                    }
                     Some("error") => return Err(provider_error(&event)),
                     _ => {}
                 }
@@ -185,18 +196,6 @@ impl NariSession {
             result = timeout(IO_TIMEOUT, setup) => result.map_err(|_| VoiceError::Timeout)??,
         };
         Ok(Self { socket, cancel })
-    }
-
-    // Supervise provider failures while native permission/setup is in progress.
-    #[cfg(feature = "voice-capture")]
-    pub(super) async fn wait_for_error(&mut self) -> VoiceError {
-        loop {
-            match receive(&mut self.socket).await {
-                Ok(event) if event["type"] == "error" => return provider_error(&event),
-                Ok(_) => {}
-                Err(error) => return error,
-            }
-        }
     }
 
     /// Stream bounded PCM from any source. Callback must be fast and nonblocking.
@@ -229,6 +228,9 @@ impl NariSession {
         let sender = async move {
             let mut samples = 0usize;
             while let Some(chunk) = pcm.recv().await {
+                if samples == 0 {
+                    super::timing::mark("first audio chunk sent to nari");
+                }
                 if chunk.is_empty() || chunk.len() > NARI_PCM_CHUNK_SAMPLES {
                     return Err(VoiceError::InvalidAudio);
                 }
@@ -252,6 +254,7 @@ impl NariSession {
         };
         tokio::pin!(sender);
         let mut sent = false;
+        let mut first_text = false;
         let mut state = TranscriptState::default();
         // Capture owns its normal five-minute stop. Allow queued PCM and filter
         // tail to drain rather than racing that stop with a network timeout.
@@ -267,6 +270,7 @@ impl NariSession {
                 incoming = receive(&mut source) => {
                     let incoming = incoming?;
                     if state.apply(&incoming, stopping.load(Ordering::SeqCst))? {
+                        if !first_text { first_text = true; super::timing::mark("first transcript revision"); }
                         event(NariEvent::Transcript(state.text()));
                     }
                     if stopping.load(Ordering::SeqCst) && state.end_ack && state.pending.is_empty() { return Ok(state.text()); }

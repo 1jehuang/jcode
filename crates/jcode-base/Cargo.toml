@@ -160,3 +160,7 @@ global-hotkey = "0.7"
 jcode-provider-openrouter-runtime = { path = "../jcode-provider-openrouter-runtime" }
 # Paused-time (auto-advancing virtual clock) tests for the background stall watchdog.
 tokio = { version = "1", features = ["test-util"] }
+
+[[example]]
+name = "voice_startup_profile"
+required-features = ["voice-capture"]

@@ -34,7 +34,7 @@ impl PcmRecording {
         if cancel.load(Ordering::SeqCst) {
             return Err(VoiceError::Cancelled);
         }
-        let (tx, rx) = nari_pcm_channel();
+        let (tx, rx) = super::nari::capture_pcm_channel();
         let (ready, started) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let level = Arc::new(AtomicU32::new(0));
@@ -116,6 +116,8 @@ struct Chunker {
     tx: tokio::sync::mpsc::Sender<Vec<i16>>,
     failed: bool,
     samples: usize,
+    first_callback: bool,
+    first_voice: bool,
 }
 impl Chunker {
     fn push<T>(&mut self, data: &[T], channels: usize)
@@ -125,6 +127,10 @@ impl Chunker {
     {
         if self.failed {
             return;
+        }
+        if !self.first_callback {
+            self.first_callback = true;
+            super::timing::mark("first microphone callback");
         }
         let mut energy = 0.0f64;
         let mut frames = 0usize;
@@ -165,6 +171,10 @@ impl Chunker {
         } else {
             (energy / frames as f64).sqrt() as f32
         };
+        if !self.first_voice && rms > 0.02 {
+            self.first_voice = true;
+            super::timing::mark("first audible input (rms > 0.02)");
+        }
         self.level
             .store(rms.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
@@ -232,12 +242,14 @@ fn capture(
     if cancel.load(Ordering::SeqCst) {
         return Err(VoiceError::Cancelled);
     }
+    super::timing::mark("capture thread started");
     let device = cpal::default_host()
         .default_input_device()
         .ok_or(VoiceError::MicrophoneUnavailable)?;
     let supported = device
         .default_input_config()
         .map_err(|_| VoiceError::MicrophoneUnavailable)?;
+    super::timing::mark("microphone device opened");
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     if config.channels == 0 {
@@ -250,6 +262,8 @@ fn capture(
         tx,
         failed: false,
         samples: 0,
+        first_callback: false,
+        first_voice: false,
     }));
     macro_rules! build {
         ($t:ty) => {
@@ -272,11 +286,28 @@ fn capture(
     if cancel.load(Ordering::SeqCst) {
         return Err(VoiceError::Cancelled);
     }
+    super::timing::mark("input stream built");
     stream
         .play()
         .map_err(|_| VoiceError::MicrophoneUnavailable)?;
-    if cancel.load(Ordering::SeqCst) {
-        return Err(VoiceError::Cancelled);
+    super::timing::mark("input stream playing");
+    // PipeWire can take hundreds of ms to deliver the first buffer after a cold
+    // start. Report ready only once audio flows, so the recording indicator never
+    // precedes capture. Bounded so a quiet device still starts.
+    let first_audio_deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(VoiceError::Cancelled);
+        }
+        let state = state.lock().map_err(|_| VoiceError::CaptureFailed)?;
+        if state.failed {
+            return Err(VoiceError::CaptureFailed);
+        }
+        if state.first_callback || std::time::Instant::now() >= first_audio_deadline {
+            break;
+        }
+        drop(state);
+        thread::sleep(Duration::from_millis(2));
     }
     let _ = ready.send(Ok(()));
     let deadline = std::time::Instant::now() + MAX_RECORDING_DURATION;
@@ -327,7 +358,8 @@ impl Events {
     }
 }
 /// Unified network + microphone operation. Constructors block, all handle methods
-/// and Drop are nonblocking. Capture begins only after session.configured.
+/// and Drop are nonblocking. Capture starts at once and PCM is buffered until
+/// session.configured, so speech during the handshake is kept.
 pub struct NariRecording {
     cancel: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -375,28 +407,39 @@ impl NariRecording {
                         .build()
                         .map_err(|_| VoiceError::CaptureFailed)?;
                     let result = runtime.block_on(async {
-                        let mut session = NariSession::connect_to(&url, &key, c.clone()).await?;
-                        drop(key);
+                        super::timing::mark("nari worker started");
+                        // The press is the consent to record. Open the microphone
+                        // while the provider handshake is in flight and buffer PCM
+                        // until it is configured, so the first words are never lost.
+                        let connect = tokio::spawn({
+                            let c = c.clone();
+                            async move { NariSession::connect_to(&url, &key, c).await }
+                        });
                         let setup_cancel = Arc::new(AtomicBool::new(false));
                         let factory_cancel = setup_cancel.clone();
                         let (mic, pcm) = tokio::select! {
                             biased;
                             _ = super::nari::cancelled(&c) => { setup_cancel.store(true, Ordering::SeqCst); return Err(VoiceError::Cancelled); },
-                            error = session.wait_for_error() => { setup_cancel.store(true, Ordering::SeqCst); return Err(error); },
                             result = tokio::task::spawn_blocking(move || factory(factory_cancel)) => result.map_err(|_|VoiceError::CaptureFailed)??,
                         };
                         let _ = level_tx.send(mic.level.clone());
+                        super::timing::mark("recording ready (ui switches to recording)");
                         let _ = ready.send(Ok(()));
+                        // Forward release even while still connecting. Buffered
+                        // audio then drains and commits once the session is up.
                         let mic_stop = mic.stop.clone();
-                        let forward_stop = async {
+                        let stop_signal = s.clone();
+                        tokio::spawn(async move {
                             loop {
-                                if s.load(Ordering::SeqCst) {
+                                if stop_signal.load(Ordering::SeqCst) {
                                     mic_stop.store(true, Ordering::SeqCst);
                                     return;
                                 }
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
-                        };
+                        });
+                        // Dropping `mic` on failure cancels the unfinished capture.
+                        let session = connect.await.map_err(|_| VoiceError::CaptureFailed)??;
                         let stream = session.run(pcm, |event| {
                             if !matches!(event, NariEvent::Finished(_)) {
                                 if let Ok(mut events) = e.lock() {
@@ -404,10 +447,7 @@ impl NariRecording {
                                 }
                             }
                         });
-                        tokio::pin!(stream);
-                        tokio::pin!(forward_stop);
-                        let result =
-                            tokio::select! {r=&mut stream=>r,_=&mut forward_stop=>stream.await};
+                        let result = stream.await;
                         mic.stop();
                         // Native stream is owned by its capture thread, never the UI.
                         let capture = mic.finish();
@@ -485,6 +525,8 @@ mod tests {
             tx,
             failed: false,
             samples: 0,
+            first_callback: false,
+            first_voice: false,
         }
     }
     fn level(c: &Chunker) -> f32 {
@@ -581,6 +623,8 @@ mod tests {
             tx,
             failed: false,
             samples: 0,
+            first_callback: false,
+            first_voice: false,
         };
         c.push(&vec![0.5f32; 48000 * 2], 2);
         let mut count = 0;
@@ -668,7 +712,7 @@ mod tests {
         )
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn orchestration_waits_for_configured_then_releases_on_network_error() {
+    async fn orchestration_opens_capture_during_handshake_then_releases_on_network_error() {
         use futures::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -693,15 +737,16 @@ mod tests {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
         ws.next().await.unwrap().unwrap();
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        assert!(!opened.load(Ordering::SeqCst));
+        // Speech during the handshake must be captured, so the microphone and
+        // the recording handle are both live before session.configured.
+        let recording = starting.await.unwrap().unwrap();
+        assert!(opened.load(Ordering::SeqCst));
+        assert!(!recording.is_finished());
         ws.send(Message::Text(
             serde_json::json!({"type":"session.configured"}).to_string(),
         ))
         .await
         .unwrap();
-        let recording = starting.await.unwrap().unwrap();
-        assert!(opened.load(Ordering::SeqCst));
         assert_eq!(recording.audio_level(), 0.375);
         ws.send(Message::Text(
             serde_json::json!({"type":"error","error":{"message":"never expose this"}}).to_string(),
@@ -727,14 +772,16 @@ mod tests {
         assert_eq!(finished, 1);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn orchestration_setup_error_never_opens_capture() {
+    async fn orchestration_setup_error_releases_capture_and_reports_provider_error() {
         use futures::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::Message;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
+        let released = Arc::new(AtomicBool::new(false));
+        let r = released.clone();
         let starting = tokio::task::spawn_blocking(move || {
-            NariRecording::start_with(Arc::new(AtomicBool::new(false)), "test", &url, |_| {
-                panic!("must not open capture")
+            NariRecording::start_with(Arc::new(AtomicBool::new(false)), "test", &url, move |c| {
+                Ok(fake_capture(c, r))
             })
         });
         let (tcp, _) = listener.accept().await.unwrap();
@@ -745,10 +792,25 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert!(matches!(
-            starting.await.unwrap(),
-            Err(VoiceError::NariCreditsExhausted)
-        ));
+        let recording = starting.await.unwrap().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(NariEvent::Finished(result)) = recording.try_event() {
+                    return result;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Err(VoiceError::NariCreditsExhausted));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !released.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
     #[test]
     fn filter_tail_never_exceeds_duration_cap() {
@@ -761,6 +823,8 @@ mod tests {
                 tx,
                 failed: false,
                 samples: 0,
+                first_callback: false,
+                first_voice: false,
             };
             c.push(&vec![0.2f32; rate as usize / 5], 1);
             let cap = c.samples;
@@ -785,6 +849,8 @@ mod tests {
             tx,
             failed: false,
             samples: cap - 1,
+            first_callback: false,
+            first_voice: false,
         };
         c.push(&[0.5f32; 100], 1);
         assert_eq!(c.samples, cap);
