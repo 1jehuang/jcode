@@ -35,7 +35,8 @@ mod vendor_files;
 /// call sites can read a card without reaching into `config`.
 pub use crate::config::CostFields;
 pub use call_rates::{
-    CallRateCard, ConfigCallRates, PricingNotice, config_call_rates, vendor_file_rule_out_of_effect,
+    CallRateCard, ConfigCallRates, PricingNotice, call_cost, config_call_rates,
+    vendor_file_rule_out_of_effect,
 };
 pub use catalog::ModelCost;
 pub use entry::{ModelPricingEntry, RuleOutOfEffect};

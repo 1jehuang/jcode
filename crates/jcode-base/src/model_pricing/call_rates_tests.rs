@@ -409,3 +409,102 @@ windows = [["01:00", "04:00"]]
         );
     });
 }
+
+#[test]
+fn call_cost_prices_a_configured_card_with_the_client_math() {
+    // The server resolves a remote call's cost with the same math the client
+    // uses, so the reported figure matches what the client would have billed.
+    let config = r#"
+[pricing.providers.deepseek.models."deepseek-v4-pro".cost]
+input = 1.0
+output = 2.0
+"#;
+    with_pricing_env(config, &[], || {
+        let (amount, currency) = super::call_cost(
+            "deepseek",
+            "deepseek-v4-pro",
+            SystemTime::now(),
+            None,
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+            false,
+            false,
+        )
+        .expect("a configured card prices the call");
+        assert!(
+            (amount - 3.0).abs() < 1e-9,
+            "1M input + 1M output at $1/$2 per Mtok is $3.00, got {amount}"
+        );
+        assert_eq!(currency, Currency::new("USD"));
+    });
+}
+
+#[test]
+fn call_cost_reads_the_tariff_in_effect_at_the_call_instant() {
+    // A peak/off-peak card is resolved at the call's own instant (F15): the
+    // same call priced one second apart bills the tariff in force at `at`.
+    with_pricing_env(PEAK_CARD_CONFIG, &[], || {
+        let (off_peak, _) = super::call_cost(
+            "deepseek",
+            "deepseek-v4-pro",
+            instant(ONE_SECOND_BEFORE_PEAK),
+            None,
+            1_000_000,
+            0,
+            0,
+            0,
+            false,
+            false,
+        )
+        .expect("off-peak instant is priced");
+        assert!(
+            (off_peak - 1.0).abs() < 1e-9,
+            "off-peak input is $1.00/Mtok, got {off_peak}"
+        );
+
+        let (peak, _) = super::call_cost(
+            "deepseek",
+            "deepseek-v4-pro",
+            instant(INSIDE_PEAK),
+            None,
+            1_000_000,
+            0,
+            0,
+            0,
+            false,
+            false,
+        )
+        .expect("peak instant is priced");
+        assert!(
+            (peak - 10.0).abs() < 1e-9,
+            "the peak tariff is 10x off-peak, so input is $10.00/Mtok, got {peak}"
+        );
+    });
+}
+
+#[test]
+fn call_cost_is_none_when_no_layer_can_price_the_call() {
+    // A card that claims the model but cannot price the call must yield no
+    // server figure at all: the client then keeps its own fallback instead of
+    // reporting a number the server invented (spec 4.4).
+    with_pricing_env(HALF_WRITTEN_CNY_CARD_CONFIG, &[], || {
+        assert!(
+            super::call_cost(
+                "deepseek",
+                "deepseek-v4-pro",
+                SystemTime::now(),
+                None,
+                1,
+                1,
+                0,
+                0,
+                false,
+                false,
+            )
+            .is_none(),
+            "an incomplete foreign-currency card must not be priced"
+        );
+    });
+}
