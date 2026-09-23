@@ -163,3 +163,31 @@ fn user_scroll_supersedes_a_pending_resize_anchor() {
         "a user scroll wins over the pending correction"
     );
 }
+
+#[test]
+fn resuming_the_tail_drops_a_pending_resize_anchor() {
+    // The anchor describes a reading position. Resuming bottom-follow must not
+    // leave the viewport pinned to it.
+    let _lock = scroll_render_test_lock();
+    crate::perf::pin_full_profile_for_tests();
+
+    let mut app = anchored_scroll_test_app();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    render_and_snap(&app, &mut terminal);
+    app.scroll_up(20);
+    render_and_snap(&app, &mut terminal);
+
+    assert!(app.should_redraw_after_resize());
+    assert!(app.pending_resize_anchor.is_some());
+
+    app.follow_chat_bottom();
+    assert!(app.pending_resize_anchor.is_none());
+
+    let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
+    render_and_snap(&app, &mut narrow);
+    assert_eq!(
+        crate::tui::ui::last_resolved_chat_scroll(),
+        crate::tui::ui::last_max_scroll(),
+        "resuming the tail must land at the bottom, not the anchored message"
+    );
+}
