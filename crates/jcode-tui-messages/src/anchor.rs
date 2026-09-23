@@ -9,8 +9,14 @@
 //!
 //! Identity is the [`MessageBoundary::msg_hash`] already carried by the frame,
 //! plus an occurrence index to disambiguate messages with identical content.
-//! A content hash survives a reflow, and the occurrence index only matters for
-//! exact duplicates.
+//!
+//! Ceiling: the occurrence is an ordinal counted from the start of *one* frame.
+//! A content hash survives a reflow, but inserting messages above the anchor
+//! (older compacted history being prepended) renumbers that ordinal, so an
+//! anchor held across a prepend can name an older duplicate instead of the
+//! message it was captured on. Callers must not carry an anchor across a
+//! prepend; that path has its own distance-from-bottom anchor, which is
+//! invariant under a top-side insert.
 
 use crate::prepared::PreparedChatFrame;
 
