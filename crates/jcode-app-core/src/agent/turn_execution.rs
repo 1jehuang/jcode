@@ -21,6 +21,18 @@ impl Agent {
 
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
+        self.run_once_with_optional_hook_banner(user_message, true).await
+    }
+
+    /// Shared implementation for the non-streaming turn entries. When
+    /// `with_hook_banner` is set, the turn_start hook runs synchronously and
+    /// its stdout is folded into the turn's system reminder (same behavior as
+    /// the streaming entry point).
+    async fn run_once_with_optional_hook_banner(
+        &mut self,
+        user_message: &str,
+        print_output: bool,
+    ) -> Result<()> {
         self.announce_late_mcp_tools().await;
         self.announce_late_skills();
         let input_id = self.add_message(
@@ -37,7 +49,21 @@ impl Agent {
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
         }
-        let _ = self.run_turn(true).await?;
+        // Fire the turn_start hook and fold its stdout into this turn's system
+        // reminder (same as the streaming entry point), so non-streaming
+        // consumers (`jcode run`, ambient cycles, debug exec) also see
+        // hook-emitted context such as alert banners.
+        let hook_output = crate::hooks::run_turn_start_collecting();
+        if let Some(text) = hook_output {
+            let banner = format!("[HOOK TURN_START]\n{}", text);
+            self.current_turn_system_reminder = Some(match self.current_turn_system_reminder.take() {
+                Some(existing) if !existing.trim().is_empty() => {
+                    format!("{}\n\n{}", existing, banner)
+                }
+                _ => banner,
+            });
+        }
+        self.run_turn(print_output).await?;
         Ok(())
     }
 
