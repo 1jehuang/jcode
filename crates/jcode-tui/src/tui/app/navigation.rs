@@ -900,7 +900,11 @@ impl App {
         }
     }
 
-    fn apply_mouse_scroll_step(&mut self, target: MouseScrollTarget, direction: i16) -> bool {
+    pub(super) fn apply_mouse_scroll_step(
+        &mut self,
+        target: MouseScrollTarget,
+        direction: i16,
+    ) -> bool {
         match target {
             MouseScrollTarget::Chat => {
                 if direction < 0 {
