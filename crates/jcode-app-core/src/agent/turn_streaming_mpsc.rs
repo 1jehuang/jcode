@@ -135,6 +135,7 @@ impl Agent {
                     repaired
                 ));
             }
+            self.maybe_repromote_after_fallback(&event_tx);
             // Start provider transport setup before deriving and potentially
             // compacting the request history. This is the first point where the
             // stable request settings are available.
@@ -1120,6 +1121,22 @@ impl Agent {
                     "Provider switched model mid-request: '{}' -> '{}' (resyncing session/UI)",
                     model_at_request_start, model_after_stream
                 ));
+                // Remember the model we were demoted from so later turns can
+                // probe it again once it recovers (issue: sticky fallback
+                // never re-promotes). Keep the oldest preferred model when
+                // fallbacks cascade (A -> B -> C should retry A, not B).
+                let preferred = self
+                    .fallback_repromotion
+                    .take()
+                    .map(|pending| pending.preferred_model)
+                    .unwrap_or_else(|| model_at_request_start.clone());
+                if preferred != model_after_stream {
+                    self.fallback_repromotion = Some(super::FallbackRepromotion {
+                        preferred_model: preferred,
+                        selection_generation: self.provider_runtime_state.selection_generation(),
+                        next_attempt_at: Instant::now() + super::FALLBACK_REPROMOTE_COOLDOWN,
+                    });
+                }
                 self.session.model = Some(self.provider_model());
                 self.provider_runtime_state.apply(
                     crate::provider::ProviderStateEvent::RuntimeModelObserved {
@@ -1134,6 +1151,16 @@ impl Agent {
                     error: None,
                     resolved_credential: self.provider.active_resolved_credential(),
                 });
+            } else if let Some(pending) = &self.fallback_repromotion
+                && model_after_stream == pending.preferred_model
+            {
+                // A full stream completed on the preferred model: the earlier
+                // outage is over and the re-promotion is done.
+                logging::info(&format!(
+                    "Model '{}' recovered after earlier fallback; re-promotion complete",
+                    model_after_stream
+                ));
+                self.fallback_repromotion = None;
             }
 
             let had_tool_calls_before = !tool_calls.is_empty();
@@ -1733,6 +1760,78 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    /// Retry the preferred model after a provider-initiated fallback.
+    ///
+    /// Providers demote sticky-downward when a model is transiently
+    /// unavailable (e.g. Gemini NOT_FOUND fallback chains, Anthropic
+    /// retired-model fallback) and nothing ever moves the session back up.
+    /// This re-selects the pre-demotion model on a cooldown so the next
+    /// request probes it. If it is still down, the provider's normal
+    /// in-stream fallback serves the request and the mid-stream switch
+    /// detection re-arms this probe. A manual user model selection made
+    /// after the demotion cancels the re-promotion.
+    fn maybe_repromote_after_fallback(&mut self, event_tx: &mpsc::UnboundedSender<ServerEvent>) {
+        let Some(pending) = self.fallback_repromotion.clone() else {
+            return;
+        };
+        if self
+            .provider_runtime_state
+            .user_selected_after(pending.selection_generation)
+        {
+            // The user picked a model after the demotion; their choice wins.
+            self.fallback_repromotion = None;
+            return;
+        }
+        if self.provider.model() == pending.preferred_model {
+            self.fallback_repromotion = None;
+            return;
+        }
+        if Instant::now() < pending.next_attempt_at {
+            return;
+        }
+        logging::info(&format!(
+            "Probing recovered availability of '{}' after earlier fallback to '{}'",
+            pending.preferred_model,
+            self.provider.model()
+        ));
+        match crate::provider::set_model_with_auth_refresh(
+            self.provider.as_ref(),
+            &pending.preferred_model,
+        ) {
+            Ok(()) => {
+                let resolved = self.provider.model();
+                self.session.model = Some(self.provider_model());
+                self.provider_runtime_state.apply(
+                    crate::provider::ProviderStateEvent::RuntimeModelObserved {
+                        model: resolved.clone(),
+                    },
+                );
+                // Push the cooldown forward so a failed probe (which falls
+                // back mid-stream again and re-arms) does not retry every
+                // turn.
+                if let Some(pending) = self.fallback_repromotion.as_mut() {
+                    pending.next_attempt_at = Instant::now() + super::FALLBACK_REPROMOTE_COOLDOWN;
+                }
+                let _ = event_tx.send(ServerEvent::ModelChanged {
+                    id: 0,
+                    model: resolved,
+                    provider_name: Some(self.provider.display_name()),
+                    error: None,
+                    resolved_credential: self.provider.active_resolved_credential(),
+                });
+            }
+            Err(err) => {
+                logging::info(&format!(
+                    "Re-promotion to '{}' rejected locally ({}); will retry later",
+                    pending.preferred_model, err
+                ));
+                if let Some(pending) = self.fallback_repromotion.as_mut() {
+                    pending.next_attempt_at = Instant::now() + super::FALLBACK_REPROMOTE_COOLDOWN;
+                }
+            }
+        }
     }
 }
 

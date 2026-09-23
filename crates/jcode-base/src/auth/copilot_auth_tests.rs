@@ -375,6 +375,47 @@ fn choose_default_model_empty_list() {
 }
 
 #[test]
+fn choose_default_model_prefers_newest_opus_version() {
+    let mk = |id: &str| CopilotModelInfo {
+        id: id.to_string(),
+        name: String::new(),
+        vendor: String::new(),
+        version: String::new(),
+        model_picker_enabled: false,
+        capabilities: Default::default(),
+    };
+    // A newer opus published in the catalog must win without a code change.
+    let models = vec![
+        mk("claude-opus-4.6"),
+        mk("claude-opus-5"),
+        mk("claude-sonnet-4.6"),
+    ];
+    assert_eq!(choose_default_model(&models), "claude-opus-5");
+    // Multi-part versions compare numerically, not lexically (4.10 > 4.6).
+    let models = vec![mk("claude-opus-4.6"), mk("claude-opus-4.10")];
+    assert_eq!(choose_default_model(&models), "claude-opus-4.10");
+}
+
+#[test]
+fn choose_default_model_ignores_variant_suffixes() {
+    let mk = |id: &str| CopilotModelInfo {
+        id: id.to_string(),
+        name: String::new(),
+        vendor: String::new(),
+        version: String::new(),
+        model_picker_enabled: false,
+        capabilities: Default::default(),
+    };
+    // Non-numeric variants must never become the silent default.
+    let models = vec![
+        mk("claude-opus-4.6-fast"),
+        mk("claude-opus-4.5"),
+        mk("claude-sonnet-4.6"),
+    ];
+    assert_eq!(choose_default_model(&models), "claude-opus-4.5");
+}
+
+#[test]
 fn copilot_account_type_display() {
     assert_eq!(CopilotAccountType::Individual.to_string(), "individual");
     assert_eq!(CopilotAccountType::Business.to_string(), "business");

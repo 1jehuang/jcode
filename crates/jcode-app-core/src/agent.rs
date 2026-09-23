@@ -180,6 +180,29 @@ struct RewindUndoSnapshot {
     visible_message_count: usize,
 }
 
+/// Pending upward re-promotion after a provider-initiated model fallback.
+///
+/// When a provider transparently downgrades mid-request (e.g. Gemini's
+/// NOT_FOUND fallback chain or Anthropic's retired-model fallback), the
+/// switch is sticky: nothing ever moves the session back up once the
+/// preferred model recovers. This records the model the session was on
+/// before the demotion so the agent can periodically retry it. A manual
+/// model selection by the user cancels the re-promotion.
+#[derive(Debug, Clone)]
+struct FallbackRepromotion {
+    /// The model the session was demoted from.
+    preferred_model: String,
+    /// Selection generation at demotion time; a later user selection wins.
+    selection_generation: u64,
+    /// Earliest instant to retry the preferred model.
+    next_attempt_at: Instant,
+}
+
+/// Cooldown between upward re-promotion probes. A failed probe costs nothing
+/// user-visible (the provider's in-stream fallback serves the request), so a
+/// short fixed interval is enough.
+const FALLBACK_REPROMOTE_COOLDOWN: Duration = Duration::from_secs(300);
+
 pub struct Agent {
     provider: Arc<dyn Provider>,
     registry: Registry,
@@ -264,6 +287,9 @@ pub struct Agent {
     /// One logical runtime session, independent of the process-global legacy
     /// telemetry slot and of any TUI clients viewing this agent.
     concurrency_session: Option<crate::telemetry::ConcurrencySession>,
+    /// Pending upward retry of a model the provider transparently fell back
+    /// from mid-request. `None` when the session is on its preferred model.
+    fallback_repromotion: Option<FallbackRepromotion>,
 }
 
 impl Agent {
@@ -339,6 +365,7 @@ impl Agent {
             inline_tail: inline_tail::InlineTailBuffer::default(),
             transcript_telemetry_sent: false,
             concurrency_session: None,
+            fallback_repromotion: None,
         }
     }
 

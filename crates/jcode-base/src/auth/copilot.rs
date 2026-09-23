@@ -934,18 +934,40 @@ pub async fn fetch_available_models(
 }
 
 /// Determine the best default model based on available models.
-/// - If claude-opus-4.6 is available -> paid tier -> use claude-opus-4.6
-/// - Otherwise -> free/basic tier -> use claude-sonnet-4.6 or claude-sonnet-4
+///
+/// Version-aware rather than hardcoded to one release: the highest-versioned
+/// `claude-opus-*` wins (paid tier), then the highest `claude-sonnet-*`
+/// (free/basic tier), so a newer model published in the live `/models`
+/// catalog becomes the default without a code change. Falls back to
+/// `claude-sonnet-4` when the catalog lists no Claude models at all.
 pub fn choose_default_model(available_models: &[CopilotModelInfo]) -> String {
-    let model_ids: Vec<&str> = available_models.iter().map(|m| m.id.as_str()).collect();
-
-    if model_ids.contains(&"claude-opus-4.6") {
-        "claude-opus-4.6".to_string()
-    } else if model_ids.contains(&"claude-sonnet-4.6") {
-        "claude-sonnet-4.6".to_string()
-    } else {
-        "claude-sonnet-4".to_string()
+    for family in ["claude-opus-", "claude-sonnet-"] {
+        if let Some(best) = available_models
+            .iter()
+            .map(|m| m.id.as_str())
+            .filter(|id| {
+                // Plain numeric releases only: variants like `-fast` or
+                // `-thought` have different cost/latency profiles and should
+                // never become the silent default.
+                id.strip_prefix(family).is_some_and(|version| {
+                    !version.is_empty()
+                        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+                })
+            })
+            .max_by(|a, b| {
+                let parse = |id: &str| -> Vec<u64> {
+                    id[family.len()..]
+                        .split('.')
+                        .map(|part| part.parse::<u64>().unwrap_or(0))
+                        .collect()
+                };
+                parse(a).cmp(&parse(b))
+            })
+        {
+            return best.to_string();
+        }
     }
+    "claude-sonnet-4".to_string()
 }
 
 /// Fetch the authenticated GitHub username using an OAuth token.
