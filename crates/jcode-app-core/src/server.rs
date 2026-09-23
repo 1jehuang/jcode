@@ -2303,6 +2303,14 @@ impl Server {
             )),
         }
 
+        let (pruned_active_pids, failed_active_pids) =
+            crate::storage::prune_active_pids_owned_by(std::process::id());
+        if pruned_active_pids + failed_active_pids > 0 {
+            crate::logging::info(&format!(
+                "Pruned {pruned_active_pids} stale active-pid marker(s); {failed_active_pids} could not be removed"
+            ));
+        }
+
         // Restrict socket files to owner-only so other local users cannot connect.
         let _ = crate::platform::set_permissions_owner_only(&self.socket_path);
         let _ = crate::platform::set_permissions_owner_only(&self.debug_socket_path);
