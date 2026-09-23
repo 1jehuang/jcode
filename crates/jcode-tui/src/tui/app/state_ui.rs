@@ -632,17 +632,39 @@ impl App {
         })
     }
 
-    /// Toggle scroll bookmark: stash current position and jump to bottom,
-    /// or restore stashed position if already at bottom.
+    /// Toggle scroll bookmark: stash the current reading position and jump to
+    /// the bottom, or return to it if a bookmark is already set.
+    ///
+    /// The stashed position is an [`jcode_tui_messages::Anchor`], so returning
+    /// resolves it against the frame being drawn instead of replaying a wrapped
+    /// line index that a resize may have invalidated.
     pub(super) fn toggle_scroll_bookmark(&mut self) {
         if let Some(saved) = self.scroll_bookmark.take() {
             // We have a bookmark - teleport back to it
-            self.scroll_offset = saved;
-            self.auto_scroll_paused = saved > 0;
-            self.set_status_notice("📌 Returned to bookmark");
+            let row = crate::tui::ui::last_chat_frame().and_then(|frame| {
+                jcode_tui_messages::resolve(&saved, &frame, crate::tui::ui::last_max_scroll())
+            });
+            match row {
+                Some(row) => {
+                    self.scroll_offset = row;
+                    self.auto_scroll_paused = true;
+                    self.set_status_notice("📌 Returned to bookmark");
+                }
+                // The bookmarked message is gone (pruned or compacted away):
+                // keep the reader where they are instead of guessing.
+                None => self.set_status_notice("📌 Bookmark is no longer in the transcript"),
+            }
         } else if self.auto_scroll_paused && self.scroll_offset > 0 {
             // We're scrolled up - save position and jump to bottom
-            self.scroll_bookmark = Some(self.scroll_offset);
+            let Some(anchor) = crate::tui::ui::last_chat_frame().and_then(|frame| {
+                jcode_tui_messages::anchor_at_row(
+                    &frame,
+                    crate::tui::ui::last_resolved_chat_scroll(),
+                )
+            }) else {
+                return;
+            };
+            self.scroll_bookmark = Some(anchor);
             self.follow_chat_bottom();
             self.set_status_notice("📌 Bookmark set - press again to return");
         }
