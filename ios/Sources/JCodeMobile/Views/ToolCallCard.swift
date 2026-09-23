@@ -9,7 +9,8 @@ import SwiftUI
 /// `ToolCallSummary` (unit tested, streaming-tolerant).
 struct ToolCallCard: View {
     let call: TranscriptEntry.ToolCall
-    @State private var expanded = false
+    // `-jcodeExpandTools YES` starts rows expanded (screenshot tooling only).
+    @State private var expanded = UserDefaults.standard.bool(forKey: "jcodeExpandTools")
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {

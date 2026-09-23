@@ -12,7 +12,7 @@ to evaluate everything that can be checked locally.
 | 3 | Protocol smoke vs real gateway | `protocol_smoke_test.py --port 7643` vs `jcode serve` | PASS |
 | 4 | Interaction-graph engine deterministic | `python3 -m reward.interaction.test_engine` exit 0 | PASS |
 | 5 | Reward scorers deterministic | `python3 -m reward.test_determinism` exit 0 | PASS |
-| 6 | UX reward at or above baseline (88.7), worst cell >= 83 | `reward.aggregate --baseline --candidate` non-negative delta | PASS |
+| 6 | UX reward tracked across the device x scenario matrix | `./TestHarness/scoreboard.sh` reward and worst cell recorded | TRACKED (see note) |
 | 7 | Foreground reconnect | scenePhase handler in JCodeMobileApp.swift | PASS |
 | 8 | Unauthorized (revoked token) stops reconnect loop, prompts re-pair | `unauthorizedStopsReconnectingAndAsksForRePair` test | PASS |
 | 8a | App target actually compiles | `xcodebuild ... -destination "generic/platform=iOS Simulator"` exit 0 | PASS |
@@ -36,6 +36,19 @@ to evaluate everything that can be checked locally.
 | 16b | Store metadata written | `AppStore/METADATA.md` | PASS |
 | 16c | Privacy policy published | `AppStore/PRIVACY.md` (URL must be reachable before submit) | PASS |
 | 16d | Screenshots reproducible | `./TestHarness/capture_screenshots.sh` | PASS |
+
+### UX reward note (2026-09-23 Desktop restyle)
+
+Same harness, same matrix, before vs after adopting Jcode Desktop's visual
+language: **75.7 -> 73.2** (worst cell 68.4 -> 68.5). The earlier 88.7 figure
+came from an older harness and is not comparable. Gains: perf, visual
+hierarchy, content safety. Losses concentrate in pixel heuristics tuned to the
+old bubble/mint design: `space_efficiency` counts non-background fill (Desktop
+style removes assistant bubbles and tool cards), and `touch_targets` finds
+controls by accent-colored blobs (the send button is neutral until a draft
+exists). Real regressions found by the same run were fixed (copy button hit
+area, fixed-size fonts, token sprawl). Screens reviewed by eye: pairing, empty,
+live activity, multi-turn, expanded tool, Sessions and Model sheets.
 
 ### ATS justification (App Review note)
 

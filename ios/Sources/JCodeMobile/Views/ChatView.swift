@@ -76,6 +76,15 @@ struct ChatView: View {
         // The conversation is Desktop's raised page (PANEL_BG); sheets and
         // pairing sit on the canvas tone behind it.
         .background(Theme.surface.ignoresSafeArea())
+        .task {
+            // Screenshot tooling: `-jcodeOpen sessions|models` opens a sheet
+            // on launch so every screen is capturable without a UI driver.
+            switch UserDefaults.standard.string(forKey: "jcodeOpen") {
+            case "sessions": showSessions = true
+            case "models": showModelPicker = true
+            default: break
+            }
+        }
         .sheet(isPresented: $showSessions) {
             SessionsView()
         }
@@ -148,6 +157,7 @@ struct ChatView: View {
                             .truncationMode(.head)
                         Image(systemName: "chevron.down")
                             .font(.caption2.weight(.semibold))
+                            .imageScale(.small)
                             .foregroundStyle(Theme.textTertiary)
                             .accessibilityHidden(true)
                     }
