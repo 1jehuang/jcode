@@ -670,9 +670,7 @@ fn maybe_enable_compat_provider_for_auto() -> Result<bool> {
     if let Some(profile) = crate::provider_catalog::openai_compatible_profiles()
         .iter()
         .copied()
-        .find(|profile| {
-            crate::provider_catalog::openai_compatible_profile_is_configured(*profile)
-        })
+        .find(|profile| crate::provider_catalog::openai_compatible_profile_is_configured(*profile))
     {
         apply_openai_compatible_profile_env(Some(profile));
         return Ok(provider::openrouter::has_credentials());
