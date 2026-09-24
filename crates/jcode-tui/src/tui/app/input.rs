@@ -2760,6 +2760,25 @@ pub(super) fn handle_scroll_overlay_key(app: &mut App, code: KeyCode) -> Result<
     Ok(true)
 }
 
+/// Idle Ctrl+C/Ctrl+D: discard a pending draft (text and/or attached images)
+/// first and arm quit, so the next press exits. With nothing drafted, fall
+/// through to the normal quit confirmation. Shared by the local, remote and
+/// disconnected key handlers so every mode behaves the same.
+pub(super) fn clear_draft_or_request_quit(app: &mut App) {
+    if app.input.is_empty() && app.pending_images.is_empty() {
+        app.handle_quit_request();
+        return;
+    }
+    app.remember_input_undo_state();
+    app.input.clear();
+    app.pending_images.clear();
+    app.cursor_pos = 0;
+    app.reset_tab_completion();
+    app.sync_model_picker_preview_from_input();
+    app.quit_pending = Some(Instant::now());
+    app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
+}
+
 pub(super) fn handle_global_control_shortcuts(
     app: &mut App,
     code: KeyCode,
@@ -2783,18 +2802,8 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
-            } else if !app.input.is_empty() || !app.pending_images.is_empty() {
-                // First Ctrl+C: clear the input box and images
-                app.input.clear();
-                app.pending_images.clear();
-                app.cursor_pos = 0;
-                app.reset_tab_completion();
-                app.sync_model_picker_preview_from_input();
-                app.quit_pending = Some(std::time::Instant::now());
-                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
-                // Second Ctrl+C (input already empty): proceed with quit
-                app.handle_quit_request();
+                clear_draft_or_request_quit(app);
             }
             true
         }
