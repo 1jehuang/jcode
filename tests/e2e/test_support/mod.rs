@@ -71,6 +71,9 @@ impl TestEnvGuard {
         let temp_home = tempfile::Builder::new()
             .prefix("jcode-e2e-home-")
             .tempdir()?;
+        // No telemetry: a concurrency lease finishing at runtime shutdown otherwise recreates
+        // telemetry_concurrency_v2/ after the TempDir is removed, leaking one dir per test.
+        std::fs::write(temp_home.path().join("no_telemetry"), b"")?;
         let prev_home = std::env::var_os("JCODE_HOME");
         let prev_runtime_dir = std::env::var_os("JCODE_RUNTIME_DIR");
         let prev_test_session = std::env::var_os("JCODE_TEST_SESSION");
