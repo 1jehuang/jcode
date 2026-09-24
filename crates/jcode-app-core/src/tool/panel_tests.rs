@@ -42,6 +42,13 @@ async fn panel_registered_lifecycle_and_validation() {
         .expect("model-visible panel definition");
     assert!(definition.description.contains("desktop panels"));
     let mut events = crate::bus::Bus::global().subscribe();
+    // Another session's event may arrive before this test's panel write.
+    crate::bus::Bus::global().publish(crate::bus::BusEvent::SidePanelUpdated(
+        crate::bus::SidePanelUpdated {
+            session_id: "other-panel-test".into(),
+            snapshot: SidePanelSnapshot::default(),
+        },
+    ));
     let first = registry
         .execute(
             "panel",
