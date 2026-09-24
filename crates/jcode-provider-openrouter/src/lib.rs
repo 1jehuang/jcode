@@ -344,19 +344,25 @@ fn configured_cache_namespace() -> String {
     sanitize_cache_namespace(&raw)
 }
 
+/// Directory for every OpenRouter disk cache: `$JCODE_HOME/cache` when set, else `~/.jcode/cache`.
+/// One helper, so a sandboxed process (tests, self-dev) never writes a cache into the real home.
+fn cache_dir() -> PathBuf {
+    cache_dir_from(std::env::var("JCODE_HOME").ok(), dirs::home_dir())
+}
+
+fn cache_dir_from(jcode_home: Option<String>, home: Option<PathBuf>) -> PathBuf {
+    match jcode_home {
+        Some(path) => PathBuf::from(path).join("cache"),
+        None => home
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".jcode")
+            .join("cache"),
+    }
+}
+
 fn cache_path_for_namespace(namespace: &str) -> PathBuf {
     let namespace = sanitize_cache_namespace(namespace);
-    if let Ok(path) = std::env::var("JCODE_HOME") {
-        return PathBuf::from(path)
-            .join("cache")
-            .join(format!("{}_models.json", namespace));
-    }
-
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
-        .join("cache")
-        .join(format!("{}_models.json", namespace))
+    cache_dir().join(format!("{}_models.json", namespace))
 }
 
 fn cache_path() -> PathBuf {
@@ -554,11 +560,7 @@ fn save_disk_cache_with_source_to_path(
 fn endpoints_cache_path(model: &str) -> PathBuf {
     let safe_name = model.replace('/', "__");
     let namespace = configured_cache_namespace();
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".jcode")
-        .join("cache")
-        .join(format!("{}_endpoints_{}.json", namespace, safe_name))
+    cache_dir().join(format!("{}_endpoints_{}.json", namespace, safe_name))
 }
 
 pub fn load_endpoints_disk_cache_public(model: &str) -> Option<(Vec<EndpointInfo>, u64)> {
@@ -798,6 +800,22 @@ pub fn rank_providers_from_endpoints(endpoints: &[EndpointInfo]) -> Vec<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caches_resolve_under_jcode_home_when_it_is_set() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            cache_dir_from(Some("/sandbox".to_string()), home.clone()),
+            PathBuf::from("/sandbox/cache")
+        );
+        assert_eq!(
+            cache_dir_from(None, home),
+            PathBuf::from("/home/u/.jcode/cache")
+        );
+        // Both caches share the helper, so the endpoints cache cannot bypass JCODE_HOME again.
+        assert!(endpoints_cache_path("moonshotai/kimi-k2.5").starts_with(cache_dir()));
+        assert!(cache_path().starts_with(cache_dir()));
+    }
 
     #[test]
     fn parse_model_spec_handles_provider_aliases_and_auto() {
