@@ -727,3 +727,44 @@ fn remerge_keeps_swarm_and_compaction_boxes() {
         );
     }
 }
+
+/// Review #1456 (4): re-merge must not retire a split part and then lose the
+/// only Overview-sized pocket to a higher-priority widget (Diagrams). The
+/// retirement is only committed if Overview is actually placed.
+#[test]
+fn remerge_keeps_split_part_when_higher_priority_widget_takes_the_pocket() {
+    let mut data = model_and_context_data();
+    data.diagrams = vec![crate::tui::info_widget::DiagramInfo {
+        hash: 70,
+        width: 800,
+        height: 400,
+        label: None,
+    }];
+    assert!(data.available_widgets().first() == Some(&WidgetKind::Diagrams));
+    let area = Rect::new(0, 0, 140, 40);
+    // A single 12-row pocket (rows 0..=11) that Diagrams fills, dense lines,
+    // then a 4-row pocket (rows 17..=20) holding the split context box.
+    let free: Vec<u16> = (0..40)
+        .map(|r| {
+            if r <= 11 || (17..=20).contains(&r) {
+                60
+            } else {
+                4
+            }
+        })
+        .collect();
+    let margins = Margins {
+        right_widths: free.clone(),
+        right_reliable: free,
+        scroll_top: 0,
+        ..Default::default()
+    };
+    let anchors = vec![right_anchor(WidgetKind::ContextUsage, 17, 4)];
+    let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+    assert_placements_sane("diagram takes pocket", area, &out.visible);
+    let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+    assert!(
+        kinds.contains(&WidgetKind::ContextUsage) || kinds.contains(&WidgetKind::Overview),
+        "context information vanished: {kinds:?}"
+    );
+}
