@@ -882,6 +882,34 @@ pub struct CopilotModelInfo {
     pub model_picker_enabled: bool,
     #[serde(default)]
     pub capabilities: Option<CopilotModelCapabilities>,
+    /// Endpoints this model supports, e.g. ["/chat/completions"] or ["/responses"].
+    /// Absent means pre-field model; treat as chat/completions (backwards-compatible).
+    #[serde(default)]
+    pub supported_endpoints: Vec<String>,
+}
+
+impl CopilotModelInfo {
+    /// Returns true when this model must be routed to the OpenAI Responses API
+    /// (`/responses`) rather than `/chat/completions`.
+    ///
+    /// Copilot exposes some models (xAI Grok, newer GPT-5.x/6.x, MAI-Code)
+    /// only on `/responses` and returns HTTP 400 `unsupported_api_for_model`
+    /// if you send them to `/chat/completions`. When `supported_endpoints`
+    /// is absent we default to chat/completions (conservative, backwards-compatible).
+    pub fn needs_responses_api(&self) -> bool {
+        if self.supported_endpoints.is_empty() {
+            return false;
+        }
+        let has_chat = self
+            .supported_endpoints
+            .iter()
+            .any(|ep| ep.contains("/chat/completions"));
+        let has_responses = self
+            .supported_endpoints
+            .iter()
+            .any(|ep| ep.contains("/responses"));
+        has_responses && !has_chat
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

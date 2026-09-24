@@ -168,6 +168,7 @@ pub(super) fn is_fatal_model_endpoint_error(error: &str) -> bool {
         "coding plan feature",
         "model_not_found",
         "model_not_supported",
+        "unsupported_api_for_model",
         "invalid model",
         "the model does not exist",
         "model does not exist",
