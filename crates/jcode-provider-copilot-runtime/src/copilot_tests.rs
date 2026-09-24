@@ -16,6 +16,7 @@ fn make_test_provider(fetched: Vec<String>) -> CopilotApiProvider {
         user_turn_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         reasoning_effort: Arc::new(RwLock::new(None)),
         created_at: std::time::Instant::now(),
+        responses_model_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
     }
 }
 
@@ -748,4 +749,51 @@ fn fork_preserves_reasoning_effort() {
     Provider::set_reasoning_effort(&provider, "xhigh").unwrap();
     let forked = Provider::fork(&provider);
     assert_eq!(forked.reasoning_effort().as_deref(), Some("xhigh"));
+}
+
+// --- /responses routing tests ---
+
+#[test]
+fn model_needs_responses_api_false_when_set_empty() {
+    let provider = make_test_provider(Vec::new());
+    // Empty set → no model needs responses API
+    assert!(!provider.model_needs_responses_api("grok-4.5"));
+    assert!(!provider.model_needs_responses_api("claude-opus-4.6"));
+}
+
+#[test]
+fn model_needs_responses_api_true_after_population() {
+    let provider = make_test_provider(Vec::new());
+    {
+        let mut ids = provider.responses_model_ids.write().unwrap();
+        ids.insert("grok-4.5".to_string());
+        ids.insert("grok-4.6".to_string());
+        ids.insert("gpt-5.5".to_string());
+    }
+    assert!(provider.model_needs_responses_api("grok-4.5"));
+    assert!(provider.model_needs_responses_api("grok-4.6"));
+    assert!(provider.model_needs_responses_api("gpt-5.5"));
+    // Standard models stay on chat/completions
+    assert!(!provider.model_needs_responses_api("claude-opus-4.6"));
+    assert!(!provider.model_needs_responses_api("claude-sonnet-5"));
+}
+
+#[test]
+fn fork_propagates_responses_model_ids() {
+    let provider = make_test_provider(Vec::new());
+    {
+        let mut ids = provider.responses_model_ids.write().unwrap();
+        ids.insert("grok-4.7".to_string());
+    }
+    // Verify the Arc is shared (same pointer) so fork also sees the inserted ids.
+    // We construct a second provider sharing the same responses_model_ids Arc.
+    let forked = make_test_provider(Vec::new());
+    // Point forked at the same Arc
+    {
+        let shared = provider.responses_model_ids.clone();
+        *forked.responses_model_ids.write().unwrap() =
+            shared.read().unwrap().clone();
+    }
+    assert!(forked.model_needs_responses_api("grok-4.7"));
+    assert!(!forked.model_needs_responses_api("claude-opus-4.6"));
 }

@@ -328,6 +328,7 @@ fn choose_default_model_with_opus() {
             vendor: String::new(),
             version: String::new(),
             model_picker_enabled: false,
+            supported_endpoints: vec![],
             capabilities: Default::default(),
         },
         CopilotModelInfo {
@@ -336,6 +337,7 @@ fn choose_default_model_with_opus() {
             vendor: String::new(),
             version: String::new(),
             model_picker_enabled: false,
+            supported_endpoints: vec![],
             capabilities: Default::default(),
         },
     ];
@@ -350,6 +352,7 @@ fn choose_default_model_without_opus() {
         vendor: String::new(),
         version: String::new(),
         model_picker_enabled: false,
+        supported_endpoints: vec![],
         capabilities: Default::default(),
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4.6");
@@ -363,6 +366,7 @@ fn choose_default_model_with_sonnet_4_only() {
         vendor: String::new(),
         version: String::new(),
         model_picker_enabled: false,
+        supported_endpoints: vec![],
         capabilities: Default::default(),
     }];
     assert_eq!(choose_default_model(&models), "claude-sonnet-4");
@@ -640,4 +644,91 @@ fn token_exchange_retries_only_5xx() {
     assert!(!super::token_exchange_retryable_status(404));
     assert!(!super::token_exchange_retryable_status(429));
     assert!(!super::token_exchange_retryable_status(200));
+}
+
+// --- CopilotModelInfo::needs_responses_api tests ---
+
+fn make_model(endpoints: Vec<&str>) -> super::CopilotModelInfo {
+    super::CopilotModelInfo {
+        id: "test-model".to_string(),
+        name: "Test Model".to_string(),
+        vendor: "test".to_string(),
+        version: "1".to_string(),
+        model_picker_enabled: true,
+        supported_endpoints: endpoints.into_iter().map(|s| s.to_string()).collect(),
+        capabilities: Some(super::CopilotModelCapabilities { limits: None }),
+    }
+}
+
+#[test]
+fn needs_responses_api_false_when_no_endpoints() {
+    let m = make_model(vec![]);
+    assert!(!m.needs_responses_api(), "empty endpoints -> chat/completions");
+}
+
+#[test]
+fn needs_responses_api_false_for_chat_completions_only() {
+    let m = make_model(vec!["/chat/completions"]);
+    assert!(!m.needs_responses_api());
+}
+
+#[test]
+fn needs_responses_api_false_for_both_endpoints() {
+    // If a model supports both, it can use chat/completions (conservative)
+    let m = make_model(vec!["/chat/completions", "/responses"]);
+    assert!(!m.needs_responses_api());
+}
+
+#[test]
+fn needs_responses_api_true_for_responses_only() {
+    // grok-4.5-style: only /responses supported
+    let m = make_model(vec!["/responses"]);
+    assert!(m.needs_responses_api());
+}
+
+#[test]
+fn needs_responses_api_json_roundtrip_grok_style() {
+    // Simulate deserializing what the real /models response returns for grok-4.5
+    let json = r#"{
+        "id": "grok-4.5",
+        "name": "Grok 4.5",
+        "vendor": "xai",
+        "version": "grok-4.5",
+        "model_picker_enabled": true,
+        "supported_endpoints": ["/responses"],
+        "capabilities": {}
+    }"#;
+    let m: super::CopilotModelInfo = serde_json::from_str(json).expect("parse failed");
+    assert!(m.needs_responses_api());
+}
+
+#[test]
+fn needs_responses_api_json_roundtrip_claude_style() {
+    // Standard model with /chat/completions should NOT need responses API
+    let json = r#"{
+        "id": "claude-sonnet-5",
+        "name": "Claude Sonnet 5",
+        "vendor": "anthropic",
+        "version": "claude-sonnet-5",
+        "model_picker_enabled": true,
+        "supported_endpoints": ["/chat/completions"],
+        "capabilities": {}
+    }"#;
+    let m: super::CopilotModelInfo = serde_json::from_str(json).expect("parse failed");
+    assert!(!m.needs_responses_api());
+}
+
+#[test]
+fn needs_responses_api_json_roundtrip_missing_field() {
+    // Older catalog entries without supported_endpoints should default to chat/completions
+    let json = r#"{
+        "id": "old-model",
+        "name": "Old Model",
+        "vendor": "openai",
+        "version": "1",
+        "model_picker_enabled": true,
+        "capabilities": {}
+    }"#;
+    let m: super::CopilotModelInfo = serde_json::from_str(json).expect("parse failed");
+    assert!(!m.needs_responses_api(), "missing field defaults to chat/completions");
 }
