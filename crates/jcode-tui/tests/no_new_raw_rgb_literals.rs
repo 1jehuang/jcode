@@ -9,12 +9,14 @@
 //! becomes the hard zero-tolerance guard once `BASELINE` is empty.
 //!
 //! Scope: TUI-rendering crates, excluding `jcode-tui-style` (the palette module,
-//! where role defaults legitimately live as raw values) and test-only files
-//! (`tests/` dirs, `*_tests.rs`). Comment lines are ignored, so docs may name
-//! colors freely.
+//! where role defaults legitimately live as raw values) and test-only code
+//! (`tests`/`*_tests` directories, `*_tests.rs`/`tests.rs` files). Comment lines
+//! are ignored, so docs may name colors freely.
 
+use regex::Regex;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 /// Raw `rgb(r, g, b)` literal counts that exist today, per file, relative to
 /// `crates/`. To regenerate after migrating a family: remove or lower the
@@ -39,7 +41,6 @@ const BASELINE: &[(&str, usize)] = &[
     ("jcode-tui/src/tui/info_widget_timeline.rs", 15),
     ("jcode-tui-markdown/src/lib.rs", 12),
     ("jcode-tui/src/tui/ui_overlays.rs", 12),
-    ("jcode-tui/src/tui/ui_tests/tools.rs", 12),
     ("jcode-tui/src/tui/ui_onboarding.rs", 10),
     ("jcode-tui-mermaid/src/mermaid_content.rs", 6),
     ("jcode-tui/src/tui/ui_prepare.rs", 6),
@@ -57,73 +58,29 @@ const BASELINE: &[(&str, usize)] = &[
     ("jcode-tui/src/tui/ui_pinned.rs", 1),
 ];
 
-// ponytail: line-based, so a literal whose digits wrap to the next line is not
-// counted (there is one such site today). Consistent with how BASELINE was
-// generated; revisit only if a wrapped literal sneaks past the guard.
-fn parse_u8_digits(bytes: &[u8], i: &mut usize) -> bool {
-    let start = *i;
-    while *i < bytes.len() && bytes[*i].is_ascii_digit() {
-        *i += 1;
-    }
-    *i > start
-}
-
-fn skip_ws(bytes: &[u8], i: &mut usize) {
-    while *i < bytes.len() && (bytes[*i] == b' ' || bytes[*i] == b'\t') {
-        *i += 1;
-    }
-}
-
-/// Matches a bare numeric `rgb(<d>, <d>, <d>)` tail (anything after `rgb(`).
-/// Expression arguments such as `rgb(MATH_FOREGROUND.0, ..)` do not count.
-fn matches_numeric_triple(bytes: &[u8]) -> bool {
-    let mut i = 0;
-    for _ in 0..2 {
-        skip_ws(bytes, &mut i);
-        if !parse_u8_digits(bytes, &mut i) {
-            return false;
-        }
-        skip_ws(bytes, &mut i);
-        if bytes.get(i) != Some(&b',') {
-            return false;
-        }
-        i += 1;
-    }
-    skip_ws(bytes, &mut i);
-    if !parse_u8_digits(bytes, &mut i) {
-        return false;
-    }
-    skip_ws(bytes, &mut i);
-    bytes.get(i) == Some(&b')')
-}
-
-fn count_in_line(line: &str) -> usize {
-    let bytes = line.as_bytes();
-    let mut count = 0;
-    let mut search_from = 0;
-    while let Some(pos) = line[search_from..].find("rgb(") {
-        let start = search_from + pos;
-        // Reject `hsl_to_rgb(`, `indexed_to_rgb(` and similar identifier tails.
-        let at_ident_boundary = start == 0 || {
-            let prev = bytes[start - 1];
-            !(prev.is_ascii_alphanumeric() || prev == b'_')
-        };
-        if at_ident_boundary && matches_numeric_triple(&bytes[start + 4..]) {
-            count += 1;
-        }
-        search_from = start + 4;
-    }
-    count
-}
+/// A bare `rgb(<digits>, <digits>, <digits>)`, with an optional trailing comma
+/// (the rustfmt shape for a wrapped call). `\b` rejects `hsl_to_rgb(` and
+/// friends; expression arguments (`rgb(ROLE.0, ..)`) do not match; `\s` spans
+/// line breaks, so a call wrapped across lines still counts.
+static LITERAL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\brgb\(\s*[0-9]+\s*,\s*[0-9]+\s*,\s*[0-9]+\s*,?\s*\)").expect("valid rgb regex")
+});
 
 fn scan_dir(dir: &Path, crates_root: &Path, out: &mut BTreeMap<String, usize>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry
+            .unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()))
+            .path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "tests") {
+            // Test-only modules carry no rendered color; skip so a test fixture
+            // never has to raise the baseline.
+            let is_test_dir = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "tests" || n.ends_with("_tests"));
+            if is_test_dir {
                 continue;
             }
             scan_dir(&path, crates_root, out);
@@ -136,17 +93,20 @@ fn scan_dir(dir: &Path, crates_root: &Path, out: &mut BTreeMap<String, usize>) {
         if name.ends_with("_tests.rs") || name == "tests.rs" {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut count = 0;
-        for line in text.lines() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") || trimmed.starts_with('*') {
-                continue;
-            }
-            count += count_in_line(line);
-        }
+        // A read failure must fail the test, not silently drop coverage.
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        // Drop whole comment lines, then scan the file as one string so a call
+        // wrapped across lines is still found.
+        let code: String = text
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with('*')
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let count = LITERAL.find_iter(&code).count();
         if count == 0 {
             continue;
         }
