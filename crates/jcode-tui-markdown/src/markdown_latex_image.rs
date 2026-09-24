@@ -14,7 +14,7 @@ use wait_timeout::ChildExt;
 const RENDERER_VERSION: u8 = 6;
 const MAX_SOURCE_BYTES: usize = 32 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
-const FOREGROUND: (u8, u8, u8) = super::MATH_FOREGROUND;
+const FOREGROUND: (u8, u8, u8) = jcode_tui_style::Role::HeaderSession.default_rgb();
 const FALLBACK_RENDER_DPI: u16 = 240;
 const MIN_RENDER_DPI: u16 = 240;
 const MAX_RENDER_DPI: u16 = 480;

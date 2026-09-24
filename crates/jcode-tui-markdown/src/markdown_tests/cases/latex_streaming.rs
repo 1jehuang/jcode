@@ -11,8 +11,9 @@ fn exact_multiline_latex_response() -> &'static str {
 
 #[test]
 fn latex_foreground_is_white_and_styles_inline_math() {
-    assert_eq!(MATH_FOREGROUND, (255, 255, 255));
-    assert_eq!(MATH_INLINE_FOREGROUND, (255, 255, 255));
+    // Math resolves through `Role::HeaderSession`, which is white by default.
+    assert_eq!(jcode_tui_style::Role::HeaderSession.default_rgb(), (255, 255, 255));
+    assert_eq!(crate::math_fg(), jcode_tui_style::role_color(jcode_tui_style::Role::HeaderSession));
 
     let lines = with_streaming_render_context(|| render_markdown("Inline $x^2$ math."));
     let math_spans: Vec<_> = lines

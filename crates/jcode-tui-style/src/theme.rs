@@ -166,6 +166,58 @@ pub fn blend_color(from: Color, to: Color, t: f32) -> Color {
     )
 }
 
+/// A role-relative shade: an explicit expression of "this role's color, adjusted".
+///
+/// Amounts are blend fractions in `0.0..=1.0` (except `Boost`, which scales
+/// chroma). Shades are resolved against the *configured* role color, so they
+/// follow `/colors`; they are deliberately not separately configurable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shade {
+    /// Blend toward white.
+    Lighten(f32),
+    /// Blend toward black.
+    Darken(f32),
+    /// Blend toward the color's own gray (reduced intensity).
+    Mute(f32),
+    /// Scale Oklab chroma (increased intensity).
+    Boost(f32),
+}
+
+/// Resolve `role`'s configured color with `shade` applied.
+///
+/// Unlike [`crate::palette::role_color`], which returns the default for the
+/// once-per-frame substitution pass, shades resolve at the source: a shaded
+/// color is not a role default, so only resolving here makes it follow
+/// `/colors`.
+pub fn shade(role: crate::palette::Role, shade: Shade) -> Color {
+    let base = crate::palette::configured_role_color(role);
+    let (r, g, b) = color_to_floats(base, (0.0, 0.0, 0.0));
+    let (r, g, b) = match shade {
+        Shade::Lighten(t) => (
+            r + (255.0 - r) * t,
+            g + (255.0 - g) * t,
+            b + (255.0 - b) * t,
+        ),
+        Shade::Darken(t) => (r * (1.0 - t), g * (1.0 - t), b * (1.0 - t)),
+        Shade::Mute(t) => {
+            let gray = (r + g + b) / 3.0;
+            (r + (gray - r) * t, g + (gray - g) * t, b + (gray - b) * t)
+        }
+        Shade::Boost(t) => {
+            let mut lab = crate::harmony::Oklab::from_rgb((r as u8, g as u8, b as u8));
+            lab.a *= 1.0 + t;
+            lab.b *= 1.0 + t;
+            let (rr, gg, bb) = lab.to_rgb();
+            (rr as f32, gg as f32, bb as f32)
+        }
+    };
+    rgb(
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+    )
+}
+
 pub fn rainbow_prompt_color(distance: usize) -> Color {
     // Rainbow colors (hue progression): red -> orange -> yellow -> green -> cyan -> blue -> violet
     const RAINBOW: [(u8, u8, u8); 7] = [
@@ -243,6 +295,31 @@ pub fn animated_tool_color(elapsed: f32, enable_decorative_animations: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shade_follows_the_configured_role() {
+        let _lock = crate::STYLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // No override: the shade is the role default, adjusted.
+        crate::palette::set_palette(crate::palette::Palette::default());
+        assert_eq!(
+            shade(crate::palette::Role::Dim, Shade::Lighten(0.0)),
+            crate::palette::role_color(crate::palette::Role::Dim)
+        );
+
+        // Override: the shade moves with the role, so `/colors dim` recolors it.
+        let mut palette = crate::palette::Palette::default();
+        palette.set(crate::palette::Role::Dim, (255, 0, 0));
+        crate::palette::set_palette(palette);
+        assert_eq!(
+            shade(crate::palette::Role::Dim, Shade::Lighten(0.5)),
+            rgb(255, 127, 127)
+        );
+
+        crate::palette::set_palette(crate::palette::Palette::default());
+    }
 
     #[test]
     fn spinner_frames_are_circular_braille_sequence() {

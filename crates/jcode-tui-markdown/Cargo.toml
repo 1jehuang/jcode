@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 jcode-render-core = { path = "../jcode-render-core" }
+jcode-tui-style = { path = "../jcode-tui-style" }
 jcode-tui-mermaid = { path = "../jcode-tui-mermaid", optional = true }
 jcode-tui-workspace = { path = "../jcode-tui-workspace" }
 dirs = "5"

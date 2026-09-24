@@ -1,3 +1,5 @@
+use jcode_tui_style::theme::{Shade, shade};
+use jcode_tui_style::{Role, role_color};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
 use serde::Serialize;
@@ -481,51 +483,44 @@ fn rendered_rule_width(max_width: Option<usize>) -> usize {
 
 // Colors matching ui.rs palette
 use jcode_tui_workspace::color_support::rgb;
-const MATH_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
-const MATH_INLINE_FOREGROUND: (u8, u8, u8) = (255, 255, 255);
-
 fn code_bg() -> Color {
-    rgb(45, 45, 45)
+    shade(Role::SelectionBg, Shade::Darken(0.25))
 }
 fn code_fg() -> Color {
-    rgb(180, 180, 180)
+    shade(Role::Pending, Shade::Lighten(0.35))
 }
 fn math_fg() -> Color {
-    rgb(MATH_FOREGROUND.0, MATH_FOREGROUND.1, MATH_FOREGROUND.2)
+    role_color(Role::HeaderSession)
 }
 fn math_inline_fg() -> Color {
-    rgb(
-        MATH_INLINE_FOREGROUND.0,
-        MATH_INLINE_FOREGROUND.1,
-        MATH_INLINE_FOREGROUND.2,
-    )
+    role_color(Role::HeaderSession)
 }
 fn link_fg() -> Color {
-    rgb(120, 180, 240)
+    shade(Role::User, Shade::Darken(0.03))
 }
 fn html_fg() -> Color {
-    rgb(140, 140, 150)
+    shade(Role::Border, Shade::Lighten(0.26))
 }
 fn text_color() -> Color {
-    rgb(200, 200, 195)
+    shade(Role::AiText, Shade::Darken(0.09))
 }
 fn bold_color() -> Color {
-    rgb(240, 240, 235)
+    shade(Role::AiText, Shade::Lighten(0.56))
 }
 fn heading_h1_color() -> Color {
-    rgb(255, 215, 100)
+    role_color(Role::Warning)
 }
 fn heading_h2_color() -> Color {
-    rgb(240, 190, 90)
+    shade(Role::Warning, Shade::Darken(0.06))
 }
 fn heading_h3_color() -> Color {
-    rgb(220, 170, 80)
+    shade(Role::Warning, Shade::Darken(0.15))
 }
 fn heading_color() -> Color {
-    rgb(200, 155, 75)
+    shade(Role::Warning, Shade::Darken(0.22))
 }
 fn md_dim_color() -> Color {
-    rgb(100, 100, 100)
+    shade(Role::Dim, Shade::Lighten(0.11))
 }
 const RULE_LEN: usize = 24;
 

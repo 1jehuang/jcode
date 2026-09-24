@@ -372,6 +372,19 @@ pub fn role_color(role: Role) -> Color {
     crate::color::rgb(r, g, b)
 }
 
+/// The configured color for `role`: its override when one is set, else its
+/// default.
+///
+/// Role-relative derivations ([`crate::theme::shade`]) resolve from this, not
+/// from [`role_color`], because a derived shade is not a role default and would
+/// otherwise never be substituted by the once-per-frame palette pass.
+pub fn configured_role_color(role: Role) -> Color {
+    match configured_palette() {
+        Some(palette) => palette.color(role),
+        None => role_color(role),
+    }
+}
+
 /// Map a terminal-named color (`Color::White`, `Color::Red`, ...) onto the
 /// configured palette.
 ///

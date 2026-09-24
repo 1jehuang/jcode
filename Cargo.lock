@@ -4249,6 +4249,7 @@ dependencies = [
  "image",
  "jcode-render-core",
  "jcode-tui-mermaid",
+ "jcode-tui-style",
  "jcode-tui-workspace",
  "mdwright-latex",
  "pulldown-cmark",
