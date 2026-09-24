@@ -329,9 +329,11 @@ jobs:
         env:
           COLORTERM: truecolor
         run: |
+          # The raw-rgb guard (#1448) is a `tests/` integration target, so `--lib`
+          # compiles it but never runs it; name it too or a violation reaches master.
           python3 .github/scripts/run_with_timeout.py 600 \
             "$(rustup which cargo)" test --target ${{ matrix.target }} \
-            -p jcode-tui --lib -- --test-threads=1 \
+            -p jcode-tui --lib --test no_new_raw_rgb_literals -- --test-threads=1 \
             --skip test_prompt_entry_shimmer_color_moves_across_positions \
             --skip right_fact_stack_uses_neutral_gray_except_for_context_usage
 
