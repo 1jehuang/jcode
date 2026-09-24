@@ -1728,7 +1728,7 @@ impl SessionPicker {
                 duration_secs: None,
                 title: None,
                 tool_data: msg.tool_data.clone(),
-                timestamp: None,
+                timestamp: msg.timestamp,
                 tool_duration_ms: None,
             };
 

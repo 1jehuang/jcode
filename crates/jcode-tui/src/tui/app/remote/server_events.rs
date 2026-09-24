@@ -408,6 +408,8 @@ mod history_dedup_tests {
             content: content.to_string(),
             tool_calls: None,
             tool_data: None,
+            timestamp: None,
+            tool_duration_ms: None,
         }
     }
 
@@ -1950,8 +1952,8 @@ pub(in crate::tui::app) fn handle_server_event(
                                 duration_secs: None,
                                 title: None,
                                 tool_data: msg.tool_data,
-                                timestamp: None,
-                                tool_duration_ms: None,
+                                timestamp: msg.timestamp,
+                                tool_duration_ms: msg.tool_duration_ms,
                             })
                             .collect();
                         app.replace_display_messages(restored_messages);
@@ -2160,8 +2162,8 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: msg.tool_data,
-                    timestamp: None,
-                    tool_duration_ms: None,
+                    timestamp: msg.timestamp,
+                    tool_duration_ms: msg.tool_duration_ms,
                 })
                 .collect();
             app.apply_compacted_history_window(

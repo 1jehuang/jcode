@@ -336,7 +336,10 @@ mod tests {
 
         // Offsets in seconds.
         assert_eq!(parse("UTC+3").timestamp_fixed_offset_secs(), Some(3 * 3600));
-        assert_eq!(parse("utc-5").timestamp_fixed_offset_secs(), Some(-5 * 3600));
+        assert_eq!(
+            parse("utc-5").timestamp_fixed_offset_secs(),
+            Some(-5 * 3600)
+        );
         assert_eq!(parse("UTC+0").timestamp_fixed_offset_secs(), Some(0));
         assert_eq!(parse(" 3 ").timestamp_fixed_offset_secs(), Some(3 * 3600));
         assert_eq!(

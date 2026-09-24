@@ -59,6 +59,15 @@ pub struct HistoryMessage {
     pub tool_calls: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_data: Option<ToolCall>,
+    /// Wall-clock time when the stored message was recorded (#1454). Tool
+    /// rows render it as the opt-in HH:MM:SS stamp; `None` (legacy servers,
+    /// non-tool rows) keeps the wire shape unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    /// How long the tool ran (#1453), carried beside the stamp so reloaded
+    /// transcripts match live rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -4545,10 +4545,15 @@ fn tool_row_time_suffix(msg: &DisplayMessage) -> Option<String> {
         return None;
     }
     let ts = msg.timestamp?;
-    let tz = crate::config::config().display.timestamp_fixed_offset_secs();
+    let tz = crate::config::config()
+        .display
+        .timestamp_fixed_offset_secs();
     let formatted = match tz.and_then(chrono::FixedOffset::east_opt) {
         Some(offset) => ts.with_timezone(&offset).format("%H:%M:%S").to_string(),
-        None => ts.with_timezone(&chrono::Local).format("%H:%M:%S").to_string(),
+        None => ts
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string(),
     };
     Some(format!(" · {formatted}"))
 }

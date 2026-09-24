@@ -1303,7 +1303,6 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
             }],
             display_role: None,
             timestamp: None,
-            timestamp: None,
             tool_duration_ms: None,
             token_usage: None,
         });

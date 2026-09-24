@@ -28,6 +28,7 @@ fn duration_tool_msg(tool_duration_ms: Option<u64>) -> DisplayMessage {
             intent: None,
             thought_signature: None,
         }),
+        timestamp: None,
         tool_duration_ms,
     }
 }

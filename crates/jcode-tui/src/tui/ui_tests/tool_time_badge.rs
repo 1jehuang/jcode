@@ -5,7 +5,13 @@
 
 use super::*;
 
-fn time_tool_msg(timestamp: Option<chrono::DateTime<chrono::Utc>>, ms: Option<u64>) -> DisplayMessage {
+fn time_tool_msg(
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    ms: Option<u64>,
+) -> DisplayMessage {
+    // Both badges ride the same row; the duration opt-in is a test override
+    // (the host config must not leak in), the timestamp one is config-driven.
+    crate::tui::ui::tools_ui::tests_show_tool_duration_override::set(ms.is_some());
     DisplayMessage {
         role: "tool".to_string(),
         content: "ok".to_string(),
@@ -24,7 +30,7 @@ fn time_tool_msg(timestamp: Option<chrono::DateTime<chrono::Utc>>, ms: Option<u6
     }
 }
 
-fn rendered_first_row(msg: &DisplayMessage, width: usize) -> String {
+fn rendered_first_row(msg: &DisplayMessage, width: u16) -> String {
     let lines = messages::render_tool_message(msg, width, crate::config::DiffDisplayMode::Off);
     lines
         .first()
@@ -37,16 +43,17 @@ fn rendered_first_row(msg: &DisplayMessage, width: usize) -> String {
 #[test]
 fn test_tool_row_stamp_renders_when_enabled() {
     let _lock = viewport_snapshot_test_lock();
-    let _config = isolate_config_home_with(
-        "[display]\nshow_tool_timestamp = true\n",
-    );
+    let _config = isolate_config_home_with("[display]\nshow_tool_timestamp = true\n");
     let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
         .expect("parse stamp")
         .with_timezone(&chrono::Utc);
     let msg = time_tool_msg(Some(stamp), Some(48_300));
 
     let row = rendered_first_row(&msg, 200);
-    let expected = stamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+    let expected = stamp
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string();
     assert!(row.contains(&expected), "stamp missing from row: {row}");
     assert!(row.contains("48.3s"), "duration badge missing: {row}");
     assert!(row.contains("tok"), "token badge must stay: {row}");
@@ -59,7 +66,8 @@ fn test_tool_row_stamp_renders_when_enabled() {
     );
 }
 
-/// Default (option off): no stamp, regardless of stored timestamp.
+/// Default (option off): no stamp, while the independently-gated duration
+/// badge still renders when its own opt-in is on.
 #[test]
 fn test_tool_row_stamp_absent_by_default() {
     let _lock = viewport_snapshot_test_lock();
@@ -131,10 +139,9 @@ fn test_tool_row_stamp_stays_neutral_for_any_duration_severity() {
 
     for ms in [700u64, 48_300, 87_456] {
         let msg = time_tool_msg(Some(stamp), Some(ms));
-        let spans = &messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off)
-            .first()
-            .expect("tool row rendered")
-            .spans;
+        let rendered =
+            messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off);
+        let spans = &rendered.first().expect("tool row rendered").spans;
 
         let stamp_span = spans
             .iter()
@@ -166,8 +173,14 @@ fn test_tool_row_stamp_survives_narrow_width() {
 
     for width in [40, 56, 72, 120] {
         let row = rendered_first_row(&msg, width);
-        assert!(row.contains("23:15:42"), "stamp lost at width {width}: {row}");
-        assert!(row.contains("48.3s"), "duration lost at width {width}: {row}");
+        assert!(
+            row.contains("23:15:42"),
+            "stamp lost at width {width}: {row}"
+        );
+        assert!(
+            row.contains("48.3s"),
+            "duration lost at width {width}: {row}"
+        );
         assert!(row.contains("tok"), "tokens lost at width {width}: {row}");
         let tok_pos = row.find("tok").expect("tokens present");
         let stamp_pos = row.find("23:15:42").expect("stamp present");
@@ -191,7 +204,10 @@ fn test_tool_row_stamp_garbage_tz_falls_back_to_local() {
     let msg = time_tool_msg(Some(stamp), None);
 
     let row = rendered_first_row(&msg, 200);
-    let expected = stamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+    let expected = stamp
+        .with_timezone(&chrono::Local)
+        .format("%H:%M:%S")
+        .to_string();
     assert!(
         row.contains(&expected),
         "garbage tz must fall back to local ({expected}): {row}"
