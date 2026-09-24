@@ -751,3 +751,15 @@ fn test_undoing_image_paste_after_clear_keeps_attachments_consistent() {
     assert_eq!(app.input, "[image 1]");
     assert_eq!(app.pending_images, vec![("image/png".to_string(), "QQ==".to_string())]);
 }
+
+#[test]
+fn test_undo_image_paste_detaches_even_with_literal_placeholder_text() {
+    let mut app = create_test_app();
+    app.set_input_for_test("compare with [image 1]");
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    assert_eq!(app.pending_images.len(), 1);
+
+    app.undo_input_change();
+    assert_eq!(app.input, "compare with [image 1]");
+    assert!(app.pending_images.is_empty(), "undone paste must not stay attached");
+}

@@ -2771,11 +2771,7 @@ pub(super) fn clear_draft_or_request_quit(app: &mut App) {
     }
     // Always push a snapshot (even for an image-only draft that matches the
     // previous entry) so the stashed images have their own undo step.
-    if app.input_undo_stack.len() >= App::INPUT_UNDO_LIMIT {
-        app.trim_oldest_input_undo_entry();
-    }
-    app.input_undo_stack
-        .push((app.input.clone(), app.cursor_pos.min(app.input.len())));
+    app.push_input_undo_snapshot((app.input.clone(), app.cursor_pos.min(app.input.len())));
     if !app.pending_images.is_empty() {
         let depth = app.input_undo_stack.len();
         app.cleared_draft_images
@@ -2997,9 +2993,10 @@ pub(super) fn stage_local_interleave(
 
 fn attach_image(app: &mut App, media_type: String, base64_data: String) {
     let size_kb = base64_data.len() / 1024;
+    // Snapshot before attaching, so undoing the paste detaches this image.
+    app.remember_input_undo_state();
     app.pending_images.push((media_type.clone(), base64_data));
     let placeholder = format!("[image {}]", app.pending_images.len());
-    app.remember_input_undo_state();
     app.input.insert_str(app.cursor_pos, &placeholder);
     app.cursor_pos += placeholder.len();
     app.sync_model_picker_preview_from_input();
