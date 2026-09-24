@@ -323,13 +323,20 @@ fn download_image_url_content(url: &str) -> Option<ClipboardPasteContent> {
 fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent {
     match kind {
         ClipboardPasteKind::Smart => {
-            // Use native-only image reader to avoid discarding text when HTML contains images
-            read_clipboard_for_paste_with(
+            // Native-only reader first, so copied web text whose HTML carries
+            // an <img> stays text. Only when the clipboard offers nothing else
+            // fall back to the HTML <img> URL path (e.g. Discord on Wayland).
+            match read_clipboard_for_paste_with(
                 kind,
                 read_clipboard_text,
                 super::clipboard_image_native,
                 download_image_url_content,
-            )
+            ) {
+                ClipboardPasteContent::Empty => super::clipboard_image()
+                    .map(|(media_type, base64_data)| image_content(media_type, base64_data))
+                    .unwrap_or(ClipboardPasteContent::Empty),
+                content => content,
+            }
         }
         _ => {
             // ImageOnly and ImageUrl can use full clipboard_image with HTML fallback
@@ -341,6 +348,24 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
             )
         }
     }
+}
+
+/// True when clipboard text is just a reference to a picture: a single line
+/// that is a local path, `file://` URL, or bare file name with an image
+/// extension. Copying an image commonly leaves exactly this on the text
+/// target alongside the image bytes. Web URLs are excluded: those go through
+/// the explicit image-URL download path instead.
+fn text_names_an_image(text: &str) -> bool {
+    let text = text.trim();
+    if text.contains('\n') || text.len() > 4096 {
+        return false;
+    }
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return false;
+    }
+    let path = lower.strip_prefix("file://").unwrap_or(&lower);
+    image_media_type(std::path::Path::new(path.trim_matches(['\'', '"']))).is_some()
 }
 
 fn read_clipboard_for_paste_with<ReadText, ReadImage, DownloadImageUrl>(
@@ -356,32 +381,26 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
-            // Locally, prefer a native image (screenshot, copied picture) over
-            // text: copying an image often also puts a file path on the text
-            // clipboard. The native-only reader skips the HTML <img> fallback,
-            // so copied web text that contains images stays text.
-            //
-            // Over SSH the clipboard read happens on the remote host, so keep
-            // the original text-first order there and never probe for images
-            // when the user pasted text.
-            let prefer_image = !crate::tui::is_ssh_remote();
-            if prefer_image && let Some((media_type, base64_data)) = read_image() {
+            // Read text first: it is cheap, and ordinary text pastes must not
+            // wait on an image probe or be replaced by an image.
+            let text = read_text().filter(|t| !t.trim().is_empty());
+            // Copying a picture (Finder, Preview, screenshots, browsers) often
+            // also puts its file name, path or file:// URL on the text target.
+            // Only then, or when there is no text at all, probe for native
+            // image bytes and prefer them. Image-only clipboards (especially
+            // on Wayland/arboard) frequently expose an empty text target.
+            if text.as_deref().is_none_or(text_names_an_image)
+                && let Some((media_type, base64_data)) = read_image()
+            {
                 return image_content(media_type, base64_data);
             }
-            // Only treat the clipboard as text when it has *non-empty* text.
-            // Image-only clipboards (especially on Wayland/arboard) frequently
-            // expose an empty text target, which previously short-circuited the
-            // image path and produced a silent "0 char" paste.
-            if let Some(text) = read_text().filter(|t| !t.trim().is_empty()) {
+            if let Some(text) = text {
                 if let Some(url) = super::extract_image_url(&text)
                     && let Some(content) = download_image_url(&url)
                 {
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
-            }
-            if !prefer_image && let Some((media_type, base64_data)) = read_image() {
-                return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
@@ -482,23 +501,44 @@ mod tests {
     }
 
     #[test]
-    fn smart_paste_prefers_image_when_clipboard_has_both() {
-        let content = read_clipboard_for_paste_with(
-            &ClipboardPasteKind::Smart,
-            || Some("plain text".to_string()),
-            || Some(("image/png".to_string(), "base64".to_string())),
-            |_| None,
-        );
+    fn smart_paste_prefers_image_when_text_is_its_file_name() {
+        for name in [
+            "Screenshot 2026-09-24 at 10.41.00.png",
+            "/Users/me/Desktop/photo.JPG",
+            "file:///tmp/diagram.webp",
+            "'/tmp/with space.gif'",
+        ] {
+            let content = read_clipboard_for_paste_with(
+                &ClipboardPasteKind::Smart,
+                || Some(name.to_string()),
+                || Some(("image/png".to_string(), "base64".to_string())),
+                |_| None,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Image { .. }),
+                "{name}: expected image, got {content:?}"
+            );
+        }
+    }
 
-        match content {
-            ClipboardPasteContent::Image {
-                media_type,
-                base64_data,
-            } => {
-                assert_eq!(media_type, "image/png");
-                assert_eq!(base64_data, "base64");
-            }
-            other => panic!("expected image paste, got {other:?}"),
+    #[test]
+    fn smart_paste_keeps_ordinary_text_without_probing_for_images() {
+        for text in [
+            "plain text",
+            "see screenshot.png and fix the layout",
+            "line one\n/tmp/a.png",
+            "https://example.com/a.png",
+        ] {
+            let content = read_clipboard_for_paste_with(
+                &ClipboardPasteKind::Smart,
+                || Some(text.to_string()),
+                || panic!("ordinary text must not wait on an image probe"),
+                |_| None,
+            );
+            assert!(
+                matches!(content, ClipboardPasteContent::Text(ref t) if t == text),
+                "{text}: expected text, got {content:?}"
+            );
         }
     }
 
