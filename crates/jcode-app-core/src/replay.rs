@@ -493,6 +493,7 @@ pub fn timeline_to_replay_events(timeline: &[TimelineEvent]) -> Vec<(u64, Replay
                         } else {
                             None
                         },
+                        duration_ms: None,
                     }),
                 ));
             }

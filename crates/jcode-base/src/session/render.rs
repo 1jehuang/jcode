@@ -403,6 +403,7 @@ pub fn render_messages_and_images_with_compacted_history(
             tool_calls: Vec::new(),
             tool_data: None,
             stored_index: None,
+            tool_duration_ms: None,
         });
     }
 
@@ -432,6 +433,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls: Vec::new(),
                 tool_data: None,
                 stored_index: Some(stored_index),
+                tool_duration_ms: None,
             });
             continue;
         }
@@ -507,6 +509,7 @@ pub fn render_messages_and_images_with_compacted_history(
                             tool_calls: tool_calls.clone(),
                             tool_data: None,
                             stored_index: Some(stored_index),
+                            tool_duration_ms: None,
                         });
                     }
 
@@ -528,6 +531,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         tool_calls: Vec::new(),
                         tool_data,
                         stored_index: Some(stored_index),
+                        tool_duration_ms: msg.tool_duration_ms,
                     });
                 }
                 ContentBlock::Reasoning { text: t } | ContentBlock::ReasoningTrace { text: t } => {
@@ -572,6 +576,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 tool_calls,
                 tool_data: None,
                 stored_index: Some(stored_index),
+                tool_duration_ms: None,
             });
         } else if !pending_prompt_image_indices.is_empty() {
             // The message carried images but produced no rendered user prompt;
