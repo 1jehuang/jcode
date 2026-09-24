@@ -760,7 +760,15 @@ pub(in crate::tui::app) fn handle_server_event(
             output,
             error,
             duration_ms,
-        } => super::server_event_handlers::handle_tool_done(app, remote, id, name, output, error),
+        } => super::server_event_handlers::handle_tool_done(
+            app,
+            remote,
+            id,
+            name,
+            output,
+            error,
+            duration_ms,
+        ),
         ServerEvent::GeneratedImage {
             id,
             path,

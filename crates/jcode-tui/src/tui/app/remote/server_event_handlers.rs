@@ -7,6 +7,7 @@ pub(super) fn handle_tool_done(
     name: String,
     output: String,
     error: Option<String>,
+    duration_ms: Option<u64>,
 ) -> bool {
     let display_output = remote.handle_tool_done(&id, &name, &output);
     let display_output = if error.is_some()
@@ -42,7 +43,10 @@ pub(super) fn handle_tool_done(
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call.clone()),
-        tool_duration_ms: None,
+        // #1453: the live row shows the server-measured duration the moment
+        // the ToolDone event lands, no history reload needed. Timestamps are
+        // a separate feature and intentionally not set here.
+        tool_duration_ms: duration_ms,
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
