@@ -613,3 +613,63 @@ fn test_ctrl_l_puts_prompt_indicator_at_top_of_screen() {
         "scrolling up reveals the pre-clear transcript:\n{scrolled}"
     );
 }
+
+fn seed_image_only_draft(app: &mut App) {
+    app.input.clear();
+    app.cursor_pos = 0;
+    app.pending_images
+        .push(("image/png".to_string(), "aW1hZ2U=".to_string()));
+}
+
+#[test]
+fn test_local_ctrl_c_clears_image_only_draft_then_quits() {
+    let mut app = create_test_app();
+    seed_image_only_draft(&mut app);
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+    assert!(app.pending_images.is_empty(), "first press must discard the image");
+    assert!(app.quit_pending.is_some());
+    assert!(!app.should_quit);
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+    assert!(app.should_quit, "second press must quit");
+}
+
+#[test]
+fn test_remote_ctrl_c_clears_image_only_draft_then_quits() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    seed_image_only_draft(&mut app);
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.pending_images.is_empty(), "first press must discard the image");
+    assert!(app.quit_pending.is_some());
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.status_notice(),
+        Some("Input cleared. Press Ctrl+C again to quit".to_string())
+    );
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.should_quit, "second press must quit");
+}
+
+#[test]
+fn test_remote_ctrl_c_clears_text_draft_and_resets_completion() {
+    let mut app = create_test_app();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    app.input = "half-written prompt".to_string();
+    app.cursor_pos = app.input.len();
+
+    rt.block_on(app.handle_remote_key(KeyCode::Char('c'), KeyModifiers::CONTROL, &mut remote))
+        .unwrap();
+    assert!(app.input.is_empty());
+    assert_eq!(app.cursor_pos, 0);
+    assert!(!app.should_quit);
+}
