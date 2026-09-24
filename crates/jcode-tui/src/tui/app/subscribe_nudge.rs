@@ -265,12 +265,19 @@ impl App {
                 reset_secs
             )
         } else {
-            let resume_at = chrono::Local::now() + chrono::Duration::seconds(reset_secs as i64);
+            // Provider-controlled value: only show a wall-clock time when it
+            // fits Chrono's range, instead of a wrapping cast that can panic.
+            let resume_at = i64::try_from(reset_secs)
+                .ok()
+                .and_then(chrono::TimeDelta::try_seconds)
+                .and_then(|delta| chrono::Local::now().checked_add_signed(delta))
+                .map(|at| format!(" (at {})", at.format("%H:%M")))
+                .unwrap_or_default();
             format!(
-                "⏳ Usage limit hit. Holding this turn and auto-resuming in {}h {:02}m (at {})...",
+                "⏳ Usage limit hit. Holding this turn and auto-resuming in {}h {:02}m{}...",
                 reset_secs / 3600,
                 (reset_secs % 3600) / 60,
-                resume_at.format("%H:%M")
+                resume_at
             )
         };
         if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {

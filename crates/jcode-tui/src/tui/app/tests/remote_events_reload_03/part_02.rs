@@ -437,3 +437,15 @@ fn test_remote_openference_window_quota_holds_turn_until_resets_at() {
     let last = app.display_messages().last().expect("missing hold notice");
     assert!(last.content.contains("auto-resuming in 2h"), "{}", last.content);
 }
+
+#[test]
+fn test_rate_limit_notice_survives_out_of_range_reset_secs() {
+    let mut app = create_test_app();
+    for secs in [u64::MAX, i64::MAX as u64 + 1, i64::MAX as u64] {
+        let line = app.rate_limit_notice_with_nudge(secs);
+        assert!(line.contains("auto-resuming in"), "{line}");
+        assert!(!line.contains("(at "), "{line}");
+    }
+    let line = app.rate_limit_notice_with_nudge(2 * 3600);
+    assert!(line.contains("auto-resuming in 2h 00m (at "), "{line}");
+}
