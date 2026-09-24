@@ -179,7 +179,6 @@ fn test_tool_row_ms_duration_no_zero_noise() {
         .first()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
         .unwrap_or_default();
-    println!("observed 45ms row: {row}");
     assert!(row.contains("45ms"), "ms duration missing: {row}");
     assert!(!row.contains("0.0s"), "0.0s banned: {row}");
     assert!(!row.contains("0ms"), "0ms banned: {row}");

@@ -204,6 +204,10 @@ impl App {
         self.replace_display_message_title_and_content(idx, title, content);
         if let Some(duration_ms) = tool_duration_ms {
             self.display_messages[idx].tool_duration_ms = Some(duration_ms);
+            // The cached row render includes the duration badge, so the
+            // duration change alone must invalidate it even when title and
+            // content are unchanged.
+            self.bump_display_messages_version();
         }
         true
     }
