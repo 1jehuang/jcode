@@ -1,4 +1,3 @@
-use super::opencode_go_responses::model_uses_responses_api;
 use super::openrouter_sse_stream::run_stream_with_retries;
 use super::*;
 use jcode_base::provider::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
@@ -43,8 +42,8 @@ impl Provider for OpenRouterProvider {
         _resume_session_id: Option<&str>,
     ) -> Result<EventStream> {
         let model = self.model.read().await.clone();
-        let responses_api =
-            model_uses_responses_api(&self.api_base, self.profile_id.as_deref(), &model);
+        let responses_api = self.api_protocol.for_model(&model)
+            == jcode_base::provider_catalog::OpenAiCompatibleProtocol::Responses;
         let reasoning_effort = self.reasoning_effort();
         let thinking_override = Self::thinking_override();
         // Moonshot's dedicated Kimi coding endpoint enables thinking server-side
@@ -810,6 +809,7 @@ impl Provider for OpenRouterProvider {
             supports_provider_features: self.supports_provider_features,
             supports_model_catalog: self.supports_model_catalog,
             profile_id: self.profile_id.clone(),
+            api_protocol: self.api_protocol,
             reasoning_effort_support: self.reasoning_effort_support,
             disable_reasoning_heuristics: self.disable_reasoning_heuristics,
             static_reasoning_config: self.static_reasoning_config.clone(),

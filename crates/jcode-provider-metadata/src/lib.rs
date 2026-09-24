@@ -119,6 +119,40 @@ pub struct LoginProviderDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenAiCompatibleProtocol {
+    ChatCompletions,
+    Responses,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenAiCompatibleModelProtocol {
+    pub model: &'static str,
+    pub protocol: OpenAiCompatibleProtocol,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenAiCompatibleProtocolConfig {
+    pub default: OpenAiCompatibleProtocol,
+    pub model_overrides: &'static [OpenAiCompatibleModelProtocol],
+}
+
+impl OpenAiCompatibleProtocolConfig {
+    pub fn for_model(self, model: &str) -> OpenAiCompatibleProtocol {
+        self.model_overrides
+            .iter()
+            .find(|entry| entry.model.eq_ignore_ascii_case(model.trim()))
+            .map(|entry| entry.protocol)
+            .unwrap_or(self.default)
+    }
+}
+
+pub const OPENAI_COMPATIBLE_CHAT_PROTOCOL: OpenAiCompatibleProtocolConfig =
+    OpenAiCompatibleProtocolConfig {
+        default: OpenAiCompatibleProtocol::ChatCompletions,
+        model_overrides: &[],
+    };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAiCompatibleProfile {
     pub id: &'static str,
     pub display_name: &'static str,
@@ -128,6 +162,7 @@ pub struct OpenAiCompatibleProfile {
     pub setup_url: &'static str,
     pub default_model: Option<&'static str>,
     pub requires_api_key: bool,
+    pub api_protocol: OpenAiCompatibleProtocolConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +175,7 @@ pub struct ResolvedOpenAiCompatibleProfile {
     pub setup_url: String,
     pub default_model: Option<String>,
     pub requires_api_key: bool,
+    pub api_protocol: OpenAiCompatibleProtocolConfig,
 }
 
 mod catalog;

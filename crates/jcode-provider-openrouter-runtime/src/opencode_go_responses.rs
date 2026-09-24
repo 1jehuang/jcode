@@ -1,9 +1,9 @@
 //! OpenCode Go's model-specific OpenAI Responses API adapter.
 //!
 //! OpenCode Go exposes a small set of models through `/responses` while the
-//! remaining catalog continues to use `/chat/completions`.  Keep this adapter
-//! local to the OpenRouter-compatible runtime so the protocol choice is made
-//! from the configured OpenCode Go profile without changing other providers.
+//! remaining catalog continues to use `/chat/completions`. Keep this adapter
+//! local to the OpenRouter-compatible runtime; the configured OpenAI-compatible
+//! profile owns the provider default and per-model protocol overrides.
 
 use bytes::Bytes;
 use futures::Stream;
@@ -14,29 +14,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-/// Models currently documented by OpenCode Go as Responses API models.
-const RESPONSES_MODELS: &[&str] = &[
-    "grok-4.6",
-    "gpt-5.6-luna",
-    "muse-spark-1.3-contributor",
-    "muse-spark-1.2-contributor",
-];
-
-pub(crate) fn model_uses_responses_api(
-    api_base: &str,
-    profile_id: Option<&str>,
-    model: &str,
-) -> bool {
-    let is_go_profile = profile_id.is_some_and(|id| id.eq_ignore_ascii_case("opencode-go"));
-    let is_go_endpoint = api_base
-        .to_ascii_lowercase()
-        .contains("opencode.ai/zen/go/");
-    (is_go_profile || is_go_endpoint)
-        && RESPONSES_MODELS
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(model.trim()))
-}
 
 pub(crate) fn build_request(
     messages: &[Message],
@@ -450,24 +427,36 @@ impl Stream for ResponsesStream {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use jcode_base::provider_catalog::{
+        OPENCODE_GO_PROFILE, OPENCODE_PROFILE, OpenAiCompatibleProtocol,
+    };
 
     #[test]
-    fn only_open_code_go_responses_models_use_responses() {
-        assert!(model_uses_responses_api(
-            "https://opencode.ai/zen/go/v1",
-            Some("opencode-go"),
-            "gpt-5.6-luna"
-        ));
-        assert!(!model_uses_responses_api(
-            "https://opencode.ai/zen/go/v1",
-            Some("opencode-go"),
-            "kimi-k2.7-code"
-        ));
-        assert!(!model_uses_responses_api(
-            "https://opencode.ai/zen/v1",
-            Some("opencode"),
-            "gpt-5.6-luna"
-        ));
+    fn open_code_go_uses_profile_default_and_model_protocol_overrides() {
+        let opencode_go =
+            jcode_base::provider_catalog::resolve_openai_compatible_profile(OPENCODE_GO_PROFILE);
+        for model in [
+            "grok-4.6",
+            "gpt-5.6-luna",
+            "muse-spark-1.3-contributor",
+            "muse-spark-1.2-contributor",
+        ] {
+            assert_eq!(
+                opencode_go.api_protocol.for_model(model),
+                OpenAiCompatibleProtocol::Responses,
+                "{model}"
+            );
+        }
+        assert_eq!(
+            opencode_go.api_protocol.for_model("kimi-k2.5"),
+            OpenAiCompatibleProtocol::ChatCompletions
+        );
+        let opencode =
+            jcode_base::provider_catalog::resolve_openai_compatible_profile(OPENCODE_PROFILE);
+        assert_eq!(
+            opencode.api_protocol.for_model("gpt-5.6-luna"),
+            OpenAiCompatibleProtocol::ChatCompletions
+        );
     }
 
     #[test]
