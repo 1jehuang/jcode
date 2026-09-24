@@ -46,9 +46,10 @@ pub(super) fn handle_tool_done(
         // #1453: the live row shows the server-measured duration the moment
         // the ToolDone event lands, no history reload needed.
         tool_duration_ms: duration_ms,
-        // #1454: ToolDone carries no wall-clock time, so the opt-in time
-        // stamp appears once the transcript reloads from the stored session.
-        timestamp: None,
+        // #1454: the ToolDone event carries no wall-clock time, so the live
+        // row stamps itself at completion time; the stored session timestamp
+        // takes over on the next history reload.
+        timestamp: Some(chrono::Utc::now()),
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
