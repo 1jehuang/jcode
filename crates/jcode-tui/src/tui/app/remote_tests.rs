@@ -1352,14 +1352,38 @@ fn improve_mode_persistence_survives_a_session_with_no_snapshot_on_disk() {
     );
 }
 
+/// Restore `JCODE_HOME` on scope exit, including during a panic.
+///
+/// Restoring at the end of a test body only runs when the test reaches it, so
+/// an assertion failure would leave the process-wide variable pointing at a
+/// `TempDir` that has already been removed, and later tests in the same
+/// process would fail for reasons that have nothing to do with them.
+struct JcodeHomeGuard(Option<std::ffi::OsString>);
+
+impl JcodeHomeGuard {
+    fn set(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", path);
+        Self(previous)
+    }
+}
+
+impl Drop for JcodeHomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(previous) => crate::env::set_var("JCODE_HOME", previous),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
 #[test]
 fn improve_mode_persistence_writes_through_to_an_existing_session_file() {
     // The no-snapshot shortcut must not swallow the real write path: when the
     // session does exist on disk, the mode still has to be persisted there.
     let _guard = crate::storage::lock_test_env();
     let temp_home = tempfile::TempDir::new().expect("temp home");
-    let prev_home = std::env::var_os("JCODE_HOME");
-    crate::env::set_var("JCODE_HOME", temp_home.path());
+    let _home_guard = JcodeHomeGuard::set(temp_home.path());
 
     let mut app = create_test_app();
     app.is_remote = true;
@@ -1392,10 +1416,4 @@ fn improve_mode_persistence_writes_through_to_an_existing_session_file() {
         Some(crate::session::SessionImproveMode::RefactorRun),
         "the improve mode should be durable across a reload"
     );
-
-    if let Some(prev_home) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev_home);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
 }
