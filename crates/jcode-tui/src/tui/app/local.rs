@@ -361,10 +361,11 @@ fn handle_manual_tool_completed(app: &mut App, result: ManualToolCompleted) {
     } else {
         result.output.clone()
     };
-    let _ = app.replace_latest_tool_display_message(
+    let _ = app.replace_latest_tool_display_message_with_duration(
         result.tool_call.id.as_str(),
         result.title.clone(),
         display_output,
+        Some(result.duration_ms),
     );
 
     app.add_provider_message(Message::tool_result_with_duration(

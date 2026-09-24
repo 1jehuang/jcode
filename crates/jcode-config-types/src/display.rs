@@ -350,5 +350,24 @@ mod tests {
         // Garbage falls back to local instead of breaking rendering.
         assert_eq!(parse("Moscow").timestamp_fixed_offset_secs(), None);
         assert_eq!(parse("UTC+99").timestamp_fixed_offset_secs(), None);
+
+        // Boundary and malformed-offset handling: +14h is valid, +15h is not,
+        // minutes must stay under 60, and sign-only or empty digits fail.
+        assert_eq!(
+            parse("UTC+14").timestamp_fixed_offset_secs(),
+            Some(14 * 3600)
+        );
+        assert_eq!(
+            parse("utc-14").timestamp_fixed_offset_secs(),
+            Some(-14 * 3600)
+        );
+        assert_eq!(parse("UTC+15").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+3:60").timestamp_fixed_offset_secs(), None);
+        assert_eq!(
+            parse("UTC+3:30").timestamp_fixed_offset_secs(),
+            Some(3 * 3600 + 30 * 60)
+        );
+        assert_eq!(parse("UTC-").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+abc").timestamp_fixed_offset_secs(), None);
     }
 }

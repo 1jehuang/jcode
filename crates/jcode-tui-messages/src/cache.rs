@@ -162,4 +162,30 @@ mod tests {
         assert_eq!(lines[0].to_string(), "   abc");
         assert_eq!(lines[0].alignment, Some(Alignment::Left));
     }
+
+    #[test]
+    fn message_cache_key_distinguishes_timestamp_config() {
+        // #1454: flipping `show_tool_timestamp` or `timestamp_tz` must not
+        // serve a cached tool row rendered under the previous config.
+        let base = MessageCacheContext {
+            diagram_mode: Default::default(),
+            centered: false,
+            mermaid_epoch: 0,
+            mermaid_aspect_bucket: None,
+            show_agentgrep_output: false,
+            show_bash_output: false,
+            tool_call_details: false,
+            show_tool_duration: false,
+            show_tool_timestamp: false,
+            timestamp_tz: String::new(),
+        };
+        let mut stamped = base.clone();
+        stamped.show_tool_timestamp = true;
+        assert_ne!(base, stamped);
+
+        let mut shifted = base.clone();
+        shifted.show_tool_timestamp = true;
+        shifted.timestamp_tz = "UTC+3".to_string();
+        assert_ne!(stamped, shifted);
+    }
 }
