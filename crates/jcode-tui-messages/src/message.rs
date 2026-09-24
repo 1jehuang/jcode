@@ -511,6 +511,28 @@ mod tests {
     }
 
     #[test]
+    fn rendered_timestamps_convert_to_display_messages() {
+        // #1454: the RenderedMessage -> DisplayMessage hop must keep the
+        // stored wall-clock time so tool rows can stamp it.
+        let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:23:35Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let rendered = RenderedMessage {
+            response_stats: None,
+            role: "tool".to_string(),
+            content: "ok".to_string(),
+            tool_calls: vec![],
+            tool_data: None,
+            timestamp: Some(stamp),
+            tool_duration_ms: Some(1234),
+            stored_index: None,
+        };
+        let display = DisplayMessage::from_rendered_message(rendered);
+        assert_eq!(display.timestamp, Some(stamp));
+        assert_eq!(display.tool_duration_ms, Some(1234));
+    }
+
+    #[test]
     fn transcript_preview_lines_share_desktop_labeling() {
         let messages = [
             ("user", " hello\nworld "),

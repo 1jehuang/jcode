@@ -19,6 +19,8 @@ struct MessageCacheKey {
     show_bash_output: bool,
     tool_call_details: bool,
     show_tool_duration: bool,
+    show_tool_timestamp: bool,
+    timestamp_tz: String,
 }
 
 #[derive(Default)]
@@ -61,7 +63,7 @@ fn message_cache() -> &'static Mutex<MessageCacheState> {
 const MESSAGE_CACHE_LIMIT: usize = 2048;
 
 /// Runtime-sensitive inputs that affect message rendering but are not intrinsic to a message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MessageCacheContext {
     pub diagram_mode: DiagramDisplayMode,
     pub centered: bool,
@@ -71,6 +73,8 @@ pub struct MessageCacheContext {
     pub show_bash_output: bool,
     pub tool_call_details: bool,
     pub show_tool_duration: bool,
+    pub show_tool_timestamp: bool,
+    pub timestamp_tz: String,
 }
 
 pub fn left_pad_lines_for_centered_mode(lines: &mut [Line<'static>], width: u16) {
@@ -123,6 +127,8 @@ where
         show_bash_output: context.show_bash_output,
         tool_call_details: context.tool_call_details,
         show_tool_duration: context.show_tool_duration,
+        show_tool_timestamp: context.show_tool_timestamp,
+        timestamp_tz: context.timestamp_tz.clone(),
     };
 
     let mut cache = match message_cache().lock() {

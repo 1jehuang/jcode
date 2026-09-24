@@ -24,8 +24,10 @@ impl Drop for ConfigHomeGuard {
         // SAFETY: test-only; see isolate_config_home.
         unsafe {
             match &self.previous {
-                Some(path) => std::env::set_var("JCODE_HOME", path),
-                None => std::env::remove_var("JCODE_HOME"),
+                Some(path) if path.as_os_str() != "__unset__" => {
+                    std::env::set_var("JCODE_HOME", path)
+                }
+                _ => std::env::remove_var("JCODE_HOME"),
             }
         }
         crate::config::invalidate_config_cache();
@@ -74,11 +76,17 @@ pub(crate) fn isolate_config_home_with(config_toml: &str) -> ConfigHomeGuard {
 
 fn isolate_config_home_in(dir: &std::path::Path, _config: Option<&str>) {
     // Remember the previous JCODE_HOME once per process so nested guards
-    // restore the true original.
+    // restore the true original. Distinguish unset from empty: restoring an
+    // empty string would point JCODE_HOME at the cwd and leak host files
+    // into test results (Greptile finding on #1480).
     if std::env::var("JCODE_HOME_PREVIOUS").is_err() {
-        let prev = std::env::var("JCODE_HOME").unwrap_or_default();
         // SAFETY: test-only setup, runs under the shared render-state lock.
-        unsafe { std::env::set_var("JCODE_HOME_PREVIOUS", prev) };
+        unsafe {
+            match std::env::var("JCODE_HOME") {
+                Ok(prev) => std::env::set_var("JCODE_HOME_PREVIOUS", prev),
+                Err(_) => std::env::set_var("JCODE_HOME_PREVIOUS", "__unset__"),
+            }
+        }
     }
     // SAFETY: test-only; all callers run under the shared render-state lock,
     // so no other test thread reads env concurrently.

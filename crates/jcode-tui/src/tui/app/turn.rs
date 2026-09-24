@@ -1572,10 +1572,11 @@ impl App {
                 };
 
                 // Update the tool's DisplayMessage with the output
-                let _ = self.replace_latest_tool_display_message(
+                let _ = self.replace_latest_tool_display_message_with_duration(
                     &tc.id,
                     tool_title.clone(),
                     output.clone(),
+                    Some(tool_duration_ms),
                 );
 
                 self.add_provider_message(Message::tool_result_with_duration(
