@@ -237,6 +237,27 @@ fn create_session_preserves_explicit_working_dir() {
 }
 
 #[test]
+fn created_session_reports_requested_working_dir_before_first_prompt() {
+    let _home = ScopedJcodeHome::new("create-unpersisted-working-dir");
+    let mut state = BridgeState::default();
+    let out = state.api_request_to_legacy(&json!({
+        "req": "create_session", "id": 7, "working_dir": "/workspace/fresh",
+    }));
+    let Outbound::Legacy(probe) = &out[1] else {
+        panic!("expected state")
+    };
+    let reply = state.legacy_event_to_api(&json!({
+        "type": "state", "id": probe["id"], "session_id": "fresh",
+        "message_count": 0, "is_processing": false,
+    }));
+    let ApiEvent::Attached { session } = &reply[0].event else {
+        panic!("expected attached")
+    };
+    assert_eq!(session.working_dir.as_deref(), Some("/workspace/fresh"));
+    assert!(state.pending_create_dir.is_none());
+}
+
+#[test]
 fn attach_session_defers_to_daemon_even_with_persisted_working_dir() {
     let home = ScopedJcodeHome::new("attach-working-dir");
     let original = home.path.join("original");

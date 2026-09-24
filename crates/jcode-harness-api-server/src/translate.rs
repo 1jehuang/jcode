@@ -167,6 +167,10 @@ pub struct BridgeState {
     known_sessions: Vec<String>,
     /// Working directory per session, as far as it is known.
     session_dirs: std::collections::BTreeMap<String, String>,
+    /// Directory sent with an in-flight `create_session` subscribe. A fresh
+    /// session has no persisted metadata until its first prompt, so the
+    /// attach reply falls back to this instead of reporting no directory.
+    pending_create_dir: Option<String>,
     /// Models the daemon last reported for this session.
     ///
     /// The daemon volunteers the catalog on attach and again whenever it
@@ -533,6 +537,7 @@ impl BridgeState {
                 self.pending_attach_id = Some((state_id, api_id, requested_session));
                 self.pending_attach_subscribe_id = Some(id);
                 self.pending_model_probe = Some(catalog_id);
+                self.pending_create_dir = None;
                 let mut subscribe = json!({
                     "type": "subscribe",
                     "id": id,
@@ -560,6 +565,7 @@ impl BridgeState {
                                     .map(|d| d.display().to_string())
                             });
                     subscribe["working_dir"] = json!(working_dir);
+                    self.pending_create_dir = working_dir.clone();
                     if working_dir
                         .as_deref()
                         .is_some_and(Self::path_is_inside_jcode_repo)
@@ -1407,6 +1413,20 @@ impl BridgeState {
                             event["is_processing"].as_bool().unwrap_or(false);
                     }
                     let metadata = Self::resolve_session_metadata(&session_id);
+                    // New sessions persist nothing until the first prompt.
+                    let working_dir = metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.working_dir.clone())
+                        .or_else(|| self.pending_create_dir.take())
+                        .or_else(|| self.session_dirs.get(&session_id).cloned());
+                    self.pending_create_dir = None;
+                    if let Some(dir) = &working_dir
+                        && !session_id.is_empty()
+                    {
+                        self.session_dirs
+                            .entry(session_id.clone())
+                            .or_insert_with(|| dir.clone());
+                    }
                     let mut frames = vec![ServerFrame::reply(
                         api_id,
                         ApiEvent::Attached {
@@ -1428,9 +1448,7 @@ impl BridgeState {
                                     .as_ref()
                                     .and_then(|value| value.last_active_at_ms),
                                 session_id: session_id.clone(),
-                                working_dir: metadata
-                                    .as_ref()
-                                    .and_then(|metadata| metadata.working_dir.clone()),
+                                working_dir,
                                 title: metadata
                                     .as_ref()
                                     .and_then(PersistedSessionMetadata::display_title),
