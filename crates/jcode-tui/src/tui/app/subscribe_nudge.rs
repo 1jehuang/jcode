@@ -267,12 +267,12 @@ impl App {
         } else {
             // Provider-controlled value: only show a wall-clock time when it
             // fits Chrono's range, instead of a wrapping cast that can panic.
-            let resume_at = i64::try_from(reset_secs)
-                .ok()
-                .and_then(chrono::TimeDelta::try_seconds)
-                .and_then(|delta| chrono::Local::now().checked_add_signed(delta))
-                .map(|at| format!(" (at {})", at.format("%H:%M")))
-                .unwrap_or_default();
+            let resume_at = match i64::try_from(reset_secs) {
+                Ok(secs) => chrono::TimeDelta::try_seconds(secs)
+                    .and_then(|delta| chrono::Local::now().checked_add_signed(delta))
+                    .map_or_else(String::new, |at| format!(" (at {})", at.format("%H:%M"))),
+                Err(_) => String::new(),
+            };
             format!(
                 "⏳ Usage limit hit. Holding this turn and auto-resuming in {}h {:02}m{}...",
                 reset_secs / 3600,

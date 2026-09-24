@@ -117,11 +117,6 @@ pub(crate) fn parse_quota_window_reset(
     error: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<Duration> {
-    static RESETS_AT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#""(?:resets_at|reset_at|resetsAt|resetAt)"\s*:\s*"([^"]+)""#)
-            .expect("valid resets_at regex")
-    });
-
     let lower = error.to_lowercase();
     let is_limit = [
         "quota",
@@ -136,12 +131,35 @@ pub(crate) fn parse_quota_window_reset(
         return None;
     }
 
-    let raw = RESETS_AT.captures(error)?.get(1)?.as_str();
-    let reset_at = chrono::DateTime::parse_from_rfc3339(raw)
-        .ok()?
-        .with_timezone(&chrono::Utc);
-    let wait = (reset_at - now).to_std().unwrap_or(Duration::ZERO) + QUOTA_WINDOW_RESET_SLACK;
+    let raw = reset_instant_field(error)?;
+    let reset_at = match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(at) => at.with_timezone(&chrono::Utc),
+        Err(_) => return None,
+    };
+    let until_reset = match (reset_at - now).to_std() {
+        Ok(wait) => wait,
+        // Reset instant already passed: resend promptly.
+        Err(_) => Duration::ZERO,
+    };
+    let wait = until_reset + QUOTA_WINDOW_RESET_SLACK;
     (wait <= MAX_QUOTA_WINDOW_WAIT).then_some(wait)
+}
+
+/// Value of a JSON `"resets_at"`-style string field inside an error body.
+fn reset_instant_field(error: &str) -> Option<&str> {
+    [
+        "\"resets_at\"",
+        "\"reset_at\"",
+        "\"resetsAt\"",
+        "\"resetAt\"",
+    ]
+    .iter()
+    .find_map(|key| {
+        let after_key = &error[error.find(key)? + key.len()..];
+        let value = after_key.trim_start().strip_prefix(':')?.trim_start();
+        let value = value.strip_prefix('"')?;
+        Some(&value[..value.find('"')?])
+    })
 }
 
 #[cfg(test)]
@@ -199,6 +217,28 @@ mod rate_limit_parse_tests {
     #[test]
     fn openference_error_is_scheduled_by_the_rate_limit_parser() {
         assert!(parse_rate_limit_error(OPENFERENCE_WINDOW_ERROR).is_some());
+    }
+
+    #[test]
+    fn reset_field_variants_and_malformed_values() {
+        let now = at("2026-09-24T08:00:00Z");
+        let hour = Some(Duration::from_secs(3600 + 15));
+        for body in [
+            r#"quota exceeded {"resets_at" : "2026-09-24T09:00:00Z"}"#,
+            r#"quota exceeded {"resetsAt":"2026-09-24T11:00:00+02:00"}"#,
+            r#"limit exceeded {"reset_at":"2026-09-24T09:00:00.000Z"}"#,
+        ] {
+            assert_eq!(parse_quota_window_reset(body, now), hour, "{body}");
+        }
+        for body in [
+            r#"quota exceeded {"resets_at":"tomorrow"}"#,
+            r#"quota exceeded {"resets_at":1790240400}"#,
+            r#"quota exceeded {"resets_at":"2026-09-24T09:00:00Z"#,
+            r#"quota exceeded {"resets_at"}"#,
+            "quota exceeded resets_at",
+        ] {
+            assert_eq!(parse_quota_window_reset(body, now), None, "{body}");
+        }
     }
 
     #[test]
