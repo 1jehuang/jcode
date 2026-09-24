@@ -218,6 +218,16 @@ pub(super) fn infer_protocol_from_env(
         return None;
     }
 
+    // foot has built-in sixel support (since 1.2.0, no libsixel) and sets
+    // TERM=foot with no TERM_PROGRAM, so TERM is the signal. foot only
+    // advertises DA1 attribute 4 when sixel is enabled at runtime
+    // ([tweak].sixel=no) and compile time, so a disabled-sixel foot is still
+    // mis-detected here; JCODE_MERMAID_PICKER_PROBE=1 probes the real DA1 and
+    // overrides the protocol with the truthful answer.
+    if term.starts_with("foot") || term_program.contains("foot") {
+        return Some(ProtocolType::Sixel);
+    }
+
     if term.contains("sixel") {
         return Some(ProtocolType::Sixel);
     }
@@ -773,6 +783,15 @@ mod tests {
             infer_protocol_from_env(Some("xterm-sixel"), None, None, None),
             Some(ProtocolType::Sixel)
         );
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
+            Some(ProtocolType::Sixel)
+        );
+        // foot sets TERM=foot but no TERM_PROGRAM.
+        assert_eq!(
+            infer_protocol_from_env(Some("foot"), None, None, None),
+            Some(ProtocolType::Sixel)
+        );
     }
 
     #[test]
@@ -785,10 +804,6 @@ mod tests {
                 Some("stale-kitty-window")
             ),
             Some(ProtocolType::Iterm2)
-        );
-        assert_eq!(
-            infer_protocol_from_env(Some("foot"), Some("foot"), None, None),
-            None
         );
         assert_eq!(
             infer_protocol_from_env(Some("xterm-256color"), Some("konsole"), None, None),
