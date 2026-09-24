@@ -259,10 +259,20 @@ impl App {
     /// Rate-limit notice line, with the weekly-gated subscribe nudge appended
     /// when the gate allows (user is blocked on tokens right now).
     pub(super) fn rate_limit_notice_with_nudge(&mut self, reset_secs: u64) -> String {
-        let mut line = format!(
-            "⏳ Rate limit hit. Will auto-retry in {} seconds...",
-            reset_secs
-        );
+        let mut line = if reset_secs < 120 {
+            format!(
+                "⏳ Rate limit hit. Will auto-retry in {} seconds...",
+                reset_secs
+            )
+        } else {
+            let resume_at = chrono::Local::now() + chrono::Duration::seconds(reset_secs as i64);
+            format!(
+                "⏳ Usage limit hit. Holding this turn and auto-resuming in {}h {:02}m (at {})...",
+                reset_secs / 3600,
+                (reset_secs % 3600) / 60,
+                resume_at.format("%H:%M")
+            )
+        };
         if self.claim_subscribe_nudge(SubscribeNudgeTrigger::RateLimited) {
             line.push_str(&format!("\n{}", RATE_LIMIT_NUDGE_LINE));
         }
