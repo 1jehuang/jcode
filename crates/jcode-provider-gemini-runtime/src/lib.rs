@@ -785,13 +785,31 @@ impl Provider for GeminiProvider {
                 .await
             {
                 Ok(response) => response,
-                Err(err) if is_gemini_model_not_found_error(&err) => {
+                Err(err)
+                    if is_gemini_model_not_found_error(&err)
+                        || is_gemini_quota_exhausted_error(&err) =>
+                {
+                    // Walk the model fallback ladder for a dead model (404:
+                    // Google retires IDs server-side) AND for a per-model
+                    // quota-exhausted 429: free-tier buckets are per model, so
+                    // when e.g. gemini-3.8-flash is empty for hours another
+                    // Gemini model can usually still serve (observed
+                    // 2026-09-24: 3.8-flash exhausted with a 2h42m reset while
+                    // 2.5-pro answered immediately). Skipping the ladder here
+                    // left sessions hard-down until the reset.
+                    let quota_walk = is_gemini_quota_exhausted_error(&err);
                     let mut fallback_response = None;
                     let mut last_err = err;
                     for fallback_model in gemini_fallback_models(&model) {
                         jcode_base::logging::warn(&format!(
-                            "Gemini model '{}' was not found; retrying with fallback '{}'",
-                            model, fallback_model
+                            "Gemini model '{}' {}; retrying with fallback '{}'",
+                            model,
+                            if quota_walk {
+                                "has exhausted its quota"
+                            } else {
+                                "was not found"
+                            },
+                            fallback_model
                         ));
                         match provider
                             .generate_content(
@@ -1179,6 +1197,15 @@ fn gemini_http_retry_delay(
         return None;
     }
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        // A quota-exhausted 429 carries the reset horizon in
+        // RetryInfo.retryDelay (e.g. "9761.31s" when the free-tier per-model
+        // bucket is empty for hours). Retrying locally against that is doomed;
+        // fail fast so the model-fallback ladder can try a model whose bucket
+        // still has capacity (buckets are per model, observed 2026-09-24:
+        // gemini-3.8-flash exhausted for 2h42m while gemini-2.5-pro served).
+        if quota_reset_delay(body).is_some_and(|delay| delay > Duration::from_secs(60)) {
+            return None;
+        }
         let lower = body.to_ascii_lowercase();
         if [
             "daily",
@@ -1259,6 +1286,36 @@ fn is_gemini_model_not_found_error(err: &anyhow::Error) -> bool {
     lower.contains("http 404")
         || lower.contains("\"status\": \"not_found\"")
         || lower.contains("requested entity was not found")
+}
+
+/// True for a per-model quota-exhausted 429 (`RESOURCE_EXHAUSTED` with reason
+/// `QUOTA_EXHAUSTED`), as opposed to the short-window burst limiter which also
+/// 429s but clears in seconds and is retried inside `post_json`. Only the
+/// long-horizon variant should trigger a model-fallback walk.
+fn is_gemini_quota_exhausted_error(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("RESOURCE_EXHAUSTED")
+        && (text.contains("QUOTA_EXHAUSTED") || text.contains("exhausted your capacity"))
+}
+
+/// Parse the quota-reset horizon out of a Gemini 429 error body.
+/// Prefers the machine-readable `RetryInfo.retryDelay` ("9761.314717678s");
+/// falls back to `quotaResetDelay` metadata ("2h42m41.31s").
+fn quota_reset_delay(body: &str) -> Option<Duration> {
+    let value: Value = serde_json::from_str(body.trim()).ok()?;
+    let details = value.get("error")?.get("details")?.as_array()?;
+    for detail in details {
+        if detail
+            .get("@type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.ends_with("google.rpc.RetryInfo"))
+            && let Some(delay) = detail.get("retryDelay").and_then(Value::as_str)
+            && let Some(seconds) = delay.strip_suffix('s').and_then(|v| v.parse::<f64>().ok())
+        {
+            return Some(Duration::from_secs_f64(seconds.max(0.0)));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -428,10 +428,11 @@ pub fn build_contents_with_signature_policy(
             }
         })
         .collect();
-    merge_consecutive_same_role(contents)
+    let contents = merge_consecutive_function_turns(contents);
+    append_continuation_if_trailing_model_turn(contents)
 }
 
-/// Collapse consecutive same-role contents into one turn.
+/// Collapse consecutive same-role *function* turns into one turn.
 ///
 /// A parallel multi-call assistant turn stores each tool result as its own
 /// user message, so the transcript reaches here as `model[call,call]`,
@@ -440,19 +441,69 @@ pub fn build_contents_with_signature_policy(
 /// as the call turn had `functionCall` parts and rejects the split form with
 /// HTTP 400 "Please ensure that the number of function response parts is
 /// equal to the number of function call parts" (live-verified 2026-09-23 by
-/// replaying a failing session both ways). Merging adjacent same-role turns
-/// restores the accepted shape and is also what the Anthropic path does.
-fn merge_consecutive_same_role(contents: Vec<GeminiContent>) -> Vec<GeminiContent> {
+/// replaying a failing session both ways).
+///
+/// The merge is deliberately restricted to fragments that BOTH carry function
+/// parts (`functionCall`/`functionResponse`). Gluing a plain text turn into a
+/// function-response turn regressed a previously-working shape: after a failed
+/// turn left the transcript on `user[tool_result]`, the user's next typed
+/// message produced `user[functionResponse, text]` as the FINAL turn and the
+/// backend rejected the whole request with HTTP 400 "Requests ending with a
+/// model turn are not supported." (observed 2026-09-24, session octopus:
+/// request id=20 with the identical 116-item shared prefix and a pure
+/// `user[functionResponse]` tail passed shape validation and reached the
+/// quota check, id=21 whose only delta was the text part merged into that
+/// tail 400ed). Split adjacent text turns have always been accepted (jcode
+/// ships system-reminder + user text as separate consecutive user contents),
+/// so they stay split.
+fn merge_consecutive_function_turns(contents: Vec<GeminiContent>) -> Vec<GeminiContent> {
+    fn has_function_part(content: &GeminiContent) -> bool {
+        content
+            .parts
+            .iter()
+            .any(|part| part.function_call.is_some() || part.function_response.is_some())
+    }
     let mut merged: Vec<GeminiContent> = Vec::with_capacity(contents.len());
     for content in contents {
         match merged.last_mut() {
-            Some(previous) if previous.role == content.role => {
+            Some(previous)
+                if previous.role == content.role
+                    && has_function_part(previous)
+                    && has_function_part(&content) =>
+            {
                 previous.parts.extend(content.parts);
             }
             _ => merged.push(content),
         }
     }
     merged
+}
+
+/// The Cloud Code backend rejects a request whose final content is a model
+/// turn ("Requests ending with a model turn are not supported.", HTTP 400).
+/// jcode never intends to prefill, so a trailing model turn is an upstream
+/// accident (e.g. a reload auto-resume that starts a turn with empty user
+/// content). Repair the shape at the last formatting step, mirroring the
+/// Anthropic path (issue #600). A model turn with unanswered `functionCall`
+/// parts is left alone: appending a text turn there would trade this 400 for
+/// the call/response part-count 400, and that shape is repaired upstream by
+/// tool-result delivery instead.
+fn append_continuation_if_trailing_model_turn(
+    mut contents: Vec<GeminiContent>,
+) -> Vec<GeminiContent> {
+    let needs_continuation = contents.last().is_some_and(|last| {
+        last.role == "model" && !last.parts.iter().any(|part| part.function_call.is_some())
+    });
+    if needs_continuation {
+        contents.push(GeminiContent {
+            role: "user".to_string(),
+            parts: vec![GeminiPart {
+                text: Some("Continue.".to_string()),
+                ..Default::default()
+            }],
+        });
+    }
+    contents
 }
 
 fn tool_name_from_tool_result(tool_use_id: &str, messages: &[Message]) -> String {

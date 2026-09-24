@@ -1239,3 +1239,148 @@ fn build_contents_merges_split_tool_results_into_one_function_response_turn() {
         "the merged user turn must carry both functionResponse parts"
     );
 }
+
+#[test]
+fn build_contents_keeps_text_turn_separate_from_function_response_turn() {
+    // Regression (2026-09-24, session octopus): a failed turn left the
+    // transcript on user[tool_result], the user then typed a new message, and
+    // the unconditional same-role merge glued them into a single trailing
+    // user[functionResponse, text] turn. The Cloud Code backend rejected that
+    // request with HTTP 400 "Requests ending with a model turn are not
+    // supported." The merge must only combine function-part turns; plain text
+    // turns stay separate.
+    let messages = vec![
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_bg".to_string(),
+                name: "bg".to_string(),
+                input: json!({"action":"list"}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_bg".to_string(),
+                content: "no tasks".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Investigate where the lead came from. Report first".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let contents = build_contents(&messages);
+    assert_eq!(
+        contents.len(),
+        3,
+        "a typed user text turn must NOT merge into the functionResponse turn: {contents:?}"
+    );
+    assert!(contents[1].parts[0].function_response.is_some());
+    assert_eq!(
+        contents[2].parts[0].text.as_deref(),
+        Some("Investigate where the lead came from. Report first")
+    );
+}
+
+#[test]
+fn build_contents_appends_continuation_after_trailing_model_text_turn() {
+    // The backend rejects "Requests ending with a model turn". A trailing
+    // assistant text turn (reload auto-resume interruption) must be repaired
+    // with a continuation user turn, mirroring the Anthropic path (issue #600).
+    let messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "hello".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "working on it".to_string(),
+                cache_control: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+
+    let contents = build_contents(&messages);
+    assert_eq!(contents.len(), 3, "{contents:?}");
+    assert_eq!(contents[2].role, "user");
+    assert_eq!(contents[2].parts[0].text.as_deref(), Some("Continue."));
+
+    // A trailing model turn with an unanswered functionCall is left alone:
+    // appending text there would trade this 400 for the part-count 400.
+    let call_only = vec![Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "call_x".to_string(),
+            name: "bash".to_string(),
+            input: json!({"command":"ls"}),
+            thought_signature: None,
+        }],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let contents = build_contents(&call_only);
+    assert_eq!(contents.len(), 1, "{contents:?}");
+    assert_eq!(contents[0].role, "model");
+}
+
+#[test]
+fn quota_exhausted_429_detection_and_reset_delay() {
+    // Body observed live 2026-09-24 (free-tier per-model bucket empty for
+    // hours; RetryInfo.retryDelay carries the reset horizon).
+    let body = r#"{
+  "error": {
+    "code": 429,
+    "message": "You have exhausted your capacity on this model. Your quota will reset after 2h42m41s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "QUOTA_EXHAUSTED",
+        "domain": "cloudcode-pa.googleapis.com",
+        "metadata": {"model": "gemini-3.8-flash", "quotaResetDelay": "2h42m41.314717678s"}
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "9761.314717678s"
+      }
+    ]
+  }
+}"#;
+
+    let delay = quota_reset_delay(body).expect("retryDelay must parse");
+    assert_eq!(delay.as_secs(), 9761);
+
+    let err = anyhow::anyhow!("Gemini request generateContent failed (HTTP 429 Too Many Requests): {body}")
+        .context("Gemini generateContent failed");
+    assert!(is_gemini_quota_exhausted_error(&err));
+    assert!(!is_gemini_model_not_found_error(&err));
+
+    // The short-window burst limiter (reset "0s", no QUOTA_EXHAUSTED reason)
+    // must NOT trigger a fallback walk.
+    let burst = anyhow::anyhow!(
+        "Gemini request generateContent failed (HTTP 429): {{\"error\":{{\"status\":\"RESOURCE_EXHAUSTED\",\"message\":\"Your quota will reset after 0s.\"}}}}"
+    );
+    assert!(!is_gemini_quota_exhausted_error(&burst));
+    assert!(quota_reset_delay("not json").is_none());
+}

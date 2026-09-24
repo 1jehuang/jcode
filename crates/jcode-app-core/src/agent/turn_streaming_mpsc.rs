@@ -450,7 +450,14 @@ impl Agent {
                 let event = match event {
                     Ok(event) => event,
                     Err(e) => {
-                        let err_str = e.to_string();
+                        // Format the FULL anyhow chain: `to_string()` alone
+                        // prints only the outermost context (e.g. "Gemini
+                        // generateContent failed") and masked the actual
+                        // provider error body (HTTP status + JSON detail) from
+                        // the logs, leaving the TUI as the only place the real
+                        // cause was visible (observed 2026-09-24 while tracing
+                        // a Gemini 429/400 pair).
+                        let err_str = format!("{e:#}");
                         if self.try_auto_compact_after_context_limit(&err_str) {
                             log_agent_provider_stream_lifecycle(
                                 logging::LogLevel::Warn,
