@@ -209,6 +209,29 @@ pub(crate) fn calculate_placements_anchored(
         _ => 1,
     });
 
+    // Re-merge: if Overview's parts were scattered as separate anchors (space
+    // was scarce when they were placed) but no Overview anchor exists and the
+    // combined box now fits a free pocket, drop those split anchors so Phase 2
+    // seats one Overview instead of the parts riding the transcript as separate
+    // boxes until they scroll off.
+    let overview_anchored = prev_anchors
+        .iter()
+        .any(|a| a.placement.kind == WidgetKind::Overview);
+    if !overview_anchored
+        && available.contains(&WidgetKind::Overview)
+        && prev_anchors
+            .iter()
+            .any(|a| is_overview_mergeable(a.placement.kind))
+    {
+        let need = phase2_min_height(WidgetKind::Overview, data);
+        let fits = all_rects
+            .iter()
+            .any(|&(_, _, height, width, _, _)| height >= need && width >= MIN_WIDGET_WIDTH);
+        if fits {
+            ordered_anchors.retain(|a| !is_overview_mergeable(a.placement.kind));
+        }
+    }
+
     // Phase 1: hold each anchored widget in its exact recorded slot.
     //
     // The viewport's free-width profile churns line-by-line as ragged content
@@ -365,7 +388,7 @@ pub(crate) fn calculate_placements_anchored(
             continue;
         }
 
-        let min_h = kind.min_height() + 2;
+        let min_h = phase2_min_height(kind, data);
         let preferred = kind.preferred_side();
         let mut best_idx: Option<usize> = None;
         let mut best_score = i32::MIN;
@@ -454,6 +477,26 @@ pub(crate) fn calculate_placements_anchored(
     PlacementOutcome {
         visible: placements,
         anchors: next_anchors,
+    }
+}
+
+/// Smallest pocket (in rows, borders included) Phase 2 may seat `kind` in.
+///
+/// Overview's static floor (8 content rows + borders = 10) is far taller than
+/// what it actually renders for a typical session (model + context is ~5
+/// rows). Gating on the floor meant a ragged transcript with no 10-row pocket
+/// never got the combined box, and its parts were scattered down the margin as
+/// separate boxes instead. Use its real rendered height at full width.
+fn phase2_min_height(kind: WidgetKind, data: &InfoWidgetData) -> u16 {
+    let floor = kind.min_height() + 2;
+    if kind != WidgetKind::Overview {
+        return floor;
+    }
+    let natural = calculate_widget_height(kind, data, MAX_WIDGET_WIDTH, u16::MAX);
+    if natural > 2 {
+        natural.min(floor)
+    } else {
+        floor
     }
 }
 
