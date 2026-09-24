@@ -947,18 +947,46 @@ fn claude_oauth_provider_reports_oauth_independently_of_api_key() {
 /// Test binaries must never open real browser windows: login/onboarding flows
 /// are exercised heavily by unit tests, and each ungated `open::that` pops an
 /// OAuth page on the developer's desktop. `running_in_test_harness` detects
-/// the `target/**/deps/` test-binary path, and `browser_suppressed` must honor
+/// the Cargo `deps/` test-binary path, and `browser_suppressed` must honor
 /// it even without --no-browser or NO_BROWSER/JCODE_NO_BROWSER.
 #[test]
 fn browser_suppressed_inside_test_harness_without_env_overrides() {
     assert!(
         super::running_in_test_harness(),
-        "test binary should be detected as a test harness (exe under target/**/deps/)"
+        "test binary should be detected even with a custom Cargo target directory"
     );
     assert!(
         super::browser_suppressed(false),
         "browser opens must be suppressed in test binaries even without --no-browser/env vars"
     );
+}
+
+#[test]
+fn test_harness_paths_include_custom_cargo_target_directories() {
+    for path in [
+        "/work/target/debug/deps/test_binary-0123456789abcdef",
+        "/work/target/debug/deps/custom_runner",
+        "/build-cache/debug/deps/test_binary-0123456789abcdef",
+        "/build-cache/aarch64-apple-darwin/release/deps/test_binary-0123456789abcdef",
+        r"C:\build-cache\debug\deps\test_binary-0123456789abcdef.exe",
+    ] {
+        assert!(
+            super::is_test_harness_path(path),
+            "missed test binary: {path}"
+        );
+    }
+    for path in [
+        "/usr/local/bin/jcode",
+        "/work/target/debug/jcode",
+        "/build-cache/debug/deps/jcode",
+        "/build-cache/debug/deps/libjcode-0123456789abcdef.rlib",
+        "/build-cache/debug/deps/test_binary-not_a_cargo_hash",
+    ] {
+        assert!(
+            !super::is_test_harness_path(path),
+            "not a test binary: {path}"
+        );
+    }
 }
 
 /// Antigravity/Gemini access tokens live about an hour and are refreshed
