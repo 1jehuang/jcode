@@ -1570,32 +1570,6 @@ pub fn evict_old_cache() {
     }
 }
 
-/// Drop the cached Kitty viewport state for `hash`.
-///
-/// Called when every placement of an image was deleted because it left the
-/// screen; the placement deletes themselves are queued by the frame boundary
-/// (`take_placements_no_longer_drawn` -> `queue_kitty_placement_delete`).
-///
-/// The pixel data stays in the terminal on purpose. A later re-display re-places
-/// the same image id **without** re-transmitting (`render_kitty_real_placement`
-/// only sends the payload carried by the cached state), so freeing the data here
-/// with the uppercase `d=I` would make the returning image render blank: Ghostty
-/// 1.3.1 frees the data on `d=I` (`deleteById` -> `deleteIfUnused`). Terminal
-/// memory is still reclaimed when jcode's own image cache drops the id, which is
-/// where `queue_kitty_delete_if_transmitted` belongs.
-fn forget_kitty_viewport_state(hash: u64) {
-    let Ok(mut cache) = KITTY_VIEWPORT_STATE.lock() else {
-        return;
-    };
-    let Some(state) = cache.entries.remove(&hash) else {
-        return;
-    };
-    cache.recency.remove(&hash);
-    cache.total_pending_transmit_bytes = cache
-        .total_pending_transmit_bytes
-        .saturating_sub(state.pending_transmit_bytes);
-}
-
 /// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
     if let Ok(mut state) = IMAGE_STATE.lock() {
@@ -1631,9 +1605,14 @@ pub fn render_pending_terminal_image_cleanup(buf: &mut Buffer) -> bool {
     // placement the terminal keeps painting (the multiplexer never repaints the
     // cells it covered). This must run even for a zero-sized buffer so the frame
     // bookkeeping stays in step.
-    for (hash, unique_id, placement_id) in viewport_render::take_placements_no_longer_drawn() {
+    // The fitted state stays cached on purpose: it is bounded by the viewport
+    // state cache's own LRU, and keeping it warm is what makes scrolling past an
+    // image and back cheap - re-entering an image re-places from the cached fit
+    // instead of rebuilding it (decoded bytes + a fresh transmit). The scroll
+    // benchmark pins that steady state
+    // (`image_scroll_steady_state_has_no_per_frame_stats_or_rebuilds`).
+    for (_hash, unique_id, placement_id) in viewport_render::take_placements_no_longer_drawn() {
         viewport_render::queue_kitty_placement_delete(unique_id, placement_id);
-        forget_kitty_viewport_state(hash);
     }
 
     let area = *buf.area();

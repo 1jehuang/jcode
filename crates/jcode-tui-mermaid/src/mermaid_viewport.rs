@@ -2460,26 +2460,19 @@ mod kitty_viewport_leak_tests {
             "placement deletes must keep the pixel data: {payload:?}"
         );
 
-        // The cached state goes so the geometry is re-fitted, but the pixel data
-        // must stay: the next draw places the same image id without re-sending
-        // the payload, and Ghostty frees the data on `d=I` (`deleteById` ->
-        // `deleteIfUnused`), which would leave the returning image blank.
+        // Nothing else may be reclaimed: the fitted state stays warm (scrolling
+        // back past an image re-places from the cached fit instead of rebuilding
+        // it, which the scroll benchmark pins) and the pixel data stays in the
+        // terminal (the re-place carries no payload, and Ghostty frees the data
+        // on `d=I`, `deleteById` -> `deleteIfUnused`, which would leave the
+        // returning image blank).
         assert!(
             KITTY_VIEWPORT_STATE
                 .lock()
                 .unwrap()
                 .entries
                 .contains_key(&hash),
-            "fixture state must be warm before the frame boundary"
-        );
-        crate::forget_kitty_viewport_state(hash);
-        assert!(
-            !KITTY_VIEWPORT_STATE
-                .lock()
-                .unwrap()
-                .entries
-                .contains_key(&hash),
-            "state must be dropped once its placements are gone"
+            "the fitted state must stay cached after its placements are cleaned up"
         );
         assert!(
             !take_kitty_delete_ids().contains(&0x00AA_BBCC),
