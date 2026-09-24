@@ -607,3 +607,123 @@ fn remerge_keeps_non_mergeable_anchors() {
         .expect("memory widget kept");
     assert_eq!(memory.rect.y, 30, "memory must hold its anchored slot");
 }
+
+fn right_anchor(kind: WidgetKind, y: u16, h: u16) -> WidgetAnchor {
+    WidgetAnchor {
+        placement: WidgetPlacement {
+            kind,
+            rect: Rect::new(100, y, 40, h),
+            side: Side::Right,
+        },
+        hidden_frames: 0,
+        content_top: y as usize,
+    }
+}
+
+fn roomy_margins() -> Margins {
+    Margins {
+        right_widths: vec![60; 40],
+        right_reliable: vec![60; 40],
+        scroll_top: 0,
+        ..Default::default()
+    }
+}
+
+/// Review #1456 (1): an Overview seated in a slot sized for model + context
+/// must not stay in that slot once todos make it taller - holding it would
+/// suppress the parts and render nothing (the content no longer fits).
+#[test]
+fn overview_that_outgrows_its_slot_rehomes_instead_of_going_blank() {
+    let mut data = model_and_context_data();
+    let small = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    let anchors = vec![right_anchor(WidgetKind::Overview, 3, small)];
+    data.todos = vec![
+        todo("a", "in_progress"),
+        todo("b", "pending"),
+        todo("c", "pending"),
+    ];
+    let grown = calculate_widget_height(WidgetKind::Overview, &data, 40, 40);
+    assert!(
+        grown > small,
+        "precondition: todos grow overview ({small} -> {grown})"
+    );
+    let area = Rect::new(0, 0, 140, 40);
+    let out = calculate_placements_anchored(area, &roomy_margins(), &data, true, &anchors);
+    assert_placements_sane("outgrown", area, &out.visible);
+    let overview = out
+        .visible
+        .iter()
+        .find(|p| p.kind == WidgetKind::Overview)
+        .expect("overview still shown");
+    assert!(
+        overview.rect.height >= grown,
+        "overview kept a {}-row slot for {grown}-row content",
+        overview.rect.height
+    );
+}
+
+/// Review #1456 (2): the re-merge fit test must use space left after other
+/// anchored widgets reserve their rows. If memory holds the only pocket tall
+/// enough for Overview, the split context box must stay visible.
+#[test]
+fn remerge_keeps_split_part_when_other_anchor_holds_the_only_pocket() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    let overview_need = super::phase2_min_height(WidgetKind::Overview, &data);
+    // One tall pocket (rows 0..=17), then dense lines, then a 4-row pocket
+    // (rows 30..=33) that only fits the small context box.
+    let free: Vec<u16> = (0..40)
+        .map(|r| {
+            if r <= 17 || (30..=33).contains(&r) {
+                60
+            } else {
+                4
+            }
+        })
+        .collect();
+    assert!(
+        18 >= overview_need,
+        "precondition: tall pocket fits overview"
+    );
+    let margins = Margins {
+        right_widths: free.clone(),
+        right_reliable: free,
+        scroll_top: 0,
+        ..Default::default()
+    };
+    // Memory occupies the tall pocket; context sits split in the small one.
+    let anchors = vec![
+        right_anchor(WidgetKind::MemoryActivity, 0, 18),
+        right_anchor(WidgetKind::ContextUsage, 30, 4),
+    ];
+    let out = calculate_placements_anchored(area, &margins, &data, true, &anchors);
+    assert_placements_sane("reserved pocket", area, &out.visible);
+    let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+    assert!(
+        kinds.contains(&WidgetKind::ContextUsage) || kinds.contains(&WidgetKind::Overview),
+        "context information vanished: {kinds:?}"
+    );
+}
+
+/// Review #1456 (3): swarm and compaction are Overview-suppressed but Overview
+/// does not render them, so re-merging must keep their boxes.
+#[test]
+fn remerge_keeps_swarm_and_compaction_boxes() {
+    let data = contended_data();
+    let area = Rect::new(0, 0, 140, 40);
+    for kind in [WidgetKind::SwarmStatus, WidgetKind::Compaction] {
+        assert!(data.has_data_for(kind), "precondition: {kind:?} has data");
+        let anchors = vec![
+            right_anchor(WidgetKind::ContextUsage, 1, 4),
+            right_anchor(kind, 30, 6),
+        ];
+        let out = calculate_placements_anchored(area, &roomy_margins(), &data, true, &anchors);
+        assert_placements_sane("keep swarm/compaction", area, &out.visible);
+        let kinds: Vec<WidgetKind> = out.visible.iter().map(|p| p.kind).collect();
+        assert!(kinds.contains(&WidgetKind::Overview), "{kinds:?}");
+        assert!(
+            kinds.contains(&kind),
+            "{kind:?} box dropped by re-merge: {kinds:?}"
+        );
+    }
+}
