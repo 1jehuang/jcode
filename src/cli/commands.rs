@@ -3220,6 +3220,7 @@ fn emit_ndjson_event(
                 "name": name,
                 "output": output,
                 "error": error,
+                "duration_ms": duration_ms,
             }),
         ),
         ServerEvent::TokenUsage {
