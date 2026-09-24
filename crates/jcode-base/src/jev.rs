@@ -435,9 +435,10 @@ fn resolve_with(
             // Included subscriber access wins over personal paid provider keys.
             // Entitlement is checked live before evaluation. Failure must not
             // silently spend a BYOK balance; users can select BYOK explicitly.
+            // Typesafe serves Jev directly, so it beats resellers of the same model.
             JevProvider::Jcode,
-            JevProvider::OpenRouter,
             JevProvider::TypeSafe,
+            JevProvider::OpenRouter,
             JevProvider::Aimlapi,
         ],
         "openrouter" => &[JevProvider::OpenRouter],
@@ -960,6 +961,13 @@ mod tests {
                 .unwrap()
                 .0,
             JevProvider::Jcode
+        );
+        // Typesafe direct wins over resellers of the same model.
+        assert_eq!(
+            resolve_with("auto", |env, _| (env != "JCODE_API_KEY").then(|| "k".into()))
+                .unwrap()
+                .0,
+            JevProvider::TypeSafe
         );
         // Deliberate BYOK remains available even when a Jcode login is present.
         assert_eq!(
