@@ -172,6 +172,19 @@ impl App {
         title: Option<String>,
         content: String,
     ) -> bool {
+        self.replace_latest_tool_display_message_with_duration(tool_call_id, title, content, None)
+    }
+
+    /// Replace the latest row for `tool_call_id` and stamp the measured
+    /// duration (#1453) so completed local tool rows show the same badge as
+    /// rows completed through the ToolDone event.
+    pub(super) fn replace_latest_tool_display_message_with_duration(
+        &mut self,
+        tool_call_id: &str,
+        title: Option<String>,
+        content: String,
+        tool_duration_ms: Option<u64>,
+    ) -> bool {
         let Some(idx) = self.display_messages.iter().rposition(|message| {
             message.tool_data.as_ref().map(|tool| tool.id.as_str()) == Some(tool_call_id)
         }) else {
@@ -188,7 +201,11 @@ impl App {
             return true;
         }
 
-        self.replace_display_message_title_and_content(idx, title, content)
+        self.replace_display_message_title_and_content(idx, title, content);
+        if let Some(duration_ms) = tool_duration_ms {
+            self.display_messages[idx].tool_duration_ms = Some(duration_ms);
+        }
+        true
     }
 
     pub(super) fn background_task_rows_ref(&self) -> &[crate::tui::BackgroundTaskRow] {
