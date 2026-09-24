@@ -68,6 +68,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/terminal-setup", "Fix Shift+Enter newlines"),
     RegisteredCommand::public("/commit", "Make logical commits from current changes"),
     RegisteredCommand::public(
+        "/merge",
+        "Merge current branch into main/master and switch to it (no push)",
+    ),
+    RegisteredCommand::public(
         "/commit-push",
         "Make logical commits from current changes, then push",
     ),
@@ -81,6 +85,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
         "Publish a prepared macOS arm64 build immediately; CI adds other platforms",
     ),
     RegisteredCommand::public("/remote", "Reach this session from another machine"),
+    RegisteredCommand::public(
+        "/merge-remote-release",
+        "Merge into main/master, validate, push, and release remotely",
+    ),
     RegisteredCommand::public(
         "/remote-release",
         "Push the release tag immediately; CI builds and publishes every platform",
@@ -149,6 +157,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/version", "Show current version"),
     RegisteredCommand::public("/changelog", "Show recent changes in this build"),
     RegisteredCommand::public("/info", "Show session info and tokens"),
+    RegisteredCommand::public("/reset", "Review and confirm a banked OpenAI usage reset"),
     RegisteredCommand::public("/usage", "Show connected provider usage limits"),
     RegisteredCommand::public(
         "/productivity",
@@ -169,7 +178,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::hidden("/keybindings", "Alias for /keys"),
     RegisteredCommand::public(
         "/diff",
-        "Cycle or set diff display mode (off/inline/full/pinned/file)",
+        "Cycle or set diff display mode (off/inline/full/file)",
     ),
     RegisteredCommand::public(
         "/onboarding-preview",
@@ -204,7 +213,7 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/logout", "Log out of a provider"),
     RegisteredCommand::public("/account", "Open the combined account picker"),
     RegisteredCommand::public("/accounts", "Alias for /account"),
-    RegisteredCommand::public("/cache", "Show cache stats or set cache TTL"),
+    RegisteredCommand::public("/cache", "Show cache stats; extend/5m saves Anthropic TTL"),
     RegisteredCommand::public("/debug-visual", "Toggle visual debug overlay"),
     RegisteredCommand::public("/screenshot-mode", "Toggle screenshot capture mode"),
     RegisteredCommand::public("/screenshot", "Capture a screenshot debug state"),
@@ -232,6 +241,10 @@ pub(crate) fn registered_command_entries() -> impl Iterator<Item = (&'static str
         .iter()
         .filter(|command| !command.hidden)
         .map(|command| (command.name, command.help))
+}
+
+pub(crate) fn registered_command_names() -> impl Iterator<Item = &'static str> {
+    REGISTERED_COMMANDS.iter().map(|command| command.name)
 }
 
 impl App {
@@ -504,6 +517,13 @@ impl App {
 
     /// Get command suggestions based on current input (or base input for cycling)
     pub(super) fn get_suggestions_for(&self, input: &str) -> Vec<(String, &'static str)> {
+        let cursor = if input == self.input {
+            self.cursor_pos.min(input.len())
+        } else {
+            input.len()
+        };
+        let input = super::slash_command_parser::active_token_before_cursor(input, cursor)
+            .map_or(input, |(start, end)| &input[start..end]);
         let input = input.trim_start();
 
         if crate::tui::is_ssh_remote() {
@@ -526,6 +546,28 @@ impl App {
 
         let prefix = input.to_lowercase();
         let prefix_trimmed = prefix.trim_end();
+
+        if prefix.starts_with("/reset ") {
+            return self.rank_suggestions(
+                // Keep the read-only command first even after a trailing space.
+                // Enter must not silently turn review into cancel or confirm.
+                input.trim_end(),
+                vec![
+                    (
+                        "/reset usage limits openai".into(),
+                        "Review an available banked reset (read-only)",
+                    ),
+                    (
+                        "/reset usage limits openai confirm".into(),
+                        "Spend the pending banked reset",
+                    ),
+                    (
+                        "/reset usage limits openai cancel".into(),
+                        "Clear the pending reset confirmation",
+                    ),
+                ],
+            );
+        }
 
         if prefix.starts_with("/model ") || prefix.starts_with("/models ") {
             if let Some(model_spec) = input
@@ -553,7 +595,10 @@ impl App {
                     ("/agents swarm".into(), "Configure swarm/subagent model"),
                     ("/agents review".into(), "Configure code review model"),
                     ("/agents judge".into(), "Configure judge model"),
-                    ("/agents memory".into(), "Configure memory sidecar model"),
+                    (
+                        "/agents memory".into(),
+                        "Configure optional memory extraction model",
+                    ),
                     ("/agents ambient".into(), "Configure ambient model"),
                 ],
             );
@@ -760,7 +805,17 @@ impl App {
         }
 
         if prefix.starts_with("/effort ") {
-            let efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+            let efforts = [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+                "swarm",
+                "swarm-deep",
+            ];
             return self.rank_suggestions(
                 input,
                 efforts
@@ -828,8 +883,9 @@ impl App {
             let suggestions = vec![
                 ("/cache stats".into(), "Show KV cache stats"),
                 ("/cache status".into(), "Alias for /cache stats"),
-                ("/cache 1h".into(), "Use 1 hour cache TTL"),
-                ("/cache 5m".into(), "Use 5 minute cache TTL"),
+                ("/cache extend".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 1h".into(), "Save 1 hour Anthropic cache TTL"),
+                ("/cache 5m".into(), "Save 5 minute Anthropic cache TTL"),
             ];
             return self.rank_suggestions(input, suggestions);
         }
@@ -1530,6 +1586,13 @@ impl App {
 
     /// Autocomplete current input - cycles through suggestions on repeated Tab
     pub fn autocomplete(&mut self) -> bool {
+        if let Some(range) =
+            super::slash_command_parser::active_token_before_cursor(&self.input, self.cursor_pos)
+        {
+            let suggestions = self.get_suggestions_for(&self.input);
+            return self.autocomplete_active_slash_token(range, suggestions);
+        }
+
         // Get suggestions for current input
         let current_suggestions = self.get_suggestions_for(&self.input);
 
@@ -1589,6 +1652,67 @@ impl App {
         true
     }
 
+    fn autocomplete_active_slash_token(
+        &mut self,
+        range: (usize, usize),
+        current_suggestions: Vec<(String, &'static str)>,
+    ) -> bool {
+        let current_token = self.input[range.0..range.1].to_string();
+
+        if let Some((ref base, idx)) = self.tab_completion_state.clone()
+            && super::slash_command_parser::active_token_before_cursor(base, base.len()).is_some()
+        {
+            let base_suggestions = self.get_suggestions_for(base);
+            if base_suggestions.len() > 1
+                && base_suggestions
+                    .iter()
+                    .any(|(command, _)| command == &current_token)
+            {
+                let next_index = (idx + 1) % base_suggestions.len();
+                let (command, _) = &base_suggestions[next_index];
+                self.remember_input_undo_state();
+                self.input.replace_range(range.0..range.1, command.as_str());
+                self.cursor_pos = range.0 + command.len();
+                self.tab_completion_state = Some((base.clone(), next_index));
+                return true;
+            }
+        }
+
+        if current_suggestions.is_empty() {
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        if current_suggestions.len() == 1 && current_suggestions[0].0 == current_token {
+            if Self::command_accepts_args(&current_token) {
+                self.remember_input_undo_state();
+                self.input
+                    .replace_range(range.0..range.1, &format!("{} ", current_token));
+                self.cursor_pos = range.1 + 1;
+                return true;
+            }
+            self.tab_completion_state = None;
+            return false;
+        }
+
+        let selected = self
+            .command_suggestion_selected
+            .min(current_suggestions.len().saturating_sub(1));
+        let (command, _) = &current_suggestions[selected];
+        let base = self.input.clone();
+        let mut replacement = command.clone();
+        if current_suggestions.len() == 1 && Self::command_accepts_args(command) {
+            replacement.push(' ');
+        }
+        self.remember_input_undo_state();
+        self.input
+            .replace_range(range.0..range.1, replacement.as_str());
+        self.cursor_pos = range.0 + replacement.len();
+        self.tab_completion_state = Some((base, selected));
+        self.command_suggestion_selected = 0;
+        true
+    }
+
     /// Reset tab completion state (call when user types/modifies input)
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
@@ -1608,10 +1732,14 @@ impl App {
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
+            // The composer now holds a restored draft, so the copy stashed by a
+            // history jump is stale: a later Down must not resurrect it.
+            self.history_draft = None;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             self.reset_tab_completion();
@@ -1654,6 +1782,7 @@ impl App {
                 | "/account openai switch"
                 | "/account openai remove"
                 | "/usage"
+                | "/reset"
                 | "/subscription"
                 | "/poke"
                 | "/memory"

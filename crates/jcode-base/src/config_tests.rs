@@ -14,6 +14,116 @@ fn restore_env_var(key: &str, previous: Option<OsString>) {
     }
 }
 
+struct GeminiConfigEnv {
+    _home: tempfile::TempDir,
+    previous: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl GeminiConfigEnv {
+    fn new() -> Self {
+        let previous = [
+            "JCODE_HOME",
+            "JCODE_GEMINI_FORCE_OAUTH",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_PROJECT_ID",
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect();
+        let home = tempfile::tempdir().unwrap();
+        crate::env::set_var("JCODE_HOME", home.path());
+        for key in [
+            "JCODE_GEMINI_FORCE_OAUTH",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_PROJECT_ID",
+        ] {
+            crate::env::remove_var(key);
+        }
+        Config::invalidate_cache();
+        Self {
+            _home: home,
+            previous,
+        }
+    }
+}
+
+impl Drop for GeminiConfigEnv {
+    fn drop(&mut self) {
+        for (key, previous) in self.previous.drain(..) {
+            restore_env_var(key, previous);
+        }
+        Config::invalidate_cache();
+    }
+}
+
+#[test]
+fn gemini_config_reload_does_not_export_sticky_environment_overrides() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = GeminiConfigEnv::new();
+    let mut cfg = Config::default();
+    cfg.provider.gemini_force_oauth = true;
+    cfg.provider.gemini_project = Some(" project-a ".into());
+    cfg.save().unwrap();
+    assert!(crate::auth::gemini::force_oauth());
+    assert_eq!(
+        crate::auth::gemini::cloud_project().as_deref(),
+        Some("project-a")
+    );
+    assert!(std::env::var_os("JCODE_GEMINI_FORCE_OAUTH").is_none());
+    assert!(std::env::var_os("GOOGLE_CLOUD_PROJECT").is_none());
+
+    cfg.provider.gemini_force_oauth = false;
+    cfg.provider.gemini_project = Some("project-b".into());
+    cfg.save().unwrap();
+    assert!(!crate::auth::gemini::force_oauth());
+    assert_eq!(
+        crate::auth::gemini::cloud_project().as_deref(),
+        Some("project-b")
+    );
+
+    cfg.provider.gemini_project = None;
+    cfg.save().unwrap();
+    assert_eq!(crate::auth::gemini::cloud_project(), None);
+}
+
+#[test]
+fn gemini_environment_overrides_config_without_changing_the_file() {
+    let _lock = crate::storage::lock_test_env();
+    let _env = GeminiConfigEnv::new();
+    let mut cfg = Config::default();
+    cfg.provider.gemini_force_oauth = true;
+    cfg.provider.gemini_project = Some("from-config".into());
+    cfg.save().unwrap();
+    crate::env::set_var("JCODE_GEMINI_FORCE_OAUTH", "off");
+    crate::env::set_var("GOOGLE_CLOUD_PROJECT_ID", "from-alias");
+    Config::invalidate_cache();
+    assert!(!crate::auth::gemini::force_oauth());
+    assert_eq!(
+        crate::auth::gemini::cloud_project().as_deref(),
+        Some("from-alias")
+    );
+    crate::env::set_var("GOOGLE_CLOUD_PROJECT", "from-env");
+    Config::invalidate_cache();
+    assert_eq!(
+        crate::auth::gemini::cloud_project().as_deref(),
+        Some("from-env")
+    );
+
+    for key in [
+        "JCODE_GEMINI_FORCE_OAUTH",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_PROJECT_ID",
+    ] {
+        crate::env::remove_var(key);
+    }
+    Config::invalidate_cache();
+    assert!(crate::auth::gemini::force_oauth());
+    assert_eq!(
+        crate::auth::gemini::cloud_project().as_deref(),
+        Some("from-config")
+    );
+}
+
 #[test]
 fn test_openai_reasoning_effort_defaults_to_low() {
     assert_eq!(
@@ -996,6 +1106,33 @@ fn test_env_override_native_scrollbars() {
 }
 
 #[test]
+fn test_removed_pinned_diff_mode_falls_back_inline() {
+    let cfg: Config = toml::from_str(
+        "[display]\ndiff_mode = 'pinned'\ndiff_line_wrap = false\ncentered = true\n",
+    )
+    .expect("legacy pinned diff settings must not invalidate the config");
+    assert_eq!(cfg.display.diff_mode, DiffDisplayMode::Inline);
+    assert!(cfg.display.centered, "unrelated settings must survive");
+}
+
+#[test]
+fn test_env_override_removed_pinned_diff_mode_is_ignored() {
+    let _guard = crate::storage::lock_test_env();
+    let prev = std::env::var_os("JCODE_DIFF_MODE");
+    for removed in ["pinned", "pin"] {
+        crate::env::set_var("JCODE_DIFF_MODE", removed);
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.display.diff_mode, DiffDisplayMode::Inline);
+
+        cfg.display.diff_mode = DiffDisplayMode::File;
+        cfg.apply_env_overrides();
+        assert_eq!(cfg.display.diff_mode, DiffDisplayMode::File);
+    }
+    restore_env_var("JCODE_DIFF_MODE", prev);
+}
+
+#[test]
 fn test_env_override_diff_mode_full_inline() {
     let _guard = crate::storage::lock_test_env();
     let prev = std::env::var_os("JCODE_DIFF_MODE");
@@ -1363,23 +1500,10 @@ fn migrate_idle_animation_off_noops_without_enabled_value() {
     restore_env_var("JCODE_HOME", prev_home);
 }
 
+/// Explicit opt-outs, including the shape written by older versions, must
+/// survive real config loads, saves, and unrelated preference updates.
 #[test]
-fn frozen_machine_written_sponsors_optout_is_repaired() {
-    let raw = "[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n";
-    let mut config: Config = toml::from_str(raw).expect("parse");
-    assert!(!config.sponsors.enabled);
-    config.repair_frozen_sponsors_optout(raw);
-    assert!(
-        config.sponsors.enabled,
-        "a whole-struct config save must not permanently disable discovery"
-    );
-}
-
-/// End-to-end: a real config file frozen by an old save must load with
-/// discovery enabled, and the next save must drop the section entirely so the
-/// freeze cannot recur.
-#[test]
-fn frozen_sponsors_optout_recovers_through_a_real_config_file() {
+fn sponsors_optout_survives_config_save_and_reload() {
     let _guard = crate::storage::lock_test_env();
     let prev_home = std::env::var_os("JCODE_HOME");
     let dir = tempfile::TempDir::new().expect("tempdir");
@@ -1387,60 +1511,49 @@ fn frozen_sponsors_optout_recovers_through_a_real_config_file() {
     Config::invalidate_cache();
 
     let path = Config::path().expect("config path");
-    std::fs::create_dir_all(path.parent().expect("config parent")).expect("create config parent");
-    std::fs::write(
-        &path,
-        "[display]\ncentered = false\n\n[sponsors]\nenabled = false\nendpoint = \"https://api.jcode.sh/v1/discovery\"\n",
-    )
-    .expect("write frozen config");
-
-    let loaded = Config::load();
-    assert!(
-        loaded.sponsors.enabled,
-        "loading a machine-frozen opt-out must restore the shipped default"
-    );
-
-    loaded.save().expect("save config");
-    let rewritten = std::fs::read_to_string(&path).expect("read config");
-    assert!(
-        !rewritten.contains("[sponsors]"),
-        "saving must not write the discovery section back: {rewritten}"
-    );
-    assert!(
-        Config::load().sponsors.enabled,
-        "discovery must stay enabled after a save/load round trip"
-    );
-
-    if let Some(prev) = prev_home {
-        crate::env::set_var("JCODE_HOME", prev);
-    } else {
-        crate::env::remove_var("JCODE_HOME");
-    }
-    Config::invalidate_cache();
-}
-
-#[test]
-fn legacy_endpoint_optout_is_also_repaired() {
-    let raw =
-        "[sponsors]\nenabled = false\nendpoint = \"https://api.solosystems.dev/v1/discovery\"\n";
-    let mut config: Config = toml::from_str(raw).expect("parse");
-    config.repair_frozen_sponsors_optout(raw);
-    assert!(config.sponsors.enabled);
-}
-
-#[test]
-fn hand_written_sponsors_optout_is_respected() {
-    for raw in [
-        "[sponsors]\nenabled = false\n",
-        "[sponsors]\nenabled = false\nendpoint = \"https://discovery.internal/v1\"\n",
+    for endpoint in [
+        None,
+        Some("https://api.jcode.sh/v1/discovery"),
+        Some("https://api.solosystems.dev/v1/discovery"),
+        Some("https://api.jcode.sh/v1/discovery/"),
+        Some("https://discovery.internal/v1"),
     ] {
-        let mut config: Config = toml::from_str(raw).expect("parse");
-        config.repair_frozen_sponsors_optout(raw);
-        assert!(
-            !config.sponsors.enabled,
-            "explicit user opt-out must survive: {raw}"
-        );
+        let mut raw = String::from("[sponsors]\nenabled = false\n");
+        if let Some(endpoint) = endpoint {
+            raw.push_str(&format!("endpoint = {endpoint:?}\n"));
+        }
+        std::fs::write(&path, &raw).expect("write opt-out");
+        let expected_endpoint = endpoint.unwrap_or("https://api.jcode.sh/v1/discovery");
+
+        for round in 0..3 {
+            let loaded = Config::load();
+            assert!(
+                !loaded.sponsors.enabled,
+                "explicit opt-out must survive load {round}: {raw}"
+            );
+            assert_eq!(loaded.sponsors.endpoint, expected_endpoint);
+            loaded.save().expect("save config");
+
+            // Exercise the strict read-modify-write path used by preferences too.
+            Config::set_default_model_only(Some("test-model")).expect("update preference");
+            let reloaded = Config::load_strict().expect("reload config");
+            assert!(
+                !reloaded.sponsors.enabled,
+                "opt-out lost on round {round}: {raw}"
+            );
+            assert_eq!(reloaded.sponsors.endpoint, expected_endpoint);
+            assert_eq!(
+                reloaded.provider.default_model.as_deref(),
+                Some("test-model")
+            );
+            let saved = std::fs::read_to_string(&path).expect("read saved config");
+            let saved: toml::Value = toml::from_str(&saved).expect("parse saved config");
+            assert_eq!(saved["sponsors"]["enabled"].as_bool(), Some(false));
+        }
     }
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }
 
 #[test]
@@ -1462,4 +1575,153 @@ fn config_reload_generation_increments_on_cache_invalidation() {
         after > before,
         "invalidate_config_cache must bump the reload generation ({before} -> {after})"
     );
+}
+
+#[test]
+fn swarm_root_effort_config_defaults_and_independent_modes() {
+    let defaults = Config::default();
+    assert_eq!(defaults.agents.root_effort_for_swarm(false), "max");
+    assert_eq!(defaults.agents.root_effort_for_swarm(true), "max");
+    let cfg: Config = toml::from_str(
+        "[agents]\nswarm_root_effort = 'low'\nswarm_deep_root_effort = ' High '\nswarm_effort = 'medium'\n",
+    ).unwrap();
+    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
+    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("medium"));
+    assert!(cfg.display_string().contains("Swarm root effort: low"));
+    assert!(
+        cfg.display_string()
+            .contains("Deep swarm root effort: high")
+    );
+    let serialized = toml::to_string(&cfg).unwrap();
+    let round_trip: Config = toml::from_str(&serialized).unwrap();
+    assert_eq!(round_trip.agents.root_effort_for_swarm(true), "high");
+
+    for level in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+        let cfg: Config =
+            toml::from_str(&format!("[agents]\nswarm_root_effort = '{level}'")).unwrap();
+        assert_eq!(cfg.agents.root_effort_for_swarm(false), level);
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+    }
+    for invalid in ["", "swarm", "swarm-deep", "turbo"] {
+        let cfg: Config = toml::from_str(&format!("[agents]\nswarm_root_effort = '{invalid}'\nswarm_deep_root_effort = '{invalid}'\nswarm_effort = 'low'")).unwrap();
+        assert_eq!(cfg.agents.root_effort_for_swarm(false), "max");
+        assert_eq!(cfg.agents.root_effort_for_swarm(true), "max");
+        assert_eq!(cfg.agents.swarm_effort.as_deref(), Some("low"));
+    }
+}
+
+#[test]
+fn swarm_root_effort_env_overrides_and_shared_resolution() {
+    let _guard = crate::storage::lock_test_env();
+    let keys = ["JCODE_SWARM_ROOT_EFFORT", "JCODE_SWARM_DEEP_ROOT_EFFORT"];
+    let previous = keys.map(std::env::var_os);
+    let fingerprint = config_env_fingerprint();
+    crate::env::set_var(keys[0], "low");
+    crate::env::set_var(keys[1], "high");
+    assert_ne!(config_env_fingerprint(), fingerprint);
+    let mut cfg = Config::default();
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.root_effort_for_swarm(false), "low");
+    assert_eq!(cfg.agents.root_effort_for_swarm(true), "high");
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort("swarm"),
+        Some("low")
+    );
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort(" Swarm-Deep "),
+        Some("high")
+    );
+    assert_eq!(crate::prompt::swarm_root_reasoning_effort("low"), None);
+    crate::env::set_var(keys[0], "none");
+    assert_eq!(
+        crate::prompt::swarm_root_reasoning_effort("swarm"),
+        Some("none")
+    );
+    // Config changes must not turn orchestration off or misrepresent its effort.
+    for mode in ["swarm", "swarm-deep"] {
+        let mut split = crate::prompt::SplitSystemPrompt::default();
+        crate::prompt::append_swarm_effort_directive(&mut split, Some(mode));
+        assert!(split.dynamic_part.contains("swarm"));
+        assert!(!split.dynamic_part.contains("maximum reasoning effort"));
+    }
+    for key in keys {
+        crate::env::set_var(key, " ");
+    }
+    cfg.apply_env_overrides();
+    assert_eq!(cfg.agents.swarm_root_effort, None);
+    assert_eq!(cfg.agents.swarm_deep_root_effort, None);
+    for (key, value) in keys.into_iter().zip(previous) {
+        restore_env_var(key, value);
+    }
+}
+
+#[test]
+fn anthropic_cache_preference_persists_and_preserves_other_settings() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().unwrap();
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+    let path = Config::path().unwrap();
+    std::fs::write(&path, "[provider]\ndefault_model = 'keep-me'\n").unwrap();
+    assert!(crate::config::config().provider.anthropic_cache_ttl_1h);
+    for enabled in [false, true] {
+        Config::set_anthropic_cache_ttl_1h(enabled).unwrap();
+        Config::invalidate_cache();
+        assert_eq!(Config::load().provider.anthropic_cache_ttl_1h, enabled);
+        assert_eq!(crate::provider::anthropic::is_cache_ttl_1h(), enabled);
+        assert_eq!(
+            crate::config::config().provider.anthropic_cache_ttl_1h,
+            enabled
+        );
+        assert_eq!(
+            Config::load().provider.default_model.as_deref(),
+            Some("keep-me")
+        );
+    }
+    std::fs::write(&path, "[broken").unwrap();
+    assert!(Config::set_anthropic_cache_ttl_1h(false).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[broken");
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
+}
+
+#[test]
+fn cli_config_save_round_trips_desktop_tables() {
+    let _guard = crate::storage::lock_test_env();
+    let prev_home = std::env::var_os("JCODE_HOME");
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    crate::env::set_var("JCODE_HOME", dir.path());
+    Config::invalidate_cache();
+
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[display]\ncentered = false\n\n[desktop.voice]\nglobal_hold = true\n\
+         global_devices = [\"/dev/input/event3\"]\n\n[desktop.appearance]\ntheme = \"warm-neutral\"\n",
+    )
+    .unwrap();
+
+    // A CLI read-modify-write must not drop Desktop-owned settings.
+    Config::set_default_model(Some("gpt-test"), None).expect("save");
+    let saved: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let desktop = saved["desktop"].as_table().expect("desktop table kept");
+    assert_eq!(desktop["voice"]["global_hold"].as_bool(), Some(true));
+    assert_eq!(
+        desktop["voice"]["global_devices"][0].as_str(),
+        Some("/dev/input/event3")
+    );
+    assert_eq!(
+        desktop["appearance"]["theme"].as_str(),
+        Some("warm-neutral")
+    );
+
+    // Configs without Desktop tables stay free of an empty [desktop] header.
+    std::fs::write(&path, "[display]\ncentered = false\n").unwrap();
+    Config::set_default_model(Some("gpt-test"), None).expect("save");
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("[desktop"));
+
+    restore_env_var("JCODE_HOME", prev_home);
+    Config::invalidate_cache();
 }

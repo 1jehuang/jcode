@@ -331,12 +331,18 @@ fn estimate_side_panel_memory(snapshot: &SidePanelSnapshot) -> SidePanelMemorySt
         let page_metadata_bytes =
             page.id.capacity() + page.title.capacity() + page.file_path.capacity();
         stats.metadata_bytes += page_metadata_bytes;
-        stats.content_bytes += page.content.capacity();
-        stats.estimate_bytes += page_metadata_bytes + page.content.capacity();
+        let payload_bytes = page.content.capacity()
+            + page
+                .pdf_data
+                .as_ref()
+                .map(|data| data.capacity())
+                .unwrap_or(0);
+        stats.content_bytes += payload_bytes;
+        stats.estimate_bytes += page_metadata_bytes + payload_bytes;
         if focused_page_id == Some(page.id.as_str()) {
-            stats.focused_content_bytes += page.content.capacity();
+            stats.focused_content_bytes += payload_bytes;
         } else {
-            stats.unfocused_content_bytes += page.content.capacity();
+            stats.unfocused_content_bytes += payload_bytes;
         }
     }
 
@@ -348,6 +354,21 @@ mod tests {
     use super::*;
     use crate::message::{ContentBlock, Role};
     use crate::side_panel::{SidePanelPage, SidePanelPageFormat, SidePanelPageSource};
+
+    #[test]
+    fn pdf_payload_counts_toward_side_panel_memory() {
+        let snapshot = SidePanelSnapshot {
+            pages: vec![SidePanelPage {
+                pdf_data: Some("base64-payload".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let stats = estimate_side_panel_memory(&snapshot);
+        assert_eq!(stats.content_bytes, "base64-payload".len());
+        assert_eq!(stats.unfocused_content_bytes, stats.content_bytes);
+        assert!(stats.estimate_bytes >= stats.content_bytes);
+    }
 
     #[test]
     fn transcript_memory_profile_breaks_out_provider_display_and_side_panel() {
@@ -383,6 +404,7 @@ mod tests {
         let display_messages = crate::tui::display_messages_from_session(&session);
         let provider_messages = session.messages_for_provider_uncached();
         let side_panel = SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page_a".to_string()),
             pages: vec![
                 SidePanelPage {
@@ -390,6 +412,7 @@ mod tests {
                     title: "Focused".to_string(),
                     file_path: "/tmp/focused.md".to_string(),
                     format: SidePanelPageFormat::Markdown,
+                    pdf_data: None,
                     source: SidePanelPageSource::Managed,
                     content: "# Focused\nhello".to_string(),
                     updated_at_ms: 1,
@@ -399,6 +422,7 @@ mod tests {
                     title: "Other".to_string(),
                     file_path: "/tmp/other.md".to_string(),
                     format: SidePanelPageFormat::Markdown,
+                    pdf_data: None,
                     source: SidePanelPageSource::Managed,
                     content: "# Other\nworld".to_string(),
                     updated_at_ms: 2,

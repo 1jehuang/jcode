@@ -45,7 +45,6 @@ impl Config {
 - Markdown spacing: {}
 - LaTeX rendering: {}
 - Pin images: {}
-- Diff line wrap: {}
 - Queue mode: {}
 - Auto server reload: {}
 - Mouse capture: {}
@@ -98,11 +97,13 @@ impl Config {
 **Agent models:**
 - Swarm / subagent: {}
 - Swarm spawn mode: {}
+- Swarm root effort: {}
+- Deep swarm root effort: {}
 - Spawn hook: {}
 - Review: {}
 - Judge: {}
-- Memory: {}
-- Memory sidecar: {}
+- Memory recall: Jev ({})
+- Memory extraction sidecar: {}
 - Ambient: {}
 
 **Gateway:**
@@ -173,7 +174,6 @@ impl Config {
             self.display.markdown_spacing.label(),
             self.display.latex_rendering.as_str(),
             self.display.pin_images,
-            self.display.diff_line_wrap,
             self.display.queue_mode,
             self.display.auto_server_reload,
             self.display.mouse_capture,
@@ -280,6 +280,8 @@ impl Config {
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
             self.agents.swarm_spawn_mode.as_str(),
+            self.agents.root_effort_for_swarm(false),
+            self.agents.root_effort_for_swarm(true),
             self.terminal
                 .spawn_hook
                 .as_deref()
@@ -292,10 +294,7 @@ impl Config {
                 .model
                 .as_deref()
                 .unwrap_or("(inherit current session)"),
-            self.agents
-                .memory_model
-                .as_deref()
-                .unwrap_or("(sidecar auto-select)"),
+            self.agents.memory_jev_provider,
             if self.agents.memory_sidecar_enabled {
                 "enabled"
             } else {

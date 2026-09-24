@@ -5,7 +5,7 @@ use async_trait::async_trait;
 #[cfg(feature = "aws-sdk")]
 use aws_config::BehaviorVersion;
 #[cfg(feature = "aws-sdk")]
-use aws_credential_types::{Credentials, Token};
+use aws_credential_types::Token;
 #[cfg(feature = "aws-sdk")]
 use aws_sdk_bedrock::Client as BedrockControlClient;
 #[cfg(feature = "aws-sdk")]
@@ -135,61 +135,17 @@ impl BedrockProvider {
             // Pin the credential provider itself, not just the profile name.
             // The default AWS chain checks process-wide AWS_ACCESS_KEY_ID first,
             // which could otherwise override an explicit Jcode Bedrock profile.
-            if let Some(credentials) = Self::credentials_from_aws_login_profile(&profile).await {
-                loader = loader.credentials_provider(credentials);
-            } else {
-                loader = loader.credentials_provider(
-                    aws_config::profile::ProfileFileCredentialsProvider::builder()
-                        .profile_name(profile.clone())
-                        .build(),
-                );
-            }
+            // The SDK profile provider resolves `aws login` sessions
+            // (`login_session`), SSO, and static keys natively, so no `aws` CLI
+            // subprocess is needed.
+            loader = loader.credentials_provider(
+                aws_config::profile::ProfileFileCredentialsProvider::builder()
+                    .profile_name(profile.clone())
+                    .build(),
+            );
             loader = loader.profile_name(profile);
         }
         loader.load().await
-    }
-
-    #[cfg(feature = "aws-sdk")]
-    async fn credentials_from_aws_login_profile(profile: &str) -> Option<Credentials> {
-        let output = tokio::process::Command::new("aws")
-            .args([
-                "configure",
-                "export-credentials",
-                "--profile",
-                profile,
-                "--format",
-                "env-no-export",
-            ])
-            .output()
-            .await
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8(output.stdout).ok()?;
-        let mut access_key_id = None;
-        let mut secret_access_key = None;
-        let mut session_token = None;
-        for line in stdout.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key.trim() {
-                "AWS_ACCESS_KEY_ID" => access_key_id = Some(value.trim().to_string()),
-                "AWS_SECRET_ACCESS_KEY" => secret_access_key = Some(value.trim().to_string()),
-                "AWS_SESSION_TOKEN" => session_token = Some(value.trim().to_string()),
-                _ => {}
-            }
-        }
-
-        Some(Credentials::new(
-            access_key_id?,
-            secret_access_key?,
-            session_token,
-            None,
-            "aws-cli-export-credentials",
-        ))
     }
 
     #[cfg(feature = "aws-sdk")]
@@ -1429,6 +1385,7 @@ impl Provider for BedrockProvider {
                                 .join(" · ")
                         )
                     },
+                    usage: None,
                     cheapness: Self::route_pricing(&model),
                 }
             })

@@ -30,6 +30,8 @@ SERVER COMMANDS (server: prefix or no prefix):
   cancel                   - Cancel in-flight generation (urgent interrupt)
   clear                    - Clear conversation history
   agent:info               - Get comprehensive agent internal state
+  agent:context            - Inspect assembled prompt, mode, current and locked provider tools (no inference)
+  agent:context:prepare    - Prepare/freeze actual provider tool snapshot without inference (updates tool cache)
   agent:memory             - Get process + session memory breakdown
   allocator                - Get allocator info and jemalloc stats, if available
   allocator:purge          - Release retained heap (jemalloc arena purge / glibc malloc_trim)

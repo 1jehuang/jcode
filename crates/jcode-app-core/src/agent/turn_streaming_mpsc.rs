@@ -75,12 +75,31 @@ fn reload_interrupted_tool_result(tc: &ToolCall, elapsed_secs: f64) -> (String, 
     )
 }
 
+/// Called only after automatic continuations have been exhausted.
+fn incomplete_turn_stop(stop_reason: Option<&str>) -> Option<ServerEvent> {
+    let reason = stop_reason?;
+    if Agent::should_continue_after_stop_reason(reason)
+        || Agent::is_stranded_tool_use_stop(Some(reason))
+    {
+        Some(ServerEvent::TurnStopped {
+            reason: crate::protocol::TurnStopReason::LimitReached,
+            message: format!(
+                "The provider stopped with {reason} after automatic continuation attempts were exhausted. Output may be incomplete."
+            ),
+            provider_stop_reason: Some(reason.to_string()),
+        })
+    } else {
+        None
+    }
+}
+
 impl Agent {
     pub(super) async fn run_turn_streaming_mpsc(
         &mut self,
         event_tx: mpsc::UnboundedSender<ServerEvent>,
     ) -> Result<()> {
         self.set_log_context();
+        let usage_turn_id = self.model_usage_turn_id();
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
         let _streaming_guard = crate::session::StreamingGuard::new(self.session.id.clone());
@@ -278,6 +297,11 @@ impl Agent {
                                             logging::warn(
                                                 "Context-limit compaction retry limit reached; giving up",
                                             );
+                                            let _ = event_tx.send(ServerEvent::TurnStopped {
+                                                reason: crate::protocol::TurnStopReason::LimitReached,
+                                                message: format!("Context limit exceeded after {} compaction retries", Self::MAX_CONTEXT_LIMIT_RETRIES),
+                                                provider_stop_reason: None,
+                                            });
                                             return Err(anyhow::anyhow!(
                                                 "Context limit exceeded after {} compaction retries",
                                                 Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -344,8 +368,8 @@ impl Agent {
                 .checked_sub(std::time::Duration::from_secs(10))
                 .unwrap_or_else(Instant::now);
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut current_tool: Option<ToolCall> = None;
-            let mut current_tool_input = String::new();
+            let mut current_tool: Option<String> = None;
+            let mut streaming_tools: HashMap<String, (ToolCall, String)> = HashMap::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
@@ -446,6 +470,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -476,6 +508,11 @@ impl Agent {
                     }
                 };
 
+                let input_tool_id = match &event {
+                    StreamEvent::ToolInputDeltaFor { id, .. }
+                    | StreamEvent::ToolUseEndFor { id } => Some(id.clone()),
+                    _ => current_tool.clone(),
+                };
                 match event {
                     StreamEvent::ThinkingStart => {
                         // Reasoning tokens are counted in provider output usage even when
@@ -524,6 +561,9 @@ impl Agent {
                             });
                         }
                     }
+                    StreamEvent::TextDone => {
+                        let _ = event_tx.send(ServerEvent::TextDone);
+                    }
                     StreamEvent::TextDelta(text) => {
                         // Close any open reasoning region before real output so the
                         // answer renders as a normal paragraph rather than as reasoning.
@@ -571,6 +611,11 @@ impl Agent {
                         }
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if streaming_tools.contains_key(&id)
+                            || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
+                        {
+                            continue;
+                        }
                         if reasoning_open {
                             reasoning_open = false;
                             let _ = event_tx.send(ServerEvent::ReasoningDone {
@@ -582,23 +627,38 @@ impl Agent {
                             name: name.clone(),
                         });
                         tool_id_to_name.insert(id.clone(), name.clone());
-                        current_tool = Some(ToolCall {
-                            id,
-                            name,
-                            input: serde_json::Value::Null,
-                            intent: None,
-                            thought_signature: None,
+                        current_tool = Some(id.clone());
+                        streaming_tools.entry(id.clone()).or_insert_with(|| {
+                            (
+                                ToolCall {
+                                    id,
+                                    name,
+                                    input: serde_json::Value::Null,
+                                    intent: None,
+                                    thought_signature: None,
+                                },
+                                String::new(),
+                            )
                         });
-                        current_tool_input.clear();
                     }
-                    StreamEvent::ToolInputDelta(delta) => {
+                    StreamEvent::ToolInputDelta(delta)
+                    | StreamEvent::ToolInputDeltaFor { delta, .. } => {
                         let _ = event_tx.send(ServerEvent::ToolInput {
+                            id: input_tool_id.clone(),
                             delta: delta.clone(),
                         });
-                        current_tool_input.push_str(&delta);
+                        if let Some((_, input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.get_mut(id))
+                        {
+                            input.push_str(&delta);
+                        }
                     }
-                    StreamEvent::ToolUseEnd => {
-                        if let Some(mut tool) = current_tool.take() {
+                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                        if let Some((mut tool, current_tool_input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.remove(id))
+                        {
                             tool.input =
                                 ToolCall::parse_streamed_input_to_object(&current_tool_input);
                             tool.refresh_intent_from_input();
@@ -609,7 +669,20 @@ impl Agent {
                             });
 
                             tool_calls.push(tool);
-                            current_tool_input.clear();
+                            if current_tool == input_tool_id {
+                                current_tool = None;
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignatureFor { id, signature } => {
+                        if !signature.is_empty() {
+                            if let Some((tool, _)) = streaming_tools.get_mut(&id) {
+                                tool.thought_signature = Some(signature);
+                            } else if let Some(tool) =
+                                tool_calls.iter_mut().find(|tool| tool.id == id)
+                            {
+                                tool.thought_signature = Some(signature);
+                            }
                         }
                     }
                     StreamEvent::ToolUseSignature(signature) => {
@@ -760,7 +833,7 @@ impl Agent {
                         text_wrapped_detected = false;
                         tool_calls.clear();
                         current_tool = None;
-                        current_tool_input.clear();
+                        streaming_tools.clear();
                         tool_id_to_name.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
@@ -803,9 +876,16 @@ impl Agent {
                         });
                     }
                     StreamEvent::SessionId(sid) => {
+                        // This is the *provider's* session id (Gemini/Claude
+                        // CLI/Grok resume handle). It must never be forwarded
+                        // as `ServerEvent::SessionId`: the client treats that
+                        // event as the jcode session id and rebinds
+                        // `remote_session_id` to it, so the next reload or
+                        // reconnect resumes a session that does not exist and
+                        // the user lands in an empty new session while the
+                        // real transcript sits untouched on disk.
                         self.provider_session_id = Some(sid.clone());
-                        self.session.provider_session_id = Some(sid.clone());
-                        let _ = event_tx.send(ServerEvent::SessionId { session_id: sid });
+                        self.session.provider_session_id = Some(sid);
                     }
                     StreamEvent::OpenAIReasoning {
                         id,
@@ -894,6 +974,14 @@ impl Agent {
                                 logging::warn(
                                     "Context-limit compaction retry limit reached; giving up",
                                 );
+                                let _ = event_tx.send(ServerEvent::TurnStopped {
+                                    reason: crate::protocol::TurnStopReason::LimitReached,
+                                    message: format!(
+                                        "Context limit exceeded after {} compaction retries",
+                                        Self::MAX_CONTEXT_LIMIT_RETRIES
+                                    ),
+                                    provider_stop_reason: None,
+                                });
                                 return Err(anyhow::anyhow!(
                                     "Context limit exceeded after {} compaction retries",
                                     Self::MAX_CONTEXT_LIMIT_RETRIES
@@ -987,10 +1075,13 @@ impl Agent {
 
                 let input = usage_input.unwrap_or(0);
                 let output = usage_output.unwrap_or(0);
-                let total = input
-                    .saturating_add(output)
-                    .saturating_add(usage_cache_read.unwrap_or(0))
-                    .saturating_add(usage_cache_creation.unwrap_or(0));
+                let total = self
+                    .effective_context_tokens_from_usage(
+                        input,
+                        usage_cache_read,
+                        usage_cache_creation,
+                    )
+                    .saturating_add(output);
                 crate::session_metrics::record_token_usage(&self.session.id, total, output);
             }
 
@@ -1041,6 +1132,7 @@ impl Agent {
                     model: model_after_stream,
                     provider_name: Some(provider_name),
                     error: None,
+                    resolved_credential: self.provider.active_resolved_credential(),
                 });
             }
 
@@ -1061,6 +1153,7 @@ impl Agent {
                 });
                 tool_id_to_name.insert(tc.id.clone(), tc.name.clone());
                 let _ = event_tx.send(ServerEvent::ToolInput {
+                    id: Some(tc.id.clone()),
                     delta: tc.input.to_string(),
                 });
                 let _ = event_tx.send(ServerEvent::ToolExec {
@@ -1088,17 +1181,17 @@ impl Agent {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: None,
-                });
+                content_blocks.push(tc.to_tool_use_block());
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
                 let token_usage = Some(crate::session::StoredTokenUsage {
+                    prompt_tokens: Some(self.effective_context_tokens_from_usage(
+                        self.last_usage.input_tokens,
+                        self.last_usage.cache_read_input_tokens,
+                        self.last_usage.cache_creation_input_tokens,
+                    )),
                     input_tokens: self.last_usage.input_tokens,
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
@@ -1108,6 +1201,7 @@ impl Agent {
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
+                self.record_model_turn_usage(&usage_turn_id);
                 Some(message_id)
             } else {
                 None
@@ -1192,6 +1286,12 @@ impl Agent {
                     &mut incomplete_continuations,
                 )? {
                     NoToolCallOutcome::Break => {
+                        if saw_message_end
+                            && !self.is_graceful_shutdown()
+                            && let Some(event) = incomplete_turn_stop(stop_reason.as_deref())
+                        {
+                            let _ = event_tx.send(event);
+                        }
                         // Surface silent guardrail/refusal stops: the provider
                         // ended the turn with no visible output (e.g. Anthropic
                         // stop_reason "refusal", or a reasoning-only response).
@@ -1638,6 +1738,21 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn abnormal_incomplete_stop_excludes_natural_completion() {
+        for reason in [None, Some("end_turn"), Some("stop")] {
+            assert!(super::incomplete_turn_stop(reason).is_none());
+        }
+        for reason in ["max_tokens", "length", "tool_use"] {
+            assert!(
+                matches!(super::incomplete_turn_stop(Some(reason)), Some(crate::protocol::ServerEvent::TurnStopped {
+                reason: crate::protocol::TurnStopReason::LimitReached,
+                provider_stop_reason: Some(raw), ..
+            }) if raw == reason)
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

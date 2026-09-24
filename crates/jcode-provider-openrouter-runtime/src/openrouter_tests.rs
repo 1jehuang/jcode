@@ -404,7 +404,7 @@ fn named_openai_compatible_model_with_empty_input_preserves_image_support() {
 }
 
 #[test]
-fn direct_deepseek_profile_does_not_advertise_image_input_support() {
+fn direct_deepseek_profile_unknown_model_does_not_advertise_image_input_support() {
     let provider = OpenRouterProvider {
         profile_id: Some("deepseek".to_string()),
         supports_provider_features: false,
@@ -412,6 +412,159 @@ fn direct_deepseek_profile_does_not_advertise_image_input_support() {
     };
 
     assert!(!provider.supports_image_input());
+}
+
+#[test]
+fn deepseek_image_input_capability_matrix() {
+    for (profile, model, provider_features, expected) in [
+        ("deepseek", "deepseek-flash", false, true),
+        ("deepseek", "deepseek-v4-flash", false, true),
+        ("deepseek", "deepseek-v4-flash-vision-exp", false, true),
+        ("DeepSeek", "DEEPSEEK-FLASH", false, true),
+        ("deepseek", "deepseek:deepseek-flash", false, true),
+        ("deepseek", "deepseek-v4-pro", false, false),
+        ("deepseek", "deepseek-pro", false, false),
+        ("deepseek", "deepseek-chat", false, false),
+        ("deepseek", "deepseek-reasoner", false, false),
+        ("deepseek", "unknown", false, false),
+        ("deepseek", "deepseek-v4-flash-free", false, false),
+        ("deepseek", "deepseek-flash-future", false, false),
+        ("deepseek", "deepseek/deepseek-flash", false, false),
+        ("zai", "deepseek-flash", false, false),
+        ("zai", "glm-5", false, false),
+        ("openrouter", "deepseek-flash", true, false),
+        ("custom", "unknown", false, true),
+    ] {
+        let provider = OpenRouterProvider {
+            profile_id: Some(profile.to_string()),
+            model: Arc::new(RwLock::new(model.to_string())),
+            supports_provider_features: provider_features,
+            ..make_custom_compatible_provider()
+        };
+        assert_eq!(
+            provider.supports_image_input(),
+            expected,
+            "profile={profile}, model={model}"
+        );
+    }
+}
+
+#[test]
+fn deepseek_image_input_explicit_model_inputs_take_precedence() {
+    let _lock = ENV_LOCK.lock();
+    let _namespace = EnvVarGuard::remove("JCODE_OPENROUTER_CACHE_NAMESPACE");
+    for profile_id in ["deepseek", "zai"] {
+        let profile = jcode_base::config::NamedProviderConfig {
+            base_url: "http://localhost:1234/v1".to_string(),
+            auth: jcode_base::config::NamedProviderAuth::None,
+            default_model: Some("deepseek-flash".to_string()),
+            models: vec![
+                jcode_base::config::NamedProviderModelConfig {
+                    id: "deepseek-flash".to_string(),
+                    input: vec!["text".to_string()],
+                    ..Default::default()
+                },
+                jcode_base::config::NamedProviderModelConfig {
+                    id: "deepseek-v4-pro".to_string(),
+                    input: vec!["text".to_string(), "image".to_string()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let provider = OpenRouterProvider::new_named_openai_compatible(profile_id, &profile)
+            .expect("named profile should initialize without auth");
+        assert!(
+            !provider.supports_image_input(),
+            "{profile_id}: explicit text-only Flash"
+        );
+        provider.set_model("deepseek-v4-pro").unwrap();
+        assert!(
+            provider.supports_image_input(),
+            "{profile_id}: explicit image-capable Pro"
+        );
+    }
+}
+
+#[test]
+fn deepseek_image_input_captured_requests_preserve_only_allowed_pixels() {
+    let _lock = ENV_LOCK.lock();
+    // A real 1x1 PNG, retained byte-for-byte in the outbound data URL.
+    let pixels = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1cAAAAASUVORK5CYII=";
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![
+            ContentBlock::Text {
+                text: "describe this".to_string(),
+                cache_control: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: pixels.to_string(),
+            },
+        ],
+        timestamp: None,
+        tool_duration_ms: None,
+    }];
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    for (profile, model, override_support, expected) in [
+        ("deepseek", "deepseek-flash", None, true),
+        ("deepseek", "deepseek-v4-flash", None, true),
+        ("deepseek", "deepseek-v4-flash-vision-exp", None, true),
+        ("deepseek", "deepseek-v4-pro", None, false),
+        ("deepseek", "unknown", None, false),
+        ("zai", "deepseek-flash", None, false),
+        ("deepseek", "deepseek-flash", Some(false), false),
+        ("deepseek", "deepseek-v4-pro", Some(true), true),
+    ] {
+        let (api_base, request_rx) = spawn_single_response_chat_server();
+        let provider = OpenRouterProvider {
+            api_base,
+            model: Arc::new(RwLock::new(model.to_string())),
+            profile_id: Some(profile.to_string()),
+            supports_provider_features: false,
+            supports_model_catalog: false,
+            static_image_input_support: override_support
+                .map(|value| HashMap::from([(model.to_string(), value)]))
+                .unwrap_or_default(),
+            ..make_custom_compatible_provider()
+        };
+        rt.block_on(async {
+            let mut stream = provider.complete(&messages, &[], "", None).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.expect("local fixture stream should succeed");
+            }
+        });
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let body = parse_captured_request_body(&request);
+        assert_eq!(body["model"], model);
+        let parts = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|message| message["content"].as_array())
+            .flatten()
+            .filter(|part| part["type"] == "image_url")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parts.len(),
+            usize::from(expected),
+            "{profile}/{model}: {body}"
+        );
+        if expected {
+            assert_eq!(
+                parts[0]["image_url"]["url"],
+                format!("data:image/png;base64,{pixels}")
+            );
+            assert!(!request.contains("Image omitted"), "{body}");
+        } else {
+            assert!(request.contains("Image omitted"), "{body}");
+            assert!(!request.contains(pixels), "{body}");
+        }
+    }
 }
 
 #[test]
@@ -1993,6 +2146,128 @@ fn direct_deepseek_profile_uses_static_1m_context_when_catalog_is_absent() {
     assert_eq!(provider.context_window(), 1_000_000);
 }
 
+/// DeepSeek renamed `deepseek-v4-flash` to `deepseek-flash`. Its live
+/// `/v1/models` now reports `deepseek-flash` and `deepseek-v4-pro`; both are
+/// 1M-window models. Without the renamed spelling in the static classifier the
+/// Flash id is budgeted at the generic 200K default before the catalog loads.
+#[test]
+fn direct_deepseek_profile_uses_1m_context_for_listed_models_when_catalog_is_absent() {
+    for model in ["deepseek-flash", "deepseek-v4-pro"] {
+        let _lock = ENV_LOCK.lock();
+        let _base = EnvVarGuard::set("JCODE_OPENROUTER_API_BASE", "https://api.deepseek.com");
+        let _key_name = EnvVarGuard::set("JCODE_OPENROUTER_API_KEY_NAME", "DEEPSEEK_API_KEY");
+        let _api_key = EnvVarGuard::set("DEEPSEEK_API_KEY", "test");
+        let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "deepseek");
+        let _model = EnvVarGuard::set("JCODE_OPENROUTER_MODEL", model);
+        let _catalog = EnvVarGuard::set("JCODE_OPENROUTER_MODEL_CATALOG", "0");
+
+        let provider = OpenRouterProvider::new().expect("provider");
+
+        assert_eq!(provider.context_window(), 1_000_000, "{model}");
+    }
+}
+
+#[test]
+fn conifer_context_fallback_yields_to_live_and_disk_catalog_without_remapping_aliases() {
+    let _lock = ENV_LOCK.lock();
+    let temp = TempDir::new().expect("create temp home");
+    let _jcode_home = EnvVarGuard::set("JCODE_HOME", temp.path());
+    let _home = EnvVarGuard::set("HOME", temp.path());
+    let _appdata = EnvVarGuard::set("APPDATA", temp.path().join("AppData").join("Roaming"));
+    let _key = EnvVarGuard::set("CONIFER_API_KEY", "test-conifer-catalog");
+    let _namespace = EnvVarGuard::set("JCODE_OPENROUTER_CACHE_NAMESPACE", "test-conifer-1274");
+    // Synthetic future catalog deliberately changes latest aliases in both
+    // directions and reintroduces the missing Together route with its own limit.
+    let (api_base, request_rx) = spawn_single_response_models_server(
+        r#"{"data":[
+            {"id":"mistral-large-latest","context_window":128000},
+            {"id":"mistral-medium-latest","context_window":512000},
+            {"id":"mistral-small-latest","context_window":64000},
+            {"id":"nemotron-3-ultra-together","context_window":131072}
+        ]}"#,
+    );
+    let make_provider = || {
+        let mut provider = OpenRouterProvider::new_openai_compatible_profile_runtime(
+            jcode_base::provider_catalog::CONIFER_PROFILE,
+        )
+        .expect("Conifer provider");
+        // Use the real constructor/metadata without sending any vendor requests.
+        provider.api_base = api_base.clone();
+        provider
+    };
+    let provider = make_provider();
+    for (model, expected) in [
+        ("seed-2.0-pro", 256_000),
+        ("gemma-4-31b", 128_000),
+        ("llama-4-scout", 327_680),
+        ("conifer:grok-4.6", 500_000),
+        ("mistral-large-latest", 256_000),
+        ("mistral-medium-latest", 256_000),
+        ("mistral-small-latest", 256_000),
+    ] {
+        provider.set_model(model).expect("select fallback model");
+        assert_eq!(provider.context_window(), expected, "{model}");
+    }
+    let alias = "nemotron-3-ultra-together";
+    assert!(!provider.static_models.iter().any(|model| model == alias));
+    provider
+        .set_model(&format!("conifer:{alias}"))
+        .expect("explicit legacy selection");
+    assert_eq!(
+        provider.model(),
+        alias,
+        "never remap to the DeepInfra route"
+    );
+    assert_eq!(
+        provider.context_window(),
+        jcode_provider_core::DEFAULT_CONTEXT_LIMIT
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let fetched = rt
+        .block_on(provider.refresh_models())
+        .expect("refresh Conifer catalog");
+    assert!(fetched.iter().any(|model| model.id == alias));
+    provider
+        .set_model("mistral-large-latest")
+        .expect("select another model before checking discovery");
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("catalog request");
+    assert!(request.starts_with("GET /v1/models "));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-conifer-catalog")
+    );
+    assert!(
+        provider
+            .available_models_display()
+            .iter()
+            .any(|model| model == alias)
+    );
+
+    let fresh = make_provider();
+    assert!(fresh.models_cache.try_read().unwrap().models.is_empty());
+    for (model, expected) in [
+        ("mistral-large-latest", 128_000),
+        ("mistral-medium-latest", 512_000),
+        ("mistral-small-latest", 64_000),
+        (alias, 131_072),
+    ] {
+        provider.set_model(model).expect("select live model");
+        fresh
+            .set_model(model)
+            .expect("restore model before in-memory hydration");
+        assert_eq!(provider.model(), model);
+        assert_eq!(provider.context_window(), expected, "live: {model}");
+        assert_eq!(fresh.context_window(), expected, "disk: {model}");
+    }
+}
+
 #[test]
 fn explicit_cached_context_window_precedes_zai_family_fallback() {
     let model = "glm-5.3-issue-1087";
@@ -3451,4 +3726,175 @@ fn opencode_session_header_is_sent_on_the_wire_only_to_opencode_hosts() {
         !raw.contains("x-opencode-session"),
         "non-opencode host received the header:\n{raw}"
     );
+}
+
+#[test]
+fn configured_swarm_root_effort_covers_all_wire_formats() {
+    let unified = make_provider();
+    let deepseek = OpenRouterProvider {
+        profile_id: Some("deepseek".into()),
+        ..make_custom_compatible_provider()
+    };
+    let openai = OpenRouterProvider {
+        profile_id: Some("zai".into()),
+        ..make_custom_compatible_provider()
+    };
+    for mode in ["swarm", "swarm-deep"] {
+        for (provider, strict, field, max) in [
+            (&unified, false, "reasoning", "xhigh"),
+            (&deepseek, false, "reasoning_effort", "max"),
+            (&openai, false, "reasoning_effort", "max"),
+            (&openai, true, "reasoning_effort", "xhigh"),
+        ] {
+            provider.set_reasoning_effort(mode).unwrap();
+            for (resolved, expected) in [("low", "low"), ("medium", "medium"), ("max", max)] {
+                let mut request = serde_json::json!({});
+                assert!(provider.apply_resolved_reasoning_effort(&mut request, resolved, strict));
+                let wire = if field == "reasoning" {
+                    &request[field]["effort"]
+                } else {
+                    &request[field]
+                };
+                assert_eq!(wire, expected);
+                assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+            }
+            let mut request = serde_json::json!({});
+            assert_eq!(
+                provider.apply_resolved_reasoning_effort(&mut request, "none", strict),
+                field == "reasoning"
+            );
+            if field == "reasoning" {
+                assert_eq!(request[field]["effort"], "none");
+            } else {
+                assert!(request.get(field).is_none());
+            }
+        }
+    }
+    for (effort, expected) in [("minimal", "low"), ("xhigh", "high")] {
+        let mut request = serde_json::json!({});
+        assert!(deepseek.apply_resolved_reasoning_effort(&mut request, effort, false));
+        assert_eq!(request["reasoning_effort"], expected);
+    }
+}
+
+#[test]
+fn configured_swarm_root_effort_reads_real_config() {
+    // Run this single test in a child process so changing config cannot race
+    // other provider tests or reuse an already-initialized global config cache.
+    if std::env::var_os("JCODE_TEST_SWARM_ROOT_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env("JCODE_TEST_SWARM_ROOT_CHILD", "1")
+            .env("JCODE_SWARM_ROOT_EFFORT", "low")
+            .env("JCODE_SWARM_DEEP_ROOT_EFFORT", "none")
+            .output()
+            .expect("run isolated config test");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    for (mode, expected) in [("swarm", "low"), ("swarm-deep", "none")] {
+        let (api_base, request_rx) = spawn_single_response_chat_server();
+        let provider = OpenRouterProvider {
+            api_base,
+            supports_model_catalog: false,
+            ..make_provider()
+        };
+        provider.set_reasoning_effort(mode).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut stream = provider.complete(&[], &[], "test", None).await.unwrap();
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        });
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            request.contains(&format!(r#""reasoning":{{"effort":"{expected}"}}"#)),
+            "{request}"
+        );
+        assert_eq!(provider.reasoning_effort().as_deref(), Some(mode));
+    }
+}
+
+/// Grok Build: a real chat/completions request built by the Grok Build
+/// subscription runtime carries the OIDC bearer from `$GROK_HOME/auth.json`
+/// and the Grok CLI identity headers the chat proxy requires, plus Jcode's
+/// tools in OpenAI format (Jcode owns tool execution).
+#[test]
+fn grok_build_subscription_request_spoofs_grok_cli_and_uses_oidc_bearer() {
+    let _lock = ENV_LOCK.lock();
+    let grok_home = TempDir::new().expect("grok home");
+    std::fs::write(
+        grok_home.path().join("auth.json"),
+        format!(
+            r#"{{"https://auth.x.ai::{}": {{"key":"oidc-access","auth_mode":"oidc","expires_at":"2999-01-01T00:00:00Z"}}}}"#,
+            jcode_base::auth::grok_build::OAUTH_CLIENT_ID
+        ),
+    )
+    .expect("auth.json");
+    let _home = EnvVarGuard::set("GROK_HOME", grok_home.path());
+    let _deploy = EnvVarGuard::remove("GROK_DEPLOYMENT_KEY");
+    let _version = EnvVarGuard::set("JCODE_GROK_CLI_VERSION", "9.8.7");
+    let (addr, rx) = spawn_header_capturing_server();
+    let _base = EnvVarGuard::set(
+        "GROK_CLI_CHAT_PROXY_BASE_URL",
+        format!("http://127.0.0.1:{}/v1", addr.port()),
+    );
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let raw = rt.block_on(async {
+        let provider = OpenRouterProvider::new_grok_build_subscription("grok-4.6");
+        assert_eq!(provider.context_window(), 500_000);
+        let tools = vec![ToolDefinition {
+            name: "bash".to_string(),
+            description: "run".to_string(),
+            input_schema: serde_json::json!({"type":"object","properties":{"cmd":{"type":"string"}}}),
+        }];
+        let mut stream = provider
+            .complete(&[Message::user("hello")], &tools, "sys", None)
+            .await
+            .expect("stream");
+        while stream.next().await.is_some() {}
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("server captured request")
+    });
+    let lower = raw.to_ascii_lowercase();
+    assert!(lower.starts_with("post /v1/chat/completions "), "{raw}");
+    for expected in [
+        "authorization: bearer oidc-access",
+        "user-agent: grok-cli/9.8.7",
+        "x-xai-token-auth: xai-grok-cli",
+        "x-grok-client-version: 9.8.7",
+        "x-grok-client-identifier: grok-shell",
+        "x-grok-client-surface: cli",
+        "x-grok-model-override: grok-4.6",
+        "x-grok-conv-id: ",
+        "x-grok-req-id: ",
+    ] {
+        assert!(lower.contains(expected), "missing `{expected}` in:\n{raw}");
+    }
+    assert!(!lower.contains("user-agent: jcode"), "{raw}");
+    assert!(!lower.contains("http-referer"), "{raw}");
+    let body: serde_json::Value =
+        serde_json::from_str(raw.split("\r\n\r\n").nth(1).expect("body")).expect("json body");
+    assert_eq!(body["model"], "grok-4.6");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["tools"][0]["function"]["name"], "bash");
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert!(body.get("reasoning_effort").is_none());
 }

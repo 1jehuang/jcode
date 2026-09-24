@@ -141,54 +141,11 @@ impl Provider for OpenRouterProvider {
             request["max_tokens"] = serde_json::json!(max_tokens);
         }
 
-        let mut sent_reasoning_config = false;
-        if let Some(effort) = reasoning_effort.as_deref() {
-            if self.supports_deepseek_reasoning_effort() {
-                // The `swarm` sentinel maps to the strongest real effort.
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if self.supports_openai_reasoning_effort() {
-                // GPT-family models on direct compat gateways (e.g. OpenCode
-                // Zen serving gpt-5.3-codex-spark) take the standard OpenAI
-                // `reasoning_effort` field with OpenAI's effort vocabulary.
-                let effort = if strict_openai_schema
-                    && (jcode_base::prompt::is_swarm_effort(effort) || effort == "max")
-                {
-                    // Strict OpenAI-schema endpoints such as Mistral document
-                    // xhigh as their strongest accepted value and reject the
-                    // jcode/OpenAI UX alias `max`.
-                    "xhigh"
-                } else if jcode_base::prompt::is_swarm_effort(effort) {
-                    "max"
-                } else {
-                    effort
-                };
-                if effort != "none" {
-                    request["reasoning_effort"] = serde_json::json!(effort);
-                    sent_reasoning_config = true;
-                }
-            } else if Self::profile_supports_unified_reasoning(
-                self.profile_id.as_deref(),
-                self.send_openrouter_headers,
-            ) {
-                let effort = if jcode_base::prompt::is_swarm_effort(effort) {
-                    "xhigh"
-                } else {
-                    effort
-                };
-                request["reasoning"] = serde_json::json!({
-                    "effort": effort,
-                });
-                sent_reasoning_config = true;
-            }
-        }
+        let sent_reasoning_config = reasoning_effort.as_deref().is_some_and(|effort| {
+            let resolved =
+                jcode_base::prompt::swarm_root_reasoning_effort(effort).unwrap_or(effort);
+            self.apply_resolved_reasoning_effort(&mut request, resolved, strict_openai_schema)
+        });
 
         if !api_tools.is_empty() {
             request["tools"] = serde_json::json!(api_tools);
@@ -393,6 +350,19 @@ impl Provider for OpenRouterProvider {
             .to_ascii_lowercase();
         if let Some(supports_images) = self.static_image_input_support.get(&model_id) {
             return *supports_images;
+        }
+        // The direct DeepSeek Flash aliases accept image_url parts (#1221).
+        // Keep Pro and unverified models text-only, and let explicit per-model
+        // input configuration above override this narrow built-in allowlist.
+        if self
+            .profile_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("deepseek"))
+        {
+            return matches!(
+                model_id.as_str(),
+                "deepseek-flash" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+            );
         }
         if Self::profile_rejects_image_input(self.profile_id.as_deref()) {
             return false;
@@ -684,6 +654,7 @@ impl Provider for OpenRouterProvider {
                     api_method: api_method.clone(),
                     available: true,
                     detail: route_detail,
+                    usage: None,
                     cheapness: None,
                 }
             })

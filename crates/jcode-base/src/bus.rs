@@ -342,6 +342,10 @@ pub enum UpdateStatus {
         version: String,
     },
     UpToDate,
+    /// Automatic checks are not applicable, e.g. a local untracked checkout.
+    Skipped {
+        reason: String,
+    },
     Error(String),
 }
 
@@ -449,6 +453,9 @@ pub enum BusEvent {
     CompactionFinished,
     /// Provider's available models list may have changed
     ModelsUpdated,
+    /// A single route's usage changed. Carries its snapshot so busy agents do
+    /// not prevent clients from refreshing cached picker metadata.
+    ModelUsageUpdated(crate::provider::ModelRoute),
     /// Synchronous provider activation after a login/import has completed, so
     /// the model picker can stop hiding the stale pre-auth catalog.
     AuthCatalogRefreshReady,

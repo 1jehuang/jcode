@@ -330,6 +330,7 @@ impl App {
             title: title.clone(),
             file_path: path.to_string_lossy().into_owned(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::LinkedFile,
             content,
             updated_at_ms: 0,
@@ -899,7 +900,11 @@ impl App {
         }
     }
 
-    fn apply_mouse_scroll_step(&mut self, target: MouseScrollTarget, direction: i16) -> bool {
+    pub(super) fn apply_mouse_scroll_step(
+        &mut self,
+        target: MouseScrollTarget,
+        direction: i16,
+    ) -> bool {
         match target {
             MouseScrollTarget::Chat => {
                 if direction < 0 {

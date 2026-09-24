@@ -68,10 +68,44 @@ fn history_provider_name_from_session(session: &crate::session::Session) -> Opti
         "bedrock" => "Bedrock".to_string(),
         "antigravity" => "Antigravity".to_string(),
         "jcode" => "Jcode".to_string(),
-        other => other.to_string(),
+        // A direct OpenAI-compatible profile is persisted either bare
+        // (`deepseek`, the session vocabulary) or as its source key
+        // (`openai-compatible:deepseek`). Both name the same profile, so report
+        // its display name like every other arm here; a raw key would otherwise
+        // reach the header, and `source_key_for_provider_label` maps the
+        // prefixed shape away from `openai:api-key` only by accident (#1286).
+        other => {
+            // Import-source codes are stored in the same field but are not
+            // profile routes; `opencode` in particular collides with the
+            // `OpenCode Zen` profile id, so it must stay verbatim.
+            const IMPORT_SOURCE_CODES: &[&str] = &["opencode", "claude-code", "openai-codex"];
+            if IMPORT_SOURCE_CODES.contains(&other) {
+                other.to_string()
+            } else {
+                let profile_id = other.strip_prefix("openai-compatible:").unwrap_or(other);
+                crate::provider_catalog::openai_compatible_profile_by_id(profile_id)
+                    .map(|profile| profile.display_name.to_string())
+                    .unwrap_or_else(|| other.to_string())
+            }
+        }
     };
 
     Some(label)
+}
+
+/// The provider name a `History` payload reports.
+///
+/// The persisted session key wins when there is one. Otherwise ask for the
+/// profile-aware label: `Provider::name()` is the stable machine id for the
+/// provider *class* (`OpenRouter` for the multiplexing slot, `openrouter` for
+/// a concrete runtime instance), and that slot also serves every direct
+/// OpenAI-compatible profile, so it must not be shown as this session's
+/// provider (issue #1286).
+fn history_provider_name(
+    session: &crate::session::Session,
+    provider: &dyn Provider,
+) -> Option<String> {
+    history_provider_name_from_session(session).or_else(|| Some(provider.display_name()))
 }
 
 pub(super) async fn handle_get_state(
@@ -116,13 +150,17 @@ pub(super) async fn handle_get_history(
     server_name: &str,
     server_icon: &str,
     was_interrupted: Option<bool>,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
     let activity =
         session_activity_snapshot(client_connections, client_session_id, client_is_processing)
             .await;
 
-    if agent.try_lock().is_err() {
+    // Keep ownership from the nonblocking decision through snapshot preparation.
+    // A probe followed by send_history would release and re-acquire this mutex,
+    // allowing a new turn to make GetHistory wait for the entire turn.
+    let Ok(agent_guard) = agent.try_lock() else {
         crate::logging::info(&format!(
             "handle_get_history: session {} busy, falling back to persisted remote-startup snapshot",
             client_session_id
@@ -138,6 +176,7 @@ pub(super) async fn handle_get_history(
             server_icon,
             was_interrupted,
             activity,
+            supports_pdf_panels,
         )
         .await?;
         crate::logging::info(&format!(
@@ -146,12 +185,12 @@ pub(super) async fn handle_get_history(
             history_start.elapsed().as_millis(),
         ));
         return Ok(());
-    }
+    };
 
-    send_history(
+    send_history_with_guard(
         id,
         client_session_id,
-        agent,
+        agent_guard,
         sessions,
         client_count,
         writer,
@@ -161,6 +200,7 @@ pub(super) async fn handle_get_history(
         activity,
         HistoryPayloadMode::Full,
         true,
+        supports_pdf_panels,
     )
     .await?;
     let send_history_ms = history_start.elapsed().as_millis();
@@ -216,11 +256,18 @@ pub(super) async fn handle_get_model_catalog(
                     .or_else(|_| Session::load_startup_stub(session_id))
                     .ok();
                 let persisted_model = persisted.as_ref().and_then(|session| session.model.clone());
+                let mut model_routes = provider.model_routes();
+                crate::model_usage::enrich_routes(&mut model_routes);
                 (
-                    Some(provider.name().to_string()),
+                    // Same field the non-busy path builds: it must name the
+                    // profile, not the multiplexing slot (#1286). This fallback
+                    // is exactly the lock-contention case a client cannot
+                    // correct, so `provider.name()` here reached the header and
+                    // the spend ledger as `OpenRouter`.
+                    Some(provider.display_name()),
                     persisted_model.or_else(|| Some(provider.model())),
                     provider.available_models_display(),
-                    provider.model_routes(),
+                    model_routes,
                     provider.active_resolved_credential(),
                     provider.service_tier(),
                     provider.reasoning_effort(),
@@ -362,6 +409,7 @@ pub(super) async fn handle_get_compacted_history(
 
 fn rendered_to_history_message(msg: crate::session::RenderedMessage) -> HistoryMessage {
     HistoryMessage {
+        response_stats: msg.response_stats,
         role: msg.role,
         content: msg.content,
         tool_calls: if msg.tool_calls.is_empty() {
@@ -487,17 +535,35 @@ async fn send_history_from_persisted_session(
     server_icon: &str,
     was_interrupted: Option<bool>,
     activity: Option<SessionActivitySnapshot>,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
-    let session = crate::session::Session::load_for_remote_startup(session_id)
-        .or_else(|_| crate::session::Session::load_startup_stub(session_id))?;
+    let session = match crate::session::Session::load_for_remote_startup(session_id)
+        .or_else(|_| crate::session::Session::load_startup_stub(session_id))
+    {
+        Ok(session) => session,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && sessions.read().await.contains_key(session_id) =>
+        {
+            // Fresh sessions intentionally have no transcript on disk until
+            // their first visible message. Metadata prefetch (or another
+            // history request) can still briefly own their agent mutex. An
+            // empty persisted view is valid here and must not disconnect the
+            // client or wait behind a turn. Provider metadata is filled below.
+            // Do not save this synthetic snapshot or mask other I/O errors.
+            Session::create_with_id(session_id.to_string(), None, None)
+        }
+        Err(error) => return Err(error),
+    };
     let token_usage_totals = session.token_usage_totals();
     let (rendered_messages, images) = crate::session::render_messages_and_images(&session);
     // Extract the small metadata fields we need, then drop the full Session
     // (including its message transcript) before building and serializing the
     // large History event, so we do not hold Session + rendered payload +
     // serialized wire bytes simultaneously.
-    let provider_name =
-        history_provider_name_from_session(&session).or_else(|| Some(provider.name().to_string()));
+    let provider_name = history_provider_name(&session, provider.as_ref());
     let provider_model = session.model.clone().or_else(|| Some(provider.model()));
     let subagent_model = session.subagent_model.clone();
     let autoreview_enabled = session.autoreview_enabled;
@@ -513,7 +579,10 @@ async fn send_history_from_persisted_session(
         .into_iter()
         .map(rendered_to_history_message)
         .collect();
-    let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+    let side_panel = super::client_writer::side_panel_for_client(
+        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        supports_pdf_panels,
+    );
 
     let (all_sessions, current_client_count) = {
         let sessions_guard = sessions.read().await;
@@ -568,10 +637,10 @@ async fn send_history_from_persisted_session(
     clippy::too_many_arguments,
     reason = "history payload assembly includes agent state, sessions, counts, writer, activity, payload mode, and server identity"
 )]
-pub(super) async fn send_history(
+async fn send_history_with_guard(
     id: u64,
     session_id: &str,
-    agent: &Arc<Mutex<Agent>>,
+    agent_guard: tokio::sync::MutexGuard<'_, Agent>,
     sessions: &SessionAgents,
     client_count: &Arc<RwLock<usize>>,
     writer: &Arc<Mutex<WriteHalf>>,
@@ -581,9 +650,9 @@ pub(super) async fn send_history(
     activity: Option<SessionActivitySnapshot>,
     payload_mode: HistoryPayloadMode,
     include_model_catalog: bool,
+    supports_pdf_panels: bool,
 ) -> Result<()> {
     let history_start = Instant::now();
-    let agent_lock_start = Instant::now();
     let (
         messages,
         images,
@@ -605,7 +674,6 @@ pub(super) async fn send_history(
         service_tier,
         compaction_mode,
         token_usage_totals,
-        agent_lock_ms,
         history_snapshot_ms,
         image_render_ms,
         tool_names_ms,
@@ -615,8 +683,6 @@ pub(super) async fn send_history(
         provider_meta_ms,
         compaction_mode_ms,
     ) = {
-        let agent_guard = agent.lock().await;
-        let agent_lock_ms = agent_lock_start.elapsed().as_millis();
         let provider = agent_guard.provider_handle();
 
         let history_snapshot_start = Instant::now();
@@ -680,7 +746,6 @@ pub(super) async fn send_history(
             service_tier,
             compaction_mode,
             agent_guard.token_usage_totals(),
-            agent_lock_ms,
             history_snapshot_ms,
             image_render_ms,
             tool_names_ms,
@@ -692,8 +757,15 @@ pub(super) async fn send_history(
         )
     };
 
+    // Only snapshot preparation needs the agent. Never hold it across session
+    // metadata locks or socket backpressure.
+    drop(agent_guard);
+
     let side_panel_start = Instant::now();
-    let side_panel = crate::side_panel::snapshot_for_session(session_id).unwrap_or_default();
+    let side_panel = super::client_writer::side_panel_for_client(
+        crate::side_panel::snapshot_for_session(session_id).unwrap_or_default(),
+        supports_pdf_panels,
+    );
     let side_panel_ms = side_panel_start.elapsed().as_millis();
 
     let mut mcp_map: BTreeMap<String, usize> = BTreeMap::new();
@@ -716,13 +788,12 @@ pub(super) async fn send_history(
         let count = *client_count.read().await;
         let sessions_snapshot_ms = sessions_snapshot_start.elapsed().as_millis();
         crate::logging::info(&format!(
-            "[TIMING] send_history prep: session={}, mode={:?}, messages={}, images={}, mcp_servers={}, agent_lock={}ms, history={}ms, images={}ms, tool_names={}ms, models={}ms, routes={}ms, skills={}ms, provider_meta={}ms, compaction={}ms, side_panel={}ms, sessions={}ms, total={}ms",
+            "[TIMING] send_history prep: session={}, mode={:?}, messages={}, images={}, mcp_servers={}, history={}ms, images={}ms, tool_names={}ms, models={}ms, routes={}ms, skills={}ms, provider_meta={}ms, compaction={}ms, side_panel={}ms, sessions={}ms, total={}ms",
             session_id,
             payload_mode,
             messages.len(),
             images.len(),
             mcp_servers.len(),
-            agent_lock_ms,
             history_snapshot_ms,
             image_render_ms,
             tool_names_ms,
@@ -885,10 +956,105 @@ mod tests {
 
     #[test]
     fn history_provider_name_preserves_unknown_runtime_profile() {
-        let session = session_with_provider_key(Some("opencode-go"));
+        let session = session_with_provider_key(Some("remote-catalog"));
         assert_eq!(
             history_provider_name_from_session(&session).as_deref(),
-            Some("opencode-go")
+            Some("remote-catalog")
+        );
+    }
+
+    /// A direct OpenAI-compatible profile is persisted as its source key.
+    /// Clients must receive a display label, not the raw key: passing the key
+    /// through would make the spend ledger bill it to `openai:api-key` (#1286).
+    #[test]
+    fn history_provider_name_maps_a_compatible_profile_key_to_its_label() {
+        let session = session_with_provider_key(Some("openai-compatible:deepseek"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("DeepSeek")
+        );
+
+        let session = session_with_provider_key(Some("openai-compatible:nvidia-nim"));
+        assert_eq!(
+            history_provider_name_from_session(&session).as_deref(),
+            Some("NVIDIA NIM")
+        );
+    }
+
+    /// The same profile is also persisted bare (`deepseek`, the session
+    /// vocabulary). Both shapes must report the profile's display name instead
+    /// of the raw key (#1286).
+    #[test]
+    fn history_provider_name_maps_a_bare_compatible_profile_key() {
+        for (key, label) in [
+            ("deepseek", "DeepSeek"),
+            ("openai-compatible", "OpenAI-compatible"),
+            ("opencode-go", "OpenCode Go"),
+            ("nvidia-nim", "NVIDIA NIM"),
+        ] {
+            let session = session_with_provider_key(Some(key));
+            assert_eq!(
+                history_provider_name_from_session(&session).as_deref(),
+                Some(label),
+                "provider key {key} must report its profile label"
+            );
+        }
+    }
+
+    /// Import-source codes live in the same field but are not profile routes:
+    /// `opencode` collides with the `OpenCode Zen` profile id, and a session
+    /// imported from that CLI must not be relabelled as the gateway.
+    #[test]
+    fn history_provider_name_keeps_import_source_codes_verbatim() {
+        for key in ["opencode", "claude-code", "openai-codex"] {
+            let session = session_with_provider_key(Some(key));
+            assert_eq!(
+                history_provider_name_from_session(&session).as_deref(),
+                Some(key),
+                "import source {key} must stay verbatim"
+            );
+        }
+    }
+
+    /// With no persisted key, the fallback must be the profile-aware label.
+    /// `Provider::name()` is the multiplexing slot (`openrouter`) that serves
+    /// every direct OpenAI-compatible profile, so it tagged DeepSeek sessions
+    /// as OpenRouter (#1286).
+    struct SlotOnlyProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for SlotOnlyProvider {
+        async fn complete(
+            &self,
+            _messages: &[crate::message::Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            Err(anyhow::anyhow!(
+                "the history fallback test never sends a request"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "OpenRouter"
+        }
+
+        fn display_name(&self) -> String {
+            "DeepSeek".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(SlotOnlyProvider)
+        }
+    }
+
+    #[test]
+    fn history_provider_name_falls_back_to_the_profile_label() {
+        let session = session_with_provider_key(None);
+        assert_eq!(
+            history_provider_name(&session, &SlotOnlyProvider).as_deref(),
+            Some("DeepSeek")
         );
     }
 }

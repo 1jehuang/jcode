@@ -61,6 +61,8 @@ pub(super) async fn process_turn_with_input(
 }
 
 pub(super) fn handle_tick(app: &mut App) -> bool {
+    let reset_redraw = app.poll_usage_reset();
+    app.refresh_terminal_title_metrics();
     // Liveness breadcrumb: if the UI loop wedges, the watchdog reports this as
     // the last phase that made progress.
     crate::logging::watchdog::beat("tui.idle_tick");
@@ -69,7 +71,7 @@ pub(super) fn handle_tick(app: &mut App) -> bool {
     // draw site. Excluding it here instead would mean animation ticks request
     // no paint at all, which drops the animation to whatever unrelated events
     // happen to trigger (~4fps in practice).
-    let mut needs_redraw = crate::tui::periodic_redraw_required(app);
+    let mut needs_redraw = reset_redraw | crate::tui::periodic_redraw_required(app);
     needs_redraw |= app.flush_pending_resize_redraw();
     app.maybe_capture_runtime_memory_heartbeat();
     app.maybe_release_idle_heap();
@@ -210,6 +212,10 @@ pub(super) fn handle_bus_event(
         Ok(BusEvent::ModelsUpdated) => {
             app.invalidate_model_picker_cache();
             app.maybe_apply_event_driven_onboarding_model();
+            true
+        }
+        Ok(BusEvent::ModelUsageUpdated(_)) => {
+            app.invalidate_model_picker_cache();
             true
         }
         Ok(BusEvent::AuthCatalogRefreshReady) => {
@@ -395,7 +401,7 @@ fn apply_terminal_event(
 ) -> Result<bool> {
     match event {
         Some(Ok(Event::FocusGained)) => {
-            crate::tui::reapply_configured_terminal_modes();
+            crate::tui::reapply_configured_terminal_modes_after_focus();
             let redraw = app.set_client_focused(true);
             app.note_client_focus(true);
             Ok(redraw)
@@ -593,6 +599,7 @@ fn handle_input_shell_completed(app: &mut App, shell: InputShellCompleted) {
 }
 
 pub(super) fn finish_turn(app: &mut App) {
+    app.remember_terminal_title_work();
     let turn_duration_secs = app.display_turn_duration_secs();
     app.token_accounting.total_input_tokens += app.streaming.streaming_input_tokens;
     app.token_accounting.total_output_tokens += app.streaming.streaming_output_tokens;

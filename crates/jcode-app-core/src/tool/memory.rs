@@ -80,7 +80,7 @@ struct MemoryInput {
     /// For related action: traversal depth (default: 2)
     #[serde(default)]
     depth: Option<usize>,
-    /// For recall action: max results (default: 10)
+    /// Maximum results. Recall defaults to 10, list/search remain uncapped when omitted.
     #[serde(default)]
     limit: Option<usize>,
     /// For recall action: retrieval mode
@@ -119,7 +119,7 @@ impl Tool for MemoryTool {
                 "scope": { "type": "string", "enum": ["project", "global", "all"] },
                 "from_id": { "type": "string" },
                 "to_id": { "type": "string" },
-                "limit": { "type": "integer", "description": "Max results." }
+                "limit": { "type": "integer", "minimum": 0, "description": "Max results for recall, search, or list. Zero returns no results. Recall defaults to 10." }
             },
             "required": ["action"]
         })
@@ -184,7 +184,7 @@ impl Tool for MemoryTool {
                 let scope = Self::parse_scope(input.scope.as_deref(), MemoryScope::All)?;
                 let mode = input.mode.as_deref().unwrap_or_else(|| {
                     if input.query.is_some() {
-                        "cascade"
+                        "jev"
                     } else {
                         "recent"
                     }
@@ -217,12 +217,12 @@ impl Tool for MemoryTool {
                         memory::set_state(MemoryState::Idle);
                         result
                     }
-                    "semantic" | "cascade" => {
+                    "jev" | "semantic" | "cascade" => {
                         let query = match &input.query {
                             Some(q) => q.clone(),
                             None => {
                                 return Err(anyhow::anyhow!(
-                                    "query required for semantic/cascade mode"
+                                    "query required for Jev recall (including semantic/cascade aliases)"
                                 ));
                             }
                         };
@@ -231,13 +231,15 @@ impl Tool for MemoryTool {
                             detail: truncate_for_widget(&query, 40),
                         });
 
-                        let results = if mode == "cascade" {
-                            manager
-                                .find_similar_with_cascade_scoped(&query, 0.5, limit, scope)?
+                        let results = if limit == 0 {
+                            Ok(Vec::new())
                         } else {
-                            manager
-                                .find_similar_scoped(&query, 0.5, limit, scope)?
+                            crate::memory_jev::recall(&manager, &query, limit, scope).await
                         };
+                        // A missing Jev credential or failed request must not leave
+                        // the widget busy or silently fall back to unjudged recall.
+                        memory::set_state(MemoryState::Idle);
+                        let results = results?;
 
                         memory::add_event(MemoryEventKind::ToolRecalled {
                             query: truncate_for_widget(&query, 40),
@@ -275,7 +277,7 @@ impl Tool for MemoryTool {
                         }
                     }
                     other => Err(anyhow::anyhow!(
-                        "Unknown mode: {}. Use recent, semantic, or cascade",
+                        "Unknown mode: {}. Use recent or jev (semantic/cascade are Jev aliases)",
                         other
                     )),
                 }
@@ -289,7 +291,10 @@ impl Tool for MemoryTool {
                     action: "search".into(),
                     detail: truncate_for_widget(&query, 40),
                 });
-                let results = manager.search_scoped(&query, scope)?;
+                let mut results = manager.search_scoped(&query, scope)?;
+                if let Some(limit) = input.limit {
+                    results.truncate(limit);
+                }
                 memory::add_event(MemoryEventKind::ToolRecalled {
                     query: truncate_for_widget(&query, 40),
                     count: results.len(),
@@ -314,13 +319,16 @@ impl Tool for MemoryTool {
                     action: "list".into(),
                     detail: String::new(),
                 });
-                let all = manager.list_all_scoped(scope)?;
+                let mut all = manager.list_all_scoped(scope)?;
+                if let Some(limit) = input.limit {
+                    all.truncate(limit);
+                }
                 memory::add_event(MemoryEventKind::ToolListed { count: all.len() });
                 memory::set_state(MemoryState::Idle);
                 if all.is_empty() {
                     Ok(ToolOutput::new("No memories stored."))
                 } else {
-                    let mut out = format!("All memories ({}):\n\n", all.len());
+                    let mut out = format!("Memories ({}):\n\n", all.len());
                     for e in all {
                         out.push_str(&format!(
                             "- [{}] {}\n  id: {}\n\n",
@@ -493,6 +501,184 @@ mod tests {
             graceful_shutdown_signal: None,
             execution_mode: crate::tool::ToolExecutionMode::Direct,
         }
+    }
+
+    /// Sandbox disk credentials as well as environment keys. Restore even when
+    /// an assertion fails, so these public-interface tests never use real keys.
+    struct OfflineEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl OfflineEnv {
+        fn new(home: &std::path::Path) -> Self {
+            let keys = [
+                "JCODE_HOME",
+                "OPENROUTER_API_KEY",
+                "JCODE_API_KEY",
+                "TYPESAFE_API_KEY",
+                "AIMLAPI_API_KEY",
+                "JCODE_MEMORY_JEV_PROVIDER",
+            ];
+            let previous = keys
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            crate::env::set_var("JCODE_HOME", home);
+            for key in &keys[1..] {
+                crate::env::remove_var(key);
+            }
+            Self(previous)
+        }
+    }
+
+    impl Drop for OfflineEnv {
+        fn drop(&mut self) {
+            for (key, previous) in &self.0 {
+                if let Some(value) = previous {
+                    crate::env::set_var(key, value);
+                } else {
+                    crate::env::remove_var(key);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queried_recall_uses_jev_for_default_and_legacy_aliases() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = OfflineEnv::new(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let tool = MemoryTool::new();
+        let ctx = || test_ctx(Some(project.path().to_path_buf()));
+        tool.execute(
+            json!({"action":"remember", "content":"jev-only-recall-probe", "scope":"project"}),
+            ctx(),
+        )
+        .await
+        .unwrap();
+
+        for mode in [None, Some("jev"), Some("semantic"), Some("cascade")] {
+            let mut input =
+                json!({"action":"recall", "query":"jev-only-recall-probe", "scope":"project"});
+            if let Some(mode) = mode {
+                input["mode"] = json!(mode);
+            }
+            let error = tool
+                .execute(input.clone(), ctx())
+                .await
+                .expect_err("populated query recall without credentials must fail closed");
+            assert!(error.to_string().contains("Jev"), "{mode:?}: {error}");
+            assert!(!error.to_string().contains("jev-only-recall-probe"));
+
+            input["limit"] = json!(0);
+            let output = tool
+                .execute(input, ctx())
+                .await
+                .expect("zero limit must not require a key or a network request");
+            assert!(!output.output.contains("id:"), "{}", output.output);
+        }
+
+        // An empty selected scope is not allowed to borrow candidates from
+        // another scope (which would also require unavailable Jev credentials).
+        let empty = tool
+            .execute(
+                json!({"action":"recall", "query":"probe", "scope":"global"}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(empty.output.starts_with("No memories found"));
+        let other_project = tempfile::tempdir().unwrap();
+        let empty = tool
+            .execute(
+                json!({"action":"recall", "query":"probe", "scope":"project"}),
+                test_ctx(Some(other_project.path().to_path_buf())),
+            )
+            .await
+            .unwrap();
+        assert!(empty.output.starts_with("No memories found"));
+    }
+
+    #[tokio::test]
+    async fn local_memory_operations_honor_scope_and_limits_without_credentials() {
+        let _guard = crate::storage::lock_test_env();
+        let home = tempfile::tempdir().unwrap();
+        let _env = OfflineEnv::new(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let tool = MemoryTool::new();
+        let ctx = || test_ctx(Some(project.path().to_path_buf()));
+        let mut remembered_id = None;
+        for (scope, content) in [
+            ("project", "local-probe project alpha"),
+            ("project", "local-probe project beta"),
+            ("global", "local-probe global gamma"),
+        ] {
+            let output = tool
+                .execute(
+                    json!({"action":"remember", "content":content, "scope":scope}),
+                    ctx(),
+                )
+                .await
+                .unwrap();
+            assert!(output.output.contains(content));
+            if scope == "global" {
+                remembered_id = output
+                    .output
+                    .rsplit_once("[id: ")
+                    .map(|(_, tail)| tail.trim_end_matches(']').to_string());
+            }
+        }
+
+        for action in ["list", "search"] {
+            for (scope, expected) in [("project", 2), ("global", 1), ("all", 3)] {
+                for limit in [None, Some(0), Some(1), Some(10)] {
+                    let mut input = json!({"action":action, "query":"local-probe", "scope":scope});
+                    if let Some(limit) = limit {
+                        input["limit"] = json!(limit);
+                    }
+                    let output = tool.execute(input, ctx()).await.unwrap().output;
+                    assert_eq!(
+                        output.matches("\n  id: ").count(),
+                        limit.unwrap_or(expected).min(expected),
+                        "{action} {scope} {limit:?}: {output}"
+                    );
+                    if scope == "project" {
+                        assert!(!output.contains("global gamma"));
+                    } else if scope == "global" {
+                        assert!(
+                            !output.contains("project alpha") && !output.contains("project beta")
+                        );
+                    }
+                }
+            }
+        }
+
+        for mode in [None, Some("recent")] {
+            let mut input = json!({"action":"recall", "scope":"project", "limit":1});
+            if let Some(mode) = mode {
+                input["mode"] = json!(mode);
+            }
+            let output = tool.execute(input.clone(), ctx()).await.unwrap().output;
+            assert_eq!(output.matches("local-probe").count(), 1);
+            assert!(!output.contains("global gamma"));
+            input["limit"] = json!(0);
+            let output = tool.execute(input, ctx()).await.unwrap().output;
+            assert!(!output.contains("local-probe"));
+        }
+
+        let forgotten = tool
+            .execute(
+                json!({"action":"forget", "id":remembered_id.expect("remember returned an ID")}),
+                ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(forgotten.output.starts_with("Forgot:"));
+        let remaining = tool
+            .execute(json!({"action":"list", "scope":"all"}), ctx())
+            .await
+            .unwrap();
+        assert_eq!(remaining.output.matches("\n  id: ").count(), 2);
+        assert!(!remaining.output.contains("global gamma"));
     }
 
     /// Issue #491 regression: project-scoped remember followed by list must

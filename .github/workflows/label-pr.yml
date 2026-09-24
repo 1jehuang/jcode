@@ -1,0 +1,43 @@
+name: Semantic PR labels
+on:
+  workflow_dispatch:
+    inputs:
+      pull-request:
+        description: Existing open PR number (waits for a completed Greptile review)
+        required: true
+        type: string
+  check_run:
+    types: [completed]
+  check_suite:
+    types: [completed]
+permissions:
+  contents: read
+  checks: read
+  pull-requests: write
+  issues: write
+jobs:
+  label:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.check_run.app.id == 867647 &&
+       github.event.check_run.name == 'Greptile Review') ||
+      (github.event_name == 'check_suite' && github.event.check_suite.app.id == 867647)
+    # Apply the trusted-app condition before acquiring a concurrency slot.
+    # Other apps' checks must never displace a pending Greptile completion.
+    concurrency:
+      group: jev-labels-${{ github.repository }}-${{ github.event.check_run.app.id || github.event.check_suite.app.id || 'manual' }}-${{ github.event.check_run.head_sha || github.event.check_suite.head_sha || inputs.pull-request }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Reviewed action code, pinned to an immutable revision.
+      # No PR checkout or PR-controlled executable code.
+      - uses: 1jehuang/jev-pr-labeler@267b789247298b06e04fcf3cac01730694c9dcb5
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+          repository: ${{ github.repository }}
+          pull-request: ${{ inputs.pull-request }}
+          check-sha: ${{ github.event.check_run.head_sha || github.event.check_suite.head_sha }}
+          require-greptile: 'true'
+          apply: 'true'

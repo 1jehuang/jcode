@@ -34,6 +34,7 @@ include!("tests/scroll_copy_01/part_02.rs");
 include!("tests/scroll_copy_02/part_01.rs");
 include!("tests/scroll_copy_02/part_02.rs");
 include!("tests/scroll_copy_03.rs");
+include!("tests/resize_viewport.rs");
 include!("tests/input_copy_selection.rs");
 include!("tests/onboarding_flow.rs");
 include!("tests/onboarding_golden.rs");
@@ -53,9 +54,12 @@ include!("tests/issue_832_remote_ctrl_k.rs");
 include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
+include!("tests/merge_command.rs");
 include!("tests/skill_invocation_multi_word.rs");
+include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");
 include!("tests/ssh_remote.rs");
+include!("tests/skill_startup.rs");
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {
     let baseline_messages = vec![
@@ -160,10 +164,15 @@ fn kv_cache_signature_ignores_non_transmitted_message_metadata() {
 #[test]
 fn cold_cache_warning_is_persisted_when_starting_next_request() {
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id,
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 911_873,
@@ -199,10 +208,15 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
     // idle tick must therefore push it as soon as the TTL expires, not wait
     // for the next request to start.
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id,
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
@@ -259,10 +273,15 @@ fn cold_cache_warning_fires_on_idle_tick_before_next_message() {
 #[test]
 fn idle_cold_cache_warning_waits_for_ttl_and_rearms_after_new_cache_write() {
     let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
     crate::provider::anthropic::set_cache_ttl_1h(true);
     app.display_messages.push(DisplayMessage::user("first"));
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id: session_id.clone(),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 42_000,
@@ -326,6 +345,7 @@ fn harness_caused_kv_cache_miss_pushes_in_chat_alarm() {
     let provider = app.kv_cache_provider_name();
     let model = app.kv_cache_provider_model();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id,
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
@@ -379,6 +399,7 @@ fn documented_invalidation_downgrades_kv_cache_alarm_to_attribution() {
     let provider = app.kv_cache_provider_name();
     let model = app.kv_cache_provider_model();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id,
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
@@ -459,6 +480,7 @@ fn legitimate_model_switch_miss_does_not_push_in_chat_alarm() {
     let baseline_signature = App::kv_cache_request_signature(&messages, &[], "system", "");
     let session_id = app.kv_cache_session_id();
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id,
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 50_000,
@@ -502,6 +524,7 @@ fn kv_cache_baseline_from_other_session_is_ignored() {
         .collect();
     let big_signature = App::kv_cache_request_signature(&big_history, &[], "system", "");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id: Some("session_big".to_string()),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 200_000,
@@ -550,6 +573,7 @@ fn kv_cache_baseline_same_session_still_compares() {
     ];
     let baseline_signature = App::kv_cache_request_signature(&history, &[], "system", "");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id: Some("session_same".to_string()),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 1_000,
@@ -593,6 +617,7 @@ fn compaction_invalidates_kv_cache_baseline_and_stale_completion_cannot_restore_
         .collect();
     let old_signature = App::kv_cache_request_signature(&old_history, &[], "system", "memory");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id: Some("session_compacted".to_string()),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 80_169,
@@ -671,6 +696,7 @@ fn native_compaction_application_invalidates_kv_cache_baseline_before_continuati
         .collect();
     let old_signature = App::kv_cache_request_signature(&old_history, &[], "system", "");
     app.kv_cache.kv_cache_baseline = Some(KvCacheBaseline {
+        cache_ttl_secs: Some(3600),
         session_id: app.kv_cache_session_id(),
         cache_generation: app.kv_cache.cache_generation,
         input_tokens: 262_419,
@@ -797,6 +823,7 @@ fn cache_stats_uses_remote_history_token_usage_totals() {
     app.is_remote = true;
     app.remote_total_tokens = Some((1_250_000, 200_000));
     app.remote_token_usage_totals = Some(crate::protocol::TokenUsageTotals {
+        cache_prompt_tokens: Some(1_000_000),
         messages_with_token_usage: 3,
         input_tokens: 1_250_000,
         output_tokens: 200_000,
@@ -1157,6 +1184,7 @@ fn stale_server_history_is_deferred_before_remote_state_is_applied() {
             id: 1,
             session_id: "session_from_stale_server".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "assistant".to_string(),
                 content: "stale answer".to_string(),
                 tool_calls: None,
@@ -1247,6 +1275,7 @@ fn deferred_stale_server_history_captures_session_id_for_reload_handoff() {
             id: 1,
             session_id: "session_real_server_owned".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "assistant".to_string(),
                 content: "stale answer".to_string(),
                 tool_calls: None,
@@ -1329,6 +1358,7 @@ fn ancient_server_history_is_deferred_via_client_side_release_check() {
             id: 1,
             session_id: "session_from_ancient_server".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "assistant".to_string(),
                 content: "ancient answer".to_string(),
                 tool_calls: None,
@@ -1726,6 +1756,7 @@ fn assert_clear_usage_reset(app: &App) {
 
 fn seed_stale_clear_image(app: &mut App) -> u64 {
     app.remote_side_pane_images = vec![crate::session::RenderedImage {
+        history_message_index: None,
         media_type: "image/png".to_string(),
         data: "stale-image".to_string(),
         label: Some("stale.png".to_string()),
@@ -1801,4 +1832,264 @@ fn assert_clear_swarm_plan_reset(app: &App) {
     assert!(app.swarm_plan_items.is_empty());
     assert_eq!(app.swarm_plan_version, None);
     assert_eq!(app.swarm_plan_swarm_id, None);
+}
+include!("tests/kv_cache_provider_identity.rs");
+
+#[test]
+fn cache_timer_snapshots_retention_at_request_start() {
+    let _guard = crate::storage::lock_test_env();
+    struct RestoreTtl(bool);
+    impl Drop for RestoreTtl {
+        fn drop(&mut self) {
+            crate::provider::anthropic::set_cache_ttl_1h(self.0);
+        }
+    }
+    let _restore = RestoreTtl(crate::provider::anthropic::is_cache_ttl_1h());
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("cache_snapshot".to_string());
+    app.remote_provider_name = Some("anthropic".to_string());
+    app.remote_provider_model = Some("claude-opus-4-6".to_string());
+    crate::provider::anthropic::set_cache_ttl_1h(true);
+    app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
+    let requested_ttl = app
+        .kv_cache
+        .pending_kv_cache_request
+        .as_ref()
+        .unwrap()
+        .cache_ttl_secs;
+    assert_eq!(requested_ttl, Some(3600));
+    // Model a preference change in flight. It cannot extend or shorten the
+    // request that already selected its cache-control policy.
+    crate::provider::anthropic::set_cache_ttl_1h(false);
+    app.streaming.streaming_input_tokens = 42_000;
+    assert!(app.record_completed_stream_cache_usage());
+    let timer = <App as TuiState>::cache_ttl_status(&app).unwrap();
+    assert_eq!(timer.ttl_secs, 3600);
+    assert!(!timer.is_estimate);
+    assert!(timer.remaining_secs > 3500);
+    crate::provider::anthropic::set_cache_ttl_1h(true);
+    assert_eq!(
+        <App as TuiState>::cache_ttl_status(&app).unwrap().ttl_secs,
+        3600
+    );
+    app.kv_cache
+        .kv_cache_baseline
+        .as_mut()
+        .unwrap()
+        .cache_ttl_secs = Some(300);
+    assert_eq!(
+        <App as TuiState>::cache_ttl_status(&app).unwrap().ttl_secs,
+        300
+    );
+}
+
+#[test]
+fn cache_timer_openai_routes_distinguish_api_oauth_and_unknown() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("cache_routes".to_string());
+    app.remote_provider_name = Some("OpenAI".to_string());
+    app.remote_provider_model = Some("gpt-5.6".to_string());
+    for (credential, route, identity, has_timer) in [
+        (None, None, "openai", false),
+        (
+            Some(jcode_provider_core::ResolvedCredential::Oauth),
+            None,
+            "openai-oauth",
+            false,
+        ),
+        (
+            Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            None,
+            "openai-api",
+            true,
+        ),
+        (None, Some("openai-api-key"), "openai-api", true),
+        (None, Some("openai-oauth"), "openai-oauth", false),
+    ] {
+        app.remote_resolved_credential = credential;
+        app.session.route_api_method = route.map(str::to_string);
+        assert_eq!(app.kv_cache_provider_name(), identity);
+        app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
+        app.streaming.streaming_input_tokens = 42_000;
+        assert!(app.record_completed_stream_cache_usage());
+        let timer = <App as TuiState>::cache_ttl_status(&app);
+        assert_eq!(timer.is_some(), has_timer, "{identity}");
+        if let Some(timer) = timer {
+            assert!(timer.is_estimate);
+        }
+    }
+    // A route change must not inherit another credential's warm timer.
+    app.remote_provider_name = Some("openai-api".to_string());
+    app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
+    app.streaming.streaming_input_tokens = 42_000;
+    assert!(app.record_completed_stream_cache_usage());
+    assert!(
+        <App as TuiState>::cache_ttl_status(&app)
+            .unwrap()
+            .is_estimate
+    );
+    app.remote_provider_name = Some("openai-oauth".to_string());
+    assert!(<App as TuiState>::cache_ttl_status(&app).is_none());
+}
+
+#[test]
+fn cache_timer_estimate_never_claims_definite_expiry() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("cache_estimate".to_string());
+    app.remote_provider_name = Some("openai-api".to_string());
+    app.remote_provider_model = Some("gpt-5.6".to_string());
+    app.display_messages.push(DisplayMessage::user("first"));
+    app.begin_kv_cache_request(&[Message::user("first")], &[], "system", "");
+    app.streaming.streaming_input_tokens = 42_000;
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    assert!(app.record_completed_stream_cache_usage());
+    let baseline = app.kv_cache.kv_cache_baseline.as_mut().unwrap();
+    baseline.completed_at =
+        Instant::now() - Duration::from_secs(baseline.cache_ttl_secs.unwrap() + 10);
+    let baseline = baseline.clone();
+    let before = app.display_messages.len();
+    assert!(!app.maybe_push_idle_cold_cache_warning());
+    app.maybe_push_cold_cache_warning(2, 1, Some(&baseline));
+    assert_eq!(
+        app.display_messages.len(),
+        before,
+        "elapsed estimates must not create unsolicited eviction warnings"
+    );
+    let request = app.fallback_pending_kv_cache_request();
+    assert_ne!(
+        app.classify_kv_cache_miss_reason(&request, &baseline, 0, 0),
+        KvCacheMissReason::Expired
+    );
+    assert!(
+        <App as TuiState>::cache_ttl_status(&app)
+            .unwrap()
+            .is_estimate
+    );
+}
+
+#[test]
+fn cache_timer_local_explicit_openai_route_does_not_probe_auto_credentials() {
+    #[derive(Clone)]
+    struct PinnedOpenAI(Option<jcode_provider_core::ResolvedCredential>);
+    #[async_trait::async_trait]
+    impl Provider for PinnedOpenAI {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[crate::message::ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<crate::provider::EventStream> {
+            unimplemented!("route-only fixture")
+        }
+        fn name(&self) -> &str {
+            "OpenAI"
+        }
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(self.clone())
+        }
+        fn active_explicit_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            self.0
+        }
+        fn active_resolved_credential(&self) -> Option<jcode_provider_core::ResolvedCredential> {
+            panic!("cache timer must not read auto credentials from disk on every frame")
+        }
+    }
+    let mut app = create_test_app();
+    for (credential, expected) in [
+        (
+            Some(jcode_provider_core::ResolvedCredential::ApiKey),
+            "openai-api",
+        ),
+        (
+            Some(jcode_provider_core::ResolvedCredential::Oauth),
+            "openai-oauth",
+        ),
+        (None, "openai"),
+    ] {
+        app.provider = Arc::new(PinnedOpenAI(credential));
+        assert_eq!(app.kv_cache_provider_name(), expected);
+    }
+}
+
+#[test]
+fn cache_warning_does_not_leak_anthropic_expiry_into_openai_route() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("openai-api".into());
+    app.remote_provider_model = Some("gpt-6-astra".into());
+    app.display_messages.push(DisplayMessage::user("first"));
+    let baseline = KvCacheBaseline {
+        session_id: app.kv_cache_session_id(),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 42_000,
+        completed_at: Instant::now() - Duration::from_secs(3700),
+        cache_ttl_secs: Some(3600),
+        provider: "anthropic".into(),
+        model: "claude-opus-4-6".into(),
+        upstream_provider: None,
+        signature: None,
+    };
+    app.kv_cache.kv_cache_baseline = Some(baseline.clone());
+    let before = app.display_messages.len();
+    assert!(!app.maybe_push_idle_cold_cache_warning());
+    app.maybe_push_cold_cache_warning(2, 1, Some(&baseline));
+    assert_eq!(app.display_messages.len(), before);
+    assert!(<App as TuiState>::cache_ttl_status(&app).is_none());
+}
+
+include!("tests/cache_prompt_accounting.rs");
+
+#[test]
+fn cache_miss_requires_explicit_read_telemetry_even_with_writes() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = AppRuntimeMode::RemoteClient;
+    app.remote_provider_name = Some("openai-api".into());
+    app.remote_provider_model = Some("gpt-6-astra".into());
+    let messages = [Message::user("first")];
+    let baseline = KvCacheBaseline {
+        session_id: app.kv_cache_session_id(),
+        cache_generation: app.kv_cache.cache_generation,
+        input_tokens: 42_000,
+        completed_at: Instant::now(),
+        cache_ttl_secs: Some(1800),
+        provider: "openai-api".into(),
+        model: "gpt-6-astra".into(),
+        upstream_provider: None,
+        signature: Some(App::kv_cache_request_signature(
+            &messages,
+            &[],
+            "before",
+            "",
+        )),
+    };
+    for writes in [None, Some(2_000)] {
+        app.kv_cache.kv_cache_baseline = Some(baseline.clone());
+        app.begin_kv_cache_request(&messages, &[], "changed system", "");
+        app.streaming.streaming_input_tokens = 42_000;
+        app.streaming.streaming_cache_read_tokens = None;
+        app.streaming.streaming_cache_creation_tokens = writes;
+        assert!(app.record_completed_stream_cache_usage());
+        assert!(app.kv_cache.kv_cache_miss_samples.is_empty());
+        assert!(
+            !app.display_messages
+                .iter()
+                .any(|m| m.content.contains("KV cache miss"))
+        );
+    }
+    // An explicitly reported zero remains meaningful and is not suppressed.
+    app.kv_cache.kv_cache_baseline = Some(baseline);
+    app.begin_kv_cache_request(&messages, &[], "changed system", "");
+    app.streaming.streaming_input_tokens = 42_000;
+    app.streaming.streaming_cache_read_tokens = Some(0);
+    assert!(app.record_completed_stream_cache_usage());
+    assert_eq!(app.kv_cache.kv_cache_miss_samples.len(), 1);
 }

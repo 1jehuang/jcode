@@ -204,6 +204,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -218,6 +219,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
         token_usage_totals: Some(TokenUsageTotals {
+            cache_prompt_tokens: Some(130),
             messages_with_token_usage: 2,
             input_tokens: 123,
             output_tokens: 45,
@@ -246,12 +248,14 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         compaction_mode: crate::config::CompactionMode::Reactive,
         activity: None,
         side_panel: crate::side_panel::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![crate::side_panel::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: crate::side_panel::SidePanelPageSource::Managed,
                 content: "# Notes".to_string(),
                 updated_at_ms: 42,
@@ -295,6 +299,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,
@@ -335,12 +340,14 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
 fn test_side_panel_state_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePanelState {
         snapshot: crate::side_panel::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![crate::side_panel::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: crate::side_panel::SidePanelPageSource::Managed,
                 content: "updated".to_string(),
                 updated_at_ms: 99,

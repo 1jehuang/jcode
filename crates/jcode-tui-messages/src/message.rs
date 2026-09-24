@@ -449,6 +449,7 @@ mod tests {
     #[test]
     fn rendered_messages_convert_to_display_messages() {
         let rendered = RenderedMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "done".to_string(),
             tool_calls: vec!["read".to_string()],

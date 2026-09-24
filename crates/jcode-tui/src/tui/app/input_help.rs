@@ -11,7 +11,7 @@ impl App {
                 "/compact\nForce context compaction now.\nStarts background summarization and applies it automatically when ready.\n\n/compact mode\nShow current compaction mode for this session.\n\n/compact mode <reactive|proactive|semantic>\nChange compaction mode for this session."
             }
             "cache" => {
-                "/cache stats\nShow KV cache stats for this session: cache read/write totals, hit ratios, current baseline, and recent miss attributions.\n\n/cache\nToggle Anthropic cache TTL between 5 minutes and 1 hour.\n\n/cache 1h  or  /cache 5m\nSet Anthropic cache TTL explicitly."
+                "/cache  or  /cache stats\nShow KV cache stats for this session: cache read/write totals, hit ratios, active-route retention, current baseline, and recent miss attributions. Does not change cache preferences.\n\n/cache extend  or  /cache 1h\nPermanently select 1-hour Anthropic caching for subsequent requests and future sessions. Cache writes cost 2x base input tokens.\n\n/cache 5m\nSave 5-minute Anthropic caching. Existing cache entries are not extended retroactively. OpenAI retention is provider/model-managed, not changed by this preference."
             }
             "fix" => {
                 "/fix\nRun recovery actions when the model cannot continue.\nRepairs missing tool outputs, resets provider session state, and starts compaction when possible."
@@ -64,6 +64,12 @@ impl App {
             "commit" => {
                 "/commit\nAsk the agent to inspect current uncommitted changes and create interactive, logical commits.\n\nThe agent should group related files or hunks, preserve unrelated work, validate as appropriate, and report the commits created plus anything left uncommitted."
             }
+            "merge" => {
+                "/merge\nAsk the agent to merge the current branch into main/master, then leave HEAD on that destination branch.\n\nRequires a clean worktree and an attached branch. If both main and master exist, use the unambiguous configured remote default or ask. The agent validates the changes, uses a normal merge (fast-forward when possible), and stops on conflicts, aborting its own merge and returning to the source branch when safe. Uncommitted changes are never auto-committed or stashed. Nothing is pushed and no branches are deleted."
+            }
+            "merge-remote-release" => {
+                "/merge-remote-release\nSame as /merge, then /remote-release from the destination main/master branch. Leaves HEAD on that branch.\n\nRequires a clean worktree. Stops the entire workflow on conflicts, failed validation, an ambiguous destination, or already being on the destination branch. Uncommitted work is never auto-committed or stashed before merging. After a verified merge, pushes normally and follows the repository's remote release conventions. In Jcode, runs scripts/quick-release.sh --remote so release artifacts are built remotely. Never force-pushes, moves existing tags, deletes branches, or bypasses remote release gates. Reports the merge, validation, version, and remote release status."
+            }
             "commit-push" | "commit-and-push" => {
                 "/commit-push\nSame as /commit, then push the new commits to the remote tracking branch.\n\nThe agent groups related changes into logical commits, preserves unrelated work, then runs git push (using git push -u if the branch has no upstream). It will not force-push or rewrite already-pushed history, and reports the commits created plus the push result."
             }
@@ -101,7 +107,7 @@ impl App {
                 "/judge\nLaunch a one-shot headed judge session immediately.\n\nThe judge will DM this session when done. If OpenAI ChatGPT OAuth is available, it prefers gpt-5.5."
             }
             "effort" => {
-                "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs run at max reasoning and turn on swarm orchestration (light fan-out or the deep task graph).\n\nAlso: {effort_keys} to cycle."
+                "/effort\nShow current effort.\n\n/effort <level>\nSet effort (none|minimal|low|medium|high|xhigh|max|swarm|swarm-deep). Which levels apply depends on the model. The swarm rungs [Beta] turn on swarm orchestration (swarm: light fan-out, swarm-deep: deep task graph). Root reasoning is configurable via [agents] swarm_root_effort and swarm_deep_root_effort (both default to max).\n\nAlso: {effort_keys} to cycle."
             }
             "fast" => {
                 "/fast\nShow whether fast mode is enabled, plus the saved default.\n\n/fast on\nEnable fast mode (service_tier = priority) for the current session.\n\n/fast off\nDisable fast mode for the current session.\n\n/fast status\nShow current fast-mode status.\n\n/fast default on\nSave fast mode as the default on startup.\n\n/fast default off\nSave fast mode as the default off on startup.\n\n/fast default status\nShow the saved fast-mode default."
@@ -194,6 +200,9 @@ impl App {
             }
             "auth" | "login" => {
                 "/auth\nShow authentication status for all providers.\n\n/login\nInteractive provider selection - pick a provider to log into.\n\n/login <provider>\nStart login flow directly for any provider shown by /login or the /login completions.\n\nUse /login jcode for pay-as-you-go hosted models through the Jcode router. Set a monthly spending limit in the browser; no API key is pasted into the terminal."
+            }
+            "reset" => {
+                "/reset  or  /reset usage limits openai\nCheck available banked OpenAI resets without spending one. Repeating this command shows the same pending confirmation.\n\n/reset usage limits openai confirm\nSpend the reviewed reset. This cannot be undone. On an uncertain error, confirm again to retry the same request safely.\n\n/reset usage limits openai cancel\nClear the pending confirmation. An already submitted reset cannot be cancelled."
             }
             "account" | "accounts" => {
                 "/account\nOpen the inline account picker showing both Claude and OpenAI accounts together. It lists saved accounts plus new/replace actions for each provider.\n\n/account claude  or  /account openai\nOpen the inline picker filtered to that provider.\n\n/account <provider> settings\nShow provider-specific account/settings details.\n\n/account <provider> login\nStart or refresh credentials for a provider.\n\n/account claude add  or  /account openai add\nCreate the next numbered OAuth account directly.\n\n/account <provider> switch <label>\nSwitch the active account for multi-account providers.\n\n/account <provider> remove <label>\nRemove a saved account.\n\n/account default-provider <provider|auto>\nSet the preferred default provider for future sessions.\n\n/account default-model <model|clear>\nSet the preferred default model for future sessions.\n\nOpenAI-specific settings:\n  /account openai transport ...\n  /account openai effort ...\n  /account openai fast on|off\n\nCustom provider settings:\n  /account openai-compatible api-base ...\n  /account openai-compatible api-key-name ...\n  /account openai-compatible env-file ...\n  /account openai-compatible default-model ..."

@@ -1,7 +1,13 @@
-//! Tracking of active session process IDs under `~/.jcode/active_pids`.
+//! Session process-ownership markers under the historical `~/.jcode/active_pids` name.
 //!
-//! This is pure filesystem state keyed by session ID, used to discover which
-//! sessions are currently running (and to map a PID back to its session). It
+//! “Active” means a process owns the session, not that a window is open, a client
+//! is connected, or a model is generating. In server mode, the owning PID is the
+//! daemon's PID and can be shared by many sessions, including disconnected ones.
+//! Markers can outlive their owner, so consumers needing live sessions must check
+//! PID liveness (as [`session_presence`] does).
+//!
+//! This is pure filesystem state keyed by session ID, used to discover session
+//! ownership (and to map a PID back to one of its sessions). It
 //! lives in the storage crate because it only needs [`jcode_dir`] and is a
 //! low-level concern shared by session management, dictation, and crash
 //! recovery, none of which should pull the full `session` module into scope.
@@ -9,7 +15,8 @@
 use crate::jcode_dir;
 use std::path::PathBuf;
 
-/// Directory holding one file per active session ID (`~/.jcode/active_pids`).
+/// Directory holding one ownership marker per session ID (`~/.jcode/active_pids`).
+/// Each file contains the owning process PID, not a client/window PID in server mode.
 pub fn active_pids_dir() -> Option<PathBuf> {
     jcode_dir().ok().map(|d| d.join("active_pids"))
 }
@@ -67,6 +74,53 @@ pub fn unregister_active_pid(session_id: &str) {
     set_session_internal(session_id, false);
 }
 
+/// Remove every active-PID marker owned by `pid`, returning
+/// `(removed, failed)`.
+///
+/// Used at server startup after an exec-based reload. `exec` preserves the
+/// daemon PID, so markers written by the previous process image still look live
+/// to [`session_presence`]'s liveness check, yet the fresh image owns no
+/// sessions until clients reconnect and re-register via `mark_active`. Reaping
+/// them here keeps presence counts honest. Crash-restart is unaffected: a
+/// genuinely new process has a different PID, so its markers are left for crash
+/// recovery.
+///
+/// `failed` is non-zero when a marker could not be unlinked.
+pub fn prune_active_pids_owned_by(pid: u32) -> (usize, usize) {
+    let Some(dir) = active_pids_dir() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (0, 0);
+    };
+
+    let owned: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                == Some(pid)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    let mut removed = 0;
+    let mut failed = 0;
+    for session_id in &owned {
+        unregister_active_pid(session_id);
+        // `unregister_active_pid` discards filesystem errors, so confirm the
+        // marker is actually gone. A failed unlink leaves it live; count it as
+        // failed rather than reporting a prune that did not happen.
+        if dir.join(session_id).exists() {
+            failed += 1;
+        } else {
+            removed += 1;
+        }
+    }
+    (removed, failed)
+}
+
 /// Mark a session as actively streaming a model response.
 pub fn mark_streaming(session_id: &str) {
     if let Some(dir) = streaming_pids_dir() {
@@ -80,6 +134,31 @@ pub fn unmark_streaming(session_id: &str) {
     if let Some(dir) = streaming_pids_dir() {
         let _ = std::fs::remove_file(dir.join(session_id));
     }
+}
+
+/// Session IDs whose streaming marker names a live process, i.e. every session
+/// some jcode process (normally the shared daemon) is running a turn for right
+/// now. Cheaper than [`session_presence`]: it reads only the handful of
+/// streaming markers, never the whole active-PID registry, so clients such as
+/// the desktop sidebar can poll it every second for sessions they have not
+/// attached to.
+pub fn streaming_session_ids() -> Vec<String> {
+    let Some(dir) = streaming_pids_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                .is_some_and(process_is_running)
+        })
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect()
 }
 
 /// RAII guard that marks a session as streaming for its lifetime and clears the
@@ -104,7 +183,9 @@ impl Drop for StreamingGuard {
     }
 }
 
-/// Find the active session ID currently owned by the given process ID.
+/// Find one session ID registered to the given process ID, without a liveness check.
+/// A daemon may own multiple sessions, so the returned session is not necessarily
+/// connected to a client or focused in a window.
 pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     let dir = active_pids_dir()?;
     for entry in std::fs::read_dir(dir).ok()? {
@@ -118,7 +199,8 @@ pub fn find_active_session_id_by_pid(pid: u32) -> Option<String> {
     None
 }
 
-/// List active session IDs currently tracked in `~/.jcode/active_pids`.
+/// List session IDs with ownership markers in `~/.jcode/active_pids`.
+/// Does not check PID liveness or whether a client/window is connected.
 pub fn active_session_ids() -> Vec<String> {
     let Some(dir) = active_pids_dir() else {
         return Vec::new();
@@ -153,6 +235,7 @@ fn process_is_running(pid: u32) -> bool {
 /// Live snapshot of how many jcode sessions are running, and how many of those
 /// are actively streaming a model response right now. Used by the menu bar
 /// indicator (`jcode menubar`) and any other presence UI.
+/// These are process-owned session counts, not open-window or connected-client counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionCounts {
     /// Number of live sessions (registered PID is still running).
@@ -183,6 +266,7 @@ pub struct SessionPresence {
 /// streaming markers, skipping any entries whose owning process is no longer
 /// alive. This is a cheap O(n) scan over a handful of tiny files; used by the
 /// menu bar indicator and other presence UI.
+/// A live owner does not imply a connected client or an open window.
 pub fn session_presence() -> Vec<SessionPresence> {
     let Some(active_dir) = active_pids_dir() else {
         return Vec::new();
@@ -299,6 +383,10 @@ mod tests {
             let _ = std::fs::write(dir.join("session_delta"), dead.to_string());
         }
 
+        let mut streaming_ids = streaming_session_ids();
+        streaming_ids.sort();
+        assert_eq!(streaming_ids, vec!["session_alpha".to_string()]);
+
         let counts = session_counts();
         assert_eq!(counts.total, 3, "three live sessions expected");
         assert_eq!(
@@ -387,6 +475,76 @@ mod tests {
         set_session_internal("session_worker", true);
         unregister_active_pid("session_worker");
         assert!(!session_is_internal("session_worker"));
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// Regression for stale markers left by an exec-based reload: markers that
+    /// claim our own PID are reaped, others are left for crash recovery, and
+    /// companion streaming/internal markers go with the pruned session.
+    #[test]
+    fn prune_active_pids_owned_by_removes_only_that_pid_and_companions() {
+        let _guard = lock_env();
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let me = std::process::id();
+        let other = 999_999u32;
+        register_active_pid("session_mine", me);
+        register_active_pid("session_theirs", other);
+        mark_streaming("session_mine");
+        set_session_internal("session_mine", true);
+
+        assert_eq!(
+            prune_active_pids_owned_by(me),
+            (1, 0),
+            "only our own marker"
+        );
+        let ids = active_session_ids();
+        assert!(!ids.contains(&"session_mine".to_string()));
+        assert!(ids.contains(&"session_theirs".to_string()));
+
+        // Pruning a session clears its companion markers too.
+        assert!(!session_is_internal("session_mine"));
+        if let Some(dir) = streaming_pids_dir() {
+            assert!(!dir.join("session_mine").exists());
+        }
+
+        // Idempotent: nothing left to prune on a second pass.
+        assert_eq!(prune_active_pids_owned_by(me), (0, 0));
+
+        jcode_core::env::remove_var("JCODE_HOME");
+    }
+
+    /// A marker that cannot be unlinked must not be reported as pruned, since
+    /// `unregister_active_pid` swallows filesystem errors.
+    #[cfg(unix)]
+    #[test]
+    fn prune_counts_only_successful_deletions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = lock_env();
+        // Root ignores the directory write bit, so unlink would succeed anyway.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        jcode_core::env::set_var("JCODE_HOME", temp.path());
+
+        let me = std::process::id();
+        register_active_pid("session_mine", me);
+
+        let dir = active_pids_dir().expect("active_pids dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555))
+            .expect("make markers undeletable");
+
+        // A failed unlink is reported as failed, not as a prune.
+        assert_eq!(prune_active_pids_owned_by(me), (0, 1));
+        assert!(active_session_ids().contains(&"session_mine".to_string()));
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore write access");
+        assert_eq!(prune_active_pids_owned_by(me), (1, 0));
 
         jcode_core::env::remove_var("JCODE_HOME");
     }

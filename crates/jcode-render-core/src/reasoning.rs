@@ -11,19 +11,43 @@
 /// [`reasoning_line_markup`]).
 pub const REASONING_SENTINEL: &str = "\u{2063}";
 
+const REASONING_ESCAPES: &str = "\\*_`[]<>&~|$";
+
+/// Recover the original Markdown from a line produced by
+/// [`reasoning_line_markup`] or [`reasoning_partial_markup`]. Native frontends
+/// can style reasoning themselves instead of interpreting the terminal's
+/// escaped emphasis wrapper. Ordinary Markdown is never unescaped here.
+pub fn reasoning_line_content(line: &str) -> Option<String> {
+    let body = line
+        .trim_end_matches([' ', '\r', '\n'])
+        .strip_prefix("*\u{2063}")?
+        .strip_suffix("\u{2063}*")?;
+    let mut chars = body.chars().peekable();
+    let mut content = String::with_capacity(body.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && chars
+                .peek()
+                .is_some_and(|ch| REASONING_ESCAPES.contains(*ch))
+        {
+            content.push(chars.next().unwrap());
+        } else {
+            content.push(ch);
+        }
+    }
+    Some(content)
+}
+
 /// Escape the characters that would otherwise be interpreted as inline markdown
 /// inside a reasoning line, so the body renders literally inside the dim/italic
 /// emphasis run.
 fn escape_reasoning_inline_markdown(line: &str) -> String {
     let mut out = String::with_capacity(line.len() + 8);
     for ch in line.chars() {
-        match ch {
-            '\\' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '&' | '~' | '|' | '$' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
+        if REASONING_ESCAPES.contains(ch) {
+            out.push('\\');
         }
+        out.push(ch);
     }
     out
 }
@@ -91,4 +115,37 @@ pub fn reasoning_summary_line_markup(line_count: usize) -> String {
         n => format!("▸ thought ({} lines)", n),
     };
     reasoning_line_markup(&label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_markup_round_trips_original_markdown() {
+        for text in [
+            "**Checking top live tabs**",
+            "  **é文字** and `code`  ",
+            r"literal \*star\*, C:\work, [docs](https://example.com), $x_1$",
+            "\\*_`[]<>&~|$",
+            " ",
+        ] {
+            for markup in [reasoning_line_markup(text), reasoning_partial_markup(text)] {
+                assert_eq!(reasoning_line_content(&markup).as_deref(), Some(text));
+            }
+        }
+    }
+
+    #[test]
+    fn reasoning_decoder_requires_both_sentinels_and_wrapper() {
+        for text in [
+            "**heading**",
+            r"\*literal\*",
+            "*\u{2063}unfinished",
+            "*ordinary*",
+            "",
+        ] {
+            assert_eq!(reasoning_line_content(text), None);
+        }
+    }
 }

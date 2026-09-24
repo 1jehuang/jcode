@@ -34,8 +34,20 @@ pub struct SubscriptionUsage {
     pub resets_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SubscriptionCapabilities {
+    #[serde(default)]
+    pub voice_transcription: bool,
+    /// Server-verified entitlement and configured isolated build service.
+    #[serde(default)]
+    pub remote_compile: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubscriptionMe {
+    /// Older servers advertise no optional capabilities.
+    #[serde(default)]
+    pub capabilities: SubscriptionCapabilities,
     pub account_id: String,
     pub email: String,
     /// Stable wire tier value: "none", "plus", "pro", "max", "ultra", or "flagship".
@@ -352,6 +364,117 @@ pub async fn poll_device_token_once(
     }
 }
 
+/// Outcome of starting a native email-code sign-in.
+#[derive(Clone)]
+pub struct EmailCodeStart {
+    pub login_token: String,
+    pub expires_in: u64,
+    pub code_length: usize,
+}
+
+#[derive(Deserialize)]
+struct EmailCodeStartWire {
+    login_token: Option<String>,
+    expires_in: Option<u64>,
+    code_length: Option<usize>,
+}
+
+/// Outcome of verifying an emailed code.
+#[derive(Debug, Clone)]
+pub enum EmailCodeVerifyOutcome {
+    Approved(ApprovedAccountKey),
+    /// Wrong code. The same login may be retried.
+    Incorrect {
+        attempts_remaining: Option<u32>,
+    },
+    /// Expired, used, or locked. Start again.
+    Expired,
+}
+
+/// Email the address a six-digit code. Nothing opens in a browser.
+pub async fn request_email_code(
+    client: &reqwest::Client,
+    api_base: &str,
+    email: &str,
+) -> std::result::Result<EmailCodeStart, AccountApiError> {
+    let response = client
+        .post(endpoint_url(api_base, "auth/email/start"))
+        .json(&serde_json::json!({ "client_name": "jcode-cli", "email": email.trim() }))
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let status = response.status();
+    let body = response.text().await.map_err(offline)?;
+    if !status.is_success() {
+        return Err(match status {
+            StatusCode::NOT_FOUND => AccountApiError::LegacyBackend,
+            _ => AccountApiError::Http {
+                status: status.as_u16(),
+                code: error_code(&body),
+            },
+        });
+    }
+    let wire: EmailCodeStartWire = serde_json::from_str(&body)
+        .map_err(|_| AccountApiError::InvalidResponse("malformed email code JSON"))?;
+    let login_token = wire
+        .login_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or(AccountApiError::InvalidResponse("missing login_token"))?;
+    Ok(EmailCodeStart {
+        login_token,
+        expires_in: wire.expires_in.unwrap_or(900).clamp(1, 3600),
+        code_length: wire.code_length.unwrap_or(6).clamp(4, 12),
+    })
+}
+
+pub async fn verify_email_code(
+    client: &reqwest::Client,
+    api_base: &str,
+    login_token: &str,
+    code: &str,
+) -> std::result::Result<EmailCodeVerifyOutcome, AccountApiError> {
+    let response = client
+        .post(endpoint_url(api_base, "auth/email/verify"))
+        .json(&serde_json::json!({ "login_token": login_token, "code": code.trim() }))
+        .timeout(DEVICE_REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(offline)?;
+    let status = response.status();
+    let body = response.text().await.map_err(offline)?;
+    if status.is_success() {
+        let approved: ApprovedAccountKeyWire = serde_json::from_str(&body)
+            .map_err(|_| AccountApiError::InvalidResponse("malformed approved token JSON"))?;
+        if approved.api_key.trim().is_empty() {
+            return Err(AccountApiError::InvalidResponse("empty api_key"));
+        }
+        return Ok(EmailCodeVerifyOutcome::Approved(ApprovedAccountKey {
+            api_key: approved.api_key,
+            account_id: approved.account_id,
+            email: approved.email,
+            tier: approved.tier,
+            status: approved.status,
+        }));
+    }
+    match error_code(&body).as_deref() {
+        Some("invalid_code") => Ok(EmailCodeVerifyOutcome::Incorrect {
+            attempts_remaining: serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value["error"]["attempts_remaining"].as_u64())
+                .map(|n| n.min(u32::MAX as u64) as u32),
+        }),
+        Some("expired_code") => Ok(EmailCodeVerifyOutcome::Expired),
+        code => Err(match status {
+            StatusCode::NOT_FOUND => AccountApiError::LegacyBackend,
+            _ => AccountApiError::Http {
+                status: status.as_u16(),
+                code: code.map(str::to_owned),
+            },
+        }),
+    }
+}
+
 pub async fn fetch_subscription_me_with(
     client: &reqwest::Client,
     api_base: &str,
@@ -555,6 +678,8 @@ mod tests {
         }"#;
         let me: SubscriptionMe = serde_json::from_str(json).expect("parse");
         assert_eq!(me.parsed_tier(), Some(JcodeTier::Flagship));
+        assert!(!me.capabilities.voice_transcription);
+        assert!(!me.capabilities.remote_compile);
         assert!(me.has_active_paid_plan());
         assert_eq!(me.manage_url.as_deref(), Some("https://jcode.sh/account"));
     }

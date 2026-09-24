@@ -421,10 +421,23 @@ fn macos_notification_broker_app_path() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("JCODE_MACOS_NOTIFICATION_BROKER_APP") {
         return Some(path.into());
     }
-    dirs::home_dir().map(|home| {
-        home.join("Applications")
-            .join(MACOS_NOTIFICATION_BROKER_APP_NAME)
-    })
+    let home = dirs::home_dir()?;
+    // Current location: hidden beside the inbox so Spotlight and Launchpad do
+    // not list the faceless helper as a second "Jcode" app. Older CLIs
+    // published it in ~/Applications; keep using that copy until the next
+    // interactive launch migrates it.
+    let current = home
+        .join(".jcode")
+        .join("notifications")
+        .join("macos")
+        .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
+    if current.is_dir() {
+        return Some(current);
+    }
+    let legacy = home
+        .join("Applications")
+        .join(MACOS_NOTIFICATION_BROKER_APP_NAME);
+    Some(if legacy.is_dir() { legacy } else { current })
 }
 
 /// The durable inbox consumed by the bundled macOS broker.
@@ -655,8 +668,8 @@ pub fn activate_macos_notification_origin(origin: &MacosNotificationOrigin) {
 /// Send a local desktop notification without blocking.
 ///
 /// Uses Notification Center via `osascript` on macOS and `notify-send` on
-/// Linux. The child process is spawned detached and never waited on; failures
-/// are ignored (a missing notifier is not an error).
+/// Linux. The child process is reaped on a background thread; failures are
+/// ignored (a missing notifier is not an error).
 pub fn send_desktop_notification(title: &str, body: &str) {
     send_desktop_notification_rich(title, None, body, None);
 }
@@ -698,25 +711,31 @@ pub fn send_desktop_notification_rich(
         if let Some(sound) = sound.filter(|s| !s.trim().is_empty()) {
             script.push_str(&format!(" sound name \"{}\"", applescript_escape(sound)));
         }
-        let _ = std::process::Command::new("osascript")
+        if let Ok(child) = std::process::Command::new("osascript")
             .arg("-e")
             .arg(script)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            reap_notification_child(child);
+        }
     }
     #[cfg(target_os = "linux")]
     {
         let _ = (subtitle, sound);
-        let _ = std::process::Command::new("notify-send")
+        if let Ok(child) = std::process::Command::new("notify-send")
             .arg("--app-name=jcode")
             .arg(title)
             .arg(body)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            reap_notification_child(child);
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -1149,4 +1168,12 @@ mod tests {
             serde_json::from_slice(&encoded).expect("decode envelope");
         assert_eq!(decoded, envelope);
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod notification_process_tests {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/support/notification_reaping.rs"
+    ));
 }

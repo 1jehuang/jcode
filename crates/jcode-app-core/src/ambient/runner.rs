@@ -28,6 +28,12 @@ use tokio::sync::{Notify, RwLock};
 
 const MAX_IDLE_POLL_SECS: u64 = 30;
 
+/// Re-read enabled on each loop iteration, without overriding an explicit stop.
+/// Config edits take effect on the next wake, not on the config cache's cadence.
+fn ambient_allowed(status: &AmbientStatus) -> bool {
+    config().ambient.enabled && !matches!(status, AmbientStatus::Disabled)
+}
+
 /// Shared ambient runner state, accessible from the server, debug socket, and TUI.
 #[derive(Clone)]
 pub struct AmbientRunnerHandle {
@@ -548,12 +554,10 @@ impl AmbientRunnerHandle {
         }
         logging::info("Ambient runner: starting background loop");
 
-        let ambient_enabled = config().ambient.enabled;
-
-        // Spawn reply pollers only when ambient mode is enabled; scheduled
+        // Spawn reply pollers only when ambient mode is enabled at startup; scheduled
         // session-targeted scheduled tasks should still work without the ambient-only reply
         // infrastructure.
-        if ambient_enabled {
+        if config().ambient.enabled {
             let safety_config = config().safety.clone();
             if safety_config.email_reply_enabled
                 && safety_config.email_imap_host.is_some()
@@ -588,8 +592,7 @@ impl AmbientRunnerHandle {
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
-            let ambient_allowed =
-                ambient_enabled && !matches!(state.status, AmbientStatus::Disabled);
+            let ambient_allowed = ambient_allowed(&state.status);
 
             if ambient_allowed {
                 // Update scheduler's user-active state
@@ -773,26 +776,8 @@ impl AmbientRunnerHandle {
                     // Send notifications (fire-and-forget)
                     self.inner.notifier.dispatch_cycle_summary(&transcript);
 
-                    // Post-cycle memory consolidation (fire-and-forget)
-                    tokio::spawn(async move {
-                        let manager = MemoryManager::new();
-                        match manager.backfill_embeddings() {
-                            Ok((backfilled, _failed)) => {
-                                if backfilled > 0 {
-                                    logging::info(&format!(
-                                        "Ambient: backfilled {} embeddings",
-                                        backfilled
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                logging::error(&format!(
-                                    "Ambient: embedding backfill failed: {}",
-                                    e
-                                ));
-                            }
-                        }
-                    });
+                    // Stored memories are recalled directly by Jev, so ambient
+                    // cycles must not initialize or backfill an embedding model.
                 }
                 Err(e) => {
                     logging::error(&format!("Ambient cycle failed: {}", e));

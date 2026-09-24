@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   API_VERSION_MAJOR,
+  API_VERSION_MINOR,
   KNOWN_EVENT_KINDS,
   KNOWN_REQUEST_KINDS,
 } from "../dist/index.js";
@@ -66,6 +67,13 @@ test("protocol major version matches the Rust constant", () => {
   const match = /API_VERSION_MAJOR: u32 = (\d+)/.exec(source);
   assert.ok(match, "API_VERSION_MAJOR not found");
   assert.equal(API_VERSION_MAJOR, Number(match![1]));
+});
+
+test("protocol minor version matches the Rust constant", () => {
+  const source = fs.readFileSync(path.join(rustCrate, "lib.rs"), "utf8");
+  const match = /API_VERSION_MINOR: u32 = (\d+)/.exec(source);
+  assert.ok(match, "API_VERSION_MINOR not found");
+  assert.equal(API_VERSION_MINOR, Number(match![1]));
 });
 
 test("socket path rules match the Rust resolver", async () => {

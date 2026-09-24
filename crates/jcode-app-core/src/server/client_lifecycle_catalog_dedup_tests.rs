@@ -30,6 +30,7 @@ fn catalog_dedup_key_ignores_age_drift_but_keeps_real_changes() {
         api_method: "openrouter".to_string(),
         available: true,
         detail: detail.to_string(),
+        usage: None,
         cheapness: None,
     };
     let event = |detail: &str| ServerEvent::AvailableModelsUpdated {

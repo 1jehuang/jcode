@@ -48,6 +48,11 @@ pub struct AuthStatus {
     pub cursor: AuthState,
     /// Grok Build CLI is installed. Runtime auth is delegated to its cached login.
     pub grok_build: AuthState,
+    /// Any OpenAI-compatible catalog profile (Cerebras, Groq, ...) has usable
+    /// credentials. These have no dedicated field and, since e0796a51c, no
+    /// longer count toward the native `openrouter` slot.
+    #[serde(default)]
+    pub openai_compatible_any: AuthState,
     /// Google/Gmail OAuth configured
     pub google: AuthState,
     /// Google Gmail has send capability (Full tier)

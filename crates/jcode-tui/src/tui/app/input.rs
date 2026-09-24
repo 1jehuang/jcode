@@ -18,6 +18,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod drop_tests;
 /// Streaming reasoning region, split out to keep this file under the
 /// code-size budget. See the module docs for the byte-offset invariant.
 mod reasoning_region;
@@ -729,9 +731,13 @@ pub(super) fn handle_paste(app: &mut App, text: String) {
     }
 }
 
-fn format_dropped_path(path: &std::path::Path, quote_whitespace: bool) -> String {
+fn format_dropped_path(path: &std::path::Path, quote_for_batch: bool) -> String {
     let value = path.to_string_lossy();
-    if quote_whitespace && value.chars().any(char::is_whitespace) {
+    if quote_for_batch
+        && value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '\\' | '\'' | '"'))
+    {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.into_owned()
@@ -751,10 +757,31 @@ fn dropped_image_files(text: &str) -> Option<Vec<(String, Vec<u8>)>> {
 }
 
 /// Terminal emulators normally send file drops as bracketed paste, but some send
-/// the path as ordinary key events. Promote a complete image-path-only composer
-/// value before command/skill routing so an absolute `/...` path is never treated
-/// as a slash command.
+/// the path as ordinary key events. Prepare a complete path-only composer before
+/// command/skill routing: attach images, or resolve quoting for ordinary files.
 pub(super) fn promote_dropped_images(app: &mut App) -> bool {
+    if attach_dropped_images(app) {
+        return true;
+    }
+    let Some(paths) = parse_dropped_paths(&app.input) else {
+        return false;
+    };
+    let normalized = paths
+        .iter()
+        .map(|path| format_dropped_path(path, paths.len() > 1))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized == app.input {
+        return false;
+    }
+    app.remember_input_undo_state();
+    app.input = normalized;
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+    true
+}
+
+fn attach_dropped_images(app: &mut App) -> bool {
     let Some(images) = dropped_image_files(&app.input) else {
         return false;
     };
@@ -1186,7 +1213,10 @@ pub(super) fn handle_text_input(app: &mut App, text: &str) -> bool {
     }
 
     insert_input_text(app, text);
-    promote_dropped_images(app);
+    // A key stream may still be receiving the rest of a multi-file drop. Do not
+    // strip quoting from a verified non-image prefix until submission, otherwise
+    // later paths make its now-unquoted spaces ambiguous.
+    attach_dropped_images(app);
     true
 }
 
@@ -1343,6 +1373,9 @@ pub(super) fn handle_prompt_history_navigation(
                 return history
                     .last()
                     .map(|prompt| {
+                        app.remember_input_undo_state();
+                        app.history_draft =
+                            Some((app.input.clone(), app.cursor_pos.min(app.input.len())));
                         app.input = prompt.clone();
                         app.cursor_pos = app.input.len();
                         app.reset_tab_completion();
@@ -1356,8 +1389,13 @@ pub(super) fn handle_prompt_history_navigation(
             KeyCode::Up => Some(current_index.saturating_sub(1)),
             KeyCode::Down if current_index + 1 < history.len() => Some(current_index + 1),
             KeyCode::Down => {
-                app.input.clear();
-                app.cursor_pos = 0;
+                if let Some((draft, cursor_pos)) = app.history_draft.take() {
+                    app.input = draft;
+                    app.cursor_pos = cursor_pos;
+                } else {
+                    app.input.clear();
+                    app.cursor_pos = 0;
+                }
                 app.reset_tab_completion();
                 app.sync_model_picker_preview_from_input();
                 return true;
@@ -1654,6 +1692,23 @@ impl App {
             .as_deref()
             .unwrap_or(&self.session.id)
             .to_string();
+        let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
+        let plan = crate::todo::load_plan(&todo_session_id).unwrap_or_default();
+        let todo_fingerprint =
+            serde_json::to_string(&(&todo_session_id, &todos, &plan, &goals)).ok();
+        if self.final_response_todo_fingerprint.is_some() {
+            if self.final_response_todo_fingerprint == todo_fingerprint {
+                // Check before timed reviews and deferred digests too: neither
+                // elapsed time nor a stale observation starts a new todo cycle.
+                return false;
+            }
+            self.final_response_todo_fingerprint = None;
+            self.todo_final_response_requested = false;
+            self.todo_gate_digest_delivered = false;
+            self.todo_completion_gate_attempts = 0;
+            self.todo_confidence_spike_challenged = false;
+            self.last_todo_ownership_fingerprint = None;
+        }
         if !todos.is_empty()
             && crate::todo::take_long_session_review_if_due(&todo_session_id).unwrap_or(false)
         {
@@ -1695,13 +1750,17 @@ impl App {
             if self.deliver_deferred_gate_digest_if_needed() {
                 return true;
             }
-            let goals = crate::todo::load_goals(&todo_session_id).unwrap_or_default();
             let ownership_needs_followup =
                 !crate::todo::completed_groups_have_sufficient_delivery(&todos, &goals);
             let gate_budget_left =
                 self.todo_completion_gate_attempts < Self::TODO_COMPLETION_GATE_MAX_ATTEMPTS;
+            let ownership_message =
+                crate::todo::build_todo_ownership_continuation_message(&todos, &goals);
+            // Only a different actionable gap merits another ownership turn.
+            // Reworded evidence, confidence updates and descriptive assessment
+            // changes must not re-arm a nudge the agent already received.
             let ownership_fingerprint =
-                serde_json::to_string(&(&todo_session_id, &todos, &goals)).ok();
+                serde_json::to_string(&(&todo_session_id, &ownership_message)).ok();
             if ownership_needs_followup
                 && ownership_fingerprint.is_some()
                 && self.last_todo_ownership_fingerprint == ownership_fingerprint
@@ -1723,10 +1782,7 @@ impl App {
                 self.push_display_message(DisplayMessage::system(
                     "🔍 Checking end-to-end ownership before finishing...",
                 ));
-                self.queued_messages
-                    .push(crate::todo::build_todo_ownership_continuation_message(
-                        &todos, &goals,
-                    ));
+                self.queued_messages.push(ownership_message);
                 self.pending_queued_dispatch = true;
                 return true;
             }
@@ -1792,6 +1848,7 @@ impl App {
             self.todo_completion_gate_attempts = 0;
             if !self.todo_final_response_requested {
                 self.todo_final_response_requested = true;
+                self.final_response_todo_fingerprint = todo_fingerprint;
                 self.push_display_message(DisplayMessage::system(format!(
                     "✅ All todos done. Completion confidence: {}.",
                     confidence_label
@@ -2726,7 +2783,14 @@ pub(super) fn handle_global_control_shortcuts(
                 } else {
                     app.set_status_notice("Interrupting...");
                 }
+            } else if !app.input.is_empty() {
+                // First Ctrl+C: clear the input box
+                app.input.clear();
+                app.pending_images.clear();
+                app.cursor_pos = 0;
+                app.set_status_notice("Input cleared. Press Ctrl+C again to quit");
             } else {
+                // Second Ctrl+C (input already empty): proceed with quit
                 app.handle_quit_request();
             }
             true
@@ -2884,6 +2948,7 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 pub(super) fn take_prepared_input(app: &mut App) -> PreparedInput {
+    promote_dropped_images(app);
     let raw_input = std::mem::take(&mut app.input);
     app.record_prompt_history(&raw_input);
     let expanded = expand_paste_placeholders(app, &raw_input);
@@ -2931,7 +2996,10 @@ fn paste_placeholder(content: &str) -> String {
 impl App {
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
-            if matches!(event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat) {
+            if matches!(
+                event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            ) {
                 let _ = self.handle_key_press_event(event);
             }
             return;
@@ -3208,6 +3276,12 @@ impl App {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
         self.handle_diagram_geometry_change();
+        // A resize rewraps the transcript, so the wrapped-line extent changes
+        // without the user scrolling. While following the tail that reads as a
+        // large append and the renderer starts its catch-up slide from the
+        // pre-resize offset, which looks like the view jumping up and sliding
+        // back down (issue #1412). Snap to the new bottom on the next frame.
+        crate::tui::ui::request_tail_follow_snap();
         true
     }
 
@@ -3793,7 +3867,8 @@ impl App {
         let trimmed = input.trim();
         let handled = super::commands_dispatch::dispatch_local_command(self, trimmed);
         if handled {
-            if trimmed.starts_with('/') {
+            let embedded = super::commands_dispatch::contains_registered_slash_command(trimmed);
+            if trimmed.starts_with('/') || embedded {
                 crate::telemetry::record_command_family(trimmed);
             }
             return;

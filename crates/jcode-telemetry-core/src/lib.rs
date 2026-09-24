@@ -20,24 +20,36 @@ use lifecycle::emit_lifecycle_event;
 use serde_json::Value;
 use state_support::*;
 use std::collections::HashSet;
+use std::sync::Mutex;
+#[cfg(not(test))]
+use std::sync::OnceLock;
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
-use std::sync::{Mutex, OnceLock};
+#[cfg(not(test))]
+use std::sync::mpsc::TrySendError;
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 const TELEMETRY_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/event";
 const TRANSCRIPT_ENDPOINT: &str = "https://telemetry.jcode.sh/v1/transcript";
+#[cfg(not(test))]
 const ASYNC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(test))]
 const BACKGROUND_QUEUE_CAPACITY: usize = 2048;
 const BLOCKING_INSTALL_TIMEOUT: Duration = Duration::from_millis(1200);
 const BLOCKING_LIFECYCLE_TIMEOUT: Duration = Duration::from_millis(800);
 const BLOCKING_FIRST_PROMPT_TIMEOUT: Duration = Duration::from_millis(500);
 const TELEMETRY_SCHEMA_VERSION: u32 = 6;
 const DEFAULT_DISCOVERY_ENDPOINT: &str = "https://api.jcode.sh/v1/discovery";
+#[cfg(not(test))]
 static TELEMETRY_PERMANENTLY_REJECTED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(test))]
 static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(test))]
 static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
+#[cfg(not(test))]
 static TRANSCRIPT_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
+#[cfg(not(test))]
 static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 #[cfg(test)]
 static TEST_EMITTED_PAYLOADS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -1157,7 +1169,7 @@ fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Val
                 turn.feature_email_used = true;
             }
         }
-        "side_panel" => {
+        "side_panel" | "panel" => {
             state.feature_side_panel_used = true;
             if let Some(turn) = state.current_turn.as_mut() {
                 turn.feature_side_panel_used = true;
@@ -1198,7 +1210,7 @@ fn mark_tool_feature_usage(state: &mut SessionTelemetry, name: &str, input: &Val
 
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) {
         state.file_write_calls += 1;
         if let Some(turn) = state.current_turn.as_mut() {
@@ -1254,14 +1266,14 @@ fn mark_tool_success_side_effects(state: &mut SessionTelemetry, name: &str, inpu
 
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) && state.first_file_edit_ms.is_none()
     {
         state.first_file_edit_ms = Some(now_ms_since(state.started_at));
     }
     if matches!(
         name,
-        "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+        "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
     ) && let Some(turn) = state.current_turn.as_mut()
         && turn.first_file_edit_ms.is_none()
     {
@@ -1288,6 +1300,7 @@ pub fn record_command_family(command: &str) {
     maybe_emit_session_start();
 }
 
+#[cfg(not(test))]
 fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
         return false;
@@ -1326,6 +1339,7 @@ fn post_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     }
 }
 
+#[cfg(not(test))]
 fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> bool {
     const RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(200), Duration::from_millis(800)];
     if post_payload(payload.clone(), timeout) {
@@ -1343,6 +1357,7 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
     false
 }
 
+#[cfg(not(test))]
 fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
@@ -1390,6 +1405,7 @@ where
     Ok(sender)
 }
 
+#[cfg(not(test))]
 fn background_sender() -> &'static SyncSender<Value> {
     TELEMETRY_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(BACKGROUND_QUEUE_CAPACITY, |payload| {
@@ -1399,6 +1415,7 @@ fn background_sender() -> &'static SyncSender<Value> {
     })
 }
 
+#[cfg(not(test))]
 fn transcript_background_sender() -> &'static SyncSender<Value> {
     TRANSCRIPT_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(64, |payload| {
@@ -1408,15 +1425,16 @@ fn transcript_background_sender() -> &'static SyncSender<Value> {
     })
 }
 
+#[cfg(test)]
 fn send_transcript_payload(payload: Value) -> bool {
-    #[cfg(test)]
-    {
-        if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
-            emitted.push(payload);
-        }
-        return true;
+    if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
+        emitted.push(payload);
     }
-    #[cfg(not(test))]
+    true
+}
+
+#[cfg(not(test))]
+fn send_transcript_payload(payload: Value) -> bool {
     match transcript_background_sender().try_send(payload) {
         Ok(()) => true,
         Err(TrySendError::Full(_)) => {
@@ -1430,17 +1448,19 @@ fn send_transcript_payload(payload: Value) -> bool {
     }
 }
 
+#[cfg(test)]
 fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
     concurrency::mark_legacy_concurrency_unavailable(&mut payload);
-    #[cfg(test)]
-    {
-        tests::TEST_DELIVERY_MODES.lock().unwrap().push(mode);
-        if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
-            emitted.push(payload);
-        }
-        return true;
+    tests::TEST_DELIVERY_MODES.lock().unwrap().push(mode);
+    if let Ok(mut emitted) = TEST_EMITTED_PAYLOADS.lock() {
+        emitted.push(payload);
     }
-    #[cfg(not(test))]
+    true
+}
+
+#[cfg(not(test))]
+fn send_payload(mut payload: serde_json::Value, mode: DeliveryMode) -> bool {
+    concurrency::mark_legacy_concurrency_unavailable(&mut payload);
     match mode {
         DeliveryMode::Background => {
             if TELEMETRY_PERMANENTLY_REJECTED.load(Ordering::Relaxed) {
@@ -2525,7 +2545,7 @@ pub fn record_tool_execution(name: &str, input: &Value, succeeded: bool, latency
         emit_onboarding_step_once("first_successful_tool", None, None);
         if matches!(
             name,
-            "write" | "edit" | "multiedit" | "patch" | "apply_patch"
+            "write" | "edit" | "multiedit" | "patch" | "apply_patch" | "replace"
         ) {
             emit_onboarding_step_once("first_file_edit", None, None);
         }

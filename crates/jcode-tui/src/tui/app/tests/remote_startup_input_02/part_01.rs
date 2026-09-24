@@ -118,6 +118,7 @@ fn test_model_picker_bedrock_selection_prefixes_model() {
         api_method: "bedrock".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     }];
 
@@ -161,6 +162,7 @@ fn test_model_picker_bedrock_arn_selection_prefixes_model() {
         api_method: "bedrock".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     }];
 
@@ -232,6 +234,7 @@ fn test_remote_placeholder_only_openai_routes_are_replaced_with_real_routes() {
             api_method: "remote-catalog".to_string(),
             available: true,
             detail: "refreshing route details…".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -270,6 +273,7 @@ fn test_remote_hydrated_catalog_restores_missing_direct_bedrock_route() {
             api_method: "remote-catalog".to_string(),
             available: true,
             detail: "compacted route snapshot".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -393,6 +397,7 @@ fn test_remote_cached_oauth_only_claude_route_gains_api_key_route_in_picker() {
             api_method: "claude-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -444,6 +449,7 @@ fn test_remote_jcode_subscription_catalog_is_not_augmented_with_local_auth_route
             api_method: "claude-api".to_string(),
             available: true,
             detail: "stale cached route".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -509,6 +515,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             api_method: "claude-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -517,6 +524,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -525,6 +533,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -533,6 +542,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
             available: true,
             detail: "managed subscription route".to_string(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -541,6 +551,7 @@ fn test_remote_mixed_catalog_keeps_jcode_subscription_separate_from_other_provid
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
     ];
@@ -612,6 +623,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 api_method: "claude-api".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -620,6 +632,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -628,6 +641,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -636,6 +650,7 @@ fn test_remote_hydrated_catalog_adds_entitled_jcode_subscription_routes() {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ];
@@ -721,6 +736,7 @@ fn test_remote_non_jcode_catalog_repairs_poisoned_all_jcode_routes() {
                 api_method: crate::subscription_catalog::JCODE_ROUTE_API_METHOD.to_string(),
                 available: true,
                 detail: "poisoned version 1 cache".to_string(),
+                usage: None,
                 cheapness: None,
             })
             .collect();
@@ -778,6 +794,7 @@ fn test_model_picker_ctrl_b_bedrock_selection_saves_bedrock_default() {
             api_method: "bedrock".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -1276,6 +1293,7 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         app.session.working_dir = Some("/tmp".to_string());
         app.session.model = Some("test-model".to_string());
         app.session.provider_key = Some("test-provider".to_string());
+        app.session.system_prompt = Some("custom transfer prompt".to_string());
         app.session.messages.push(crate::session::StoredMessage {
             id: "msg-1".to_string(),
             role: Role::User,
@@ -1326,9 +1344,21 @@ fn test_create_transfer_session_from_parent_copies_todos_and_uses_compacted_cont
         assert_eq!(child.compaction, Some(transfer_compaction));
         assert_eq!(child.model.as_deref(), Some("test-model"));
         assert_eq!(child.provider_key.as_deref(), Some("test-provider"));
+        assert_eq!(child.system_prompt, app.session.system_prompt);
         assert_eq!(child.working_dir.as_deref(), Some("/tmp"));
         assert_eq!(child_todos.len(), 1);
         assert_eq!(child_todos[0].content, "Carry this forward");
+        for prompt in [None, Some("")] {
+            app.session.system_prompt = prompt.map(str::to_string);
+            let (child_id, _) = super::commands::create_transfer_session_from_parent(
+                &app.session.id,
+                &app.session,
+                None,
+            )
+            .expect("create transfer session with optional prompt");
+            let child = crate::session::Session::load(&child_id).expect("load child session");
+            assert_eq!(child.system_prompt, app.session.system_prompt);
+        }
     });
 }
 
@@ -1782,6 +1812,7 @@ fn test_model_picker_effort_variants_follow_each_route_vocabulary() {
         api_method: "openrouter".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
 
@@ -1826,6 +1857,7 @@ fn test_model_picker_plain_selection_stages_no_effort_in_remote_mode() {
         api_method: "copilot".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
 
@@ -1877,6 +1909,7 @@ fn test_model_switch_notice_omits_placeholder_route_details() {
             api_method: "remote-catalog".to_string(),
             available: true,
             detail: "refreshing route details…".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -1948,6 +1981,7 @@ fn test_favorite_hotkey_does_not_confirm_remote_placeholder_without_matching_fav
             api_method: "remote-catalog".to_string(),
             available: true,
             detail: "refreshing route details…".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -1976,6 +2010,7 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             api_method: "remote-catalog".to_string(),
             available: true,
             detail: "refreshing route details…".to_string(),
+            usage: None,
             cheapness: None,
         }];
 
@@ -1988,6 +2023,7 @@ fn test_catalog_update_rebuilds_open_model_picker_with_real_routes() {
             api_method: "openai-api".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }];
         app.invalidate_model_picker_cache();

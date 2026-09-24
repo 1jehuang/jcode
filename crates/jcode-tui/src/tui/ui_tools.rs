@@ -6,7 +6,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) use jcode_tui_tool_display::concise_tool_error_summary;
 pub(crate) use jcode_tui_tool_display::{
-    canonical_tool_name, is_edit_tool_name, resolve_display_tool_name, tool_output_looks_failed,
+    canonical_tool_name, edit_render_name, is_edit_tool_name, resolve_display_tool_name,
+    tool_output_looks_failed,
 };
 
 /// Whether the dimmed technical detail (command, path, args) should render
@@ -904,7 +905,7 @@ pub(super) fn get_tool_summary_with_budget(
         return String::new();
     }
 
-    match canonical_tool_name(&tool.name) {
+    match edit_render_name(&tool.name, &tool.input) {
         "bash" => tool
             .input
             .get("command")
@@ -1430,15 +1431,18 @@ pub(super) fn get_tool_summary_with_budget(
                 .unwrap_or("selfdev");
             action.to_string()
         }
-        "side_panel" => {
-            let action = tool
-                .input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("side_panel");
+        "side_panel" | "panel" => {
+            let action = tool.input.get("action").and_then(|v| v.as_str()).unwrap_or(
+                if tool.name == "panel" {
+                    "spawn"
+                } else {
+                    "side_panel"
+                },
+            );
             let target = tool
                 .input
                 .get("title")
+                .or_else(|| tool.input.get("panel_id"))
                 .or_else(|| tool.input.get("page_id"))
                 .or_else(|| tool.input.get("file_path"))
                 .and_then(|v| v.as_str());

@@ -908,6 +908,8 @@ mod tests {
                 }],
                 extra_info: vec![("plan".to_string(), "max".to_string())],
                 hard_limit_reached: false,
+                openai_reset_credits: None,
+                anthropic_limit_reset: None,
                 error: None,
                 last_used_unix_secs: None,
             }],

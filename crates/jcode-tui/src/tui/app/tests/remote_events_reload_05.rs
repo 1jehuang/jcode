@@ -10,6 +10,114 @@
 // reload snapshot must therefore fold it back into the queue.
 
 #[test]
+fn test_busy_automatic_continuation_waits_for_running_turn_without_retrying() {
+    for auto_retry in [false, true] {
+        let mut app = create_test_app();
+        app.is_remote = true;
+        app.auto_poke_incomplete_todos = false;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        let mut remote = crate::tui::backend::RemoteConnection::dummy();
+        remote.mark_history_loaded();
+        rt.block_on(remote::begin_remote_send(
+            &mut app,
+            &mut remote,
+            String::new(),
+            vec![],
+            true,
+            Some("Continue the pending task".to_string()),
+            auto_retry,
+            2,
+        ))
+        .unwrap();
+        let rejected_id = app.current_message_id.unwrap();
+        app.handle_server_event(
+            crate::protocol::ServerEvent::Error {
+                id: rejected_id,
+                message: "Already processing a message".to_string(),
+                retry_after_secs: None,
+            },
+            &mut remote,
+        );
+
+        assert!(app.is_processing);
+        assert!(app.current_message_id.is_none());
+        assert!(app.rate_limit_pending_message.is_none());
+        assert!(app.rate_limit_reset.is_none());
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Continue the pending task"]
+        );
+        assert!(!app.display_messages().iter().any(|m| m.role == "error"));
+        assert!(app.pending_fallback_offer.is_none());
+
+        // Real live activity clears the resume snapshot. That must not turn
+        // the running turn into a synthetic startup send on the next event.
+        app.handle_server_event(
+            crate::protocol::ServerEvent::ReasoningDelta {
+                text: "Still working".to_string(),
+            },
+            &mut remote,
+        );
+        assert!(app.remote_resume_activity.is_none());
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        rt.block_on(remote::handle_tick(&mut app, &mut remote));
+        assert!(app.is_processing);
+        assert!(app.current_message_id.is_none());
+        assert_eq!(
+            app.hidden_queued_system_messages,
+            ["Continue the pending task"]
+        );
+
+        app.handle_server_event(
+            crate::protocol::ServerEvent::MessageEnd { stop_reason: None },
+            &mut remote,
+        );
+        let ops = app.stream_buffer.flush();
+        app.apply_stream_ops(ops);
+        app.handle_server_event(crate::protocol::ServerEvent::Done { id: 0 }, &mut remote);
+        assert!(
+            !app.is_processing,
+            "only real turn completion releases the queue"
+        );
+        rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+        assert!(app.is_processing);
+        assert!(app.hidden_queued_system_messages.is_empty());
+        assert_eq!(
+            app.rate_limit_pending_message
+                .as_ref()
+                .unwrap()
+                .system_reminder
+                .as_deref(),
+            Some("Continue the pending task")
+        );
+    }
+}
+
+#[test]
+fn test_external_stream_with_queued_followup_is_not_synthetic_startup() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+    app.queued_messages
+        .push("Wait until this turn ends".to_string());
+    app.handle_server_event(
+        crate::protocol::ServerEvent::ReasoningDelta {
+            text: "Working on the original task".to_string(),
+        },
+        &mut remote,
+    );
+    rt.block_on(remote::process_remote_followups(&mut app, &mut remote));
+    assert!(app.is_processing);
+    assert!(app.current_message_id.is_none());
+    assert_eq!(app.queued_messages(), &["Wait until this turn ends"]);
+    assert!(app.rate_limit_pending_message.is_none());
+}
+
+#[test]
 fn test_disconnect_recovers_inflight_queued_continuation_to_queue() {
     let mut app = create_test_app();
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -134,7 +242,7 @@ fn test_reload_preserves_completed_confidence_spike_challenge() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 confidence_history: vec![
-                    crate::todo::ConfidenceState::from_legacy_score(70),
+                    crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
                 ],
                 ..Default::default()
@@ -334,7 +442,7 @@ fn remote_ownership_gate_reads_the_remote_goal_assessment() {
     });
 }
 
-fn save_blocked_ownership_fixture(session_id: &str) {
+fn save_unfinished_ownership_fixture(session_id: &str) {
     crate::todo::save_todos(
         session_id,
         &[crate::todo::TodoItem {
@@ -352,10 +460,10 @@ fn save_blocked_ownership_fixture(session_id: &str) {
         session_id,
         &[crate::todo::TodoGoal {
             difficulty: Some(crate::todo::Difficulty::Involved),
-            delivery_state: Some(crate::todo::DeliveryState::WorkflowValidated),
+            delivery_state: Some(crate::todo::DeliveryState::Integrated),
             autonomy: Some(crate::todo::Autonomy::NecessaryFollowthrough),
-            iteration_maturity: Some(crate::todo::IterationMaturity::ConstraintsExhausted),
-            stopping_evidence: Some("USB read-back passed. Target laptop is unavailable.".into()),
+            iteration_maturity: Some(crate::todo::IterationMaturity::Improving),
+            stopping_evidence: None,
             feedback_loop_relevance: Some(crate::todo::FeedbackLoopRelevance::Representative),
             feedback_loop_coverage: Some(crate::todo::FeedbackLoopCoverage::MainPaths),
             feedback_loop_traceability: Some(crate::todo::FeedbackLoopTraceability::Partial),
@@ -379,7 +487,7 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
         app.todo_final_response_requested = false;
-        save_blocked_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(&app.session.id);
         let goals = crate::todo::load_goals(&app.session.id).unwrap();
         dispatch_ownership_followup(&mut app);
         for _ in 0..5 {
@@ -394,23 +502,141 @@ fn ownership_gate_stops_on_unchanged_assessment_without_claiming_success() {
 }
 
 #[test]
-fn ownership_gate_rechecks_changed_assessment_and_respects_budget() {
+fn ownership_gate_ignores_cosmetic_assessment_changes() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_blocked_ownership_fixture(&app.session.id);
-        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+        save_unfinished_ownership_fixture(&app.session.id);
+        dispatch_ownership_followup(&mut app);
+        for attempt in 0..App::TODO_COMPLETION_GATE_MAX_ATTEMPTS + 1 {
             let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
             goals[0].stopping_evidence =
                 Some(format!("Checked available hardware, attempt {attempt}"));
+            goals[0].feedback_loop = Some(format!("Read-back check wording revision {attempt}"));
             crate::todo::save_goals(&app.session.id, &goals).unwrap();
-            dispatch_ownership_followup(&mut app);
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert_eq!(app.todo_completion_gate_attempts, 1);
+            assert!(app.queued_messages.is_empty());
         }
-        let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
-        goals[0].stopping_evidence = Some("One more assessment change".into());
-        crate::todo::save_goals(&app.session.id, &goals).unwrap();
-        assert!(!app.schedule_auto_poke_followup_if_needed());
+        assert!(app.auto_poke_incomplete_todos);
+        assert!(!app.todo_final_response_requested);
+    });
+}
+
+#[test]
+fn ownership_gate_rechecks_actual_gap_changes_and_respects_budget() {
+    with_temp_jcode_home(|| {
+        let mut app = create_test_app();
+        app.auto_poke_incomplete_todos = true;
+        save_unfinished_ownership_fixture(&app.session.id);
+        let mut previous_message = None;
+        for attempt in 0..=App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+            let mut goals = crate::todo::load_goals(&app.session.id).unwrap();
+            // Alternate a delivery gap with an iteration gap, not just wording.
+            let delivery_gap = attempt % 2 == 0;
+            goals[0].delivery_state = Some(if delivery_gap {
+                crate::todo::DeliveryState::Integrated
+            } else {
+                crate::todo::DeliveryState::WorkflowValidated
+            });
+            goals[0].iteration_maturity = Some(if delivery_gap {
+                crate::todo::IterationMaturity::OutcomeReached
+            } else {
+                crate::todo::IterationMaturity::Improving
+            });
+            crate::todo::save_goals(&app.session.id, &goals).unwrap();
+            if attempt == App::TODO_COMPLETION_GATE_MAX_ATTEMPTS {
+                assert!(!app.schedule_auto_poke_followup_if_needed());
+            } else {
+                assert!(app.schedule_auto_poke_followup_if_needed());
+                assert_eq!(app.queued_messages.len(), 1);
+                let message = app.queued_messages.pop().unwrap();
+                assert!(message.starts_with(crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE));
+                assert_ne!(previous_message.as_ref(), Some(&message));
+                previous_message = Some(message);
+                app.pending_queued_dispatch = false;
+            }
+        }
         assert!(!app.auto_poke_incomplete_todos);
+        assert!(app.queued_messages.is_empty());
+    });
+}
+
+#[test]
+fn scheduling_and_remote_done_accept_documented_stops_and_requested_only_results() {
+    with_temp_jcode_home(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+        for remote_done in [false, true] {
+            for maturity in [
+                crate::todo::IterationMaturity::ConstraintsExhausted,
+                crate::todo::IterationMaturity::BudgetExhausted,
+                crate::todo::IterationMaturity::PlateauConfirmed,
+                crate::todo::IterationMaturity::OutcomeReached,
+            ] {
+                let mut app = create_test_app();
+                app.auto_poke_incomplete_todos = true;
+                app.auto_poke_default_on = false;
+                app.is_remote = remote_done;
+                let session_id = if remote_done {
+                    let id = format!("ownership-accepted-{}", app.session.id);
+                    app.remote_session_id = Some(id.clone());
+                    id
+                } else {
+                    app.session.id.clone()
+                };
+                save_unfinished_ownership_fixture(&session_id);
+                let mut goals = crate::todo::load_goals(&session_id).unwrap();
+                goals[0].iteration_maturity = Some(maturity);
+                goals[0].autonomy = Some(crate::todo::Autonomy::RequestedOnly);
+                goals[0].stopping_evidence = Some(
+                    "USB read-back passed. Target laptop is unavailable; no further check is possible.".into(),
+                );
+                // Documented stops may retain delivery and check limitations.
+                // Requested-only success needs no additional ownership work.
+                if maturity == crate::todo::IterationMaturity::OutcomeReached {
+                    goals[0].delivery_state = Some(crate::todo::DeliveryState::WorkflowValidated);
+                    goals[0].stopping_evidence = None;
+                }
+                goals[0].difficulty = Some(crate::todo::Difficulty::Complex);
+                crate::todo::save_goals(&session_id, &goals).unwrap();
+                let mut remote = crate::tui::backend::RemoteConnection::dummy();
+                for id in 42..44 {
+                    if remote_done {
+                        app.is_processing = true;
+                        app.status = ProcessingStatus::Streaming;
+                        app.current_message_id = Some(id);
+                        app.handle_server_event(
+                            crate::protocol::ServerEvent::Done { id },
+                            &mut remote,
+                        );
+                    } else {
+                        assert_eq!(app.schedule_auto_poke_followup_if_needed(), id == 42);
+                    }
+                    if id == 42 {
+                        assert_eq!(
+                            app.queued_messages,
+                            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+                        );
+                        assert!(app.pending_queued_dispatch);
+                    } else {
+                        assert!(app.queued_messages.is_empty());
+                        assert!(!app.pending_queued_dispatch);
+                    }
+                    app.queued_messages.clear();
+                    app.pending_queued_dispatch = false;
+                }
+                assert!(!app.auto_poke_incomplete_todos);
+                assert!(!app.todo_confidence_spike_challenged);
+                assert!(app.hidden_queued_system_messages.is_empty());
+                assert!(!app.display_messages().iter().any(|message| {
+                    message
+                        .content
+                        .contains("Checking end-to-end ownership before finishing")
+                }));
+                assert_eq!(crate::todo::load_goals(&session_id).unwrap(), goals);
+            }
+        }
     });
 }
 
@@ -419,7 +645,7 @@ fn ownership_gate_rearms_after_reopened_work_or_explicit_poke() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_blocked_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(&app.session.id);
         dispatch_ownership_followup(&mut app);
         let mut todos = crate::todo::load_todos(&app.session.id).unwrap();
         todos[0].status = "in_progress".into();
@@ -442,7 +668,7 @@ fn ownership_gate_survives_reload_and_is_scoped_to_session() {
     with_temp_jcode_home(|| {
         let mut app = create_test_app();
         app.auto_poke_incomplete_todos = true;
-        save_blocked_ownership_fixture(&app.session.id);
+        save_unfinished_ownership_fixture(&app.session.id);
         dispatch_ownership_followup(&mut app);
         app.save_input_for_reload(&app.session.id);
         let restored = App::restore_input_for_reload(&app.session.id).unwrap();
@@ -452,7 +678,7 @@ fn ownership_gate_survives_reload_and_is_scoped_to_session() {
         reloaded.apply_restored_reload_input(restored);
         assert!(!reloaded.schedule_auto_poke_followup_if_needed());
         reloaded.session.id.push_str("-different-session");
-        save_blocked_ownership_fixture(&reloaded.session.id);
+        save_unfinished_ownership_fixture(&reloaded.session.id);
         dispatch_ownership_followup(&mut reloaded);
     });
 }
@@ -467,7 +693,7 @@ fn remote_done_does_not_repeat_ownership_notice() {
         app.is_remote = true;
         app.remote_session_id = Some(format!("ownership-remote-{}", app.session.id));
         app.auto_poke_incomplete_todos = true;
-        save_blocked_ownership_fixture(app.remote_session_id.as_deref().unwrap());
+        save_unfinished_ownership_fixture(app.remote_session_id.as_deref().unwrap());
         for id in 42..45 {
             app.is_processing = true;
             app.status = ProcessingStatus::Streaming;
@@ -717,9 +943,16 @@ fn test_gate_digest_is_delivered_at_turn_end_and_rearms_next_cycle() {
         app.queued_messages.clear();
         app.pending_queued_dispatch = false;
         assert!(
-            !app.schedule_auto_poke_followup_if_needed(),
-            "with nothing left outstanding the cycle should finish"
+            app.schedule_auto_poke_followup_if_needed(),
+            "with nothing left outstanding the final response should be requested"
         );
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(!app.schedule_auto_poke_followup_if_needed());
         assert!(
             !app.todo_gate_digest_delivered,
             "a finished cycle must re-arm the review for later work"
@@ -861,6 +1094,84 @@ fn completed_cycle_rearms_auto_poke_only_when_default_on() {
         assert!(
             app.auto_poke_incomplete_todos,
             "default-on auto-poke should cover the next batch of work too"
+        );
+
+        // The final handoff must stay latched across a client reload too.
+        app.save_input_for_reload(&app.session.id);
+        let restored = App::restore_input_for_reload(&app.session.id)
+            .expect("final handoff should survive reload");
+        let mut reloaded = create_test_app();
+        reloaded.session.id = app.session.id.clone();
+        reloaded.auto_poke_incomplete_todos = true;
+        reloaded.auto_poke_default_on = true;
+        reloaded.apply_restored_reload_input(restored);
+        assert_eq!(
+            reloaded.final_response_todo_fingerprint,
+            app.final_response_todo_fingerprint
+        );
+        assert!(reloaded.todo_final_response_requested);
+        app = reloaded;
+
+        // An overdue timed review alone must not restart finished work.
+        let review_path = crate::storage::jcode_dir()
+            .expect("jcode home")
+            .join("todos")
+            .join(format!("{}-review-state.json", app.session.id));
+        crate::storage::write_json_fast(
+            &review_path,
+            &serde_json::json!({
+                "cycle_started_at": "2020-01-01T00:00:00Z",
+                "review_delivered": false,
+            }),
+        )
+        .expect("age review");
+
+        // A late observation must not resurrect gates after the final answer,
+        // even when the scheduler is called repeatedly with the same todo state.
+        crate::todo::append_gate_observations(
+            &app.session.id,
+            &[crate::todo::GateObservation {
+                kind: crate::todo::GateObservationKind::IntentUnderstanding,
+                group: None,
+                state: Some("uncertain".to_string()),
+            }],
+        )
+        .expect("record late observation");
+        for _ in 0..3 {
+            assert!(!app.schedule_auto_poke_followup_if_needed());
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.pending_queued_dispatch);
+        }
+
+        // Rewriting identical data is not a new cycle either.
+        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save");
+        assert!(!app.schedule_auto_poke_followup_if_needed());
+
+        assert!(
+            crate::todo::take_long_session_review_if_due(&app.session.id)
+                .expect("the final-response guard must not consume the timed review")
+        );
+
+        // A real todo change re-arms the quality checks and final handoff.
+        let mut changed = completed("todo-1");
+        changed.completion_confidence = Some(crate::todo::ConfidenceState::Plausible);
+        crate::todo::save_todos(&app.session.id, &[changed]).expect("save changed todo");
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(app.queued_messages[0].starts_with(crate::todo::TODO_GATE_DIGEST_PREFIX));
+        assert!(!app.todo_final_response_requested);
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert!(
+            app.queued_messages[0].starts_with(crate::todo::TODO_COMPLETION_CONTINUATION_MESSAGE)
+        );
+        app.queued_messages.clear();
+        app.pending_queued_dispatch = false;
+        crate::todo::save_todos(&app.session.id, &[completed("todo-1")]).expect("save validated");
+        assert!(app.schedule_auto_poke_followup_if_needed());
+        assert_eq!(
+            app.queued_messages,
+            vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
         );
 
         // An explicit /poke off must stick.

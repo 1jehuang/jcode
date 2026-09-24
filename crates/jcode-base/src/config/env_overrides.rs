@@ -161,7 +161,6 @@ impl Config {
                 | "inlinefull" | "full" => {
                     self.display.diff_mode = DiffDisplayMode::FullInline;
                 }
-                "pinned" | "pin" => self.display.diff_mode = DiffDisplayMode::Pinned,
                 "file" => self.display.diff_mode = DiffDisplayMode::File,
                 _ => {}
             }
@@ -187,11 +186,6 @@ impl Config {
         if let Ok(v) = std::env::var("JCODE_DISPLAY_CENTERED") {
             if let Some(parsed) = parse_env_bool(&v) {
                 self.display.centered = parsed;
-            }
-        }
-        if let Ok(v) = std::env::var("JCODE_DIFF_LINE_WRAP") {
-            if let Some(parsed) = parse_env_bool(&v) {
-                self.display.diff_line_wrap = parsed;
             }
         }
         if let Ok(v) = std::env::var("JCODE_QUEUE_MODE") {
@@ -389,6 +383,21 @@ impl Config {
                 Some(trimmed.to_string())
             };
         }
+        for (key, target) in [
+            (
+                "JCODE_SWARM_ROOT_EFFORT",
+                &mut self.agents.swarm_root_effort,
+            ),
+            (
+                "JCODE_SWARM_DEEP_ROOT_EFFORT",
+                &mut self.agents.swarm_deep_root_effort,
+            ),
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                let value = value.trim();
+                *target = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
         if let Ok(v) = std::env::var("JCODE_SWARM_SPAWN_MODE") {
             if let Some(parsed) = SwarmSpawnMode::parse(&v) {
                 self.agents.swarm_spawn_mode = parsed;
@@ -403,6 +412,9 @@ impl Config {
             if let Ok(parsed) = v.trim().parse::<usize>() {
                 self.agents.swarm_max_concurrent_agents = parsed;
             }
+        }
+        if let Ok(v) = std::env::var("JCODE_MEMORY_JEV_PROVIDER") {
+            self.agents.memory_jev_provider = v.trim().to_ascii_lowercase();
         }
         if let Ok(v) = std::env::var("JCODE_MEMORY_MODEL") {
             let trimmed = v.trim();
@@ -491,6 +503,15 @@ impl Config {
         hook_env_override(&mut self.hooks.session_start, "JCODE_HOOK_SESSION_START");
         hook_env_override(&mut self.hooks.session_end, "JCODE_HOOK_SESSION_END");
         hook_env_override(&mut self.hooks.pre_tool, "JCODE_HOOK_PRE_TOOL");
+        hook_env_override(
+            &mut self.hooks.pre_tool_transform,
+            "JCODE_HOOK_PRE_TOOL_TRANSFORM",
+        );
+        if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TRANSFORM_TIMEOUT_MS")
+            && let Ok(parsed) = v.trim().parse::<u64>()
+        {
+            self.hooks.pre_tool_transform_timeout_ms = parsed;
+        }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
@@ -822,6 +843,21 @@ impl Config {
             };
             if !env_val.is_empty() {
                 crate::env::set_var("JCODE_COPILOT_PREMIUM", env_val);
+            }
+        }
+
+        // Explicit environment overrides win, but never export config values:
+        // self-written env would mask subsequent config edits/removals.
+        if let Ok(v) = std::env::var("JCODE_GEMINI_FORCE_OAUTH") {
+            self.provider.gemini_force_oauth = parse_env_bool(&v).unwrap_or(false);
+        }
+
+        if let Ok(v) = std::env::var("GOOGLE_CLOUD_PROJECT")
+            .or_else(|_| std::env::var("GOOGLE_CLOUD_PROJECT_ID"))
+        {
+            let v = v.trim();
+            if !v.is_empty() {
+                self.provider.gemini_project = Some(v.to_string());
             }
         }
     }

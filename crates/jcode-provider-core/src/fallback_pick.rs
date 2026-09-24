@@ -20,6 +20,7 @@ fn api_method_is_oauth(api_method: &ModelRouteApiMethod) -> bool {
         ModelRouteApiMethod::ClaudeOAuth
             | ModelRouteApiMethod::OpenAIOAuth
             | ModelRouteApiMethod::CodeAssistOAuth
+            | ModelRouteApiMethod::GrokBuild
     )
 }
 
@@ -172,6 +173,7 @@ mod tests {
             api_method: api_method.to_string(),
             available,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }
     }

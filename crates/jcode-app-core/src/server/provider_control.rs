@@ -68,7 +68,9 @@ async fn available_models_snapshot(agent: &Arc<Mutex<Agent>>) -> ModelCatalogSna
 }
 
 fn available_models_snapshot_from_provider(provider: &Arc<dyn Provider>) -> ModelCatalogSnapshot {
-    ModelCatalogSnapshot::from_provider(provider.as_ref())
+    let mut snapshot = ModelCatalogSnapshot::from_provider(provider.as_ref());
+    crate::model_usage::enrich_routes(&mut snapshot.model_routes);
+    snapshot
 }
 
 pub(super) async fn available_models_updated_event(agent: &Arc<Mutex<Agent>>) -> ServerEvent {
@@ -371,22 +373,18 @@ async fn apply_auth_route_to_agent(
     }
 }
 
-fn model_switching_unavailable_current(agent: &Agent) -> Option<String> {
-    if agent.available_models_for_switching().is_empty() {
-        Some(agent.provider_model())
-    } else {
-        None
-    }
-}
-
 fn send_model_changed_result(
     id: u64,
-    result: anyhow::Result<(String, String)>,
+    result: anyhow::Result<(
+        String,
+        String,
+        Option<jcode_provider_core::ResolvedCredential>,
+    )>,
     fallback_model: String,
     client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
 ) {
     match result {
-        Ok((updated, provider_name)) => {
+        Ok((updated, provider_name, resolved_credential)) => {
             crate::telemetry::record_model_switch();
             crate::logging::event_info(
                 "server_model_changed",
@@ -401,6 +399,7 @@ fn send_model_changed_result(
                 model: updated,
                 provider_name: Some(provider_name),
                 error: None,
+                resolved_credential,
             });
         }
         Err(error) => {
@@ -417,6 +416,7 @@ fn send_model_changed_result(
                 model: fallback_model,
                 provider_name: None,
                 error: Some(error.to_string()),
+                resolved_credential: None,
             });
         }
     }
@@ -435,6 +435,7 @@ fn apply_cycle_model(
             model: agent.provider_model(),
             provider_name: None,
             error: Some("Model switching is not available for this provider.".to_string()),
+            resolved_credential: None,
         });
         return;
     }
@@ -463,7 +464,13 @@ fn apply_cycle_model(
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -558,31 +565,19 @@ fn apply_set_model(
         ],
     );
 
-    if let Some(current) = model_switching_unavailable_current(agent) {
-        crate::logging::event_warn(
-            "server_set_model_unavailable",
-            vec![
-                ("id", id.to_string()),
-                ("requested_model", model.clone()),
-                ("current_model", current.clone()),
-            ],
-        );
-        let _ = client_event_tx.send(ServerEvent::ModelChanged {
-            id,
-            model: current,
-            provider_name: None,
-            error: Some("Model switching is not available for this provider.".to_string()),
-        });
-        return;
-    }
-
     let current = agent.provider_model();
     let result = {
         let result = agent.set_model(&model);
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -605,32 +600,19 @@ fn apply_set_route(
         ],
     );
 
-    if let Some(current) = model_switching_unavailable_current(agent) {
-        crate::logging::event_warn(
-            "server_set_route_unavailable",
-            vec![
-                ("id", id.to_string()),
-                ("requested_model", selection.model.clone()),
-                ("requested_provider", selection.provider_label.clone()),
-                ("current_model", current.clone()),
-            ],
-        );
-        let _ = client_event_tx.send(ServerEvent::ModelChanged {
-            id,
-            model: current,
-            provider_name: None,
-            error: Some("Model switching is not available for this provider.".to_string()),
-        });
-        return;
-    }
-
     let current = agent.provider_model();
     let result = {
         let result = agent.set_route_selection(&selection);
         if result.is_ok() {
             agent.reset_provider_session();
         }
-        result.map(|_| (agent.provider_model(), agent.provider_name()))
+        result.map(|_| {
+            (
+                agent.provider_model(),
+                agent.provider_name(),
+                agent.active_resolved_credential(),
+            )
+        })
     };
     send_model_changed_result(id, result, current, client_event_tx);
 }
@@ -1293,6 +1275,28 @@ pub(super) async fn handle_switch_openai_account(
     }
 }
 
+pub(super) async fn handle_invalidate_openai_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Only local state changes here. A retry of this request is harmless and
+    // cannot spend another reset. Acknowledge after invalidation so a following
+    // prompt cannot be rejected by the pre-reset quota cooldown.
+    crate::usage::invalidate_openai_usage_reset_state(account_label.as_deref()).await;
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
+pub(super) async fn handle_invalidate_anthropic_usage(
+    id: u64,
+    account_label: Option<String>,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    // Local cache and cooldown state only, so retries cannot spend a reset.
+    crate::usage::invalidate_anthropic_usage_reset_state(account_label.as_deref());
+    let _ = client_event_tx.send(ServerEvent::Done { id });
+}
+
 fn spawn_account_switch_refresh(
     id: u64,
     provider_kind: &'static str,
@@ -1570,6 +1574,7 @@ mod tests {
                 model,
                 provider_name: Some(provider_name),
                 error: None,
+                ..
             }) if model == "test-model-b" && provider_name == "test-effort"
         ));
     }

@@ -30,12 +30,14 @@ fn test_tool_side_panel_focus_supports_horizontal_pan_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -60,12 +62,14 @@ fn test_tool_side_panel_focus_supports_image_zoom_keys() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -97,12 +101,14 @@ fn test_mouse_horizontal_scroll_over_tool_side_panel_pans_without_focus_change()
     app.diff_pane_scroll_x = 0;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -138,12 +144,14 @@ fn test_ctrl_mouse_scroll_over_tool_side_panel_zooms_images() {
     app.side_panel_image_zoom_percent = 100;
     app.diff_pane_focus = false;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("plan".to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "plan".to_string(),
             title: "Plan".to_string(),
             file_path: "".to_string(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: "hello".to_string(),
             updated_at_ms: 1,
@@ -622,6 +630,25 @@ fn test_fuzzy_command_suggestions() {
 }
 
 #[test]
+fn test_swarm_effort_autocomplete_and_help() {
+    let app = create_test_app();
+    let suggestions = app.get_suggestions_for("/effort swarm");
+    for mode in ["swarm", "swarm-deep"] {
+        let command = format!("/effort {mode}");
+        let (_, label) = suggestions
+            .iter()
+            .find(|(cmd, _)| cmd == &command)
+            .expect("both swarm modes should be suggested");
+        assert_eq!(*label, super::effort_display_label(mode));
+        assert!(label.contains("[Beta]"));
+    }
+    let help = app.command_help("effort").expect("effort help");
+    assert!(help.contains("swarm_root_effort"));
+    assert!(help.contains("swarm_deep_root_effort"));
+    assert!(!help.contains("run at max reasoning"));
+}
+
+#[test]
 fn test_refresh_model_list_command_suggestions() {
     let app = create_test_app();
     let suggestions = app.get_suggestions_for("/refresh");
@@ -1004,26 +1031,34 @@ fn test_top_level_command_suggestions_include_all_non_hidden_commands() {
 #[test]
 fn test_logout_clear_anthropic_accounts_removes_all_accounts_once() {
     with_temp_jcode_home(|| {
+        // `account_store::upsert_account` assigns its own canonical label
+        // (`claude-<animal>`) and ignores the requested one for a new account,
+        // so capture what it actually returns instead of assuming the request
+        // was honoured.
+        let mut assigned = Vec::new();
         for index in 1..=3 {
-            crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
-                label: format!("requested-{index}"),
-                access: format!("access-{index}"),
-                refresh: format!("refresh-{index}"),
-                expires: 100 + index,
-                email: None,
-                subscription_type: None,
-                scopes: Vec::new(),
-            })
-            .unwrap();
+            assigned.push(
+                crate::auth::claude::upsert_account(crate::auth::claude::AnthropicAccount {
+                    label: format!("requested-{index}"),
+                    access: format!("access-{index}"),
+                    refresh: format!("refresh-{index}"),
+                    expires: 100 + index,
+                    email: None,
+                    subscription_type: None,
+                    scopes: Vec::new(),
+                })
+                .unwrap(),
+            );
         }
-        crate::auth::claude::set_active_account("claude-3").unwrap();
+        let last = assigned.last().expect("three accounts were created").clone();
+        crate::auth::claude::set_active_account(&last).unwrap();
 
         let labels: Vec<_> = crate::auth::claude::list_accounts()
             .unwrap()
             .into_iter()
             .map(|account| account.label)
             .collect();
-        assert_eq!(labels, vec!["claude-1", "claude-2", "claude-3"]);
+        assert_eq!(labels, assigned);
 
         assert_eq!(crate::auth::claude::clear_accounts().unwrap(), 3);
         assert!(crate::auth::claude::list_accounts().unwrap().is_empty());
@@ -1073,12 +1108,14 @@ fn test_context_command_reports_session_context_snapshot() {
         app.pending_images
             .push(("image/png".to_string(), "abc".to_string()));
         app.side_panel = crate::side_panel::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("goals".to_string()),
             pages: vec![crate::side_panel::SidePanelPage {
                 id: "goals".to_string(),
                 title: "Goals".to_string(),
                 file_path: "".to_string(),
                 format: crate::side_panel::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: crate::side_panel::SidePanelPageSource::Managed,
                 content: "goal details".to_string(),
                 updated_at_ms: 0,
@@ -1238,6 +1275,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             api_method: "openai-oauth".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         })
         .collect();
@@ -1247,6 +1285,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         api_method: "claude-oauth".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
     app.remote_model_options.push(crate::provider::ModelRoute {
@@ -1255,6 +1294,7 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         api_method: "claude-api".to_string(),
         available: true,
         detail: String::new(),
+        usage: None,
         cheapness: None,
     });
 }
@@ -1271,6 +1311,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: "→ Fireworks".to_string(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -1279,6 +1320,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
         crate::provider::ModelRoute {
@@ -1287,6 +1329,7 @@ fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
             api_method: "openrouter".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         },
     ];
@@ -1451,12 +1494,14 @@ fn test_panel_image_preview_click_render_dismiss_and_restore() {
     let mut app = create_test_app();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
     app.side_panel = crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some("preview".into()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: "preview".into(),
             title: "Preview fixture".into(),
             file_path: "".into(),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!(
                 "# Preview fixture\n\n![Image]({})\n\nAfter image",

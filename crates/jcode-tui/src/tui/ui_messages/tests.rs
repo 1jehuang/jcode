@@ -84,6 +84,25 @@ fn render_cold_cache_warning_is_always_one_width_bounded_line() {
 }
 
 #[test]
+fn render_launch_hotkeys_keeps_both_shortcuts_visible() {
+    let saved = crate::tui::markdown::center_code_blocks();
+    let content = "Hotkeys: Super+; → jcode · Super+' → home";
+    let msg = DisplayMessage::system(content).with_title("Launch hotkeys");
+
+    for centered in [false, true] {
+        crate::tui::markdown::set_center_code_blocks(centered);
+        for width in [80_u16, 50] {
+            let lines = render_system_message(&msg, width, crate::config::DiffDisplayMode::Off);
+            assert_eq!(lines.len(), 1);
+            assert_eq!(extract_line_text(&lines[0]).trim(), content);
+            assert!(lines[0].width() <= width as usize);
+        }
+    }
+
+    crate::tui::markdown::set_center_code_blocks(saved);
+}
+
+#[test]
 fn render_compact_launch_and_divergence_notices_as_one_line() {
     let saved = crate::tui::markdown::center_code_blocks();
     let notices = [
@@ -1362,9 +1381,19 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
 
     assert!(rendered.contains("✓ todo"), "{rendered}");
     assert!(rendered.contains("pelican-bike"), "{rendered}");
+    // The plan intent renders inline with the understanding state on a single
+    // ellipsized line (2e847827f). The full text lives in the todo payload.
+    let intent_line = rendered
+        .lines()
+        .find(|line| line.contains("Intent clear:"))
+        .expect("batched todo card should show the plan intent");
+    let shown = intent_line
+        .split_once("Intent clear:")
+        .map(|(_, rest)| rest.trim().trim_end_matches('…'))
+        .unwrap_or_default();
     assert!(
-        compact.contains(&without_whitespace(OBJECTIVE)),
-        "batched todo plan intention was truncated:\n{rendered}"
+        shown.len() > 20 && OBJECTIVE.starts_with(shown),
+        "batched todo plan intent should show the objective prefix:\n{rendered}"
     );
     // Compact transcript cards show the goal's quality assessments rather than
     // repeating its potentially long feedback-loop prose. The full prose remains

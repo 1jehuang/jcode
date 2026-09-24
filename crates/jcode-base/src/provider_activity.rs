@@ -11,12 +11,20 @@
 //! both), so queries re-read the file with a short TTL instead of trusting a
 //! process-local cache.
 //!
+//! ChatGPT OAuth token counts and API-equivalent estimates use a separate
+//! `openai_oauth_usage.json` ledger, written only by provider completion hooks.
+//! See [`openai_oauth_usage_summary`]. These estimates never enter API-key spend.
+//!
 //! Source key conventions:
 //!   - `claude:oauth:<label>` / `claude:api-key`
 //!   - `openai:oauth:<label>` / `openai:api-key`
 //!   - `openai-compatible:<profile-id>` (DeepSeek, Moonshot, NVIDIA NIM, ...)
 //!   - `openrouter`, `jcode`, `copilot`, `gemini`, `cursor`, `bedrock`,
 //!     `antigravity`, `azure-openai`
+
+#[path = "provider_activity_oauth.rs"]
+mod oauth_usage;
+pub use oauth_usage::{openai_oauth_usage_summary, record_openai_oauth_usage};
 
 use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
@@ -305,6 +313,20 @@ pub fn source_key_for_provider_label(label: &str, runtime_provider: Option<&str>
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
 
+    // A label that is already a ledger source key names its own profile:
+    // `openai-compatible:<id>` is the identity the ledger keys on, and the
+    // display-name lookups below cannot recover it (the profile's display name
+    // is e.g. `DeepSeek`, and the multiplexing OpenRouter slot reports the
+    // transport name for every direct profile). Without this, such a label
+    // falls through to the `contains("openai")` branch and is billed to
+    // `openai:api-key`.
+    if let Some(profile_id) = normalized.strip_prefix("openai-compatible:") {
+        let profile_id = profile_id.trim();
+        if !profile_id.is_empty() {
+            return format!("openai-compatible:{profile_id}");
+        }
+    }
+
     // OpenRouter first: the catalog also carries an `openrouter` compatible
     // profile, but the ledger treats the public aggregator as its own bucket.
     if normalized.contains("openrouter") {
@@ -471,6 +493,28 @@ mod tests {
         assert_eq!(
             source_key_for_provider_label("Some Custom Endpoint", None),
             "some-custom-endpoint"
+        );
+    }
+
+    /// A label can already *be* a ledger source key: the `History` payload
+    /// reports the session's provider key, which for a direct profile is
+    /// `openai-compatible:<id>`. That key must survive the mapping; otherwise
+    /// it falls through to `contains("openai")` and the spend is attributed to
+    /// `openai:api-key` instead of the profile that served the request (#1286).
+    #[test]
+    fn source_key_mapping_keeps_an_already_prefixed_profile_key() {
+        assert_eq!(
+            source_key_for_provider_label("openai-compatible:deepseek", None),
+            "openai-compatible:deepseek"
+        );
+        assert_eq!(
+            source_key_for_provider_label("OpenAI-Compatible:NVIDIA-NIM", None),
+            "openai-compatible:nvidia-nim"
+        );
+        // An empty profile id is not a profile key; it keeps the old fallback.
+        assert_eq!(
+            source_key_for_provider_label("openai-compatible:", None),
+            "openai:api-key"
         );
     }
 

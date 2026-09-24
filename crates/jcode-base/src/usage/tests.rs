@@ -411,6 +411,8 @@ fn test_usage_data_from_provider_report_maps_limits_and_extra_usage() {
             "enabled".to_string(),
         )],
         hard_limit_reached: false,
+        openai_reset_credits: None,
+        anthropic_limit_reset: None,
         error: None,
         last_used_unix_secs: None,
     };
@@ -832,4 +834,51 @@ fn anthropic_model_scoped_exhaustion_matches_display_name_to_catalog_id() {
         ..Default::default()
     };
     assert!(!below_limit.model_scoped_exhausted("claude-fable-5"));
+}
+
+#[test]
+fn attach_activity_refreshes_openai_oauth_totals_even_on_error() {
+    let label = "test-usage-summary-no-account";
+    let mut report = ProviderUsage {
+        provider_name: "OpenAI".into(),
+        error: Some("quota request unavailable".into()),
+        extra_info: vec![("Plan".into(), "Plus".into())],
+        ..Default::default()
+    };
+    let expected = crate::provider_activity::openai_oauth_usage_summary(label);
+    assert!(!expected.is_empty());
+    for (key, _) in &expected {
+        report
+            .extra_info
+            .push((key.clone(), "stale cached value".into()));
+    }
+    for _ in 0..2 {
+        attach_activity(&mut report, &format!("openai:oauth:{label}"));
+        for row in &expected {
+            assert!(report.extra_info.contains(row));
+            assert_eq!(
+                report
+                    .extra_info
+                    .iter()
+                    .filter(|(key, _)| key == &row.0)
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            report
+                .extra_info
+                .contains(&("Account label".into(), label.into()))
+        );
+        assert!(report.extra_info.contains(&("Plan".into(), "Plus".into())));
+        assert!(report.error.is_some());
+    }
+    let mut api_report = ProviderUsage::default();
+    attach_activity(&mut api_report, "openai:api:test-key");
+    assert!(
+        !api_report
+            .extra_info
+            .iter()
+            .any(|(key, _)| key == "Account label")
+    );
 }

@@ -45,7 +45,29 @@ pub enum ApiEvent {
 
     // --- Streaming events (carry session_id, not tied to a request id) ---
     /// Assistant text delta.
-    TextDelta { session_id: String, text: String },
+    TextDelta {
+        session_id: String,
+        text: String,
+        /// Stream correlation id, not a persisted history message id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+
+    /// Assistant message text ended. Reasoning alone is not a boundary.
+    TextDone {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+
+    /// Replace previously streamed text for this message, including rollback.
+    /// An empty replacement retracts the message, even after TextDone.
+    TextReplace {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
 
     /// Model reasoning delta (render dim/italic; safe to ignore).
     ReasoningDelta { session_id: String, text: String },
@@ -57,12 +79,30 @@ pub enum ApiEvent {
         duration_secs: Option<f64>,
     },
 
-    /// Tool call streaming lifecycle.
+    /// Effective tool inventory, in reply to `ListTools`.
+    Tools {
+        session_id: String,
+        tools: Vec<crate::SessionToolDefinition>,
+    },
+
+    /// Custom tool execution requested from the owning client.
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+
+    /// A tool name is known, even if no argument bytes have arrived yet.
+    /// Parallel calls may start before earlier calls finish streaming input.
     ToolStart {
         session_id: String,
         call_id: String,
         name: String,
     },
+    /// Incremental, potentially incomplete JSON. A nonempty `call_id` identifies
+    /// the call independently of event interleaving. Empty IDs are legacy input
+    /// for the most recently started call.
     ToolInputDelta {
         session_id: String,
         call_id: String,
@@ -89,13 +129,36 @@ pub enum ApiEvent {
         images: Vec<RenderedImage>,
     },
 
-    /// Token usage update for the attached session.
+    /// Complete session-scoped Markdown side-panel state. Replace the previous
+    /// snapshot, including when pages is empty. Sent live and during attachment
+    /// hydration, possibly before `Attached`. Subscribe before attaching.
+    SidePanelState {
+        session_id: String,
+        snapshot: crate::SidePanelSnapshot,
+    },
+
+    /// Usage for the latest provider call, not cumulative session or turn totals.
+    /// Input/cache accounting is provider-specific: Anthropic reports cache
+    /// reads and writes separately, while OpenAI includes cache reads in input.
     TokenUsage {
         session_id: String,
         input: u64,
         output: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cache_read_input: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_creation_input: Option<u64>,
+    },
+
+    /// An abnormal stop, never emitted for natural completion. This precedes
+    /// TurnDone (and Error for failures). Render as status, not assistant text.
+    /// Transport loss alone does not establish a Crash.
+    TurnStopped {
+        session_id: String,
+        reason: crate::TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
     },
 
     /// The turn finished; the agent is idle.
@@ -149,6 +212,17 @@ pub enum ApiEvent {
         request_id: String,
         tool_name: String,
         description: String,
+    },
+
+    /// Recovery intent from attachment history, emitted at most once per attach.
+    /// May precede `Attached`. Subscribe to events before attaching. The client
+    /// decides whether to send the continuation; the bridge never sends it.
+    /// Ordinary history refreshes, empty histories, and active turns do not emit it.
+    SessionRecovery {
+        session_id: String,
+        continuation_message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reconnect_notice: Option<String>,
     },
 
     /// Session-level status change (idle, generating, tool_running, ...).
@@ -278,7 +352,23 @@ pub enum ErrorCode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionInfo {
+    /// Cumulative built-in file-tool changes. Absent when unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_stats: Option<crate::SessionEditStats>,
     pub session_id: String,
+    /// Swarm owner this agent reports to, not the transcript's fork parent.
+    /// Absent for ordinary sessions and user-created forks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// Stable task/role label assigned when spawning or assigning a swarm agent.
+    /// Separate from `title`, which remains the user's canonical display title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+    /// Last persisted swarm lifecycle status (for example `running`, `ready`,
+    /// `completed`, or `failed`). Independent of this connection's `status`.
+    /// Clients should tolerate new status strings and missing snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_dir: Option<String>,
     /// The effective persisted display title. A custom rename takes precedence
@@ -299,6 +389,10 @@ pub struct SessionInfo {
     /// ordinary sessions in every first-party session picker.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub saved: bool,
+    /// Optional label given with `/save <label>`. Pickers display and search it
+    /// alongside the title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_label: Option<String>,
     /// Persisted transcript update time, used for newest-first ordering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at_ms: Option<i64>,
@@ -319,6 +413,9 @@ pub struct ModelRouteInfo {
     pub api_method: String,
     pub available: bool,
     pub detail: String,
+    /// Tracked turns and prior picker selections, when supplied by the runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::ModelUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -329,8 +426,33 @@ pub struct TextMatch {
     pub preview: String,
 }
 
+/// Durable usage for one user turn, summed across its assistant/tool rounds.
+/// Input is the raw provider-reported count, not normalized across providers.
+/// Cache reads may be included in input (OpenAI) or separate (Anthropic).
+/// Missing telemetry is unknown, not zero. Counts are absent if any assistant
+/// round lacks that metric. This is not a session total or a billing estimate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ResponseStats {
+    /// Whole-turn wall-clock seconds, including tools. Currently not persisted,
+    /// so restored history leaves this absent. Never inferred from tool timings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HistoryMessage {
+    /// Present only on the final visible assistant row of a completed stored
+    /// user turn. Tool-only intermediate rounds contribute to these totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_stats: Option<ResponseStats>,
     /// "user" | "assistant" | "tool".
     pub role: String,
     pub content: String,
@@ -359,4 +481,52 @@ pub struct RenderedImage {
     pub source: RenderedImageSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor: Option<RenderedImageAnchor>,
+    /// Insert before this zero-based entry in the accompanying History.messages
+    /// array (including hidden/system/tool rows). Its length means append.
+    /// Set for restored tool images, whose tool-call row may not be exposed by
+    /// a client. Absent on live events and older servers. Preserve vector order
+    /// for multiple images at the same boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_message_index: Option<usize>,
+}
+
+#[cfg(test)]
+mod image_history_tests {
+    use super::*;
+
+    #[test]
+    fn image_history_boundary_is_optional_and_round_trips() {
+        let legacy = serde_json::json!({"media_type": "image/png", "data": "bytes", "label": null,
+            "source": {"kind": "tool_result", "tool_name": "read"}, "anchor": {"kind": "tool_call", "id": "read-1"}});
+        let mut image: RenderedImage = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(image.history_message_index, None);
+        assert_eq!(serde_json::to_value(&image).unwrap(), legacy);
+        for boundary in [0, 3] {
+            image.history_message_index = Some(boundary);
+            let encoded = serde_json::to_value(&image).unwrap();
+            assert_eq!(encoded["history_message_index"], boundary);
+            assert_eq!(
+                serde_json::from_value::<RenderedImage>(encoded).unwrap(),
+                image
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod response_stats_tests {
+    use super::*;
+
+    #[test]
+    fn history_response_stats_are_backward_compatible_and_optional() {
+        let old = serde_json::json!({"role":"assistant","content":"answer"});
+        let message: HistoryMessage = serde_json::from_value(old.clone()).unwrap();
+        assert!(message.response_stats.is_none());
+        assert_eq!(serde_json::to_value(message).unwrap(), old);
+        let new = serde_json::json!({"role":"assistant","content":"answer",
+            "response_stats":{"input_tokens":0,"output_tokens":12,"cache_read_tokens":0}});
+        let message: HistoryMessage = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(message.response_stats.as_ref().unwrap().duration_secs, None);
+        assert_eq!(serde_json::to_value(message).unwrap(), new);
+    }
 }

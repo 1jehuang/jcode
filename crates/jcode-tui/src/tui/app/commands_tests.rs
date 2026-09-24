@@ -16,24 +16,20 @@ fn parse_diff_mode_name_maps_known_aliases() {
         parse_diff_mode_name("full"),
         Some(DiffDisplayMode::FullInline)
     );
-    assert_eq!(
-        parse_diff_mode_name("pinned"),
-        Some(DiffDisplayMode::Pinned)
-    );
     assert_eq!(parse_diff_mode_name("file"), Some(DiffDisplayMode::File));
 }
 
 #[test]
 fn parse_diff_mode_name_is_case_insensitive_and_trims() {
     use crate::config::DiffDisplayMode;
-    assert_eq!(
-        parse_diff_mode_name("  PINNED "),
-        Some(DiffDisplayMode::Pinned)
-    );
+    assert_eq!(parse_diff_mode_name("  FILE "), Some(DiffDisplayMode::File));
 }
 
 #[test]
 fn parse_diff_mode_name_rejects_unknown() {
+    for removed in ["pinned", "pin", "pane", "  PINNED "] {
+        assert_eq!(parse_diff_mode_name(removed), None);
+    }
     assert_eq!(parse_diff_mode_name("sidebyside"), None);
     assert_eq!(parse_diff_mode_name(""), None);
 }
@@ -359,4 +355,63 @@ mod colors {
             "/colorscheme must not be claimed by /colors"
         );
     }
+}
+
+#[test]
+fn cache_extend_saves_preference_and_reset_survives_reload() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().unwrap();
+    let previous = std::env::var_os("JCODE_HOME");
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => crate::env::set_var("JCODE_HOME", value),
+                None => crate::env::remove_var("JCODE_HOME"),
+            }
+            crate::config::Config::invalidate_cache();
+        }
+    }
+    let _restore = Restore(previous);
+    crate::env::set_var("JCODE_HOME", temp.path());
+    crate::config::Config::invalidate_cache();
+    let mut app = crate::tui::app::tests::create_test_app();
+    for (command, expected) in [
+        ("/cache 5m", false),
+        ("/cache extend", true),
+        ("/cache extend", true),
+        ("/cache 5m", false),
+    ] {
+        assert!(crate::tui::app::commands_dispatch::dispatch_local_command(
+            &mut app, command
+        ));
+        crate::config::Config::invalidate_cache();
+        assert_eq!(
+            crate::config::Config::load()
+                .provider
+                .anthropic_cache_ttl_1h,
+            expected
+        );
+        assert!(
+            app.display_messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Saved Anthropic cache TTL")
+        );
+    }
+    let path = crate::config::Config::path().unwrap();
+    std::fs::write(&path, "[broken").unwrap();
+    assert!(crate::tui::app::commands_dispatch::dispatch_local_command(
+        &mut app,
+        "/cache extend"
+    ));
+    assert!(
+        app.display_messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Could not save cache preference")
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "[broken");
 }

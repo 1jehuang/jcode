@@ -26,6 +26,7 @@ use crossterm::event::{
 };
 use debug::DebugTrace;
 use futures::StreamExt;
+pub(crate) use helpers::effort_display_label;
 use helpers::*;
 use jcode_tui_messages::DisplayMessage;
 use ratatui::DefaultTerminal;
@@ -92,11 +93,13 @@ mod replay;
 pub(crate) mod run_shell;
 mod runtime_memory;
 mod shortcut_hints;
+mod slash_command_parser;
 mod split_view;
 mod state_ui;
 mod state_ui_input_helpers;
 mod update_sim;
-pub(crate) use state_ui_input_helpers::registered_command_entries;
+mod usage_reset;
+pub(crate) use state_ui_input_helpers::{registered_command_entries, registered_command_names};
 mod state_ui_maintenance;
 mod state_ui_messages;
 mod state_ui_runtime;
@@ -106,6 +109,7 @@ mod support;
 mod swarm_hint;
 mod terminal_liveness;
 mod terminal_setup_command;
+mod terminal_title;
 mod todos_view;
 mod tui_lifecycle;
 mod tui_lifecycle_runtime;
@@ -119,6 +123,10 @@ pub(crate) use self::state_ui_storage::compact_display_messages_for_storage;
 
 pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
     self::input::extract_input_shell_command(input)
+}
+
+pub(crate) fn has_safe_slash_command_token(input: &str) -> bool {
+    self::slash_command_parser::active_token_before_cursor(input, input.len()).is_some()
 }
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
@@ -211,6 +219,8 @@ struct KvCacheBaseline {
     /// is only the uncached remainder of that one request.
     input_tokens: u64,
     completed_at: Instant,
+    /// Retention selected when the request started, not the current preference.
+    cache_ttl_secs: Option<u64>,
     provider: String,
     model: String,
     upstream_provider: Option<String>,
@@ -219,6 +229,7 @@ struct KvCacheBaseline {
 
 #[derive(Debug, Clone)]
 struct PendingKvCacheRequest {
+    cache_ttl_secs: Option<u64>,
     turn_number: usize,
     call_index: u16,
     provider: String,
@@ -710,10 +721,12 @@ struct TokenAccounting {
     total_output_tokens: u64,
     // Total session KV cache usage for turns where the provider reported cache telemetry.
     total_cache_reported_input_tokens: u64,
+    total_cache_prompt_tokens: u64,
     total_cache_read_tokens: u64,
     total_cache_creation_tokens: u64,
     total_cache_optimal_input_tokens: u64,
     last_cache_reported_input_tokens: Option<u64>,
+    last_cache_prompt_tokens: Option<u64>,
     last_cache_read_tokens: Option<u64>,
     last_cache_creation_tokens: Option<u64>,
     last_cache_optimal_input_tokens: Option<u64>,
@@ -840,6 +853,8 @@ pub struct App {
     display_messages_version: u64,
     display_user_message_count: usize,
     display_edit_tool_message_count: usize,
+    display_edit_line_counts: (usize, usize),
+    terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
     /// When older compacted history has just been loaded, this anchors the
     /// viewport to the content the reader was looking at so the prepend does not
@@ -958,6 +973,9 @@ pub struct App {
     /// Whether the clean completion handoff has already requested a user-facing
     /// final response for the current todo cycle.
     todo_final_response_requested: bool,
+    /// Todo state at the final-response handoff. Unchanged finished work must
+    /// not re-enter quality gates on later turn-end or timer callbacks.
+    final_response_todo_fingerprint: Option<String>,
     /// Exact continuation sent for the last incomplete todo state. An unchanged
     /// list must not trigger another automatic turn: the agent may be parked on
     /// a worker, wake, or human decision, and repeated pokes cannot help.
@@ -1476,6 +1494,9 @@ pub struct App {
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
+    // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
+    // restored when Down walks back past the newest entry
+    history_draft: Option<(String, usize)>,
     // Short-lived notice for status feedback (model switch, cycle diff mode, etc.)
     status_notice: Option<(String, Instant)>,
     // Distinct learned-keybinding nudge ("you keep doing X the slow way, press
@@ -1648,6 +1669,7 @@ pub struct App {
     usage_overlay: Option<RefCell<super::usage_overlay::UsageOverlay>>,
     /// Whether a usage refresh request is currently in flight.
     usage_report_refreshing: bool,
+    usage_reset: usage_reset::ResetState,
     /// Whether a `/productivity` report generation is currently in flight.
     productivity_refreshing: bool,
     /// Last time the passive overnight progress card polled its run files.
@@ -1784,6 +1806,10 @@ impl App {
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
+            cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
+                &self.kv_cache_provider_name(),
+                Some(&self.kv_cache_provider_model()),
+            ),
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
@@ -1831,6 +1857,10 @@ impl App {
         self.kv_cache.pending_kv_cache_request = Some(PendingKvCacheRequest {
             turn_number,
             call_index: self.kv_cache.kv_cache_turn_call_index,
+            cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
+                &self.kv_cache_provider_name(),
+                Some(&self.kv_cache_provider_model()),
+            ),
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
@@ -1904,12 +1934,11 @@ impl App {
                 return false;
             };
             if self.kv_cache.cold_cache_warned_baseline_completed_at == Some(baseline.completed_at)
+                || crate::provider::cache_ttl_is_estimate(&baseline.provider)
             {
                 return false;
             }
-            let Some(ttl_secs) =
-                crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
-            else {
+            let Some(ttl_secs) = baseline.cache_ttl_secs else {
                 return false;
             };
             if baseline.completed_at.elapsed().as_secs() < ttl_secs {
@@ -1940,9 +1969,15 @@ impl App {
         baseline: &KvCacheBaseline,
         trigger: ColdCacheWarningTrigger,
     ) -> bool {
-        let Some(ttl_secs) =
-            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
-        else {
+        // An elapsed estimate is not evidence of eviction. Also never warn
+        // about a previous route's cache after switching provider or model.
+        if crate::provider::cache_ttl_is_estimate(&baseline.provider)
+            || baseline.provider != self.kv_cache_provider_name()
+            || baseline.model != self.kv_cache_provider_model()
+        {
+            return false;
+        }
+        let Some(ttl_secs) = baseline.cache_ttl_secs else {
             return false;
         };
         let age_secs = baseline.completed_at.elapsed().as_secs();
@@ -1990,7 +2025,10 @@ impl App {
         if self.kv_cache.current_api_usage_recorded {
             return false;
         }
-        if self.streaming.streaming_input_tokens == 0 {
+        if self.streaming.streaming_input_tokens == 0
+            && self.streaming.streaming_cache_read_tokens.unwrap_or(0) == 0
+            && self.streaming.streaming_cache_creation_tokens.unwrap_or(0) == 0
+        {
             return false;
         }
 
@@ -2000,6 +2038,7 @@ impl App {
         // For split-accounting providers (Anthropic) bare `input` is only the
         // uncached remainder, so the reusable prefix is input + read + creation.
         let effective_prompt_tokens = crate::tui::info_widget::effective_prompt_tokens(
+            &self.kv_cache_provider_name(),
             self.streaming.streaming_input_tokens,
             self.streaming.streaming_cache_read_tokens.unwrap_or(0),
             self.streaming.streaming_cache_creation_tokens.unwrap_or(0),
@@ -2023,6 +2062,7 @@ impl App {
                 cache_generation: request.cache_generation,
                 input_tokens: self.streaming.streaming_input_tokens,
                 completed_at: Instant::now(),
+                cache_ttl_secs: request.cache_ttl_secs,
                 provider: request.provider,
                 model: request.model,
                 upstream_provider: request.upstream_provider,
@@ -2031,6 +2071,11 @@ impl App {
             return true;
         }
 
+        self.token_accounting.total_cache_prompt_tokens = self
+            .token_accounting
+            .total_cache_prompt_tokens
+            .saturating_add(effective_prompt_tokens);
+        self.token_accounting.last_cache_prompt_tokens = Some(effective_prompt_tokens);
         self.token_accounting.total_cache_reported_input_tokens = self
             .token_accounting
             .total_cache_reported_input_tokens
@@ -2051,10 +2096,9 @@ impl App {
             .saturating_add(self.streaming.streaming_cache_creation_tokens.unwrap_or(0));
         self.token_accounting.last_cache_reported_input_tokens =
             Some(self.streaming.streaming_input_tokens);
-        self.token_accounting.last_cache_read_tokens =
-            Some(self.streaming.streaming_cache_read_tokens.unwrap_or(0));
+        self.token_accounting.last_cache_read_tokens = self.streaming.streaming_cache_read_tokens;
         self.token_accounting.last_cache_creation_tokens =
-            Some(self.streaming.streaming_cache_creation_tokens.unwrap_or(0));
+            self.streaming.streaming_cache_creation_tokens;
         self.token_accounting.last_cache_optimal_input_tokens = optimal_input_tokens;
 
         self.log_kv_cache_usage_summary(&request, optimal_input_tokens);
@@ -2064,6 +2108,7 @@ impl App {
             cache_generation: request.cache_generation,
             input_tokens: effective_prompt_tokens,
             completed_at: Instant::now(),
+            cache_ttl_secs: request.cache_ttl_secs,
             provider: request.provider,
             model: request.model,
             upstream_provider: request.upstream_provider,
@@ -2080,12 +2125,16 @@ impl App {
         let input_tokens = self.streaming.streaming_input_tokens;
         let read_tokens = self.streaming.streaming_cache_read_tokens.unwrap_or(0);
         let creation_tokens = self.streaming.streaming_cache_creation_tokens.unwrap_or(0);
-        let read_pct = ratio_pct(read_tokens, input_tokens);
-        let creation_pct = ratio_pct(creation_tokens, input_tokens);
+        let prompt_tokens = self
+            .token_accounting
+            .last_cache_prompt_tokens
+            .unwrap_or(input_tokens);
+        let read_pct = ratio_pct(read_tokens, prompt_tokens);
+        let creation_pct = ratio_pct(creation_tokens, prompt_tokens);
         let optimal_read_pct = optimal_input_tokens.map(|optimal| ratio_pct(read_tokens, optimal));
         let session_read_pct = ratio_pct(
             self.token_accounting.total_cache_read_tokens,
-            self.token_accounting.total_cache_reported_input_tokens,
+            self.token_accounting.total_cache_prompt_tokens,
         );
         let session_optimal_read_pct = if self.token_accounting.total_cache_optimal_input_tokens > 0
         {
@@ -2127,9 +2176,10 @@ impl App {
             .map(|baseline| baseline.input_tokens);
         let missed_tokens =
             baseline_input_tokens.map(|baseline| baseline.saturating_sub(read_tokens));
-        let ttl_secs = request.baseline.as_ref().and_then(|baseline| {
-            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
-        });
+        let ttl_secs = request
+            .baseline
+            .as_ref()
+            .and_then(|baseline| baseline.cache_ttl_secs);
         let ttl_remaining_secs = ttl_secs
             .zip(baseline_age_secs)
             .map(|(ttl, age)| ttl.saturating_sub(age));
@@ -2189,12 +2239,12 @@ impl App {
             .unwrap_or(false);
 
         crate::logging::info(&format!(
-            "KV_CACHE_USAGE: turn={} call={} provider={} upstream={:?} model={} \
+            "KV_CACHE_USAGE: turn={} call={} provider={} label={} upstream={:?} model={} \
              input={} cache_read={} cache_write={} read_pct={} write_pct={} \
              optimal_input={:?} optimal_read_pct={:?} missed_tokens={:?} miss={} \
              session_input={} session_read={} session_write={} session_read_pct={} \
              session_optimal_input={} session_optimal_read_pct={:?} \
-             baseline_input={:?} baseline_age_secs={:?} ttl_secs={:?} ttl_remaining_secs={:?} \
+             baseline_input={:?} baseline_age_secs={:?} ttl_secs={:?} ttl_remaining_secs={:?} ttl_is_estimate={} \
              prefix_matches={:?} common_prefix_messages={:?} first_changed_message_index={:?} \
              system_changed={:?} tools_changed={:?} message_prefix_changed={:?} message_full_hash_changed={:?} dynamic_changed={:?} \
              message_count={:?} baseline_message_count={:?} tool_count={:?} baseline_tool_count={:?} \
@@ -2205,6 +2255,7 @@ impl App {
             request.turn_number,
             request.call_index,
             request.provider,
+            self.kv_cache_provider_label(),
             request.upstream_provider,
             request.model,
             input_tokens,
@@ -2226,6 +2277,10 @@ impl App {
             baseline_age_secs,
             ttl_secs,
             ttl_remaining_secs,
+            request
+                .baseline
+                .as_ref()
+                .is_some_and(|baseline| crate::provider::cache_ttl_is_estimate(&baseline.provider)),
             request.baseline_messages_prefix_matches,
             common_prefix_messages,
             first_changed_message_index,
@@ -2264,6 +2319,10 @@ impl App {
                 .count()
                 .max(1),
             call_index: 1,
+            cache_ttl_secs: crate::tui::cache_ttl_for_provider_model(
+                &self.kv_cache_provider_name(),
+                Some(&self.kv_cache_provider_model()),
+            ),
             provider: self.kv_cache_provider_name(),
             model: self.kv_cache_provider_model(),
             upstream_provider: self.upstream_provider.clone(),
@@ -2283,7 +2342,11 @@ impl App {
             return;
         }
 
-        let read_tokens = self.streaming.streaming_cache_read_tokens.unwrap_or(0);
+        // Missing telemetry is not an explicit cache miss. Write-only usage
+        // and providers omitting cached_tokens must not trigger harness alarms.
+        let Some(read_tokens) = self.streaming.streaming_cache_read_tokens else {
+            return;
+        };
         let missed_tokens = expected_tokens.saturating_sub(read_tokens);
         if missed_tokens < Self::KV_CACHE_MIN_MISSED_TOKENS {
             return;
@@ -2405,8 +2468,8 @@ impl App {
             return KvCacheMissReason::UpstreamSwitch;
         }
 
-        if let Some(ttl_secs) =
-            crate::tui::cache_ttl_for_provider_model(&baseline.provider, Some(&baseline.model))
+        if let Some(ttl_secs) = baseline.cache_ttl_secs
+            && !crate::provider::cache_ttl_is_estimate(&baseline.provider)
             && baseline.completed_at.elapsed() >= Duration::from_secs(ttl_secs)
         {
             return KvCacheMissReason::Expired;
@@ -2439,13 +2502,37 @@ impl App {
         KvCacheMissReason::Unknown
     }
 
+    /// Canonical provider identity for the KV-cache baseline and its TTL logic.
+    ///
+    /// Deliberately the machine id, not the rendered profile label: the TTL
+    /// classifier (`cache_ttl_for_provider_model`) recognises provider families
+    /// (`openrouter`, `openai`, ...), so handing it a profile label such as
+    /// `NVIDIA NIM` would stop `KvCacheMissReason::Expired` from ever firing for
+    /// direct OpenAI-compatible profiles. The label belongs in the log line only
+    /// ([`Self::kv_cache_provider_label`], #1286).
     fn kv_cache_provider_name(&self) -> String {
-        if self.uses_server_or_replay_metadata() {
+        let provider = if self.uses_server_or_replay_metadata() {
             self.remote_provider_name
                 .clone()
                 .unwrap_or_else(|| self.provider.name().to_string())
         } else {
             self.provider.name().to_string()
+        };
+        self.cache_provider_identity(&provider)
+    }
+
+    /// Human-facing profile label for KV-cache diagnostics (#1286).
+    ///
+    /// Kept separate from [`Self::kv_cache_provider_name`] on purpose: the
+    /// baseline stores the machine id, while people reading `KV_CACHE_USAGE`
+    /// want the profile the session actually talks to.
+    fn kv_cache_provider_label(&self) -> String {
+        if self.uses_server_or_replay_metadata() {
+            self.remote_provider_name
+                .clone()
+                .unwrap_or_else(|| self.provider.display_name())
+        } else {
+            self.provider.display_name()
         }
     }
 

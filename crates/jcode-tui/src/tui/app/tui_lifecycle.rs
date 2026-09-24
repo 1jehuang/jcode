@@ -38,6 +38,8 @@ impl App {
         self.set_todos_view_enabled(restored.todos_view_enabled, restored.todos_view_enabled);
         self.todo_confidence_spike_challenged = restored.todo_confidence_spike_challenged;
         self.last_todo_ownership_fingerprint = restored.last_todo_ownership_fingerprint;
+        self.final_response_todo_fingerprint = restored.final_response_todo_fingerprint;
+        self.todo_final_response_requested = self.final_response_todo_fingerprint.is_some();
 
         let mut queued_messages = restored.queued_messages;
         let mut recovered_followups = Vec::new();
@@ -409,6 +411,8 @@ impl App {
             display_messages_version: 0,
             display_user_message_count: 0,
             display_edit_tool_message_count: 0,
+            display_edit_line_counts: (0, 0),
+            terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
             pending_history_anchor: None,
             input: String::new(),
@@ -460,6 +464,7 @@ impl App {
             todo_completion_gate_attempts: 0,
             last_todo_ownership_fingerprint: None,
             todo_final_response_requested: false,
+            final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
@@ -678,6 +683,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            history_draft: None,
             status_notice: None,
             learn_hint: None,
             learn_hint_shown_this_session: false,
@@ -757,6 +763,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            usage_reset: Default::default(),
             productivity_refreshing: false,
             last_overnight_card_refresh: None,
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
@@ -860,6 +867,8 @@ impl App {
             display_messages_version: 0,
             display_user_message_count: 0,
             display_edit_tool_message_count: 0,
+            display_edit_line_counts: (0, 0),
+            terminal_title: RefCell::new(terminal_title::TerminalTitleState::default()),
             compacted_history_lazy: CompactedHistoryLazyState::default(),
             pending_history_anchor: None,
             input: String::new(),
@@ -911,6 +920,7 @@ impl App {
             todo_completion_gate_attempts: 0,
             last_todo_ownership_fingerprint: None,
             todo_final_response_requested: false,
+            final_response_todo_fingerprint: None,
             last_auto_poke_fingerprint: None,
             turn_guardrail_stopped: false,
             consecutive_guardrail_stops: 0,
@@ -1129,6 +1139,7 @@ impl App {
             typing_scroll_lock: false,
             stashed_input: None,
             input_undo_stack: Vec::new(),
+            history_draft: None,
             status_notice: None,
             learn_hint: None,
             learn_hint_shown_this_session: false,
@@ -1208,6 +1219,7 @@ impl App {
             account_picker_overlay: None,
             usage_overlay: None,
             usage_report_refreshing: false,
+            usage_reset: Default::default(),
             productivity_refreshing: false,
             last_overnight_card_refresh: None,
             workspace_client: crate::tui::workspace_client::WorkspaceClientState::default(),
@@ -1351,6 +1363,11 @@ impl App {
             app.set_status_notice(format!("SSH: {host} (remote server)"));
             return app;
         }
+
+        // Minimal local clients start with empty skill registries. Load global
+        // metadata once so autocomplete works before the first History event.
+        // SSH clients above must use only the remote server's skill metadata.
+        app.refresh_skills_snapshot();
 
         let reload_fast_start = std::env::var("JCODE_RELOAD_FAST_START")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))

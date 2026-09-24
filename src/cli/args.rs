@@ -400,14 +400,18 @@ pub(crate) enum Command {
         uninstall: bool,
     },
 
-    /// Install a launcher so jcode appears in your app launcher
+    /// Install platform launcher integration (Windows shortcut; macOS notification helper)
     SetupLauncher,
 
     /// Browser automation setup and status
     Browser {
-        /// Action (setup, status)
+        /// Action (setup, status, detect)
         #[arg(default_value = "setup")]
         action: String,
+
+        /// Browser to target: auto (default: detect your browser), firefox,
+        /// chrome, chromium, edge, brave, or safari
+        browser: Option<String>,
     },
 
     /// Replay a saved session in the TUI
@@ -1113,7 +1117,7 @@ pub(crate) enum MemoryCommand {
         /// Search query
         query: String,
 
-        /// Use semantic search (embedding-based) instead of keyword
+        /// Use Jev relevance decisions instead of local keyword search (requires Jev access)
         #[arg(short, long)]
         semantic: bool,
     },

@@ -173,15 +173,19 @@ fn stream_text_or_recovered_tool_call(
         if !prefix.is_empty() {
             pending.push_back(StreamEvent::TextDelta(prefix));
         }
+        let id = format!(
+            "fallback_text_call_{}",
+            FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         pending.push_back(StreamEvent::ToolUseStart {
-            id: format!(
-                "fallback_text_call_{}",
-                FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ),
+            id: id.clone(),
             name: tool_name,
         });
-        pending.push_back(StreamEvent::ToolInputDelta(arguments));
-        pending.push_back(StreamEvent::ToolUseEnd);
+        pending.push_back(StreamEvent::ToolInputDeltaFor {
+            id: id.clone(),
+            delta: arguments,
+        });
+        pending.push_back(StreamEvent::ToolUseEndFor { id });
         if !suffix.is_empty() {
             pending.push_back(StreamEvent::TextDelta(suffix));
         }
@@ -222,18 +226,27 @@ struct ResponseSseEvent {
     item: Option<Value>,
     delta: Option<String>,
     item_id: Option<String>,
+    output_index: Option<u64>,
     call_id: Option<String>,
     name: Option<String>,
     arguments: Option<String>,
+    input: Option<String>,
     response: Option<Value>,
     error: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StreamingToolCallState {
+    identities: HashSet<String>,
+    fallback_id: String,
     call_id: Option<String>,
     name: Option<String>,
     arguments: String,
+    emitted_id: Option<String>,
+    started: bool,
+    emitted_arguments: usize,
+    complete: bool,
+    order: usize,
 }
 
 fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
@@ -253,41 +266,175 @@ fn normalize_openai_tool_arguments(raw_arguments: String) -> String {
 fn streaming_tool_item_id(item: &Value) -> Option<String> {
     item.get("id")
         .and_then(|v| v.as_str())
-        .or_else(|| item.get("item_id").and_then(|v| v.as_str()))
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| {
+            item.get("item_id")
+                .and_then(|v| v.as_str())
+                .filter(|id| !id.trim().is_empty())
+        })
         .map(|id| id.to_string())
 }
 
-fn stream_tool_call_from_state(
-    item_id: Option<String>,
-    mut state: StreamingToolCallState,
-    pending: &mut VecDeque<StreamEvent>,
-) -> Option<StreamEvent> {
-    let tool_name = state.name.take().filter(|name| !name.is_empty())?;
-    let raw_call_id = state
-        .call_id
-        .take()
-        .filter(|id| !id.is_empty())
-        .or(item_id)
-        .unwrap_or_else(|| {
+fn tool_call_state<'a>(
+    calls: &'a mut HashMap<String, StreamingToolCallState>,
+    completed: &mut HashSet<String>,
+    output_index: Option<u64>,
+    item_id: Option<&str>,
+    call_id: Option<&str>,
+) -> Option<&'a mut StreamingToolCallState> {
+    let item_id = item_id.filter(|id| !id.trim().is_empty());
+    let call_id = call_id.filter(|id| !id.trim().is_empty());
+    // Some Responses-compatible providers regenerate item IDs on every event.
+    // output_index is stable even on argument deltas without a call_id. Keep
+    // aliases so item-only/call-only snapshots still find the same call.
+    // Keep raw item IDs for callers of the public parser's completed-item set,
+    // and namespace synthetic identities away from ordinary provider IDs.
+    let identities: Vec<String> = output_index
+        .map(|index| format!("\0output:{index}"))
+        .into_iter()
+        .chain(item_id.map(str::to_string))
+        .chain(call_id.map(|id| format!("\0call:{id}")))
+        .collect();
+    if identities.iter().any(|id| completed.contains(id)) {
+        completed.extend(identities);
+        return None;
+    }
+    let key = identities
+        .iter()
+        .find_map(|identity| {
+            calls
+                .iter()
+                .find_map(|(key, state)| state.identities.contains(identity).then(|| key.clone()))
+        })
+        .or_else(|| identities.first().cloned())?;
+    let order = calls.values().map(|state| state.order).max().unwrap_or(0) + 1;
+    let state = calls.entry(key).or_insert_with(|| StreamingToolCallState {
+        order,
+        fallback_id: item_id.or(call_id).map(str::to_string).unwrap_or_else(|| {
             format!(
-                "fallback_text_call_{}",
+                "fallback_call_{}",
                 FALLBACK_TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
             )
-        });
-    let call_id = sanitize_tool_id(&raw_call_id);
-    let arguments = normalize_openai_tool_arguments(if state.arguments.is_empty() {
-        "{}".to_string()
-    } else {
-        state.arguments
+        }),
+        ..Default::default()
     });
+    state.identities.extend(identities);
+    Some(state)
+}
 
-    pending.push_back(StreamEvent::ToolUseStart {
-        id: call_id,
-        name: tool_name,
-    });
-    pending.push_back(StreamEvent::ToolInputDelta(arguments));
-    pending.push_back(StreamEvent::ToolUseEnd);
+fn update_tool_call_from_item(
+    state: &mut StreamingToolCallState,
+    item: &Value,
+    complete: bool,
+) -> bool {
+    if let Some(id) = item
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+    {
+        state.call_id = Some(id.to_string());
+    }
+    if let Some(name) = item.get("name").and_then(Value::as_str) {
+        state.name = Some(name.to_string());
+    }
+    let arguments = item
+        .get("arguments")
+        .or_else(|| item.get("input"))
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string())
+        });
+    if complete {
+        complete_tool_arguments(state, arguments)
+    } else {
+        if state.arguments.is_empty() {
+            state.arguments = arguments.unwrap_or_default();
+        }
+        true
+    }
+}
+
+fn inconsistent_tool_arguments() -> Option<StreamEvent> {
+    Some(StreamEvent::Error {
+        message: "OpenAI tool argument snapshot differs from streamed arguments".to_string(),
+        retry_after_secs: None,
+    })
+}
+
+fn stream_tool_calls(
+    calls: &mut HashMap<String, StreamingToolCallState>,
+    completed: &mut HashSet<String>,
+    pending: &mut VecDeque<StreamEvent>,
+) -> Option<StreamEvent> {
+    // Keyed events let every named call advance independently, even when an
+    // earlier call has not supplied any arguments yet.
+    let mut ready: Vec<_> = calls
+        .iter()
+        .filter(|(_, state)| {
+            state.started || state.name.as_ref().is_some_and(|name| !name.is_empty())
+        })
+        .map(|(id, state)| (state.order, id.clone()))
+        .collect();
+    ready.sort_by_key(|(order, _)| *order);
+    for (_, item_id) in ready {
+        let state = calls.get_mut(&item_id).expect("selected tool call");
+        let id = state
+            .emitted_id
+            .get_or_insert_with(|| {
+                sanitize_tool_id(
+                    state
+                        .call_id
+                        .as_deref()
+                        .filter(|id| !id.trim().is_empty())
+                        .unwrap_or(&state.fallback_id),
+                )
+            })
+            .clone();
+        if !state.started {
+            pending.push_back(StreamEvent::ToolUseStart {
+                id: id.clone(),
+                name: state.name.clone().expect("named tool call"),
+            });
+            state.started = true;
+        }
+        if state.complete {
+            state.arguments = normalize_openai_tool_arguments(std::mem::take(&mut state.arguments));
+        }
+        // Hold only a possible empty/null value until it can be normalized.
+        // Ordinary JSON fragments flow through without waiting for valid JSON.
+        if state.complete || !"null".starts_with(state.arguments.trim()) {
+            let delta = &state.arguments[state.emitted_arguments..];
+            if !delta.is_empty() {
+                pending.push_back(StreamEvent::ToolInputDeltaFor {
+                    id: id.clone(),
+                    delta: delta.to_string(),
+                });
+                state.emitted_arguments = state.arguments.len();
+            }
+        }
+        if !state.complete {
+            continue;
+        }
+        pending.push_back(StreamEvent::ToolUseEndFor { id });
+        let state = calls.remove(&item_id).expect("completed tool call");
+        completed.extend(state.identities);
+    }
     pending.pop_front()
+}
+
+fn complete_tool_arguments(state: &mut StreamingToolCallState, arguments: Option<String>) -> bool {
+    if let Some(arguments) = arguments {
+        // A done snapshot normally repeats the deltas. Only its unseen suffix
+        // may be appended, otherwise the consumer would parse duplicated JSON.
+        if !arguments.starts_with(&state.arguments[..state.emitted_arguments]) {
+            return false;
+        }
+        state.arguments = arguments;
+    }
+    state.complete = true;
+    true
 }
 
 pub fn parse_openai_response_event(
@@ -351,85 +498,92 @@ pub fn parse_openai_response_event(
                 if matches!(
                     item.get("type").and_then(|v| v.as_str()),
                     Some("function_call") | Some("custom_tool_call")
-                ) && let Some(item_id) = streaming_tool_item_id(item)
-                {
-                    let state = streaming_tool_calls.entry(item_id).or_default();
-                    state.call_id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| state.call_id.clone());
-                    state.name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                        .or_else(|| state.name.clone());
-                    if let Some(arguments) = item
-                        .get("arguments")
-                        .and_then(|v| v.as_str())
-                        .or_else(|| item.get("input").and_then(|v| v.as_str()))
-                    {
-                        state.arguments = arguments.to_string();
-                    } else if let Some(input) = item.get("input")
-                        && (input.is_object() || input.is_array())
-                    {
-                        state.arguments = input.to_string();
-                    }
+                ) {
+                    let state = tool_call_state(
+                        streaming_tool_calls,
+                        completed_tool_items,
+                        event.output_index,
+                        streaming_tool_item_id(item).as_deref(),
+                        item.get("call_id").and_then(Value::as_str),
+                    )?;
+                    update_tool_call_from_item(state, item, false);
+                    return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
                 }
             }
         }
-        "response.function_call_arguments.delta" => {
-            if let Some(item_id) = event.item_id {
-                let state = streaming_tool_calls.entry(item_id).or_default();
-                if let Some(call_id) = event.call_id {
-                    state.call_id = Some(call_id);
-                }
-                if let Some(name) = event.name {
-                    state.name = Some(name);
-                }
-                if let Some(delta) = event.delta {
-                    state.arguments.push_str(&delta);
-                }
+        "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => {
+            let state = tool_call_state(
+                streaming_tool_calls,
+                completed_tool_items,
+                event.output_index,
+                event.item_id.as_deref(),
+                event.call_id.as_deref(),
+            )?;
+            if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
+                state.call_id = Some(call_id);
             }
+            if let Some(name) = event.name {
+                state.name = Some(name);
+            }
+            if let Some(delta) = event.delta {
+                state.arguments.push_str(&delta);
+            }
+            return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
         }
-        "response.function_call_arguments.done" => {
-            if let Some(item_id) = event.item_id {
-                let mut state = streaming_tool_calls.remove(&item_id).unwrap_or_default();
-                if let Some(call_id) = event.call_id {
-                    state.call_id = Some(call_id);
-                }
-                if let Some(name) = event.name {
-                    state.name = Some(name);
-                }
-                if let Some(arguments) = event.arguments {
-                    state.arguments = arguments;
-                }
-                if let Some(tool_event) =
-                    stream_tool_call_from_state(Some(item_id.clone()), state.clone(), pending)
-                {
-                    completed_tool_items.insert(item_id);
-                    return Some(tool_event);
-                }
-                streaming_tool_calls.insert(item_id, state);
+        "response.function_call_arguments.done" | "response.custom_tool_call_input.done" => {
+            let state = tool_call_state(
+                streaming_tool_calls,
+                completed_tool_items,
+                event.output_index,
+                event.item_id.as_deref(),
+                event.call_id.as_deref(),
+            )?;
+            if let Some(call_id) = event.call_id.filter(|id| !id.trim().is_empty()) {
+                state.call_id = Some(call_id);
             }
+            if let Some(name) = event.name {
+                state.name = Some(name);
+            }
+            if !complete_tool_arguments(state, event.arguments.or(event.input)) {
+                return inconsistent_tool_arguments();
+            }
+            return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
         }
         "response.output_item.done" => {
             if let Some(item) = event.item {
-                if let Some(item_id) = streaming_tool_item_id(&item)
-                    && completed_tool_items.contains(&item_id)
-                    && matches!(
-                        item.get("type").and_then(|v| v.as_str()),
-                        Some("function_call") | Some("custom_tool_call")
-                    )
+                if matches!(
+                    item.get("type").and_then(|v| v.as_str()),
+                    Some("function_call") | Some("custom_tool_call")
+                ) && (event.output_index.is_some()
+                    || streaming_tool_item_id(&item).is_some()
+                    || item
+                        .get("call_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty()))
                 {
-                    completed_tool_items.remove(&item_id);
-                    return None;
+                    let state = tool_call_state(
+                        streaming_tool_calls,
+                        completed_tool_items,
+                        event.output_index,
+                        streaming_tool_item_id(&item).as_deref(),
+                        item.get("call_id").and_then(Value::as_str),
+                    )?;
+                    if !update_tool_call_from_item(state, &item, true) {
+                        return inconsistent_tool_arguments();
+                    }
+                    return stream_tool_calls(streaming_tool_calls, completed_tool_items, pending);
                 }
-                if let Some(event) =
-                    handle_openai_output_item(item, saw_text_delta, saw_thinking_delta, pending)
-                {
-                    return Some(event);
+                let is_message = item.get("type").and_then(Value::as_str) == Some("message");
+                let first =
+                    handle_openai_output_item(item, saw_text_delta, saw_thinking_delta, pending);
+                if is_message {
+                    // output_item.done, not reasoning or response.completed, is
+                    // the actual assistant-message boundary. Preserve fallback
+                    // text before the marker and reset deduplication per message.
+                    pending.push_back(StreamEvent::TextDone);
+                    *saw_text_delta = false;
                 }
+                return first.or_else(|| pending.pop_front());
             }
         }
         "response.incomplete" => {
@@ -564,8 +718,11 @@ pub fn handle_openai_output_item(
                 id: call_id.clone(),
                 name,
             });
-            pending.push_back(StreamEvent::ToolInputDelta(arguments));
-            pending.push_back(StreamEvent::ToolUseEnd);
+            pending.push_back(StreamEvent::ToolInputDeltaFor {
+                id: call_id.clone(),
+                delta: arguments,
+            });
+            pending.push_back(StreamEvent::ToolUseEndFor { id: call_id });
             return pending.pop_front();
         }
         "image_generation_call" => {
@@ -830,25 +987,33 @@ impl OpenAIResponsesStream {
     }
 }
 
-fn extract_cached_input_tokens(usage: &Value) -> Option<u64> {
-    usage
-        .get("input_tokens_details")
-        .or_else(|| usage.get("prompt_tokens_details"))
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
+fn extract_input_token_detail(usage: &Value, field: &str) -> Option<u64> {
+    // Fall back per field: an empty/null Responses detail object should not
+    // hide a value reported under the compatibility prompt_tokens_details key.
+    ["input_tokens_details", "prompt_tokens_details"]
+        .iter()
+        .find_map(|key| usage.get(key)?.get(field)?.as_u64())
 }
 
 fn extract_usage_from_response(response: &Value) -> Option<StreamEvent> {
     let usage = response.get("usage")?;
     let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64());
     let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64());
-    let cache_read_input_tokens = extract_cached_input_tokens(usage);
-    if input_tokens.is_some() || output_tokens.is_some() || cache_read_input_tokens.is_some() {
+    // OpenAI input_tokens is the total, including both cache-read and
+    // cache-write subsets. Do not add these details to it or infer writes from
+    // an uncached remainder: missing details mean unknown, not zero.
+    let cache_read_input_tokens = extract_input_token_detail(usage, "cached_tokens");
+    let cache_creation_input_tokens = extract_input_token_detail(usage, "cache_write_tokens");
+    if input_tokens.is_some()
+        || output_tokens.is_some()
+        || cache_read_input_tokens.is_some()
+        || cache_creation_input_tokens.is_some()
+    {
         Some(StreamEvent::TokenUsage {
             input_tokens,
             output_tokens,
             cache_read_input_tokens,
-            cache_creation_input_tokens: None,
+            cache_creation_input_tokens,
         })
     } else {
         None
@@ -886,6 +1051,134 @@ impl Stream for OpenAIResponsesStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_preserves_inclusive_input_and_optional_cache_details() {
+        for (usage, expected_read, expected_write) in [
+            (
+                serde_json::json!({"input_tokens_details": {
+                    "cached_tokens": 12000, "cache_write_tokens": 3000
+                }}),
+                Some(12000),
+                Some(3000),
+            ),
+            (
+                serde_json::json!({"input_tokens_details": {
+                    "cached_tokens": 0, "cache_write_tokens": 15000
+                }}),
+                Some(0),
+                Some(15000),
+            ),
+            (
+                serde_json::json!({"input_tokens_details": {"cached_tokens": 12000}}),
+                Some(12000),
+                None,
+            ),
+            (serde_json::json!({}), None, None),
+            (
+                serde_json::json!({"input_tokens_details": null}),
+                None,
+                None,
+            ),
+            (
+                serde_json::json!({"input_tokens_details": {
+                    "cached_tokens": -1, "cache_write_tokens": "3000"
+                }}),
+                None,
+                None,
+            ),
+            (
+                serde_json::json!({"prompt_tokens_details": {
+                    "cached_tokens": 12000, "cache_write_tokens": 3000
+                }}),
+                Some(12000),
+                Some(3000),
+            ),
+            (
+                serde_json::json!({
+                    "input_tokens_details": {"cached_tokens": null},
+                    "prompt_tokens_details": {
+                        "cached_tokens": 12000, "cache_write_tokens": 3000
+                    }
+                }),
+                Some(12000),
+                Some(3000),
+            ),
+            (
+                serde_json::json!({
+                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                    "prompt_tokens_details": {
+                        "cached_tokens": 12000, "cache_write_tokens": 3000
+                    }
+                }),
+                Some(0),
+                Some(0),
+            ),
+        ] {
+            let mut usage = usage;
+            usage["input_tokens"] = serde_json::json!(15000);
+            usage["output_tokens"] = serde_json::json!(200);
+            let response = serde_json::json!({"usage": usage});
+            let Some(StreamEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            }) = extract_usage_from_response(&response)
+            else {
+                panic!("missing usage for {response}");
+            };
+            assert_eq!(input_tokens, Some(15000), "{response}");
+            assert_eq!(output_tokens, Some(200), "{response}");
+            assert_eq!(cache_read_input_tokens, expected_read, "{response}");
+            assert_eq!(cache_creation_input_tokens, expected_write, "{response}");
+        }
+    }
+
+    #[test]
+    fn terminal_responses_emit_cache_write_only_usage_before_message_end() {
+        for kind in ["response.completed", "response.incomplete"] {
+            let frame = serde_json::json!({
+                "type": kind,
+                "response": {"usage": {"input_tokens_details": {"cache_write_tokens": 1024}}}
+            });
+            let mut pending = VecDeque::new();
+            let event = parse_openai_response_event(
+                &frame.to_string(),
+                &mut false,
+                &mut false,
+                &mut HashMap::new(),
+                &mut HashSet::new(),
+                &mut pending,
+            );
+            assert!(matches!(
+                event,
+                Some(StreamEvent::TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: Some(1024),
+                })
+            ));
+            assert!(matches!(
+                pending.pop_front(),
+                Some(StreamEvent::MessageEnd { .. })
+            ));
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn missing_usage_does_not_report_a_cache_miss() {
+        for response in [
+            serde_json::json!({}),
+            serde_json::json!({"usage": null}),
+            serde_json::json!({"usage": {}}),
+            serde_json::json!({"usage": {"input_tokens_details": {}}}),
+        ] {
+            assert!(extract_usage_from_response(&response).is_none());
+        }
+    }
 
     #[test]
     fn structured_stream_read_error_is_extracted_and_classified_as_transient() {
@@ -1028,5 +1321,49 @@ mod tests {
         );
 
         assert!(event.is_none());
+    }
+}
+
+#[cfg(test)]
+#[path = "stream_tool_tests.rs"]
+mod stream_tool_tests;
+
+#[cfg(test)]
+mod text_framing_tests {
+    use super::*;
+
+    #[test]
+    fn output_item_completion_frames_messages_not_reasoning_or_text_chunks() {
+        let mut saw_text = false;
+        let mut saw_thinking = false;
+        let mut tools = HashMap::new();
+        let mut completed = HashSet::new();
+        let mut pending = VecDeque::new();
+        let mut events = Vec::new();
+        for value in [
+            serde_json::json!({"type":"response.output_text.delta","delta":"The cause is "}),
+            serde_json::json!({"type":"response.reasoning_summary_text.delta","delta":"thinking"}),
+            serde_json::json!({"type":"response.output_text.delta","delta":"the retry loop."}),
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"The cause is the retry loop."}]}}),
+            // This message has no text delta. Per-message deduplication must
+            // allow fallback output even though the preceding message streamed.
+            serde_json::json!({"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"Second message"}]}}),
+            serde_json::json!({"type":"response.completed","response":{}}),
+        ] {
+            events.extend(parse_openai_response_event(
+                &value.to_string(),
+                &mut saw_text,
+                &mut saw_thinking,
+                &mut tools,
+                &mut completed,
+                &mut pending,
+            ));
+            events.extend(pending.drain(..));
+        }
+        assert!(matches!(events.as_slice(), [
+            StreamEvent::TextDelta(a), StreamEvent::ThinkingDelta(_), StreamEvent::TextDelta(b),
+            StreamEvent::TextDone, StreamEvent::TextDelta(c), StreamEvent::TextDone,
+            StreamEvent::MessageEnd { .. }
+        ] if a == "The cause is " && b == "the retry loop." && c == "Second message"));
     }
 }

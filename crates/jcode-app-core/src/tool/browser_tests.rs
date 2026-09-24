@@ -45,6 +45,7 @@ fn snapshot_maps_to_annotated_get_content() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("snapshot", &input).unwrap();
@@ -87,6 +88,7 @@ fn eval_maps_script_and_page_world() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("eval", &input).unwrap();
@@ -127,6 +129,7 @@ fn interactables_maps_to_bridge_action() {
         path: None,
         fields: None,
         scroll_to: None,
+        ..Default::default()
     };
 
     let (action, params, _) = bridge_request("interactables", &input).unwrap();
@@ -173,20 +176,50 @@ fn schema_exposes_advanced_browser_fields() {
 }
 
 #[test]
-fn resolve_provider_accepts_auto_and_firefox() {
-    assert!(resolve_provider(Some("auto")).is_ok());
-    assert!(resolve_provider(Some("firefox")).is_ok());
+fn resolve_provider_accepts_every_supported_browser() {
+    for browser in [
+        "auto", "firefox", "chrome", "chromium", "edge", "brave", "safari",
+    ] {
+        assert!(resolve_provider(Some(browser)).is_ok(), "{browser}");
+    }
 }
 
 #[test]
-fn resolve_provider_rejects_unsupported_browser() {
-    let err = resolve_provider(Some("chrome"))
+fn resolve_provider_rejects_unknown_browser() {
+    let err = resolve_provider(Some("netscape"))
         .err()
-        .expect("chrome should not resolve yet");
+        .expect("unknown browsers must not resolve");
+    assert!(err.to_string().contains("Unknown browser 'netscape'"));
+}
+
+#[test]
+fn explicit_browser_request_refuses_a_different_connected_browser() {
+    let status = jcode_base::browser::BrowserStatus {
+        backend: "firefox_agent_bridge",
+        browser: "chrome",
+        detected_via: "requested explicitly",
+        connected_browser: Some("firefox".into()),
+        setup_complete: true,
+        binary_installed: true,
+        responding: true,
+        compatible: true,
+        missing_actions: vec![],
+        ready: true,
+    };
+    let err = ready_in_requested_browser(&status, BrowserKind::Chrome, true)
+        .expect_err("explicit chrome must not silently drive firefox");
     assert!(
         err.to_string()
-            .contains("not wired into the built-in browser tool")
+            .contains("connected to Firefox, not Google Chrome")
     );
+    // Auto mode drives whichever browser owns the bridge.
+    assert!(ready_in_requested_browser(&status, BrowserKind::Chrome, false).is_ok());
+    // Chromium-family browsers share one extension build.
+    let edge = jcode_base::browser::BrowserStatus {
+        connected_browser: Some("edge".into()),
+        ..status
+    };
+    assert!(ready_in_requested_browser(&edge, BrowserKind::Chrome, true).is_ok());
 }
 
 #[test]
@@ -240,7 +273,9 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
     std::fs::write(browser_dir.join("firefox-agent-bridge-host"), "host").expect("write fake host");
     std::fs::write(browser_dir.join(".setup-complete"), "complete").expect("write setup marker");
 
-    let error = ensure_firefox_ready()
+    // Pin the target so the test does not depend on this machine's browsers.
+    let target = jcode_base::browser::resolve_target_browser(Some("firefox")).expect("firefox");
+    let error = ensure_firefox_ready(&target, false)
         .await
         .expect_err("stale setup marker must not bypass live readiness");
     let message = error.to_string();
@@ -261,4 +296,131 @@ async fn readiness_does_not_trust_a_stale_setup_marker() {
     } else {
         jcode_base::env::remove_var("JCODE_BROWSER_AUTOLAUNCH");
     }
+}
+
+#[test]
+fn ordinary_click_preserves_existing_bridge_dispatch() {
+    let input = BrowserInput {
+        action: "click".into(),
+        selector: Some("#next".into()),
+        ..Default::default()
+    };
+    let (_, params, _) = bridge_request("click", &input).unwrap();
+    assert!(params.get("dispatchEvents").is_none());
+}
+
+#[test]
+fn handoff_schema_defaults_to_fast_agent_and_bounds_inputs() {
+    let _guard = jcode_base::storage::lock_test_env();
+    let tool = BrowserTool::new();
+    assert!(
+        tool.description()
+            .contains("Use action='handoff' by default for browser tasks")
+    );
+    let schema = tool.parameters_schema();
+    assert!(
+        schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Use handoff by default for browser tasks")
+    );
+    assert_eq!(schema["properties"]["max_steps"]["default"], 40);
+    assert_eq!(schema["properties"]["max_steps"]["maximum"], 100);
+    assert_eq!(schema["properties"]["confidence_threshold"]["default"], 0.8);
+    for key in ["goal", "context", "candidates", "text_values"] {
+        assert!(schema["properties"].get(key).is_some());
+    }
+}
+
+#[tokio::test]
+async fn handoff_disabled_switch_removes_schema_and_rejects_execution_before_provider_setup() {
+    const KEY: &str = "JCODE_BROWSER_HANDOFF_DISABLED";
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => jcode_base::env::set_var(KEY, value),
+                None => jcode_base::env::remove_var(KEY),
+            }
+        }
+    }
+
+    let _guard = jcode_base::storage::lock_test_env();
+    let _restore = RestoreEnv(std::env::var_os(KEY));
+    let tool = BrowserTool::new();
+    for value in [None, Some("0"), Some("1")] {
+        match value {
+            Some(value) => jcode_base::env::set_var(KEY, value),
+            None => jcode_base::env::remove_var(KEY),
+        }
+        let disabled = value == Some("1");
+        assert_eq!(browser_handoff_disabled(), disabled);
+        let schema = tool.parameters_schema();
+        let properties = &schema["properties"];
+        let actions = properties["action"]["enum"].as_array().unwrap();
+        assert_eq!(actions.contains(&json!("handoff")), !disabled);
+        for action in ["status", "setup", "open", "click", "fill_form", "eval"] {
+            assert!(actions.contains(&json!(action)));
+        }
+        for key in [
+            "goal",
+            "context",
+            "max_steps",
+            "confidence_threshold",
+            "text_values",
+            "candidates",
+        ] {
+            assert_eq!(properties.get(key).is_some(), !disabled, "{key}");
+        }
+        assert_eq!(
+            tool.description()
+                .contains("Use action='handoff' by default"),
+            !disabled
+        );
+        assert_eq!(
+            properties["action"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Use handoff by default"),
+            !disabled
+        );
+        let ctx = ToolContext {
+            session_id: "browser-disable-test".into(),
+            message_id: "m".into(),
+            tool_call_id: "t".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: super::super::ToolExecutionMode::Direct,
+        };
+        // An unknown browser makes the enabled branch hermetic. In the
+        // disabled branch the guard must fire before even resolving a provider.
+        let err = tool
+            .execute(json!({"action":"handoff", "browser":"netscape"}), ctx)
+            .await
+            .err()
+            .expect("request must fail without browser side effects");
+        if disabled {
+            assert!(err.to_string().contains("JCODE_BROWSER_HANDOFF_DISABLED=1"));
+        } else {
+            assert!(err.to_string().contains("Unknown browser 'netscape'"));
+        }
+    }
+}
+
+#[test]
+fn nested_scroll_uses_container_delta_without_escaping_scope() {
+    let input: BrowserInput = serde_json::from_value(json!({
+        "action":"scroll","selector":"#sections","y":600,"tab_id":7,"frame_id":0,"all_frames":false
+    }))
+    .unwrap();
+    let (action, params, _) = bridge_request("scroll", &input).unwrap();
+    assert_eq!(action, "evaluate");
+    assert_eq!(params["tabId"], 7);
+    assert_eq!(params["frameId"], 0);
+    assert_eq!(params["allFrames"], false);
+    let script = params["script"].as_str().unwrap();
+    assert!(script.contains("element.scrollBy"));
+    assert!(script.contains("top:600"));
+    assert!(script.contains("return {scrolled:true"));
 }

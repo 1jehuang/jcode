@@ -53,18 +53,33 @@ to reach the terminal: the rendered frame buffer.
 ```mermaid
 flowchart TD
     A["Widgets: rgb() literals,<br/>role accessors, named colors"] --> B["Rendered frame buffer"]
-    B --> C["adapt_buffer_for_theme<br/>(light/dark adaptation)"]
-    C --> D["adapt_buffer_for_palette<br/>(user color config)"]
-    D --> E[Terminal]
+    B --> C["Attribute configured roles<br/>from original colors"]
+    C --> D["Adapt unconfigured colors<br/>for theme and surface contrast"]
+    D --> E["Terminal: chosen overrides stay exact"]
 ```
 
 The order matters. The light/dark pass exists because jcode's *built-in* palette
-is designed for dark terminals, so it flips luminance to make those colors work
-on light ones. A color the user configured is already the color they want, so it
-runs last and is never flipped: otherwise a deliberately dark red for errors on a
-white terminal would come out an unreadable pale pink. Because incoming literals
-have already been flipped by then, role defaults are pre-flipped the same way
-before matching.
+is designed for dark terminals. On light terminals it flips luminance, then
+repairs foreground and underline colors to meet a **7:1 enhanced contrast target** on
+their cell's adapted background. Default terminal backgrounds use a conservative
+off-white reference (`#e0e0e0`), so muted labels stay readable on tinted and
+inactive light panes, not only pure white. Panel fills keep their light tints.
+Reverse-video cells use their visible foreground/background roles, and the
+contrast check includes 256-color quantization. If neither black nor white can
+reach 7:1 on an intermediate-tone surface, the best available endpoint is used.
+Dark themes are unchanged.
+
+This avoids simple inversion turning muted `#505050` text into washed-out
+`#afafaf` text. The default-surface muted ink is now `#474747` instead.
+
+A color the user configured is already the color they want. The combined
+`adapt_buffer_for_display` pass matches overrides against the original native
+colors, then adapts only colors that were not substituted. Matching must happen
+before contrast repair: otherwise different muted grays can converge to the same
+readable ink, making `tool`, `dim`, and `pending` overrides indistinguishable.
+Explicit overrides remain exact, even if a user deliberately chooses a
+low-contrast color. Unconfigured text uses its final surface, including a
+configured panel background. Partial animation/spinner redraws use the same order.
 
 Three consequences worth knowing:
 
@@ -72,11 +87,12 @@ Three consequences worth knowing:
   the role's *default* color, not the configured one. If it returned the
   configured color, a cell would be remapped twice (once by the accessor, once
   by the buffer pass) and the hue/lightness offsets would compound.
-- **Ad hoc literals follow their role.** A literal within a small perceptual
-  radius of a role's default is re-expressed relative to the new role color,
-  preserving its own lightness and chroma offset. So a "slightly dimmer variant
-  of the warning color" stays a slightly dimmer variant after you recolor
-  `warning`. Literals far from every configured role are left alone.
+- **Only role-tagged colors are configurable.** A buffer color that *is* a
+  role's default is replaced by that role's configured color, and ratatui's
+  named colors map to the role they conventionally stand for. An ad hoc
+  `rgb(...)` literal carries no role, so recoloring a role leaves it alone: give
+  a shade a role if it should follow `/colors`. There is no guessing by color
+  proximity, so an override can never bleed into another role's output.
 
 - **Configured colors are used exactly as given**, on light and dark terminals
   alike, so what you put in the config is what the terminal receives.
@@ -84,23 +100,13 @@ Three consequences worth knowing:
 An unconfigured palette is a byte-identical no-op, guarded by tests, so existing
 users see no change.
 
-### Is it really *every* color?
+### Which colors are configurable?
 
-That claim is checked rather than asserted. `palette_literals.rs` holds every
-distinct `rgb(...)` literal the TUI crates render (222 of them), and a test
-requires **all** of them to be reachable from some role: an unclaimed literal is
-a color a user cannot change. A second test requires every one of the 22 roles to
-claim at least one real literal (so no role is dead weight in `/colors`) and none
-to claim more than half (so the family radius still tells roles apart). The
-current spread runs from 2 literals (`header_session`) to 28 (`warning`).
-
-Ratatui's named colors are covered separately, since they carry no RGB for
-literal matching to work with. A test enumerates every named color the TUI
-actually uses and requires each to map to a role. `Color::Black` was unreachable
-until that test existed. `Color::Reset` is deliberately never substituted: it is
-how the terminal's own background shows through.
-
-Regenerate `palette_literals.rs` when adding widgets that introduce new shades.
+Every role, plus every ratatui named color the TUI uses. Named colors are mapped
+explicitly and a test requires each used one to map to a role; `Color::Reset` is
+never substituted, since it is how the terminal's own background shows through.
+`palette_literals.rs` is a corpus for the light-contrast tests, not a
+configurability claim; regenerate it when adding widgets with new shades.
 
 ## Measuring harmony
 

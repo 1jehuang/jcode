@@ -4,7 +4,8 @@
 //! - Project (per working directory)
 //! - Global (user-level preferences)
 //!
-//! Integrates with the Haiku sidecar for relevance verification and extraction.
+//! Jev provides typed relevance decisions. Optional text-generating extraction
+//! is independent of recall and is never required to read existing memories.
 
 use crate::memory_graph::{GRAPH_VERSION, MemoryGraph};
 use crate::memory_types::{
@@ -34,7 +35,7 @@ pub use crate::memory_types::{
     format_relevant_display_prompt, format_relevant_prompt,
 };
 use crate::memory_types::{
-    collect_skill_query_terms, format_entries_for_prompt, memory_matches_search, memory_score,
+    collect_skill_query_terms, format_entries_for_prompt, memory_matches_search,
     normalize_memory_search_text, normalize_search_text, skill_retrieval_bonus,
 };
 pub use activity::{
@@ -42,12 +43,14 @@ pub use activity::{
     get_activity, pipeline_start, pipeline_update, record_injected_prompt, set_state,
 };
 use cache::{cache_graph, cached_graph};
+pub(crate) use pending::set_pending_memory_for_project_with_selection;
 pub use pending::{
     PendingMemory, clear_all_injected_memories, clear_all_pending_memory, clear_injected_memories,
     clear_pending_memory, has_any_pending_memory, has_pending_memory, is_memory_injected,
     is_memory_injected_any, mark_memories_injected, mark_memories_known, set_pending_memory,
-    set_pending_memory_with_ids, set_pending_memory_with_ids_and_display, sync_injected_memories,
-    take_pending_memory,
+    set_pending_memory_for_project, set_pending_memory_with_ids,
+    set_pending_memory_with_ids_and_display, sync_injected_memories, take_pending_memory,
+    take_pending_memory_for_project,
 };
 #[cfg(test)]
 use pending::{backdate_injected_memory_for_test, insert_pending_memory_for_test};
@@ -84,6 +87,7 @@ pub fn register_synthetic_entry_provider(provider: SyntheticEntryProvider) {
         .push(provider);
 }
 
+#[cfg(test)]
 fn collect_synthetic_entries() -> Vec<MemoryEntry> {
     let providers = SYNTHETIC_ENTRY_PROVIDERS
         .read()
@@ -112,41 +116,20 @@ struct LegacyNoteEntry {
 
 pub type MemoryEventSink = Arc<dyn Fn(crate::protocol::ServerEvent) + Send + Sync>;
 
-/// Whether the user opted into the memory sidecar (LLM precision judge) mode.
-///
-/// This is the *configured* intent, not whether an LLM is actually reachable.
-/// It defaults to `true`: the LLM precision-judge path is the only mode that is
-/// reliably productive, so memory uses it unless the user explicitly opts into
-/// the no-LLM hybrid path (`agents.memory_sidecar_enabled = false`).
+/// Optional text-generating extraction is independent of Jev recall.
 pub fn memory_sidecar_enabled() -> bool {
     crate::config::config().agents.memory_sidecar_enabled
 }
 
-/// Whether the LLM precision-judge (sidecar) path can actually run right now:
-/// the user opted into sidecar mode AND a real LLM backend is reachable.
-///
-/// Re-evaluated live so login add/remove is reflected without a restart.
+/// Availability of the optional extraction sidecar, never used to gate recall.
 pub fn memory_llm_judge_available() -> bool {
     memory_sidecar_enabled() && crate::sidecar::Sidecar::llm_backend_available()
 }
 
-/// Whether memory should do anything at all this moment.
-///
-/// Memory is only worthwhile with the LLM precision judge. So memory is active
-/// when EITHER:
-/// - the LLM judge is available (configured + a backend is reachable), OR
-/// - the user explicitly opted OUT of the sidecar (they deliberately want the
-///   no-LLM hybrid path).
-///
-/// The one case we suppress is "sidecar mode requested but no LLM backend is
-/// reachable" (e.g. logged out / lost access): rather than silently degrading
-/// to the low-precision no-LLM path, memory goes dormant until a login returns.
+/// Recall requires a Jev credential route. Subscription entitlement is checked
+/// by the gateway, not inferred from a cached client tier.
 pub fn memory_runtime_active() -> bool {
-    if !memory_sidecar_enabled() {
-        // Explicit opt-out: user chose the no-LLM hybrid path on purpose.
-        return true;
-    }
-    crate::sidecar::Sidecar::llm_backend_available()
+    crate::jev::JevClient::available()
 }
 
 fn emit_memory_activity(event_tx: Option<&MemoryEventSink>) {
@@ -191,6 +174,15 @@ pub struct MemoryManager {
     /// When true, use isolated test storage instead of real memory
     test_mode: bool,
     include_skills: bool,
+}
+
+/// Recall output retains the exact entries supplied to the relevance judge so
+/// publication can reject even non-rendered metadata changes during inference.
+#[derive(Default)]
+pub struct MemoryRelevanceResult {
+    pub prompt: Option<String>,
+    pub display_prompt: Option<String>,
+    pub selected_entries: Vec<MemoryEntry>,
 }
 
 impl MemoryManager {
@@ -343,7 +335,6 @@ impl MemoryManager {
             if let Some(tag) = note.tag {
                 entry.tags.push(tag);
             }
-            entry.ensure_embedding();
             graph.add_memory(entry);
             changed = true;
         }
@@ -389,81 +380,42 @@ impl MemoryManager {
         storage::write_json(&path, store)
     }
 
-    /// Similarity threshold for storage-layer dedup.
-    /// Memories above this threshold are considered duplicates and reinforced instead.
-    const STORAGE_DEDUP_THRESHOLD: f32 = 0.85;
-
+    /// Store without embedding inference. Exact duplicates reinforce an existing
+    /// entry only within the requested scope, never mutate a different project.
     pub fn remember_project(&self, entry: MemoryEntry) -> Result<String> {
-        let mut entry = entry;
-        if self.should_generate_embedding_for_entry(&entry) {
-            entry.ensure_embedding();
-        }
-
+        anyhow::ensure!(
+            self.project_memory_path()?.is_some(),
+            "Project memory requires a working directory; use global scope explicitly"
+        );
         let mut graph = self.load_project_graph()?;
-
-        if let Some(ref emb) = entry.embedding {
-            if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
-                && let Some(existing) = graph.get_memory_mut(&existing_id)
-            {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_project_graph(&graph)?;
-                return Ok(existing_id);
-            }
-
-            // Cross-store dedup: also check global graph
-            if let Ok(mut global_graph) = self.load_global_graph()
-                && let Some(existing_id) =
-                    Self::find_duplicate_in_graph(&global_graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
-                && let Some(existing) = global_graph.get_memory_mut(&existing_id)
-            {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_global_graph(&global_graph)?;
-                return Ok(existing_id);
-            }
-        }
-
-        let id = graph.add_memory(entry);
+        let id = Self::remember_in_graph(&mut graph, entry);
         self.save_project_graph(&graph)?;
         Ok(id)
     }
 
     pub fn remember_global(&self, entry: MemoryEntry) -> Result<String> {
-        let mut entry = entry;
-        if self.should_generate_embedding_for_entry(&entry) {
-            entry.ensure_embedding();
-        }
-
         let mut graph = self.load_global_graph()?;
-
-        if let Some(ref emb) = entry.embedding {
-            if let Some(existing_id) =
-                Self::find_duplicate_in_graph(&graph, emb, Self::STORAGE_DEDUP_THRESHOLD)
-                && let Some(existing) = graph.get_memory_mut(&existing_id)
-            {
-                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
-                self.save_global_graph(&graph)?;
-                return Ok(existing_id);
-            }
-
-            // Cross-store dedup: also check project graph
-            if let Ok(mut project_graph) = self.load_project_graph()
-                && let Some(existing_id) = Self::find_duplicate_in_graph(
-                    &project_graph,
-                    emb,
-                    Self::STORAGE_DEDUP_THRESHOLD,
-                )
-                && let Some(existing) = project_graph.get_memory_mut(&existing_id)
-            {
-                existing.reinforce(entry.source.as_deref().unwrap_or("cross-dedup"), 0);
-                self.save_project_graph(&project_graph)?;
-                return Ok(existing_id);
-            }
-        }
-
-        let id = graph.add_memory(entry);
+        let id = Self::remember_in_graph(&mut graph, entry);
         self.save_global_graph(&graph)?;
         Ok(id)
+    }
+
+    fn remember_in_graph(graph: &mut MemoryGraph, entry: MemoryEntry) -> String {
+        let normalized = entry.content.trim();
+        let duplicate = graph
+            .active_memories()
+            .into_iter()
+            .find(|existing| {
+                existing.category == entry.category && existing.content.trim() == normalized
+            })
+            .map(|existing| existing.id.clone());
+        if let Some(id) = duplicate {
+            if let Some(existing) = graph.get_memory_mut(&id) {
+                existing.reinforce(entry.source.as_deref().unwrap_or("dedup"), 0);
+            }
+            return id;
+        }
+        graph.add_memory(entry)
     }
 
     /// Insert or update a memory with a stable ID in the project graph.
@@ -489,13 +441,9 @@ impl MemoryManager {
     fn upsert_memory_in_graph(
         &self,
         graph: &mut crate::memory_graph::MemoryGraph,
-        mut entry: MemoryEntry,
+        entry: MemoryEntry,
     ) -> String {
         let id = entry.id.clone();
-        let should_generate_embedding = self.should_generate_embedding_for_entry(&entry);
-        if should_generate_embedding {
-            entry.ensure_embedding();
-        }
 
         let Some(existing_snapshot) = graph.get_memory(&id).cloned() else {
             return graph.add_memory(entry);
@@ -523,49 +471,14 @@ impl MemoryManager {
             existing.active = entry.active;
             existing.superseded_by = entry.superseded_by;
             existing.confidence = entry.confidence;
-            if content_changed && should_generate_embedding {
-                existing.embedding = None;
-                existing.ensure_embedding();
-            } else if content_changed {
-                existing.embedding = None;
+            if content_changed {
+                existing.set_embedding(None, None);
             }
         }
 
         id
     }
 
-    fn should_generate_embedding_for_entry(&self, entry: &MemoryEntry) -> bool {
-        if self.test_mode {
-            return false;
-        }
-
-        #[cfg(test)]
-        if std::env::var_os("JCODE_TEST_ALLOW_MEMORY_EMBEDDINGS").is_none() {
-            return false;
-        }
-
-        !matches!(&entry.category, MemoryCategory::Custom(category) if category == "goal")
-    }
-
-    fn find_duplicate_in_graph(
-        graph: &crate::memory_graph::MemoryGraph,
-        query_emb: &[f32],
-        threshold: f32,
-    ) -> Option<String> {
-        let mut best: Option<(String, f32)> = None;
-        for entry in graph.active_memories() {
-            if let Some(ref emb) = entry.embedding {
-                let sim = crate::embedding::cosine_similarity(query_emb, emb);
-                if sim >= threshold && best.as_ref().map(|(_, s)| sim > *s).unwrap_or(true) {
-                    best = Some((entry.id.clone(), sim));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
-    }
-
-    /// Find memories similar to the given text using embedding search
-    /// Returns memories with similarity above threshold, sorted by similarity
     pub fn find_similar(
         &self,
         text: &str,
@@ -774,6 +687,7 @@ impl MemoryManager {
         Ok(entries)
     }
 
+    #[cfg(test)]
     fn synthetic_skill_entries(&self) -> Vec<MemoryEntry> {
         if !self.include_skills {
             return Vec::new();
@@ -782,49 +696,13 @@ impl MemoryManager {
         collect_synthetic_entries()
     }
 
+    #[cfg(test)]
     fn collect_retrieval_candidates_scoped(&self, scope: MemoryScope) -> Result<Vec<MemoryEntry>> {
         let mut entries = self.collect_memories_scoped(scope)?;
         if scope.includes_global() {
             entries.extend(self.synthetic_skill_entries());
         }
         Ok(entries)
-    }
-
-    fn collect_retrieval_candidates_with_embeddings_scoped(
-        &self,
-        scope: MemoryScope,
-    ) -> Result<Vec<MemoryEntry>> {
-        let mut entries = self.collect_memories_with_embeddings_scoped(scope)?;
-        if scope.includes_global() {
-            entries.extend(
-                self.synthetic_skill_entries()
-                    .into_iter()
-                    .filter_map(|mut entry| entry.ensure_embedding().then_some(entry)),
-            );
-        }
-        Ok(entries)
-    }
-
-    fn find_retrieval_candidates_similar_scoped(
-        &self,
-        text: &str,
-        threshold: f32,
-        limit: usize,
-        scope: MemoryScope,
-    ) -> Result<Vec<(MemoryEntry, f32)>> {
-        let query_embedding = match crate::embedding_backend::embed_query_active(text) {
-            Ok((emb, _model)) => emb,
-            Err(e) => {
-                crate::logging::info(&format!(
-                    "Embedding failed for retrieval candidates, falling back to keyword search: {}",
-                    e
-                ));
-                return Ok(Vec::new());
-            }
-        };
-
-        let entries = self.collect_retrieval_candidates_with_embeddings_scoped(scope)?;
-        Self::score_and_filter(entries, &query_embedding, text, threshold, limit)
     }
 
     fn score_and_filter(
@@ -970,40 +848,6 @@ impl MemoryManager {
         Ok((generated, failed))
     }
 
-    fn touch_entries(&self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_set: std::collections::HashSet<&str> = ids.iter().map(|id| id.as_str()).collect();
-
-        let mut project = self.load_project_graph()?;
-        let mut project_changed = false;
-        for entry in project.memories.values_mut() {
-            if id_set.contains(entry.id.as_str()) {
-                entry.touch();
-                project_changed = true;
-            }
-        }
-        if project_changed {
-            self.save_project_graph(&project)?;
-        }
-
-        let mut global = self.load_global_graph()?;
-        let mut global_changed = false;
-        for entry in global.memories.values_mut() {
-            if id_set.contains(entry.id.as_str()) {
-                entry.touch();
-                global_changed = true;
-            }
-        }
-        if global_changed {
-            self.save_global_graph(&global)?;
-        }
-
-        Ok(())
-    }
-
     pub fn get_prompt_memories(&self, limit: usize) -> Option<String> {
         self.get_prompt_memories_scoped(limit, MemoryScope::All)
     }
@@ -1146,89 +990,23 @@ impl MemoryManager {
         Ok(ids)
     }
 
-    /// Check if stored memories are relevant to the current context
-    /// Returns memories that the sidecar deems relevant
+    /// Recall directly through Jev. The legacy `max_candidates` argument now
+    /// limits output, not the input pool: old memories must remain discoverable.
     pub async fn get_relevant_for_context(
         &self,
         context: &str,
         max_candidates: usize,
     ) -> Result<Vec<MemoryEntry>> {
-        // Get top candidate memories by score
-        let candidates: Vec<_> = top_k_by_score(
-            self.collect_retrieval_candidates_scoped(MemoryScope::All)?
+        Ok(
+            crate::memory_jev::recall(self, context, max_candidates, MemoryScope::All)
+                .await?
                 .into_iter()
-                .filter(|entry| entry.active)
-                .map(|entry| {
-                    let score = memory_score(&entry) as f32;
-                    (entry, score)
-                }),
-            max_candidates,
+                .map(|(entry, _)| entry)
+                .collect(),
         )
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .collect();
-
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Update activity state - checking memories
-        set_state(MemoryState::SidecarChecking {
-            count: candidates.len(),
-        });
-        add_event(MemoryEventKind::SidecarStarted);
-
-        let sidecar = Sidecar::new();
-        let mut relevant = Vec::new();
-        let mut relevant_ids = Vec::new();
-
-        for memory in candidates {
-            let start = Instant::now();
-            match sidecar.check_relevance(&memory.content, context).await {
-                Ok((is_relevant, _reason)) => {
-                    let latency_ms = start.elapsed().as_millis() as u64;
-                    add_event(MemoryEventKind::SidecarComplete { latency_ms });
-
-                    if is_relevant {
-                        let preview = if memory.content.len() > 30 {
-                            format!("{}...", crate::util::truncate_str(&memory.content, 30))
-                        } else {
-                            memory.content.clone()
-                        };
-                        add_event(MemoryEventKind::SidecarRelevant {
-                            memory_preview: preview,
-                        });
-                        relevant_ids.push(memory.id.clone());
-                        relevant.push(memory);
-                    } else {
-                        add_event(MemoryEventKind::SidecarNotRelevant);
-                    }
-                }
-                Err(e) => {
-                    add_event(MemoryEventKind::Error {
-                        message: e.to_string(),
-                    });
-                    crate::logging::error(&format!("Sidecar relevance check failed: {}", e));
-                }
-            }
-        }
-
-        let _ = self.touch_entries(&relevant_ids);
-
-        // Update final state
-        if relevant.is_empty() {
-            set_state(MemoryState::Idle);
-        } else {
-            set_state(MemoryState::FoundRelevant {
-                count: relevant.len(),
-            });
-        }
-
-        Ok(relevant)
     }
 
-    /// Simple relevance check without sidecar (keyword-based)
-    /// Use this for quick checks when sidecar is not needed
+    /// Local keyword lookup, available without a remote decision provider.
     pub fn get_relevant_keywords(
         &self,
         keywords: &[&str],
@@ -1291,39 +1069,32 @@ impl MemoryManager {
                 .get_relevant_parallel(&sid, &messages, event_tx.clone())
                 .await
             {
-                Ok((Some(prompt), memory_ids, display_prompt)) => {
-                    let count = prompt
-                        .lines()
-                        .map(str::trim_start)
-                        .filter(|line| {
-                            line.starts_with("- ")
-                                || line
-                                    .split_once(". ")
-                                    .map(|(prefix, _)| {
-                                        !prefix.is_empty()
-                                            && prefix.chars().all(|c| c.is_ascii_digit())
-                                    })
-                                    .unwrap_or(false)
-                        })
-                        .count()
-                        .max(1);
-                    set_pending_memory_with_ids_and_display(
+                Ok(MemoryRelevanceResult {
+                    prompt: Some(prompt),
+                    display_prompt,
+                    selected_entries,
+                }) => {
+                    let count = selected_entries.len();
+                    set_pending_memory_for_project_with_selection(
                         &sid,
                         prompt,
                         count,
-                        memory_ids,
+                        &selected_entries,
                         display_prompt,
+                        manager
+                            .project_dir
+                            .as_deref()
+                            .and_then(|path| path.to_str()),
                     );
-                    if memory_sidecar_enabled() {
-                        add_event(MemoryEventKind::SidecarComplete { latency_ms: 0 });
-                    }
                     emit_memory_activity(event_tx.as_ref());
                 }
-                Ok((None, _, _)) => {
+                Ok(MemoryRelevanceResult { prompt: None, .. }) => {
+                    clear_pending_memory(&sid);
                     set_state(MemoryState::Idle);
                     emit_memory_activity(event_tx.as_ref());
                 }
                 Err(e) => {
+                    clear_pending_memory(&sid);
                     crate::logging::error(&format!("Background memory check failed: {}", e));
                     add_event(MemoryEventKind::Error {
                         message: e.to_string(),
@@ -1337,324 +1108,102 @@ impl MemoryManager {
         });
     }
 
-    /// Get relevant memories using embedding search + sidecar verification.
-    ///
-    /// 1. Embed the context (fast, local, ~30ms)
-    /// 2. Find similar memories by embedding (instant)
-    /// 3. Only call sidecar for embedding hits (1-5 calls instead of 30)
-    ///
-    /// Returns `(formatted_prompt, memory_ids, display_prompt)` on success.
+    /// Jev-only automatic recall. Storage and per-session dedup remain local;
+    /// there is no embedding, conventional LLM, or unjudged fallback path.
     pub async fn get_relevant_parallel(
         &self,
         session_id: &str,
         messages: &[crate::message::Message],
         event_tx: Option<MemoryEventSink>,
-    ) -> Result<(Option<String>, Vec<String>, Option<String>)> {
-        let context = format_context_for_relevance(messages);
-        if context.is_empty() {
-            return Ok((None, Vec::new(), None));
+    ) -> Result<MemoryRelevanceResult> {
+        let query = format_focused_query_for_relevance(messages);
+        let query = crate::util::truncate_str(&query, crate::memory_jev::MAX_QUERY_BYTES);
+        if query.trim().is_empty() {
+            return Ok(MemoryRelevanceResult::default());
         }
-
-        // Start pipeline tracking
         pipeline_start();
-
-        // Step 1: Embedding search (fast, local)
-        set_state(MemoryState::Embedding);
-        add_event(MemoryEventKind::EmbeddingStarted);
-        pipeline_update(|p| p.search = StepStatus::Running);
-        emit_memory_activity(event_tx.as_ref());
-
-        let embedding_start = Instant::now();
-        let candidates = match self.find_retrieval_candidates_similar_scoped(
-            &context,
-            EMBEDDING_SIMILARITY_THRESHOLD,
-            EMBEDDING_MAX_HITS,
-            MemoryScope::All,
-        ) {
-            Ok(hits) => {
-                let latency_ms = embedding_start.elapsed().as_millis() as u64;
-                if hits.is_empty() {
-                    add_event(MemoryEventKind::EmbeddingComplete {
-                        latency_ms,
-                        hits: 0,
-                    });
-                    pipeline_update(|p| {
-                        p.search = StepStatus::Done;
-                        p.search_result = Some(StepResult {
-                            summary: "0 hits".to_string(),
-                            latency_ms,
-                        });
-                        p.verify = StepStatus::Skipped;
-                        p.inject = StepStatus::Skipped;
-                        p.maintain = StepStatus::Skipped;
-                    });
-                    set_state(MemoryState::Idle);
-                    emit_memory_activity(event_tx.as_ref());
-                    return Ok((None, Vec::new(), None));
-                }
-                pipeline_update(|p| {
-                    p.search = StepStatus::Done;
-                    p.search_result = Some(StepResult {
-                        summary: format!("{} hits", hits.len()),
-                        latency_ms,
-                    });
-                });
-                add_event(MemoryEventKind::EmbeddingComplete {
-                    latency_ms,
-                    hits: hits.len(),
-                });
-                hits
-            }
-            Err(e) => {
-                crate::logging::info(&format!("Embedding search failed, falling back: {}", e));
-                add_event(MemoryEventKind::Error {
-                    message: e.to_string(),
-                });
+        let entries = match crate::memory_jev::collect_scoped(self, MemoryScope::All) {
+            Ok(entries) => entries,
+            Err(error) => {
+                clear_pending_memory(session_id);
                 pipeline_update(|p| {
                     p.search = StepStatus::Error;
-                    p.search_result = Some(StepResult {
-                        summary: "fallback".to_string(),
-                        latency_ms: embedding_start.elapsed().as_millis() as u64,
-                    });
-                });
-                emit_memory_activity(event_tx.as_ref());
-
-                top_k_by_score(
-                    self.collect_retrieval_candidates_scoped(MemoryScope::All)?
-                        .into_iter()
-                        .filter(|entry| entry.active)
-                        .map(|entry| {
-                            let score = memory_score(&entry) as f32;
-                            (entry, score)
-                        }),
-                    MEMORY_RELEVANCE_MAX_CANDIDATES,
-                )
-                .into_iter()
-                .map(|(entry, _)| (entry, 0.0))
-                .collect()
-            }
-        };
-
-        // Filter out memories that have already been injected in this session
-        let pre_filter_count = candidates.len();
-        let candidates: Vec<_> = candidates
-            .into_iter()
-            .filter(|(entry, _)| !is_memory_injected_any(&entry.id))
-            .collect();
-        if candidates.len() < pre_filter_count {
-            crate::logging::info(&format!(
-                "Filtered out {} already-injected memories ({} -> {} candidates)",
-                pre_filter_count - candidates.len(),
-                pre_filter_count,
-                candidates.len()
-            ));
-        }
-
-        if candidates.is_empty() {
-            pipeline_update(|p| {
-                p.verify = StepStatus::Skipped;
-                p.inject = StepStatus::Skipped;
-                p.maintain = StepStatus::Skipped;
-            });
-            set_state(MemoryState::Idle);
-            emit_memory_activity(event_tx.as_ref());
-            return Ok((None, Vec::new(), None));
-        }
-
-        if !memory_sidecar_enabled() {
-            let relevant: Vec<_> = candidates
-                .into_iter()
-                .take(MEMORY_RELEVANCE_MAX_RESULTS)
-                .map(|(entry, _)| entry)
-                .collect();
-            let relevant_ids: Vec<String> = relevant.iter().map(|entry| entry.id.clone()).collect();
-            let _ = self.touch_entries(&relevant_ids);
-
-            if relevant.is_empty() {
-                pipeline_update(|p| {
                     p.verify = StepStatus::Skipped;
-                    p.verify_result = Some(StepResult {
-                        summary: "semantic only".to_string(),
-                        latency_ms: 0,
-                    });
                     p.inject = StepStatus::Skipped;
-                    p.maintain = StepStatus::Skipped;
                 });
                 set_state(MemoryState::Idle);
                 emit_memory_activity(event_tx.as_ref());
-                return Ok((None, Vec::new(), None));
+                return Err(error);
             }
-
-            pipeline_update(|p| {
-                p.verify = StepStatus::Skipped;
-                p.verify_result = Some(StepResult {
-                    summary: format!("semantic {}", relevant.len()),
-                    latency_ms: 0,
-                });
-                p.inject = StepStatus::Running;
-            });
-
-            set_state(MemoryState::FoundRelevant {
-                count: relevant.len(),
-            });
-            emit_memory_activity(event_tx.as_ref());
-
-            let prompt = format_relevant_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS);
-            let display_prompt =
-                format_relevant_display_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS);
-
-            pipeline_update(|p| {
-                p.inject = StepStatus::Done;
-                p.inject_result = Some(StepResult {
-                    summary: format!("{} memories", relevant.len()),
-                    latency_ms: 0,
-                });
-            });
-            emit_memory_activity(event_tx.as_ref());
-
-            return Ok((prompt, relevant_ids, display_prompt));
-        }
-
-        // Step 2: Sidecar verification (only for embedding hits - much fewer calls!)
-        let total_candidates = candidates.len();
-        set_state(MemoryState::SidecarChecking {
-            count: total_candidates,
-        });
-        add_event(MemoryEventKind::SidecarStarted);
+        };
+        let entries: Vec<_> = entries
+            .into_iter()
+            .filter(|entry| entry.active && !is_memory_injected(session_id, &entry.id))
+            .collect();
         pipeline_update(|p| {
+            p.search = StepStatus::Done;
+            p.search_result = Some(StepResult {
+                summary: format!("{} local memories", entries.len()),
+                latency_ms: 0,
+            });
             p.verify = StepStatus::Running;
-            p.verify_progress = Some((0, total_candidates));
+            p.maintain = StepStatus::Skipped;
+        });
+        set_state(MemoryState::SidecarChecking {
+            count: entries.len(),
         });
         emit_memory_activity(event_tx.as_ref());
-
-        let sidecar = Sidecar::new();
-        let mut relevant = Vec::new();
-        let mut relevant_ids = Vec::new();
-
-        // Process in parallel batches
-        const BATCH_SIZE: usize = 5;
-        for batch in candidates.chunks(BATCH_SIZE) {
-            let futures: Vec<_> = batch
-                .iter()
-                .map(|(memory, _sim)| {
-                    let sidecar = sidecar.clone();
-                    let content = memory.content.clone();
-                    let ctx = context.clone();
-                    async move {
-                        let start = Instant::now();
-                        let result = sidecar.check_relevance(&content, &ctx).await;
-                        (result, start.elapsed())
-                    }
-                })
-                .collect();
-
-            let results = futures::future::join_all(futures).await;
-
-            for ((memory, sim), (result, elapsed)) in batch.iter().zip(results) {
-                match result {
-                    Ok((is_relevant, _reason)) => {
-                        add_event(MemoryEventKind::SidecarComplete {
-                            latency_ms: elapsed.as_millis() as u64,
-                        });
-
-                        if is_relevant {
-                            let preview = if memory.content.len() > 30 {
-                                format!("{}...", crate::util::truncate_str(&memory.content, 30))
-                            } else {
-                                memory.content.clone()
-                            };
-                            add_event(MemoryEventKind::SidecarRelevant {
-                                memory_preview: preview,
-                            });
-                            relevant_ids.push(memory.id.clone());
-                            relevant.push(memory.clone());
-                            crate::logging::info(&format!(
-                                "[{}] Memory relevant (sim={:.2}): {}",
-                                session_id,
-                                sim,
-                                crate::util::truncate_str(&memory.content, 50)
-                            ));
-                        } else {
-                            add_event(MemoryEventKind::SidecarNotRelevant);
-                        }
-                    }
-                    Err(e) => {
-                        add_event(MemoryEventKind::Error {
-                            message: e.to_string(),
-                        });
-                        crate::logging::info(&format!("Sidecar check failed: {}", e));
-                    }
-                }
-                // Update verify progress
-                let checked = relevant.len()
-                    + batch.len().saturating_sub(
-                        batch.len(), // approximate
-                    );
-                let _ = checked; // Progress updated below per-batch
+        let started = Instant::now();
+        let result = async {
+            if entries.is_empty() {
+                return Ok(Vec::new());
             }
-            // Update pipeline verify progress after each batch
-            pipeline_update(|p| {
-                p.verify_progress = Some((
-                    relevant_ids.len()
-                        + (total_candidates - candidates.len().min(total_candidates)),
-                    total_candidates,
-                ));
-            });
-            emit_memory_activity(event_tx.as_ref());
+            let client = crate::jev::JevClient::new()?;
+            crate::memory_jev::select(&client, query, entries, 5).await
         }
-
-        let verify_latency_ms = embedding_start.elapsed().as_millis() as u64;
-        let _ = self.touch_entries(&relevant_ids);
-
-        if relevant.is_empty() {
-            pipeline_update(|p| {
-                p.verify = StepStatus::Done;
-                p.verify_result = Some(StepResult {
-                    summary: "0 relevant".to_string(),
-                    latency_ms: verify_latency_ms,
+        .await;
+        let relevant: Vec<MemoryEntry> = match result {
+            Ok(results) => results.into_iter().map(|(entry, _)| entry).collect(),
+            Err(error) => {
+                clear_pending_memory(session_id);
+                pipeline_update(|p| {
+                    p.verify = StepStatus::Error;
+                    p.inject = StepStatus::Skipped;
                 });
-                p.inject = StepStatus::Skipped;
-                p.maintain = StepStatus::Skipped;
-            });
-            set_state(MemoryState::Idle);
-            emit_memory_activity(event_tx.as_ref());
-            return Ok((None, Vec::new(), None));
-        }
-
+                set_state(MemoryState::Idle);
+                emit_memory_activity(event_tx.as_ref());
+                return Err(error);
+            }
+        };
+        let count = relevant.len();
         pipeline_update(|p| {
             p.verify = StepStatus::Done;
             p.verify_result = Some(StepResult {
-                summary: format!("{} relevant", relevant.len()),
-                latency_ms: verify_latency_ms,
+                summary: format!("Jev: {count} relevant"),
+                latency_ms: started.elapsed().as_millis() as u64,
             });
-            p.inject = StepStatus::Running;
+            p.inject = if count == 0 {
+                StepStatus::Skipped
+            } else {
+                StepStatus::Pending
+            };
         });
-
-        set_state(MemoryState::FoundRelevant {
-            count: relevant.len(),
+        let prompt = format_relevant_prompt(&relevant, 5);
+        let display = format_relevant_display_prompt(&relevant, 5);
+        set_state(if count == 0 {
+            MemoryState::Idle
+        } else {
+            MemoryState::FoundRelevant { count }
         });
         emit_memory_activity(event_tx.as_ref());
-
-        let prompt = format_relevant_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS);
-        let display_prompt =
-            format_relevant_display_prompt(&relevant, MEMORY_RELEVANCE_MAX_RESULTS);
-
-        // Mark inject as done - the prompt is ready for injection
-        pipeline_update(|p| {
-            p.inject = StepStatus::Done;
-            p.inject_result = Some(StepResult {
-                summary: format!("{} memories", relevant.len()),
-                latency_ms: 0,
-            });
-        });
-        emit_memory_activity(event_tx.as_ref());
-
-        Ok((prompt, relevant_ids, display_prompt))
+        Ok(MemoryRelevanceResult {
+            prompt,
+            display_prompt: display,
+            selected_entries: relevant,
+        })
     }
 
-    // ==================== Graph-Based Operations ====================
-
-    /// Load project memories as a MemoryGraph with automatic migration
+    /// Load the existing project graph without generating embeddings.
     pub fn load_project_graph(&self) -> Result<MemoryGraph> {
         let Some(path) = self.project_memory_path()? else {
             return Ok(MemoryGraph::new());

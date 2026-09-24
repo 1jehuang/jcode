@@ -123,8 +123,12 @@ key = "off"
 # Max seconds to wait for the dictation command to finish (0 = no timeout)
 timeout_secs = 90
 
+# Extra names or terms to help built-in voice transcription recognize them.
+# Jcode's own product names are always included.
+# vocabulary = ["Kubernetes", "Alice Zhang"]
+
 [display]
-# Diff display mode: "off", "inline" (default), "full-inline", "pinned" (dedicated pane), or "file"
+# Diff display mode: "off", "inline" (default), "full-inline", or "file"
 diff_mode = "inline"
 
 # Center all content by default (default: false)
@@ -136,10 +140,6 @@ pin_images = true
 # Pin the full session todo list to the top of the chat transcript while it
 # scrolls, like the sticky previous-prompt preview (default: false)
 # pin_todos = true
-
-# Wrap long lines in the pinned diff pane (default: true)
-# Set to false for horizontal scrolling instead of wrapping
-diff_line_wrap = true
 
 # Queue mode: wait until assistant is done before sending next message
 queue_mode = false
@@ -221,10 +221,10 @@ prompt_entry_animation = true
 # external_sessions = true
 
 # Overscroll status line (model/provider/context info below the input):
-#   "overscroll" - elastic reveal when scrolling past the bottom (default)
-#   "on"         - always visible
+#   "on"         - always visible (default)
+#   "overscroll" - elastic reveal when scrolling past the bottom
 #   "off"        - never shown
-# overscroll_status = "overscroll"
+# overscroll_status = "on"
 
 # Disable specific animation variants by name.
 # Examples: ["donut"] or ["donut", "orbit_rings"]
@@ -348,7 +348,7 @@ tool_profile = "acp"
 [provider]
 # Default model (optional, uses provider default if not set)
 # Set via /model picker with Ctrl+B to save as default
-# default_model = "claude-opus-5"
+# default_model = "claude-opus-5-5"
 # Default provider (optional: claude|anthropic-api|openai|openai-api|copilot|openrouter|...)
 # When set, this provider is preferred on startup if available.
 #   claude        = Claude via OAuth/subscription (token in ~/.jcode/auth.json)
@@ -414,7 +414,7 @@ cross_provider_failover = "countdown"
 wake_mode = "internal"
 
 [agents]
-# Defaults for spawned helper agents (swarm workers, subagents, sidecars).
+# Swarm root settings and defaults for helper agents (workers, subagents, sidecars).
 # All keys are optional; the values below are the built-in defaults.
 #
 # Default model for spawned swarm/subagent sessions.
@@ -429,6 +429,14 @@ wake_mode = "internal"
 # workers inherit the provider-wide reasoning effort.
 # Env override: JCODE_SWARM_EFFORT
 # swarm_effort = "medium"
+#
+# Root model reasoning while /effort swarm or /effort swarm-deep is selected.
+# These are independent of worker swarm_effort. Supported levels:
+# none|minimal|low|medium|high|xhigh|max. Unset/invalid = max (model maximum).
+# Providers map unsupported levels to their supported range.
+# Env overrides: JCODE_SWARM_ROOT_EFFORT, JCODE_SWARM_DEEP_ROOT_EFFORT
+swarm_root_effort = "max"
+swarm_deep_root_effort = "max"
 #
 # How swarm-created agents are spawned:
 #   "inline"   - in-process (no window), shown as a live gallery viewport in the coordinator (default)
@@ -458,42 +466,28 @@ swarm_max_concurrent_agents = 32
 # Env override: JCODE_SWARM_STRIP_LAYOUT
 # swarm_strip_layout = "vertical"
 #
-# Model for the memory sidecar (relevance/extraction). Unset = sidecar auto-select
+# Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
+# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
+# auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
+# Env override: JCODE_MEMORY_JEV_PROVIDER
+# memory_jev_provider = "auto"
+# Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
+# memory_jev_threshold = 0.8
+# BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
+# Jcode requires an eligible subscription and gateway memory_jev capability.
+# With a Jcode login and an older gateway, explicitly select a BYOK provider.
+# No fallback after entitlement, auth, billing, or network failure; no silent BYOK spend.
+# Memories remain local; the query and candidate memories go to the selected provider.
+# No keys? Local memory list/search/remember/forget still work.
+#
+# Optional text-generating extraction is separate from recall. Disable it to
+# learn only through the main agent's explicit memory writes.
 # (OpenAI defaults to gpt-5.6-luna with reasoning effort "none").
-# Env override: JCODE_MEMORY_MODEL
-# memory_model = "gpt-5.6-luna"
-#
-# Whether the memory sidecar (LLM precision judge) handles relevance/extraction.
-# Default true: the LLM precision-judge path is the only reliably productive
-# memory mode. Set false only to opt into the lower-precision no-LLM hybrid path.
-# When this is true but no LLM backend is reachable (logged out), memory goes
-# dormant instead of degrading to the no-LLM path. Env: JCODE_MEMORY_SIDECAR_ENABLED
+# Env overrides: JCODE_MEMORY_SIDECAR_ENABLED, JCODE_MEMORY_MODEL
 # memory_sidecar_enabled = true
-#
-# Minimum turns between Mode-2 memory reranks (cadence floor). The expensive
-# listwise LLM rerank runs at most once per this many turns; skipped turns fall
-# back to hybrid-ordered surfacing. A topic change always forces a rerank. Set 1
-# to rerank every turn. Default 3.
-# memory_rerank_cadence = 3
-#
-# High-precision consensus rerank: run N independent LLM judges per fired rerank
-# and inject only memories that >= memory_rerank_min_agree of them agree on.
-# Default 2 judges / 2 agreement -> injection precision ~1.0 with ~100% clean
-# (zero memory) on no-memory turns, at 2 LLM calls per fired turn. Set votes=1
-# for the cheaper single-judge path (precision ~0.77).
-# memory_rerank_votes = 2
-# memory_rerank_min_agree = 2
-#
-# Embedding backend for memory dense-retrieval. "local" (default) uses the
-# bundled all-MiniLM-L6-v2 ONNX model (no network); "openai" uses a remote
-# OpenAI / OpenAI-compatible /v1/embeddings endpoint (requires OPENAI_API_KEY;
-# silently falls back to local when no key is found). Vectors from different
-# models live in separate spaces and are never compared, so switching is safe.
-# Env override: JCODE_MEMORY_EMBEDDING_BACKEND
-# memory_embedding_backend = "local"
-# memory_embedding_model = "text-embedding-3-small"
-# memory_embedding_base_url = "https://api.openai.com/v1"
-# memory_embedding_dim = 1536
+# memory_model = "gpt-5.6-luna"
+# Legacy memory_rerank_* and memory_embedding_* settings are accepted for
+# backwards compatibility, but have no effect on Jev recall.
 
 [terminal]
 # Without a hook, clients inside tmux automatically use a right-side pane.
@@ -559,6 +553,11 @@ swarm_max_concurrent_agents = 32
 # turn_complete_sound = "Glass"
 
 [hooks]
+# Synchronous tool-input transformers. Each receives the tool input JSON on
+# stdin and may print replacement JSON on stdout. Failures and empty output
+# retain the original input. Transformers run before pre_tool policy gates.
+# pre_tool_transform = ["~/.jcode/plugins/rtk-transform"]
+# pre_tool_transform_timeout_ms = 500
 # Lifecycle hooks: external commands jcode runs at well-defined points so other
 # programs can observe or gate agent behavior. Commands are parsed shell-style
 # (quotes work) but executed directly, with JCODE_HOOK_* env vars describing

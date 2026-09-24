@@ -4,13 +4,16 @@ use crate::{terminal_eprintln as eprintln, terminal_println as println};
 impl Agent {
     /// Run a single turn with the given user message
     pub async fn run_once(&mut self, user_message: &str) -> Result<()> {
-        self.add_message(
+        let input_id = self.add_message(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
                 cache_control: None,
             }],
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -29,7 +32,7 @@ impl Agent {
         user_message: &str,
         display_role: Option<crate::session::StoredDisplayRole>,
     ) -> Result<String> {
-        self.add_message_with_display_role(
+        let input_id = self.add_message_with_display_role(
             Role::User,
             vec![ContentBlock::Text {
                 text: user_message.to_string(),
@@ -37,6 +40,9 @@ impl Agent {
             }],
             display_role,
         );
+        if !user_message.trim().is_empty() {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()?;
         if trace_enabled() {
             eprintln!("[trace] session_id {}", self.session.id);
@@ -132,7 +138,11 @@ impl Agent {
             ));
         }
 
-        self.add_message_with_display_role(Role::User, blocks, display_role);
+        let starts_turn = blocks.len() > 1 || !user_message.trim().is_empty();
+        let input_id = self.add_message_with_display_role(Role::User, blocks, display_role);
+        if starts_turn {
+            self.begin_model_usage_turn(&input_id);
+        }
         self.session.save()
     }
 
@@ -319,17 +329,21 @@ impl Agent {
     }
 
     pub fn set_canary(&mut self, build_hash: &str) {
+        if !self.session.is_canary {
+            // Self-dev changes the tool surface, including hiding bundled docs.
+            self.unlock_tools();
+        }
         self.session.set_canary(build_hash);
         if let Err(err) = self.session.save() {
             logging::error(&format!("Failed to persist canary session state: {}", err));
         }
     }
 
-    /// Mark this session as a debug/test session
-    /// Set a custom system prompt override (used by ambient mode).
+    /// Set a persisted custom system prompt override (also used by ambient mode).
     /// When set, this replaces the normal system prompt entirely.
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        self.system_prompt_override = Some(prompt.to_string());
+        self.session.system_prompt = Some(prompt.to_string());
+        self.persist_session_best_effort("system prompt override");
     }
 
     pub fn set_debug(&mut self, is_debug: bool) {
@@ -404,6 +418,24 @@ impl Agent {
     pub(super) async fn tool_definitions(&mut self) -> Vec<ToolDefinition> {
         if self.session.is_canary {
             self.registry.register_selfdev_tools().await;
+        }
+
+        // Account sign-in/out and verified entitlement changes must reach the
+        // model even when the tool list is frozen (including deferred MCP).
+        // Only update this definition when its guidance actually changes.
+        if !crate::tool::sdk::custom(&self.session.id, "compile_remote")
+            && self
+                .locked_tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| tool.name == "compile_remote"))
+            && let Some(fresh) = self.registry.remote_compile_definition().await
+            && let Some(locked) = self.locked_tools.as_mut()
+            && let Some(previous) = locked.iter_mut().find(|tool| tool.name == "compile_remote")
+            && (previous.description != fresh.description
+                || previous.input_schema != fresh.input_schema)
+        {
+            *previous = fresh;
+            self.cache_tracker.reset();
         }
 
         // Return locked tools if available (prevents cache invalidation from
@@ -481,14 +513,31 @@ impl Agent {
     /// Build the agent's tool definitions from the registry, applying the
     /// session's `allowed_tools`, `disabled_tools`, and self-dev filters.
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
-        let mut tools = self.registry.definitions(self.allowed_tools.as_ref()).await;
-        if !self.disabled_tools.is_empty() {
+        let sdk = crate::tool::sdk::config(&self.session.id);
+        let enabled = sdk
+            .as_ref()
+            .and_then(|c| c.enabled.as_ref())
+            .map(|names| names.iter().cloned().collect());
+        let allowed = enabled.as_ref().or(self.allowed_tools.as_ref());
+        let mut tools = self.registry.definitions(allowed).await;
+        if enabled.is_none() && !self.disabled_tools.is_empty() {
             tools.retain(|tool| {
-                !crate::tool::tool_name_is_disabled(&self.disabled_tools, &tool.name)
+                !self
+                    .registry
+                    .tool_is_disabled(&self.disabled_tools, &tool.name)
             });
         }
-        Self::apply_selfdev_tool_surface(&mut tools, self.session.is_canary);
+        Self::apply_selfdev_tool_surface(
+            &mut tools,
+            self.session.is_canary,
+            self.is_desktop_selfdev(),
+        );
         self.apply_mcp_tool_exposure(&mut tools);
+        let mut tools = crate::tool::sdk::apply_definitions(&self.session.id, tools);
+        if let Some(config) = sdk.as_ref() {
+            let disabled = config.disabled.iter().cloned().collect();
+            tools.retain(|tool| !self.registry.tool_is_disabled(&disabled, &tool.name));
+        }
         tools
     }
 
@@ -516,15 +565,34 @@ impl Agent {
     }
 
     /// Expose the `selfdev` tool only while running in self-development mode.
+    /// Self-dev agents use the working tree rather than bundled `jcode_docs`,
+    /// which can lag behind the source they are editing.
     ///
     /// The registry keeps the implementation available for self-dev sessions,
     /// but regular agents should not spend tool-list context on an internal
     /// development surface.
-    fn apply_selfdev_tool_surface(tools: &mut Vec<ToolDefinition>, is_canary: bool) {
+    fn apply_selfdev_tool_surface(
+        tools: &mut Vec<ToolDefinition>,
+        is_canary: bool,
+        is_desktop: bool,
+    ) {
+        // Desktop development is a separate product mode, not a CLI canary.
+        // Never advertise CLI build/reload or TUI debug sockets in that mode.
+        if is_desktop {
+            tools.retain(|tool| {
+                !matches!(
+                    tool.name.as_str(),
+                    "selfdev" | "debug_socket" | "jcode_docs"
+                )
+            });
+            return;
+        }
+        tools.retain(|tool| tool.name != "desktop_selfdev");
         if !is_canary {
             tools.retain(|tool| tool.name != "selfdev");
             return;
         }
+        tools.retain(|tool| tool.name != "jcode_docs");
         for tool in tools.iter_mut() {
             if tool.name == "selfdev" {
                 tool.description =
@@ -543,11 +611,17 @@ impl Agent {
         registry_names.iter().any(|name| {
             name.starts_with("mcp__")
                 && allowed
-                    .map(|set| crate::tool::tool_name_is_allowed(set, name))
+                    .map(|set| self.registry.tool_is_allowed(set, name))
                     .unwrap_or(true)
-                && !crate::tool::tool_name_is_disabled(&self.disabled_tools, name)
+                && !self.registry.tool_is_disabled(&self.disabled_tools, name)
                 && !locked.iter().any(|t| &t.name == name)
         })
+    }
+
+    pub(crate) fn invalidate_sdk_tools(&mut self) {
+        self.mcp_late_register_resolved = false;
+        self.locked_tools = None;
+        self.cache_tracker.reset();
     }
 
     pub async fn tool_names(&self) -> Vec<String> {
@@ -640,12 +714,59 @@ impl Agent {
     }
 
     pub(super) fn validate_tool_allowed(&self, name: &str) -> Result<()> {
+        let unqualified_name = name.strip_prefix("functions.").unwrap_or(name);
+        let name = if crate::tool::sdk::custom(&self.session.id, unqualified_name) {
+            unqualified_name
+        } else {
+            Registry::resolve_tool_name(unqualified_name)
+        };
+        let mut sdk_enabled = false;
+        if let Some(config) = crate::tool::sdk::config(&self.session.id) {
+            let disabled = config.disabled.into_iter().collect();
+            anyhow::ensure!(
+                !self.registry.tool_is_disabled(&disabled, name),
+                "Tool '{}' is disabled",
+                name
+            );
+            if config.custom.iter().any(|t| t.name == name) {
+                return Ok(());
+            }
+            if let Some(enabled) = config.enabled {
+                let allowed = enabled.into_iter().collect();
+                anyhow::ensure!(
+                    self.registry.tool_is_allowed(&allowed, name),
+                    "Tool '{}' is not allowed",
+                    name
+                );
+                sdk_enabled = true;
+            }
+        }
+        let is_desktop = self.is_desktop_selfdev();
+        if is_desktop && matches!(name, "selfdev" | "debug_socket") {
+            return Err(anyhow::anyhow!(
+                "Tool '{}' targets Jcode CLI, not Desktop. Use 'desktop_selfdev' in Desktop self-development mode.",
+                name
+            ));
+        }
+        if !is_desktop && name == "desktop_selfdev" {
+            return Err(anyhow::anyhow!(
+                "Tool 'desktop_selfdev' is only available in a Jcode Desktop source checkout."
+            ));
+        }
+        if (self.session.is_canary || is_desktop) && name == "jcode_docs" {
+            return Err(anyhow::anyhow!(
+                "Tool 'jcode_docs' is disabled in self-development mode. Read the working tree documentation instead."
+            ));
+        }
+        if sdk_enabled {
+            return Ok(());
+        }
         if let Some(allowed) = self.allowed_tools.as_ref()
-            && !crate::tool::tool_name_is_allowed(allowed, name)
+            && !self.registry.tool_is_allowed(allowed, name)
         {
             return Err(anyhow::anyhow!("Tool '{}' is not allowed", name));
         }
-        if crate::tool::tool_name_is_disabled(&self.disabled_tools, name) {
+        if self.registry.tool_is_disabled(&self.disabled_tools, name) {
             return Err(anyhow::anyhow!("Tool '{}' is disabled", name));
         }
         Ok(())
@@ -778,6 +899,7 @@ impl Agent {
         crate::session::render_messages(&self.session)
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -797,6 +919,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {
@@ -826,6 +949,7 @@ impl Agent {
         let history = messages
             .into_iter()
             .map(|msg| HistoryMessage {
+                response_stats: msg.response_stats,
                 role: msg.role,
                 content: msg.content,
                 tool_calls: if msg.tool_calls.is_empty() {

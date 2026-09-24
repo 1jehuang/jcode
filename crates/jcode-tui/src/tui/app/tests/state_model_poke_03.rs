@@ -156,6 +156,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
         }
@@ -170,6 +171,7 @@ impl AuthUxStateSpaceProvider {
                 } else {
                     "no API key".to_string()
                 },
+                usage: None,
                 cheapness: None,
             });
             if self.include_generic_profile_duplicate {
@@ -183,6 +185,7 @@ impl AuthUxStateSpaceProvider {
                     } else {
                         "no API key".to_string()
                     },
+                    usage: None,
                     cheapness: None,
                 });
             }
@@ -200,6 +203,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -208,6 +212,7 @@ impl MixedModelRoutesProvider {
                 api_method: "claude-oauth".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -216,6 +221,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openai-compatible:chutes".to_string(),
                 available: true,
                 detail: "https://llm.chutes.ai/v1".to_string(),
+                usage: None,
                 cheapness: None,
             },
             crate::provider::ModelRoute {
@@ -224,6 +230,7 @@ impl MixedModelRoutesProvider {
                 api_method: "openrouter".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             },
         ]
@@ -478,6 +485,7 @@ impl Provider for CountingModelRoutesProvider {
                 api_method: "test".to_string(),
                 available: true,
                 detail: String::new(),
+                usage: None,
                 cheapness: None,
             })
             .collect()
@@ -1611,6 +1619,7 @@ impl Provider for AzureLoginMockProvider {
             api_method: "openai-compatible".to_string(),
             available: true,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }]
     }
@@ -1872,10 +1881,8 @@ fn test_local_model_picker_render_shows_antigravity_models_exactly_as_user_sees_
     let gpt_text = render_filtered(&mut app, "gpt-oss-120b-medium");
 
     assert!(
-        claude_text.contains("MODEL")
-            && claude_text.contains("PROVIDER")
-            && claude_text.contains("METHOD"),
-        "rendered /model view should include picker columns, got:
+        claude_text.contains("▸ Claude Sonnet 4.6") && claude_text.contains("↑↓ choose"),
+        "rendered /model suggestions should show the selected row and navigation, got:
 {}",
         claude_text
     );
@@ -1945,10 +1952,8 @@ fn test_login_smoke_model_picker_renders_unstacked_provider_rows() {
     let openrouter_openai_text = render_filtered(&mut app, "openai/gpt-5.5");
 
     assert!(
-        openai_text.contains("MODEL")
-            && openai_text.contains("PROVIDER")
-            && openai_text.contains("METHOD"),
-        "rendered /model view should include user-visible picker columns, got:\n{}",
+        openai_text.contains("▸ GPT-5.4") && openai_text.contains("↑↓ choose"),
+        "rendered /model suggestions should show the selected row and navigation, got:\n{}",
         openai_text
     );
     assert!(
@@ -2750,7 +2755,7 @@ fn test_finish_turn_challenges_confidence_spike_once() {
                 confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 completion_confidence: Some(crate::todo::ConfidenceState::from_legacy_score(100)),
                 confidence_history: vec![
-                    crate::todo::ConfidenceState::from_legacy_score(70),
+                    crate::todo::ConfidenceState::Speculative,
                     crate::todo::ConfidenceState::from_legacy_score(100),
                 ],
                 ..Default::default()
@@ -3011,5 +3016,85 @@ fn test_overnight_start_queues_remote_turn_without_stuck_sending() {
         );
         assert_eq!(app.queued_messages.len(), 1);
         assert!(app.queued_messages[0].contains("visible Overnight Coordinator"));
+    });
+}
+
+#[test]
+fn test_finish_turn_does_not_challenge_moderate_or_unrecorded_confidence_jumps() {
+    use crate::todo::ConfidenceState;
+    with_temp_jcode_home(|| {
+        for (planning, completion, history) in [
+            (
+                ConfidenceState::Plausible,
+                ConfidenceState::Verified,
+                vec![ConfidenceState::Plausible, ConfidenceState::Verified],
+            ),
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Validated,
+                vec![ConfidenceState::Speculative, ConfidenceState::Validated],
+            ),
+            // Legacy planning/completion disagreement is not a recorded jump.
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Verified,
+                vec![],
+            ),
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Verified,
+                vec![ConfidenceState::Verified],
+            ),
+            // Stale history must end at the current completion confidence.
+            (
+                ConfidenceState::Speculative,
+                ConfidenceState::Validated,
+                vec![ConfidenceState::Speculative, ConfidenceState::Verified],
+            ),
+        ] {
+            let mut app = create_test_app();
+            app.is_remote = false;
+            app.auto_poke_incomplete_todos = true;
+            app.auto_poke_default_on = false;
+            crate::todo::save_todos(
+                &app.session.id,
+                &[crate::todo::TodoItem {
+                    id: "validated-result".into(),
+                    content: "Validate the requested result".into(),
+                    status: "completed".into(),
+                    confidence: Some(planning),
+                    completion_confidence: Some(completion),
+                    confidence_history: history,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+            // Missing goal metadata is not unfinished ownership work either.
+            crate::todo::save_goals(&app.session.id, &[]).unwrap();
+            for id in 42..44 {
+                app.is_processing = true;
+                super::local::finish_turn(&mut app);
+                assert!(!app.todo_confidence_spike_challenged);
+                if id == 42 {
+                    assert_eq!(
+                        app.queued_messages,
+                        vec![crate::todo::TODO_FINAL_RESPONSE_CONTINUATION_MESSAGE.to_string()]
+                    );
+                    assert!(app.pending_queued_dispatch);
+                } else {
+                    assert!(app.queued_messages.is_empty());
+                    assert!(!app.pending_queued_dispatch);
+                }
+                app.queued_messages.clear();
+                app.pending_queued_dispatch = false;
+            }
+            assert!(!app.auto_poke_incomplete_todos);
+            assert!(app.hidden_queued_system_messages.is_empty());
+            assert!(
+                !app.display_messages()
+                    .iter()
+                    .any(|message| message.content.contains("Double-checking confidence jumps"))
+            );
+        }
     });
 }

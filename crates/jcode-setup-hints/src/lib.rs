@@ -49,11 +49,12 @@ use macos_launcher::{install_macos_app_launcher, should_refresh_macos_app_launch
 use macos_terminal::launch_script_for_macos_terminal;
 #[cfg(target_os = "macos")]
 use macos_terminal::load_preferred_macos_terminal;
+#[cfg(test)]
+use macos_terminal::paused_jcode_shell_command;
+#[cfg(target_os = "macos")]
+use macos_terminal::save_preferred_macos_terminal;
 #[cfg(any(test, target_os = "macos"))]
-use macos_terminal::{
-    MacTerminalKind, effective_macos_terminal, escape_applescript_text, escape_shell_single_quotes,
-    launch_command_for_macos_terminal, paused_jcode_shell_command, save_preferred_macos_terminal,
-};
+use macos_terminal::{MacTerminalKind, effective_macos_terminal};
 #[cfg(windows)]
 use windows_setup::{
     create_windows_desktop_shortcut, maybe_show_windows_setup_hints, run_setup_hotkey_windows,
@@ -188,8 +189,6 @@ const LAUNCH_HOTKEY_TRACKING_VERSION: u32 = 1;
 /// asking, even if the user never explicitly picked "Don't ask again".
 pub const MAX_TERMINAL_NUDGES: u64 = 5;
 const LAUNCH_HOTKEY_LEARNED_USES: u64 = 3;
-#[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
-const LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP: u64 = 10;
 
 #[derive(Debug, Clone, Default)]
 pub struct StartupHints {
@@ -1399,7 +1398,6 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     let rows: Vec<LaunchHotkeyRow> = entries
         .into_iter()
         .map(|entry| {
-            let cwd = launch_hotkeys::resolve_target_dir(&entry.dir, &last_dir, &last_repo);
             let display = keymap::KeyChord::parse(&entry.chord)
                 .map(|c| c.display_symbols())
                 .unwrap_or_else(|| entry.chord.clone());
@@ -1407,7 +1405,6 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
                 chord: entry.chord,
                 display,
                 label: entry.label,
-                cwd_display: cwd.display().to_string(),
                 self_dev: entry.args.iter().any(|arg| arg == "self-dev"),
             }
         })
@@ -1418,7 +1415,7 @@ fn macos_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     Some(StartupHints::with_status_and_display(
         "Launch hotkeys available".to_string(),
         "Launch hotkeys",
-        format!("Configured Jcode launch hotkeys:\n{}", lines.join("\n")),
+        compact_launch_hotkey_notice(&lines),
     ))
 }
 
@@ -1504,25 +1501,6 @@ fn linux_hotkey_config_path(comp: linux_env::LinuxCompositor) -> Option<PathBuf>
         linux_env::LinuxCompositor::Niri => niri_config_path(),
         linux_env::LinuxCompositor::Kde => kde_globalshortcutsrc_path(),
         other => flat_compositor_config_path(other),
-    }
-}
-
-/// Human description of where the binds land, for the startup notice footer.
-#[cfg(target_os = "linux")]
-fn linux_hotkey_target_description(comp: linux_env::LinuxCompositor) -> String {
-    use linux_env::LinuxCompositor;
-    match comp {
-        LinuxCompositor::Gnome => "GNOME custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Kde => "KDE global shortcuts (kglobalshortcutsrc)".to_string(),
-        LinuxCompositor::Cinnamon => "Cinnamon custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Mate => "MATE custom shortcuts (via dconf)".to_string(),
-        LinuxCompositor::Xfce => "XFCE keyboard shortcuts (via xfconf)".to_string(),
-        other => {
-            let path = linux_hotkey_config_path(other)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "its config".to_string());
-            format!("your {} config ({})", other.name(), path)
-        }
     }
 }
 
@@ -2212,7 +2190,6 @@ fn linux_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
             chord: hk.chord.canonical(),
             display: hk.chord.display_super(),
             label: hk.label.clone(),
-            cwd_display: hk.dir.clone(),
             self_dev: hk.self_dev,
         })
         .collect();
@@ -2225,20 +2202,10 @@ fn linux_launch_hotkeys_notice(state: &SetupHintsState) -> Option<StartupHints> 
     if !linux_hotkeys_installed(comp) {
         return None;
     }
-    let footer = format!(
-        "Bound via {} and available system-wide.",
-        linux_hotkey_target_description(comp)
-    );
-
     Some(StartupHints::with_status_and_display(
         "Launch hotkeys available".to_string(),
         "Launch hotkeys",
-        format!(
-            "Configured Jcode launch hotkeys ({}): {} {}",
-            comp.name(),
-            lines.join("; "),
-            footer
-        ),
+        compact_launch_hotkey_notice(&lines),
     ))
 }
 
@@ -2250,20 +2217,23 @@ pub(crate) struct LaunchHotkeyRow {
     /// Pretty, user-facing chord rendering (e.g. `⌘;` or `Super+;`).
     pub display: String,
     pub label: String,
-    pub cwd_display: String,
     pub self_dev: bool,
 }
 
-/// Decide which launch-hotkey lines to surface, given how often each chord has
-/// been used. Pure so the adaptive "stop nagging once learned" policy is
-/// unit-tested without touching config or the filesystem.
+/// Keep startup reminders focused on the shortcuts, not installation details.
+#[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
+pub(crate) fn compact_launch_hotkey_notice(lines: &[String]) -> String {
+    format!("Hotkeys: {}", lines.join(" · "))
+}
+
+/// Decide which launch-hotkey lines to surface on the first launch. Pure so
+/// the one-time onboarding policy is tested without config or filesystem I/O.
 ///
 /// Policy:
 /// - Hide a per-repo binding once it has been used `LAUNCH_HOTKEY_LEARNED_USES`
 ///   times (the user has clearly internalized it).
-/// - Once the user has learned at least one binding and has launched jcode at
-///   least `LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP` times, drop the whole
-///   notice so it never lingers for an experienced user.
+/// - Never repeat the notice after the first launch, even if no binding has
+///   been used. Choosing not to use global hotkeys should not cause nagging.
 /// - Returns `None` when nothing should be shown.
 #[cfg(any(test, target_os = "macos", target_os = "linux", windows))]
 pub(crate) fn launch_hotkey_notice_lines(
@@ -2271,27 +2241,18 @@ pub(crate) fn launch_hotkey_notice_lines(
     usage: &HashMap<String, u64>,
     launch_count: u64,
 ) -> Option<Vec<String>> {
-    if rows.is_empty() {
+    if rows.is_empty() || launch_count != 1 {
         return None;
     }
 
     let uses_for = |chord: &str| usage.get(chord).copied().unwrap_or(0);
-    let learned_any = rows
-        .iter()
-        .any(|row| uses_for(&row.chord) >= LAUNCH_HOTKEY_LEARNED_USES);
-    if learned_any && launch_count >= LAUNCH_HOTKEY_NOTICE_MIN_LAUNCHES_TO_STOP {
-        return None;
-    }
 
     let lines: Vec<String> = rows
         .iter()
         .filter(|row| uses_for(&row.chord) < LAUNCH_HOTKEY_LEARNED_USES)
         .map(|row| {
             let suffix = if row.self_dev { " [self-dev]" } else { "" };
-            format!(
-                "{} → {} ({}){}",
-                row.display, row.label, row.cwd_display, suffix
-            )
+            format!("{} → {}{}", row.display, row.label, suffix)
         })
         .collect();
 
@@ -2458,20 +2419,25 @@ pub fn run_setup_launcher() -> Result<()> {
         eprintln!("\x1b[1mjcode setup-launcher\x1b[0m");
         eprintln!();
 
+        let removed = macos_launcher::remove_legacy_macos_bundles();
         match install_macos_app_launcher() {
-            Ok((app_dir, terminal)) => {
+            Ok(broker_dir) => {
                 state.desktop_shortcut_created = true;
                 let _ = state.save();
+                for path in removed.unwrap_or_default() {
+                    eprintln!(
+                        "  \x1b[32m✓\x1b[0m Removed legacy launcher: {}",
+                        path.display()
+                    );
+                }
                 eprintln!(
-                    "  \x1b[32m✓\x1b[0m Installed launcher: {}",
-                    app_dir.display()
-                );
-                eprintln!(
-                    "  \x1b[32m✓\x1b[0m Spotlight/Launchpad/Dock will launch jcode in {}",
-                    terminal.label()
+                    "  \x1b[32m✓\x1b[0m Installed turn-notification helper: {}",
+                    broker_dir.display()
                 );
                 eprintln!();
-                eprintln!("  Tip: pin Jcode.app to your Dock or launch it with Cmd+Space.");
+                eprintln!(
+                    "  Launch Jcode from the Jcode Desktop app, a terminal, or the Cmd+; hotkey."
+                );
                 return Ok(());
             }
             Err(e) => {
@@ -2507,7 +2473,8 @@ pub fn run_setup_launcher() -> Result<()> {
 
 /// Create a desktop shortcut/launcher for jcode.
 ///
-/// - macOS: creates a jcode.app bundle in ~/Applications/
+/// - macOS: installs the hidden notification helper and removes the legacy
+///   CLI launcher bundles. Jcode Desktop is the only macOS app launcher.
 /// - Windows uses [`windows_setup::create_windows_desktop_shortcut`] via
 ///   `jcode setup-launcher` instead (PowerShell/COM is too slow for the
 ///   startup path).
@@ -2515,12 +2482,15 @@ pub fn run_setup_launcher() -> Result<()> {
 fn create_desktop_shortcut(state: &mut SetupHintsState) -> Result<()> {
     #[cfg(any(test, target_os = "macos"))]
     {
-        let (app_dir, _terminal) = install_macos_app_launcher()?;
+        let broker_dir = install_macos_app_launcher()?;
 
         state.desktop_shortcut_created = true;
         let _ = state.save();
 
-        jcode_logging::info(&format!("Created macOS app bundle: {}", app_dir.display()));
+        jcode_logging::info(&format!(
+            "Installed macOS notification helper: {}",
+            broker_dir.display()
+        ));
     }
 
     #[cfg(not(any(test, target_os = "macos")))]

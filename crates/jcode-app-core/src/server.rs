@@ -1257,33 +1257,8 @@ impl Server {
         server_start_time: Instant,
         temporary_server_policy: Option<lifecycle::TemporaryServerPolicy>,
     ) {
-        // Preload the embedding model in background so warm startups get fast
-        // memory recall. On a cold install, skip eager preload because the
-        // first-time model download can make the first spawned client look hung
-        // while the daemon finishes bootstrapping.
-        if crate::embedding::is_model_available() {
-            tokio::task::spawn_blocking(|| {
-                let start = std::time::Instant::now();
-                match crate::embedding::get_embedder() {
-                    Ok(_) => {
-                        crate::logging::info(&format!(
-                            "Embedding model preloaded in {}ms",
-                            start.elapsed().as_millis()
-                        ));
-                    }
-                    Err(e) => {
-                        crate::logging::info(&format!(
-                            "Embedding model preload failed (non-fatal): {}",
-                            e
-                        ));
-                    }
-                }
-            });
-        } else {
-            crate::logging::info(
-                "Embedding model not installed yet; skipping eager preload during server startup",
-            );
-        }
+        // Jev memory recall does not need a local embedding model. Optional
+        // embedding consumers (such as semantic compaction) load it on demand.
 
         // Warm the lightweight session-search index after daemon startup. This
         // keeps the first agent `session_search` call from paying the cold
@@ -2326,6 +2301,14 @@ impl Server {
             Err(error) => crate::logging::warn(&format!(
                 "Reload recovery GC failed during startup: {error}"
             )),
+        }
+
+        let (pruned_active_pids, failed_active_pids) =
+            crate::storage::prune_active_pids_owned_by(std::process::id());
+        if pruned_active_pids + failed_active_pids > 0 {
+            crate::logging::info(&format!(
+                "Pruned {pruned_active_pids} stale active-pid marker(s); {failed_active_pids} could not be removed"
+            ));
         }
 
         // Restrict socket files to owner-only so other local users cannot connect.

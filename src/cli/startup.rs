@@ -204,13 +204,7 @@ fn is_telemetry_subcommand_invocation(
 pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::GROK_BUILD_RUNTIME,
-        || {
-            let mut process = jcode_provider_grok_build_runtime::GrokBuildProcess::from_env();
-            process.command = crate::auth::grok_build::cli_path();
-            std::sync::Arc::new(
-                jcode_provider_grok_build_runtime::GrokBuildProvider::with_process(process),
-            )
-        },
+        || std::sync::Arc::new(jcode_provider_grok_build_runtime::GrokBuildProvider::new()),
     );
     crate::provider::external::register_external_provider(
         crate::provider::external::GEMINI_RUNTIME,
@@ -223,10 +217,6 @@ pub fn register_external_provider_runtimes() {
     crate::provider::external::register_external_provider(
         crate::provider::external::ANTIGRAVITY_RUNTIME,
         || std::sync::Arc::new(jcode_provider_antigravity_runtime::AntigravityProvider::new()),
-    );
-    crate::provider::external::register_external_provider(
-        crate::provider::external::CLAUDE_CLI_RUNTIME,
-        || std::sync::Arc::new(jcode_provider_claude_cli_runtime::ClaudeProvider::new()),
     );
     crate::provider::external::register_external_provider(
         crate::provider::external::ANTHROPIC_RUNTIME,
@@ -406,9 +396,8 @@ fn spawn_background_update_check(args: &Args) {
 
             let start = std::time::Instant::now();
             Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Checking));
-            if let Some(update_available) = hot_exec::check_for_updates()
-                && update_available
-            {
+            let status = source_update_check_status(hot_exec::check_for_updates());
+            if matches!(status, UpdateStatus::Available { .. }) {
                 // A checkout with local commits can never fast-forward, so the
                 // pull below would always fail and surface a noisy "Update
                 // diverged. Press Ctrl+Y..." card in every new session.
@@ -421,10 +410,7 @@ fn spawn_background_update_check(args: &Args) {
                     );
                     Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
                 } else {
-                    Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Available {
-                        current: jcode_build_meta::version().to_string(),
-                        latest: "latest source".to_string(),
-                    }));
+                    Bus::global().publish(BusEvent::UpdateStatus(status));
                     if auto_update {
                         logging::info("Update available - auto-updating...");
                         Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::Installing {
@@ -446,7 +432,14 @@ fn spawn_background_update_check(args: &Args) {
                     }
                 }
             } else {
-                Bus::global().publish(BusEvent::UpdateStatus(UpdateStatus::UpToDate));
+                match &status {
+                    UpdateStatus::Error(message) => logging::info(message),
+                    UpdateStatus::Skipped { reason } => {
+                        logging::info(&format!("Source update check skipped: {reason}"));
+                    }
+                    _ => {}
+                }
+                Bus::global().publish(BusEvent::UpdateStatus(status));
             }
             logging::info(&format!(
                 "[TIMING] background_update_check: auto_update={}, total={}ms",
@@ -454,6 +447,24 @@ fn spawn_background_update_check(args: &Args) {
                 start.elapsed().as_millis()
             ));
         });
+    }
+}
+
+fn source_update_check_status(result: anyhow::Result<Option<bool>>) -> crate::bus::UpdateStatus {
+    use crate::bus::UpdateStatus;
+
+    match result {
+        Ok(Some(true)) => UpdateStatus::Available {
+            current: jcode_build_meta::version().to_string(),
+            latest: "latest source".to_string(),
+        },
+        Ok(Some(false)) => UpdateStatus::UpToDate,
+        Ok(None) => UpdateStatus::Skipped {
+            reason:
+                "no upstream configured for the source checkout (local branch or detached HEAD)"
+                    .to_string(),
+        },
+        Err(error) => UpdateStatus::Error(format!("Source update check failed: {error:#}")),
     }
 }
 
@@ -503,6 +514,141 @@ mod tests {
 
     fn parse_args(argv: &[&str]) -> Args {
         Args::parse_from(argv)
+    }
+
+    #[test]
+    fn source_update_check_preserves_git_error() {
+        let crate::bus::UpdateStatus::Error(message) =
+            source_update_check_status(Err(anyhow::anyhow!("git fetch: offline")))
+        else {
+            panic!("an indeterminate source comparison must report an error");
+        };
+        assert_eq!(message, "Source update check failed: git fetch: offline");
+    }
+
+    #[test]
+    fn source_update_check_false_reports_up_to_date() {
+        assert!(matches!(
+            source_update_check_status(Ok(Some(false))),
+            crate::bus::UpdateStatus::UpToDate
+        ));
+    }
+
+    #[test]
+    fn source_update_check_true_reports_available() {
+        let crate::bus::UpdateStatus::Available { current, latest } =
+            source_update_check_status(Ok(Some(true)))
+        else {
+            panic!("a source update must remain available");
+        };
+        assert_eq!(current, jcode_build_meta::version());
+        assert_eq!(latest, "latest source");
+    }
+
+    #[test]
+    fn source_update_check_real_git_upstream_states() {
+        let repo = tempfile::tempdir().expect("temporary source checkout");
+        let git = |args: &[&str]| {
+            let output = ProcessCommand::new("git")
+                .args([
+                    "-c",
+                    "user.name=Update Test",
+                    "-c",
+                    "user.email=update-test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "source"]);
+        git(&["commit", "--allow-empty", "-m", "initial"]);
+
+        // A local branch without tracking is skipped before claiming a fetch slot.
+        let result = hot_exec::check_for_updates_in(repo.path(), || {
+            panic!("untracked checkouts must not fetch or claim the fetch slot")
+        });
+        assert_eq!(*result.as_ref().unwrap(), None);
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Skipped { .. }
+        ));
+
+        // Local branches supply tracking controls without fetching or networking.
+        git(&["branch", "upstream"]);
+        git(&["branch", "--set-upstream-to=upstream", "source"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(*result.as_ref().unwrap(), Some(false));
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::UpToDate
+        ));
+
+        git(&["checkout", "upstream"]);
+        git(&["commit", "--allow-empty", "-m", "upstream update"]);
+        git(&["checkout", "source"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(*result.as_ref().unwrap(), Some(true));
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Available { .. }
+        ));
+
+        // Local commits alone are not updates.
+        git(&["checkout", "upstream"]);
+        git(&["branch", "--set-upstream-to=source", "upstream"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert_eq!(result.unwrap(), Some(false));
+
+        git(&["checkout", "--detach"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || {
+            panic!("detached checkouts must not fetch")
+        });
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Skipped { .. }
+        ));
+
+        // A configured but missing upstream must still report an error.
+        git(&["checkout", "source"]);
+        git(&["branch", "-D", "upstream"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || false);
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Error(_)
+        ));
+
+        // Network/fetch failures on tracked branches must not become skips.
+        git(&["remote", "add", "origin", "./missing-remote"]);
+        git(&["update-ref", "refs/remotes/origin/source", "HEAD"]);
+        git(&["config", "branch.source.remote", "origin"]);
+        git(&["config", "branch.source.merge", "refs/heads/source"]);
+        let result = hot_exec::check_for_updates_in(repo.path(), || true);
+        let crate::bus::UpdateStatus::Error(message) = source_update_check_status(result) else {
+            panic!("failed fetch must report an error");
+        };
+        assert!(message.contains("git fetch -q:"));
+    }
+
+    #[test]
+    fn source_update_check_invalid_checkout_reports_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = hot_exec::check_for_updates_in(directory.path(), || {
+            panic!("invalid checkouts must not fetch")
+        });
+        assert!(matches!(
+            source_update_check_status(result),
+            crate::bus::UpdateStatus::Error(_)
+        ));
     }
 
     #[test]

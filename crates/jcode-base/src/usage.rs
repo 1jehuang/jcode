@@ -4,17 +4,29 @@
 
 use crate::auth;
 mod accessors;
+mod anthropic_reset;
 mod api_keys;
 mod cache;
 mod display;
 mod model;
 mod openai_helpers;
+mod openai_reset;
 mod provider_fetch;
 pub use accessors::*;
+pub use anthropic_reset::{
+    AnthropicLimitResetOffer, AnthropicLimitResetOutcome, AnthropicLimitResetUnavailable,
+    PendingAnthropicLimitReset, consume_anthropic_limit_reset,
+    invalidate_anthropic_usage_reset_state, prepare_anthropic_limit_reset,
+};
 use api_keys::enqueue_api_key_usage_tasks;
 use cache::*;
-pub use jcode_usage_types::{ProviderUsage, ProviderUsageProgress, UsageLimit};
+pub use jcode_usage_types::{OpenAiResetCredits, ProviderUsage, ProviderUsageProgress, UsageLimit};
 pub use model::*;
+pub use openai_reset::{
+    OpenAiUsageResetOutcome, PendingOpenAiUsageReset, consume_openai_usage_reset,
+    invalidate_openai_usage_cache, invalidate_openai_usage_reset_state, prepare_openai_usage_reset,
+    prepare_openai_usage_reset_for_account,
+};
 use provider_fetch::*;
 
 use anyhow::{Context, Result};
@@ -160,6 +172,7 @@ where
     F: FnMut(ProviderUsageProgress) + Send,
 {
     let cache = PROVIDER_USAGE_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let openai_generation = openai_usage_generation();
 
     let now = Instant::now();
     let cached_results = if let Ok(map) = cache.lock() {
@@ -204,7 +217,7 @@ where
     let total = enqueue_provider_usage_tasks(&mut tasks);
 
     if total == 0 {
-        sync_cached_usage_from_reports(&results).await;
+        sync_cached_usage_from_reports(&results, openai_generation).await;
         if let Ok(mut map) = cache.lock() {
             map.clear();
         }
@@ -234,9 +247,11 @@ where
         });
     }
 
-    sync_cached_usage_from_reports(&results).await;
+    sync_cached_usage_from_reports(&results, openai_generation).await;
 
-    if let Ok(mut map) = cache.lock() {
+    if let Ok(mut map) = cache.lock()
+        && openai_generation == openai_usage_generation()
+    {
         map.clear();
         let now = Instant::now();
         for r in &results {
@@ -278,8 +293,19 @@ fn sort_reports_most_recent_first(results: &mut [ProviderUsage]) {
 }
 
 /// Stamp a report with last-used recency from the activity ledger: sets the
-/// sort key and appends a human-readable "Last used" detail line.
+/// sort key and appends human-readable activity details. OpenAI OAuth totals
+/// are attached after fetching (including cached/error reports), so local usage
+/// never waits for the provider quota cache to expire.
 fn attach_activity(report: &mut ProviderUsage, source_key: &str) {
+    if let Some(label) = source_key.strip_prefix("openai:oauth:") {
+        let mut details = crate::provider_activity::openai_oauth_usage_summary(label);
+        details.push(("Account label".to_string(), label.to_string()));
+        // Replace rather than duplicate local values if a caller reattaches.
+        report
+            .extra_info
+            .retain(|(key, _)| !details.iter().any(|(local_key, _)| local_key == key));
+        report.extra_info.extend(details);
+    }
     if let Some(used) = crate::provider_activity::last_used_unix_secs(source_key) {
         report.last_used_unix_secs = Some(used);
         report.extra_info.push((
@@ -544,9 +570,9 @@ fn enqueue_openai_usage_tasks(tasks: &mut tokio::task::JoinSet<Option<ProviderUs
     1
 }
 
-async fn sync_cached_usage_from_reports(results: &[ProviderUsage]) {
+async fn sync_cached_usage_from_reports(results: &[ProviderUsage], openai_generation: u64) {
     sync_active_anthropic_usage_from_reports(results).await;
-    sync_openai_usage_from_reports(results).await;
+    sync_openai_usage_from_reports(results, openai_generation).await;
 }
 
 async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
@@ -579,10 +605,13 @@ async fn sync_active_anthropic_usage_from_reports(results: &[ProviderUsage]) {
     }
 }
 
-async fn sync_openai_usage_from_reports(results: &[ProviderUsage]) {
+async fn sync_openai_usage_from_reports(results: &[ProviderUsage], generation: u64) {
     let report = active_openai_usage_report(results);
     let usage = get_openai_usage_cell().await;
     let mut cached = usage.write().await;
+    if generation != openai_usage_generation() {
+        return;
+    }
 
     match report {
         Some(report) => {

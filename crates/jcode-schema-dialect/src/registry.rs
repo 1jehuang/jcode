@@ -90,6 +90,11 @@ pub const GEMINI: DialectSpec = DialectSpec {
     ],
     supported_string_formats: &[],
     transforms: DialectTransforms {
+        // Code Assist rejects a root `anyOf` when `type`/`properties` sit
+        // beside it ("specified other fields alongside any_of"), which is how
+        // the `swarm` tool expresses its spawn/non-spawn branches. Nested
+        // `anyOf` inside a property is fine, so only the root is widened.
+        flatten_top_level_combiners: true,
         prune_dangling_required: true,
         const_as_enum: true,
         one_of_as_any_of: true,

@@ -106,8 +106,8 @@ mod wrap;
 pub(crate) use context::with_markdown_spacing_mode_override;
 pub use context::{
     center_code_blocks, get_diagram_mode_override, mermaid_rendering_enabled,
-    set_center_code_blocks, set_diagram_mode_override, with_deferred_mermaid_render_context,
-    with_diagram_mode_scope, with_mermaid_rendering_override,
+    set_center_code_blocks, set_diagram_mode_override, with_center_code_blocks,
+    with_deferred_mermaid_render_context, with_diagram_mode_scope, with_mermaid_rendering_override,
 };
 use context::{
     deferred_mermaid_render_context_enabled, effective_diagram_mode,
@@ -622,6 +622,35 @@ fn with_blockquote_prefix(line: Line<'static>, blockquote_depth: usize) -> Line<
     match alignment {
         Some(align) => line.alignment(align),
         None => line.left_aligned(),
+    }
+}
+
+/// Decorate internal spacing only after the quote closes, so its final block
+/// separator stays outside the gutter. Inner quotes close first and retain
+/// their deeper gutters when the enclosing quote is finished.
+fn fill_blockquote_separators(lines: &mut [Line<'static>], depth: usize) {
+    let Some(last_content) = lines.iter().rposition(|line| !line_is_blank(line)) else {
+        return;
+    };
+    let mut image_rows = 0usize;
+    for line in &mut lines[..=last_content] {
+        if line_is_blank(line) {
+            if image_rows > 0 {
+                image_rows -= 1;
+            } else {
+                *line = with_blockquote_prefix(Line::default(), depth);
+            }
+        } else {
+            // Image placeholder fill rows are reserved for the image renderer,
+            // not paragraph spacing. Keep their blank-run geometry intact.
+            image_rows = if let Some((_, rows, _)) = mermaid::parse_inline_image_placeholder(line) {
+                rows.saturating_sub(1) as usize
+            } else if mermaid::parse_image_placeholder(line).is_some() {
+                usize::MAX
+            } else {
+                0
+            };
+        }
     }
 }
 

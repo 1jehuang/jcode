@@ -12,16 +12,16 @@ pub const SWARM_COMPLETION_REPORT_MARKER: &str = "SWARM COMPLETION REPORT REQUIR
 /// control instead of dumping the full body into the transcript.
 pub const SWARM_TLDR_REQUIRED_OVER_CHARS: usize = 240;
 
-/// Upper bound for a sender-provided `tldr`. Anything longer defeats the
-/// purpose of a one-line collapsed summary.
+/// Recommended upper bound for a sender-provided `tldr`, not a hard limit.
+/// Models should keep collapsed summaries short, but length must not block delivery.
 pub const MAX_SWARM_TLDR_CHARS: usize = 200;
 
 /// Validate a sender-provided `tldr` against the message body it summarizes.
 ///
 /// Returns the normalized (trimmed, whitespace-collapsed) tldr when present,
 /// `Ok(None)` when the body is short enough to not need one, and a
-/// human/model-actionable error when a long body is missing a tldr or the
-/// tldr itself is malformed (too long or multi-line).
+/// human/model-actionable error when a long body is missing a tldr.
+/// Overlong summaries are preserved rather than rejecting the message.
 pub fn validate_swarm_tldr(
     tldr: Option<&str>,
     body: &str,
@@ -31,14 +31,7 @@ pub fn validate_swarm_tldr(
         .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|t| !t.is_empty());
 
-    if let Some(ref tldr) = normalized {
-        let chars = tldr.chars().count();
-        if chars > MAX_SWARM_TLDR_CHARS {
-            return Err(format!(
-                "'tldr' for {context} is too long ({chars} chars, max {MAX_SWARM_TLDR_CHARS}). \
-                 Provide a single short line summarizing the message."
-            ));
-        }
+    if normalized.is_some() {
         return Ok(normalized);
     }
 
@@ -659,10 +652,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_swarm_tldr_rejects_overlong_tldr() {
-        let tldr = "y".repeat(MAX_SWARM_TLDR_CHARS + 1);
-        let err = validate_swarm_tldr(Some(&tldr), "body", "this message").unwrap_err();
-        assert!(err.contains("too long"), "{err}");
+    fn validate_swarm_tldr_preserves_overlong_tldr() {
+        for summary_chars in [MAX_SWARM_TLDR_CHARS, MAX_SWARM_TLDR_CHARS + 1, 1000] {
+            let tldr = "界".repeat(summary_chars);
+            for body_chars in [4, SWARM_TLDR_REQUIRED_OVER_CHARS + 1] {
+                let body = "x".repeat(body_chars);
+                assert_eq!(
+                    validate_swarm_tldr(Some(&tldr), &body, "this message"),
+                    Ok(Some(tldr.clone()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_swarm_tldr_normalizes_overlong_tldr() {
+        let tldr = "summary".repeat(MAX_SWARM_TLDR_CHARS);
+        assert_eq!(
+            validate_swarm_tldr(Some(&format!("  {tldr}\n  done  ")), "body", "this report"),
+            Ok(Some(format!("{tldr} done")))
+        );
     }
 
     #[test]

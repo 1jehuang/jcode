@@ -228,16 +228,27 @@ pub fn provider_model_to_select_after_auth_with_configured_default(
     let configured_model = configured_model
         .map(str::trim)
         .filter(|model| !model.is_empty());
-    if let Some(configured) = configured_model
+    // `config.provider.default_model` is persisted by the model picker as a
+    // full model spec that may carry an explicit provider/credential prefix
+    // (e.g. `claude-oauth:claude-sonnet-5`, issue: default model reverts to
+    // Opus after /login or /refresh-model-list). `route.model` is always the
+    // bare id, so compare against the prefix-stripped form or this branch
+    // never matches and silently falls through to the flagship-first
+    // fallback below.
+    let configured_bare = configured_model.map(|model| {
+        jcode_provider_core::selection::explicit_model_provider_prefix(model)
+            .map(|(_, _, bare)| bare)
+            .unwrap_or(model)
+    });
+    if let Some(configured) = configured_bare
         && routes.iter().any(|route| {
             route.available
                 && route.model == configured
                 && route_matches_activation(route, activation)
         })
+        && selected_model.map(str::trim) != Some(configured)
     {
-        if selected_model.map(str::trim) != Some(configured) {
-            return Some(configured.to_string());
-        }
+        return Some(configured.to_string());
     }
 
     provider_model_to_select_after_auth(activation, selected_model, routes)
@@ -804,6 +815,9 @@ fn route_matches_activation(route: &ModelRoute, activation: &AuthActivationResul
                 crate::provider::ModelRouteApiMethod::JcodeSubscription
             );
         }
+        "grok-build" => {
+            return matches!(api_method, crate::provider::ModelRouteApiMethod::GrokBuild);
+        }
         "azure-openai" => {
             // Azure OpenAI reuses the OpenRouter transport (configured via Azure
             // env), so its routes carry the `openrouter` api_method while keeping
@@ -899,6 +913,7 @@ fn normalized_login_provider_id(provider_id: &str) -> Option<&'static str> {
         }
         "openrouter" => Some("openrouter"),
         "jcode" | "subscription" | "jcode-subscription" => Some("jcode"),
+        "grok-build" => Some("grok-build"),
         "bedrock" | "aws-bedrock" | "aws_bedrock" => Some("bedrock"),
         "cursor" => Some("cursor"),
         "copilot" => Some("copilot"),
@@ -1186,6 +1201,7 @@ pub fn model_switch_request_for_provider_id(
         Some("openai-api") => format!("openai-api:{}", model),
         Some("openrouter") => format!("openrouter:{}", model),
         Some("jcode") => model.to_string(),
+        Some("grok-build") => crate::provider::grok_build_model_spec(model),
         Some("bedrock") => format!("bedrock:{}", model),
         Some("cursor") => format!("cursor:{}", model),
         Some("copilot") => format!("copilot:{}", model),
@@ -1238,6 +1254,7 @@ mod tests {
             api_method: api_method.to_string(),
             available,
             detail: String::new(),
+            usage: None,
             cheapness: None,
         }
     }
@@ -1420,6 +1437,7 @@ mod tests {
             ("openai-key", "openai-api", "OpenAI API"),
             ("openrouter", "openrouter", "OpenRouter"),
             ("subscription", "jcode", "Jcode Subscription"),
+            ("grok-build", "grok-build", "Grok Build"),
             ("bedrock", "bedrock", "AWS Bedrock"),
             ("cursor", "cursor", "Cursor"),
             ("copilot", "copilot", "GitHub Copilot"),
@@ -1460,6 +1478,30 @@ mod tests {
     }
 
     #[test]
+    fn grok_build_login_selects_subscription_route_and_preserves_prefix() {
+        let _sandbox = crate::auth::test_sandbox::AuthTestSandbox::new().expect("sandbox");
+        let activation = activate_auth_change(&AuthActivationRequest::new(
+            None,
+            Some(AuthChanged::new("grok-build")),
+        ));
+        assert_eq!(activation.provider_id.as_deref(), Some("grok-build"));
+        assert_eq!(activation.provider_label.as_deref(), Some("Grok Build"));
+        let routes = vec![
+            route("grok-4.6", "xAI", "openrouter", true),
+            route("grok-build:grok-4.6", "Grok Build", "grok-build-acp", true),
+        ];
+        let selected = provider_model_to_select_after_auth(&activation, Some("grok-4.6"), &routes);
+        assert_eq!(selected.as_deref(), Some("grok-build:grok-4.6"));
+        assert!(validate_catalog_invariants(&activation, selected.as_deref(), &routes).ok());
+        for model in ["grok-4.6", "grok-build:grok-4.6"] {
+            assert_eq!(
+                activation.model_switch_request("OpenRouter", model),
+                "grok-build:grok-4.6"
+            );
+        }
+    }
+
+    #[test]
     fn direct_login_provider_activation_sets_runtime_identity_and_active_provider() {
         // Sandbox JCODE_HOME so activation's env-file credential sync (#453)
         // cannot read the developer's real ~/.config/jcode/*.env files and
@@ -1473,6 +1515,7 @@ mod tests {
             ("openai-api", "openai-api", "openai"),
             ("openrouter", "openrouter", "openrouter"),
             ("jcode", "jcode", "openrouter"),
+            ("grok-build", "grok-build", "openrouter"),
             ("bedrock", "bedrock", "bedrock"),
             ("cursor", "cursor", "cursor"),
             ("copilot", "copilot", "copilot"),
@@ -1515,6 +1558,9 @@ mod tests {
             let Some((normalized, runtime, active, switch_prefix)) = (match provider.target {
                 crate::provider_catalog::LoginProviderTarget::Jcode => {
                     Some(("jcode", "jcode", "openrouter", ""))
+                }
+                crate::provider_catalog::LoginProviderTarget::GrokBuild => {
+                    Some(("grok-build", "grok-build", "openrouter", "grok-build"))
                 }
                 crate::provider_catalog::LoginProviderTarget::Claude => {
                     Some(("claude", "claude", "claude", "claude-oauth"))
@@ -1619,6 +1665,7 @@ mod tests {
             "openai-api",
             "openrouter",
             "jcode",
+            "grok-build",
             "bedrock",
             "cursor",
             "copilot",
@@ -1909,6 +1956,43 @@ mod tests {
             )
             .as_deref(),
             Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn post_auth_model_selection_preserves_provider_prefixed_configured_default() {
+        // Regression: config.provider.default_model is persisted by the model
+        // picker as a full spec with an explicit provider prefix (e.g.
+        // `claude-oauth:claude-sonnet-5`). Comparing that raw string against
+        // route.model (always bare) must not silently miss and fall through
+        // to the flagship-first pick (Opus) on every /login or
+        // /refresh-model-list.
+        let activation = AuthActivationResult {
+            provider_id: Some("claude".to_string()),
+            provider_label: Some("Anthropic".to_string()),
+            activated_model: None,
+            expected_runtime: None,
+            expected_catalog_namespace: None,
+        };
+        let routes = vec![
+            route(
+                jcode_provider_core::DEFAULT_CLAUDE_MODEL,
+                "Anthropic",
+                "claude-oauth",
+                true,
+            ),
+            route("claude-sonnet-5", "Anthropic", "claude-oauth", true),
+        ];
+
+        assert_eq!(
+            provider_model_to_select_after_auth_with_configured_default(
+                &activation,
+                Some("claude-oauth:claude-sonnet-5"),
+                Some(jcode_provider_core::DEFAULT_CLAUDE_MODEL),
+                &routes,
+            )
+            .as_deref(),
+            Some("claude-sonnet-5")
         );
     }
 

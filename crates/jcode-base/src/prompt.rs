@@ -93,33 +93,33 @@ pub fn load_swarm_prompt(working_dir: Option<&Path>) -> String {
     DEFAULT_SWARM_PROMPT.trim().to_string()
 }
 
-/// Reasoning-effort sentinel that means "use the strongest reasoning the model
-/// supports, AND actively orchestrate the work with the swarm tool". Providers
-/// translate this to their strongest real effort when building API requests,
-/// while the UI/session keep the literal `swarm` marker so the agent knows to
+/// Reasoning-effort sentinel that enables swarm orchestration. Providers
+/// translate this to the configured root effort (maximum by default) when
+/// building API requests, while the UI/session keep the literal `swarm` marker
+/// so the agent knows to
 /// inject [`SWARM_EFFORT_DIRECTIVE`].
 pub const SWARM_EFFORT: &str = "swarm";
 
-/// Reasoning-effort sentinel for the **deep task graph** mode: strongest model
+/// Reasoning-effort sentinel for the **deep task graph** mode: configured root
 /// reasoning AND the comprehensive DAG-first swarm workflow (decompose into a
 /// validated task graph, critique/verify gates, typed artifact handoffs). Sits
 /// one rung above [`SWARM_EFFORT`] on the effort ladder: `... xhigh`, `swarm`
 /// (light fan-out), `swarm-deep` (deep task graph). Providers translate this to
-/// their strongest real effort, while the UI/session keep the literal marker so
+/// the configured root effort, while the UI/session keep the literal marker so
 /// the agent knows to inject [`SWARM_DEEP_EFFORT_DIRECTIVE`].
 pub const SWARM_DEEP_EFFORT: &str = "swarm-deep";
 
 /// System-prompt directive injected when the active reasoning effort is
 /// [`SWARM_EFFORT`]. Instructs the agent to lean on the swarm tooling.
-pub const SWARM_EFFORT_DIRECTIVE: &str = "# Swarm Effort\n\nYou are running at the maximum reasoning effort with swarm orchestration enabled. For any non-trivial task, decompose the work and use the `swarm` tool to spawn and coordinate parallel agents (spawn workers with concrete prompts, assign tasks, and collect their reports) instead of doing everything yourself in one thread. Prefer parallelizing independent subtasks across swarm members, and use a coordinator/plan when the work has multiple stages. Only skip the swarm for trivial, single-step requests.";
+pub const SWARM_EFFORT_DIRECTIVE: &str = "# Swarm Effort\n\nSwarm orchestration is enabled. Your root reasoning effort is configured independently from worker effort. For any non-trivial task, decompose the work and use the `swarm` tool to spawn and coordinate parallel agents (spawn workers with concrete prompts, assign tasks, and collect their reports) instead of doing everything yourself in one thread. Prefer parallelizing independent subtasks across swarm members, and use a coordinator/plan when the work has multiple stages. Only skip the swarm for trivial, single-step requests.";
 
 /// System-prompt directive injected when the active reasoning effort is
 /// [`SWARM_DEEP_EFFORT`]. Instructs the agent to run the comprehensive DAG-first
 /// task-graph workflow.
-pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = "# Deep Task Graph\n\nYou are running at maximum reasoning effort with the deep task-graph swarm workflow. Treat the task DAG as the primary object, not ad hoc agent chat. Workflow:\n\n1. Seed a graph with `swarm task_graph` using `mode: \"deep\"`: lay out nodes (kind explore|implement|verify|fix|synthesize) and `depends_on` edges instead of answering directly. (At this effort the server already defaults the plan to deep, but pass `mode: \"deep\"` explicitly anyway.) The engine auto-inserts a plan-wide root gate over your seed: the plan cannot finish until a final adversarial audit passes, and that audit can inject new top-level work.\n2. For any node that is too big, `swarm expand_node` to decompose it into a child sub-DAG (you become its planner/integrator). In deep mode a critique/verify gate is auto-inserted before a composite node can close. The graph is EXPECTED to outgrow its seed, often by several times: growth (expansions and gate-injected gaps) is the system working, not scope creep. plan_status reports seeded-vs-grown counts.\n3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.\n4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.\n5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card + wake on completion), so keep working or answer the user while it runs; check `swarm plan_status` or `bg` for progress. Deep mode fans out wide automatically (many workers run in parallel, bounded only by the swarm member cap), so prefer decomposing into MANY independent sibling nodes rather than a few serial ones: keep the ready set wide so run_plan can dispatch lots of agents at once. Only add `depends_on` edges for real data dependencies.\n\nComprehensiveness is structural: prefer decomposition + gates over a single thorough answer, so it is very unlikely any nook or cranny is missed.";
+pub const SWARM_DEEP_EFFORT_DIRECTIVE: &str = "# Deep Task Graph\n\nThe deep task-graph swarm workflow is enabled. Your root reasoning effort is configured independently from worker effort. Treat the task DAG as the primary object, not ad hoc agent chat. Workflow:\n\n1. Seed a graph with `swarm task_graph` using `mode: \"deep\"`: lay out nodes (kind explore|implement|verify|fix|synthesize) and `depends_on` edges instead of answering directly. (At this effort the server already defaults the plan to deep, but pass `mode: \"deep\"` explicitly anyway.) The engine auto-inserts a plan-wide root gate over your seed: the plan cannot finish until a final adversarial audit passes, and that audit can inject new top-level work.\n2. For any node that is too big, `swarm expand_node` to decompose it into a child sub-DAG (you become its planner/integrator). In deep mode a critique/verify gate is auto-inserted before a composite node can close. The graph is EXPECTED to outgrow its seed, often by several times: growth (expansions and gate-injected gaps) is the system working, not scope creep. plan_status reports seeded-vs-grown counts.\n3. Finish each node with `swarm complete_node` and a typed artifact: `findings`, `evidence` (file:line / commit refs), `validation`, `open_questions`, a required `confidence` (low|medium|high; report low honestly, it routes follow-up work to shore up that scope), and an honest `what_i_did_not_check`. Downstream nodes are hydrated with these artifacts automatically. There is no other way to close a deep node: a turn ending without expand_node/complete_node re-queues the node to a fresh worker and fails it on repeat.\n4. When a critique/verify gate finds gaps or failures, use `swarm inject_gap` to add new nodes; the parent cannot close until they drain. A passing gate artifact must account for EVERY node it audited by id (the server rejects rubber stamps), and cannot pass over a low-confidence sibling without addressing it explicitly, so treat low-confidence siblings as priority probe targets.\n5. Use `swarm run_plan` to drive the graph to completion. It returns immediately and drives the plan as a background task (progress card + wake on completion), so keep working or answer the user while it runs; check `swarm plan_status` or `bg` for progress. Deep mode fans out wide automatically (many workers run in parallel, bounded only by the swarm member cap), so prefer decomposing into MANY independent sibling nodes rather than a few serial ones: keep the ready set wide so run_plan can dispatch lots of agents at once. Only add `depends_on` edges for real data dependencies.\n\nComprehensiveness is structural: prefer decomposition + gates over a single thorough answer, so it is very unlikely any nook or cranny is missed.";
 
 /// Returns true when `effort` is either swarm sentinel (light or deep),
-/// case-insensitive. Used by providers to map to the strongest real effort.
+/// case-insensitive. Providers resolve their configured root reasoning level.
 pub fn is_swarm_effort(effort: &str) -> bool {
     let trimmed = effort.trim();
     trimmed.eq_ignore_ascii_case(SWARM_EFFORT) || trimmed.eq_ignore_ascii_case(SWARM_DEEP_EFFORT)
@@ -130,18 +130,32 @@ pub fn is_deep_swarm_effort(effort: &str) -> bool {
     effort.trim().eq_ignore_ascii_case(SWARM_DEEP_EFFORT)
 }
 
+/// Configured root reasoning level for an orchestration sentinel. Providers
+/// translate this real level to their supported range while retaining the
+/// sentinel in session state. Ordinary reasoning efforts are left untouched.
+pub fn swarm_root_reasoning_effort(effort: &str) -> Option<&'static str> {
+    if !is_swarm_effort(effort) {
+        return None;
+    }
+    Some(
+        crate::config::config()
+            .agents
+            .root_effort_for_swarm(is_deep_swarm_effort(effort)),
+    )
+}
+
 /// The user-facing "general effort" ladder is one list, but each rung is one of
 /// two internal kinds: a plain reasoning level (mapped straight to the provider
-/// wire effort) or a swarm orchestration mode (which also pins reasoning to the
-/// model's max). [`EffortKind`] is the single classifier all consumers use so the
+/// wire effort) or a swarm orchestration mode (with independently configured
+/// root reasoning). [`EffortKind`] is the single classifier all consumers use so the
 /// UI, providers, and scheduler never disagree about what a rung means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffortKind {
     /// A plain reasoning level (none/low/medium/high/xhigh/max).
     Reasoning,
-    /// Light swarm mode: max reasoning + parallel fan-out.
+    /// Light swarm mode: configured root reasoning + parallel fan-out.
     SwarmLight,
-    /// Deep swarm mode: max reasoning + DAG-first task graph.
+    /// Deep swarm mode: configured root reasoning + DAG-first task graph.
     SwarmDeep,
 }
 
@@ -192,6 +206,7 @@ pub fn append_swarm_effort_directive(split: &mut SplitSystemPrompt, effort: Opti
 /// alongside the other prompt templates.
 pub const MISSION_CONTINUATION_TEMPLATE: &str = include_str!("prompt/mission_continuation.md");
 const SELFDEV_MODE_PROMPT: &str = include_str!("prompt/selfdev_mode.txt");
+const DESKTOP_SELFDEV_MODE_PROMPT: &str = include_str!("prompt/desktop_selfdev_mode.txt");
 const SELFDEV_FOCUS_TUI_PROMPT: &str = include_str!("prompt/selfdev_focus_tui.txt");
 /// Split system prompt for efficient caching
 /// Static content is cached, dynamic content is not
@@ -447,9 +462,11 @@ pub fn build_system_prompt_full_with_capabilities(
         ..Default::default()
     };
 
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
+    // Desktop checkout identity takes precedence over the CLI self-dev flag.
+    if is_desktop_working_dir(working_dir) {
+        info.selfdev_chars = DESKTOP_SELFDEV_MODE_PROMPT.len();
+        parts.push(DESKTOP_SELFDEV_MODE_PROMPT.to_string());
+    } else if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         parts.push(selfdev_prompt);
@@ -584,9 +601,11 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
 
     // === STATIC CONTENT (cacheable) ===
 
-    // Add self-dev guidance only in active self-dev sessions. Normal sessions
-    // learn about the on-ramp from the mode-aware `selfdev` tool schema.
-    if is_selfdev {
+    // Keep Desktop guidance cacheable and separate from CLI self-development.
+    if is_desktop_working_dir(working_dir) {
+        info.selfdev_chars = DESKTOP_SELFDEV_MODE_PROMPT.len();
+        static_parts.push(DESKTOP_SELFDEV_MODE_PROMPT.to_string());
+    } else if is_selfdev {
         let selfdev_prompt = build_selfdev_prompt_static_for_working_dir(working_dir);
         info.selfdev_chars = selfdev_prompt.len();
         static_parts.push(selfdev_prompt);
@@ -649,6 +668,13 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     )
 }
 
+/// Detect Desktop independently of the CLI self-development flag.
+fn is_desktop_working_dir(working_dir: Option<&Path>) -> bool {
+    working_dir
+        .and_then(jcode_selfdev_types::desktop_repo_root)
+        .is_some()
+}
+
 /// Build self-dev tools prompt section (static version without dynamic socket path)
 #[cfg(test)]
 fn build_selfdev_prompt_static() -> String {
@@ -698,6 +724,10 @@ fn build_selfdev_prompt_for_context(context: SelfDevProductContext) -> String {
 /// Build immutable session context captured once per session.
 pub fn build_session_context(working_dir: Option<&Path>) -> String {
     let mut lines = vec!["# Session Context".to_string()];
+
+    if is_desktop_working_dir(working_dir) {
+        lines.push("Self-development mode: desktop".to_string());
+    }
 
     lines.extend(session_datetime_lines());
     lines.push(format!("OS: {}", std::env::consts::OS));
@@ -909,6 +939,13 @@ fn gpu_summary() -> Option<String> {
     }
 }
 
+fn same_canonical_path(first: &Path, second: &Path) -> bool {
+    match (std::fs::canonicalize(first), std::fs::canonicalize(second)) {
+        (Ok(first), Ok(second)) => first == second,
+        _ => false,
+    }
+}
+
 fn load_agents_md_files_from_dirs(
     project_dir: &Path,
     global_agents_md: Option<&Path>,
@@ -940,15 +977,8 @@ fn load_agents_md_files_from_dirs(
     // Canonical file identity handles cwd=$HOME as well as symlinked aliases.
     // If either file is absent or cannot be resolved, loading below remains the
     // source of truth and simply skips unreadable files.
-    let global_duplicates_project = global_agents_md.is_some_and(|global_agents_md| {
-        match (
-            std::fs::canonicalize(&project_agents_md),
-            std::fs::canonicalize(global_agents_md),
-        ) {
-            (Ok(project), Ok(global)) => project == global,
-            _ => false,
-        }
-    });
+    let global_duplicates_project = global_agents_md
+        .is_some_and(|global_agents_md| same_canonical_path(&project_agents_md, global_agents_md));
 
     if !global_duplicates_project
         && let Some(global_agents_md) = global_agents_md
@@ -992,8 +1022,9 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     };
 
     let project_dir = working_dir.unwrap_or(Path::new("."));
+    let project_overlay = project_dir.join(".jcode").join("prompt-overlay.md");
     if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("prompt-overlay.md"),
+        &project_overlay,
         "Project Prompt Overlay (.jcode/prompt-overlay.md)",
     ) {
         total_chars += size;
@@ -1001,6 +1032,7 @@ fn load_prompt_overlay_files_from_dir(working_dir: Option<&Path>) -> (Option<Str
     }
 
     if let Ok(global_overlay) = crate::storage::jcode_dir().map(|dir| dir.join("prompt-overlay.md"))
+        && !same_canonical_path(&project_overlay, &global_overlay)
         && let Some((content, size)) = load_file(
             &global_overlay,
             "Global Prompt Overlay (~/.jcode/prompt-overlay.md)",
@@ -1035,8 +1067,9 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
     };
 
     let project_dir = working_dir.unwrap_or(Path::new("."));
+    let project_preferred_tools = project_dir.join(".jcode").join("preferred-tools.md");
     if let Some((content, size)) = load_file(
-        &project_dir.join(".jcode").join("preferred-tools.md"),
+        &project_preferred_tools,
         "Project Preferred Tools (.jcode/preferred-tools.md)",
     ) {
         total_chars += size;
@@ -1045,6 +1078,7 @@ fn load_preferred_tools_files_from_dir(working_dir: Option<&Path>) -> (Option<St
 
     if let Ok(global_preferred_tools) =
         crate::storage::jcode_dir().map(|dir| dir.join("preferred-tools.md"))
+        && !same_canonical_path(&project_preferred_tools, &global_preferred_tools)
         && let Some((content, size)) = load_file(
             &global_preferred_tools,
             "Global Preferred Tools (~/.jcode/preferred-tools.md)",

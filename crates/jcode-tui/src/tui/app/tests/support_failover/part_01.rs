@@ -141,6 +141,7 @@ impl Provider for OpenRouterSpecCaptureProvider {
             api_method: "openrouter".to_string(),
             available: true,
             detail: "cached route".to_string(),
+            usage: None,
             cheapness: None,
         }]
     }
@@ -275,6 +276,7 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
     let mut app = create_test_app();
     app.remote_side_pane_images
         .push(crate::session::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "x".repeat(32 * 1024),
             label: Some("preview.png".to_string()),
@@ -318,12 +320,14 @@ fn debug_memory_profile_includes_app_owned_summary_for_large_client_state() {
 
 fn test_side_panel_snapshot(page_id: &str, title: &str) -> crate::side_panel::SidePanelSnapshot {
     crate::side_panel::SidePanelSnapshot {
+        focus_revision: 0,
         focused_page_id: Some(page_id.to_string()),
         pages: vec![crate::side_panel::SidePanelPage {
             id: page_id.to_string(),
             title: title.to_string(),
             file_path: format!("/tmp/{page_id}.md"),
             format: crate::side_panel::SidePanelPageFormat::Markdown,
+            pdf_data: None,
             source: crate::side_panel::SidePanelPageSource::Managed,
             content: format!("# {title}"),
             updated_at_ms: 1,

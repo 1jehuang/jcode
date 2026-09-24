@@ -141,6 +141,7 @@ pub(crate) use messages::{
     render_swarm_message, render_system_message, render_tool_message, render_usage_message,
 };
 pub(crate) use output_style::adapt_buffer_for_emoji_preference;
+use pinned_ui::draw_side_panel_markdown;
 pub use pinned_ui::{
     SidePanelDebugStats, SidePanelMermaidProbe, SidePanelMermaidProbeRect,
     debug_probe_side_panel_mermaid,
@@ -148,9 +149,6 @@ pub use pinned_ui::{
 pub(crate) use pinned_ui::{
     clear_side_panel_debug_snapshot, clear_side_panel_render_caches, prewarm_focused_side_panel,
     reset_side_panel_debug_stats, side_panel_debug_json, side_panel_debug_stats,
-};
-use pinned_ui::{
-    collect_pinned_diffs_cached, draw_pinned_content_cached, draw_side_panel_markdown,
 };
 #[cfg(test)]
 use transitions::extract_line_text;
@@ -238,6 +236,7 @@ thread_local! {
     static TEST_TAIL_FOLLOW_SNAP_PENDING: Cell<bool> = const { Cell::new(false) };
     static TEST_LAST_USER_PROMPT_POSITIONS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static TEST_LAST_LAYOUT: RefCell<Option<LayoutSnapshot>> = const { RefCell::new(None) };
+    static TEST_LAST_CHAT_FRAME: RefCell<Option<Arc<PreparedChatFrame>>> = const { RefCell::new(None) };
     static TEST_LAST_STATUS_AREA: RefCell<Option<Rect>> = const { RefCell::new(None) };
     static TEST_VISIBLE_COPY_TARGETS: RefCell<Vec<VisibleCopyTarget>> = RefCell::new(Vec::new());
     static TEST_VISIBLE_EXPAND_EDIT_BADGE: Cell<bool> = const { Cell::new(false) };
@@ -512,9 +511,11 @@ pub(crate) fn set_tail_catchup_active(active: bool) {
 
 /// Request that the next tail-follow render land at the exact bottom.
 ///
-/// This is reserved for explicit navigation or composer actions. Automatic
-/// transcript growth does not set it, so large committed blocks still use the
-/// bounded catch-up animation.
+/// Set by explicit navigation and composer actions, and by a terminal resize,
+/// which rewraps the transcript and would otherwise look like a large append
+/// that the catch-up animation slides through. Automatic transcript growth does
+/// not set it, so large committed blocks still use the bounded catch-up
+/// animation.
 pub(crate) fn request_tail_follow_snap() {
     #[cfg(test)]
     {
@@ -1447,6 +1448,17 @@ pub struct LayoutSnapshot {
 #[cfg(not(test))]
 static LAST_LAYOUT: OnceLock<Mutex<Option<LayoutSnapshot>>> = OnceLock::new();
 
+/// The prepared transcript frame the renderer last drew. The retained frame
+/// *is* the published geometry: it carries per-item row ranges and totals, so
+/// handlers outside `draw` can resolve a viewport anchor against it.
+#[cfg(not(test))]
+static LAST_CHAT_FRAME: OnceLock<Mutex<Option<Arc<PreparedChatFrame>>>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn last_chat_frame_state() -> &'static Mutex<Option<Arc<PreparedChatFrame>>> {
+    LAST_CHAT_FRAME.get_or_init(|| Mutex::new(None))
+}
+
 #[cfg(not(test))]
 fn last_layout_state() -> &'static Mutex<Option<LayoutSnapshot>> {
     LAST_LAYOUT.get_or_init(|| Mutex::new(None))
@@ -1494,6 +1506,38 @@ pub fn last_layout_snapshot() -> Option<LayoutSnapshot> {
             .lock()
             .ok()
             .and_then(|snapshot| *snapshot)
+    }
+}
+
+/// Record the prepared transcript frame the renderer just drew.
+pub(crate) fn set_last_chat_frame(frame: Arc<PreparedChatFrame>) {
+    #[cfg(test)]
+    {
+        TEST_LAST_CHAT_FRAME.with(|slot| *slot.borrow_mut() = Some(frame));
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        if let Ok(mut slot) = last_chat_frame_state().lock() {
+            *slot = Some(frame);
+        }
+    }
+}
+
+/// The prepared transcript frame the renderer last drew, if any.
+// First production consumer lands in epic #1411 phase 4/5a.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn last_chat_frame() -> Option<Arc<PreparedChatFrame>> {
+    #[cfg(test)]
+    {
+        return TEST_LAST_CHAT_FRAME.with(|slot| slot.borrow().clone());
+    }
+    #[cfg(not(test))]
+    {
+        last_chat_frame_state()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -1586,6 +1630,9 @@ fn clear_test_render_state_locked() {
     frame_metrics::clear_flicker_frame_history_for_tests();
     TEST_LAST_LAYOUT.with(|snapshot| {
         *snapshot.borrow_mut() = None;
+    });
+    TEST_LAST_CHAT_FRAME.with(|slot| {
+        *slot.borrow_mut() = None;
     });
     TEST_LAST_STATUS_AREA.with(|snapshot| {
         *snapshot.borrow_mut() = None;
@@ -2663,12 +2710,11 @@ pub fn draw(frame: &mut Frame, app: &dyn TuiState) {
         Ok(()) => {}
         Err(payload) => render_recovered_panic_frame(frame, &payload),
     }
-    // Adapt the finished frame for light backgrounds, then apply the user's
-    // configured colors, which must not be luminance-flipped. Working at the
-    // buffer level covers every widget and overlay without touching individual
-    // color call sites. See `palette::adapt_buffer_for_palette` for the ordering.
-    jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
-    jcode_tui_style::palette::adapt_buffer_for_palette(frame.buffer_mut());
+    // Adapt the finished frame at buffer level so every widget and overlay
+    // follows the same policy. User-configured colors remain exact.
+    // Attribute explicit palette overrides before light-theme contrast repair
+    // can make distinct muted source grays converge to the same rendered ink.
+    jcode_tui_style::adapt_buffer_for_display(frame.buffer_mut());
     adapt_buffer_for_emoji_preference(frame.buffer_mut());
     // Cache eviction/clearing can outlive the last visible image. Carry Kitty
     // deletion commands on any completed frame so terminal-side pixel storage
@@ -2805,24 +2851,11 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let pane_position = app.diagram_pane_position();
     let has_side_panel_content = !swarm_page_active && app.side_panel().focused_page().is_some();
     let diff_mode = app.diff_mode();
-    let collect_diffs = diff_mode.is_pinned();
-    // Images now render inline in the transcript, so the side panel only handles
-    // pinned file diffs. `pin_images` no longer feeds the side-panel surface.
-    let has_pinned_content = if collect_diffs && !swarm_page_active {
-        collect_pinned_diffs_cached(app.display_messages(), app.display_messages_version())
-    } else {
-        false
-    };
     let has_file_diff_edits =
         !swarm_page_active && diff_mode.is_file() && app.has_display_edit_tool_messages();
-    let has_right_side_pane_content =
-        has_side_panel_content || has_pinned_content || has_file_diff_edits;
-    // The side panel is itself a single right-hand auxiliary surface and can render
-    // visual content such as Mermaid diagrams inline. Pinned image/file-diff content
-    // also uses that same right-hand surface. Do not also open the global pinned
-    // diagram pane while any right-hand side pane is visible, otherwise combinations
-    // like pinned images + Mermaid can produce chat + side pane + diagram triple-split
-    // layouts.
+    let has_right_side_pane_content = has_side_panel_content || has_file_diff_edits;
+    // Regular side-panel pages and full-file diffs share the right-hand surface.
+    // Suppress a separate diagram pane to avoid a triple-split layout.
     let suppress_side_diagram = has_right_side_pane_content;
     let pinned_diagram = if !swarm_page_active
         && diagram_mode == crate::config::DiagramDisplayMode::Pinned
@@ -2931,20 +2964,7 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     let (chat_area, diff_pane_area) = if needs_side_pane {
         const MIN_DIFF_WIDTH: u16 = 30;
         const MIN_CHAT_WIDTH: u16 = 20;
-        // Pinned images live in a tall narrow column, so a wide image fits to
-        // the pane width and ends up small with empty space below it. When the
-        // pane is showing image content (and the user has not manually resized
-        // it), widen the default split so images use more of the available
-        // horizontal space. Diffs/markdown keep the standard ratio.
-        let image_dominant_pane =
-            has_pinned_content && !has_file_diff_edits && !has_side_panel_content;
-        const ADAPTIVE_IMAGE_RATIO: u32 = 55;
-        let base_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
-        let effective_ratio = if image_dominant_pane && !app.diagram_pane_ratio_user_adjusted() {
-            base_ratio.max(ADAPTIVE_IMAGE_RATIO)
-        } else {
-            base_ratio
-        };
+        let effective_ratio = app.diagram_pane_ratio().clamp(25, 100) as u32;
         let max_diff = chat_area.width.saturating_sub(MIN_CHAT_WIDTH);
         if max_diff >= MIN_DIFF_WIDTH {
             let diff_width = (((chat_area.width as u32 * effective_ratio) / 100) as u16)
@@ -3093,7 +3113,8 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
 
     let show_donut = !onboarding_welcome && super::idle_donut_active(app);
     let donut_height: u16 = idle_donut_reserved_height(show_donut, input_height);
-    let notification_height: u16 = if app.has_notification() { 1 } else { 0 };
+    let notification_height =
+        input_ui::notification_height(app, chat_area.width).min(chat_area.height.saturating_sub(4));
     // Elastic overscroll status line revealed when the user scrolls past the
     // bottom of the transcript. Rendered directly below the input line.
     let overscroll_height: u16 = if app.chat_overscroll_active() { 1 } else { 0 };
@@ -3332,7 +3353,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
         chat_scrollbar_visible,
         use_packed_layout: use_packed,
         has_side_panel_content,
-        has_pinned_content,
         has_file_diff_edits,
     });
 
@@ -3439,18 +3459,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
                 app,
                 prepared.as_ref(),
                 app.diff_pane_scroll(),
-                app.diff_pane_focus(),
-            );
-        } else if has_pinned_content {
-            if let Some(ref mut capture) = debug_capture {
-                capture.render_order.push("draw_pinned_content".to_string());
-            }
-            draw_pinned_content_cached(
-                frame,
-                diff_area,
-                app,
-                app.diff_pane_scroll(),
-                app.diff_line_wrap(),
                 app.diff_pane_focus(),
             );
         }

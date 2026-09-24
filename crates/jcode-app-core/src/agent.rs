@@ -5,6 +5,8 @@ mod environment;
 mod inline_tail;
 mod interrupts;
 mod messages;
+#[cfg(test)]
+mod model_usage_tests;
 mod prompting;
 mod provider;
 mod response_recovery;
@@ -52,7 +54,7 @@ pub use jcode_agent_runtime::{
     SoftInterruptQueue, SoftInterruptSource, StreamError,
 };
 
-const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "desktop_selfdev", "communicate"];
 static RECOVERED_TEXT_WRAPPED_TOOL_CALLS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static JCODE_REPO_SOURCE_STATE: LazyLock<(Option<String>, Option<bool>)> = LazyLock::new(|| {
@@ -237,8 +239,6 @@ pub struct Agent {
     /// MCP tools to wait for), this is set so the per-turn registry scan stops.
     /// Reset whenever the tool list is intentionally unlocked.
     mcp_late_register_resolved: bool,
-    /// Override system prompt (used by ambient mode to inject a custom prompt)
-    system_prompt_override: Option<String>,
     /// AGENTS.md is session bootstrap input. Keep the captured text stable so
     /// tool writes do not mutate the provider's cacheable prefix mid-session.
     agents_md_snapshot: (Option<String>, crate::prompt::ContextInfo),
@@ -330,7 +330,6 @@ impl Agent {
             last_usage: TokenUsage::default(),
             locked_tools: None,
             mcp_late_register_resolved: false,
-            system_prompt_override: None,
             agents_md_snapshot,
             memory_enabled: crate::config::config().features.memory,
             rewind_undo_snapshot: None,
@@ -959,9 +958,21 @@ impl Agent {
         &self.session.id
     }
 
+    /// Desktop self-development is selected by the session checkout, including
+    /// restored sessions. It must not set the CLI canary/reload flags.
+    pub fn is_desktop_selfdev(&self) -> bool {
+        self.session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(jcode_selfdev_types::desktop_repo_root)
+            .is_some()
+    }
+
     pub(crate) fn set_working_dir_for_pending_context(&mut self, working_dir: Option<String>) {
         if working_dir.is_some() {
             self.session.working_dir = working_dir;
+            self.unlock_tools();
             self.session.refresh_initial_session_context_message();
         }
     }

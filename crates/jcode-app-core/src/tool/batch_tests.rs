@@ -249,6 +249,7 @@ fn test_normalize_arguments_aliases_to_parameters() {
 #[test]
 fn test_schema_only_requires_tool() {
     let registry = Registry {
+        mcp_policy: Arc::default(),
         tools: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         skills: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::skill::SkillRegistry::default(),
@@ -331,4 +332,62 @@ fn subcall_level_accept_large_output_does_not_override_an_explicit_value() {
         serde_json::json!(false),
         "explicit per-subcall value must win"
     );
+}
+
+struct ImageTool;
+
+#[async_trait::async_trait]
+impl Tool for ImageTool {
+    fn name(&self) -> &str {
+        "test_image"
+    }
+    fn description(&self) -> &str {
+        "Image fixture"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+        if input["fail"] == true {
+            anyhow::bail!("fixture failure");
+        }
+        if input["slow"] == true {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let data = input["data"].as_str().unwrap();
+        Ok(ToolOutput::new("image").with_labeled_image("image/png", data, format!("{data}.png")))
+    }
+}
+
+#[tokio::test]
+async fn batch_preserves_images_in_input_order_across_failures() {
+    let registry = registry_with_batch_and_echo().await;
+    registry
+        .tools
+        .write()
+        .await
+        .insert("test_image".into(), Arc::new(ImageTool));
+    let output = registry
+        .execute(
+            "batch",
+            json!({"tool_calls": [
+                {"tool": "test_image", "parameters": {"data": "first", "slow": true}},
+                {"tool": "test_image", "parameters": {"fail": true}},
+                {"tool": "test_image", "parameters": {"data": "last"}}
+            ]}),
+            test_context(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        output
+            .images
+            .iter()
+            .map(|i| i.data.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "last"]
+    );
+    assert_eq!(output.images[0].label.as_deref(), Some("first.png"));
+    assert_eq!(output.images[1].media_type, "image/png");
+    assert!(output.output.contains("Completed: 2 succeeded, 1 failed"));
 }

@@ -469,6 +469,7 @@ fn test_handle_server_event_history_same_session_rewind_reapply_clears_streaming
             id: 2,
             session_id: "session_rewind_preview".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -577,6 +578,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
             id: 3,
             session_id: "session_midstream_dup".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "truncated payload from another client's rewind".to_string(),
                 tool_calls: None,
@@ -658,6 +660,7 @@ fn test_handle_server_event_history_same_session_midstream_duplicate_is_dropped_
                 id: 3,
                 session_id: "session_midstream_dup".to_string(),
                 messages: vec![crate::protocol::HistoryMessage {
+                    response_stats: None,
                     role: "user".to_string(),
                     content: "truncated payload from another client's rewind".to_string(),
                     tool_calls: None,
@@ -759,6 +762,7 @@ fn test_handle_server_event_history_same_session_rewind_then_late_done_does_not_
             id: 2,
             session_id: "session_rewind_done_race".to_string(),
             messages: vec![crate::protocol::HistoryMessage {
+                response_stats: None,
                 role: "user".to_string(),
                 content: "first message kept by the rewind".to_string(),
                 tool_calls: None,
@@ -1546,7 +1550,7 @@ fn test_handle_server_event_interrupted_clears_stream_state_and_sets_idle() {
         .push((77, "pending soft interrupt".to_string()));
 
     remote.handle_tool_start("tool_1", "bash");
-    remote.handle_tool_input("{\"command\":\"sleep 10\"}");
+    remote.handle_tool_input(None, "{\"command\":\"sleep 10\"}");
     remote.handle_tool_exec("tool_1", "edit");
 
     app.handle_server_event(crate::protocol::ServerEvent::Interrupted, &mut remote);
@@ -1759,6 +1763,7 @@ fn test_handle_server_event_side_pane_images_populates_pane_live() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: Some("openclaw.png".to_string()),
@@ -1805,6 +1810,7 @@ fn test_native_generated_image_renders_inline_without_opening_side_panel() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_active".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: Some("/tmp/generated.png".to_string()),
@@ -1856,6 +1862,7 @@ fn test_handle_server_event_side_pane_images_ignores_inactive_session() {
         crate::protocol::ServerEvent::SidePaneImages {
             session_id: "session_other".to_string(),
             images: vec![crate::session::RenderedImage {
+                history_message_index: None,
                 media_type: "image/png".to_string(),
                 data: "image-data".to_string(),
                 label: None,

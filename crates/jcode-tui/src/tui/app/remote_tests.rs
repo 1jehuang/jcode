@@ -593,13 +593,106 @@ fn process_remote_followups_sends_startup_prompt_before_history_arrives() {
         "the user echo must be retained until bootstrap History is applied"
     );
 
-    // Bootstrap History replaces the visible transcript. The retained echo is
-    // restored afterwards so the fork prompt does not visually disappear.
-    crate::tui::app::remote::input_dispatch::restore_pending_startup_prompt_echo(&mut app);
+    let startup_id = app.current_message_id.expect("startup request was sent");
+    let next_request_id = remote.next_request_id_for_test();
+    let processing_started = app.processing_started;
+    let visible_turn_started = app.visible_turn_started;
+    // A queued recovery continuation must not dispatch behind the already-sent
+    // startup turn when Subscribe's earlier, idle History snapshot arrives.
+    app.hidden_queued_system_messages
+        .push("Continue after reload".to_string());
+    handle_server_event(&mut app, startup_history("startup-session"), &mut remote);
+    assert!(remote.has_loaded_history());
+    assert_eq!(app.remote_session_id.as_deref(), Some("startup-session"));
+    assert!(app.is_processing);
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Sending));
+    assert_eq!(app.current_message_id, Some(startup_id));
+    assert_eq!(app.processing_started, processing_started);
+    assert_eq!(app.visible_turn_started, visible_turn_started);
+    assert_eq!(
+        app.rate_limit_pending_message
+            .as_ref()
+            .map(|pending| pending.content.as_str()),
+        Some("Start the fork immediately")
+    );
+
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert_eq!(
+        remote.next_request_id_for_test(),
+        next_request_id,
+        "History must not enable a second send"
+    );
+    assert_eq!(app.current_message_id, Some(startup_id));
+    assert!(app.is_processing);
+    assert_eq!(
+        app.hidden_queued_system_messages,
+        vec!["Continue after reload"]
+    );
     assert!(app.display_messages().iter().any(|message| {
         message.role == "user" && message.content == "Start the fork immediately"
     }));
     assert!(app.pending_startup_prompt_echo.is_none());
+}
+
+fn startup_history(session_id: &str) -> ServerEvent {
+    ServerEvent::History {
+        id: 1,
+        session_id: session_id.to_string(),
+        messages: vec![],
+        images: vec![],
+        provider_name: None,
+        provider_model: None,
+        subagent_model: None,
+        autoreview_enabled: None,
+        autojudge_enabled: None,
+        available_models: vec![],
+        available_model_routes: vec![],
+        mcp_servers: vec![],
+        skills: vec![],
+        total_tokens: None,
+        token_usage_totals: None,
+        all_sessions: vec![],
+        client_count: Some(1),
+        is_canary: Some(false),
+        reload_recovery: None,
+        server_version: None,
+        server_name: None,
+        server_icon: None,
+        server_has_update: Some(false),
+        was_interrupted: None,
+        connection_type: None,
+        status_detail: None,
+        upstream_provider: None,
+        resolved_credential: None,
+        reasoning_effort: None,
+        service_tier: None,
+        compaction_mode: crate::config::CompactionMode::Reactive,
+        activity: None,
+        side_panel: crate::side_panel::SidePanelSnapshot::default(),
+    }
+}
+
+#[test]
+fn startup_send_state_is_not_preserved_for_real_session_switch() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("previous-session".to_string());
+    app.input = "Start the fork immediately".to_string();
+    app.submit_input_on_startup = true;
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    rt.block_on(process_remote_followups(&mut app, &mut remote));
+    assert!(app.current_message_id.is_some());
+    assert!(app.pending_startup_prompt_echo.is_some());
+
+    handle_server_event(&mut app, startup_history("different-session"), &mut remote);
+
+    assert!(!app.is_processing);
+    assert!(app.rate_limit_pending_message.is_none());
+    assert!(app.processing_started.is_none());
+    assert!(matches!(app.status, crate::tui::ProcessingStatus::Idle));
 }
 
 #[test]
@@ -1128,6 +1221,73 @@ fn remote_dropped_file_path_is_sent_as_a_prompt_not_a_slash_command() {
         !app.pending_turn,
         "remote submissions must never park on the local-only pending_turn flag"
     );
+}
+
+#[test]
+fn remote_embedded_known_slash_commands_are_sent_as_prompt_text() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let prompt = "Explain the literal strings \"/help\", `/test`, and /tmp/shot.png.";
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: prompt.to_string(),
+            expanded: prompt.to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("embedded command-looking text should use the remote prompt path");
+
+    assert!(
+        app.is_processing,
+        "remote prompt should start a remote turn"
+    );
+    assert!(
+        !app.pending_turn,
+        "remote prompts must not use local pending_turn"
+    );
+    assert!(
+        app.display_messages()
+            .iter()
+            .any(|message| { message.role == "user" && message.content == prompt })
+    );
+}
+
+#[test]
+fn remote_multiple_known_slash_commands_use_the_local_command_boundary() {
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+
+    rt.block_on(crate::tui::app::remote::submit_remote_slash_input(
+        &mut app,
+        &mut remote,
+        crate::tui::app::input::PreparedInput {
+            raw_input: "/help compact /test help".to_string(),
+            expanded: "/help compact /test help".to_string(),
+            images: vec![],
+        },
+    ))
+    .expect("known built-in slash commands should stay local");
+
+    let messages = app.display_messages();
+    assert_eq!(messages.len(), 2);
+    assert!(messages[0].content.contains("/compact"));
+    assert!(messages[1].content.contains("Usage: /test"));
+    assert!(!app.pending_turn);
+    assert!(!app.is_processing);
 }
 
 #[test]

@@ -9,22 +9,13 @@ fn inline_view_display_width(text: &str) -> usize {
 pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
     match app.inline_ui_state() {
         Some(crate::tui::InlineUiStateRef::Interactive(picker)) => {
+            // Model choices replace the command suggestions, without reflowing chat.
+            if picker.kind == crate::tui::PickerKind::Model {
+                return 0;
+            }
             let visible_rows = picker.filtered.len() as u16;
             let rows_needed = visible_rows + 1 + 2; // header + rounded border
-            // Reserve one extra row for the model-picker hotkey hint that is
-            // rendered ABOVE the box (outside its border). Shown for runtime model
-            // pickers in both focused and preview modes.
-            let hint_rows: u16 = if picker.kind == crate::tui::PickerKind::Model
-                && picker
-                    .entries
-                    .iter()
-                    .any(|entry| matches!(entry.action, crate::tui::PickerAction::Model))
-            {
-                1
-            } else {
-                0
-            };
-            rows_needed.min(20) + hint_rows
+            rows_needed.min(20)
         }
         Some(crate::tui::InlineUiStateRef::View(view)) => {
             let visible_rows = view.lines.len().max(1) as u16;
@@ -37,11 +28,13 @@ pub(super) fn inline_ui_height(app: &dyn TuiState) -> u16 {
 
 pub(super) fn draw_inline_ui(frame: &mut Frame, app: &dyn TuiState, area: Rect) {
     match app.inline_ui_state() {
-        Some(crate::tui::InlineUiStateRef::Interactive(_)) => {
+        Some(crate::tui::InlineUiStateRef::Interactive(picker))
+            if picker.kind != crate::tui::PickerKind::Model =>
+        {
             super::inline_interactive_ui::draw_inline_interactive(frame, app, area)
         }
         Some(crate::tui::InlineUiStateRef::View(view)) => draw_inline_view(frame, app, view, area),
-        None => {}
+        _ => {}
     }
 }
 

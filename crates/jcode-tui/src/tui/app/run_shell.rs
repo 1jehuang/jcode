@@ -119,7 +119,7 @@ pub(super) fn status_spinner_only_symbol(app: &App) -> Option<&'static str> {
 }
 
 fn is_slash_command_input(input: &str) -> bool {
-    input.trim_start().starts_with('/')
+    super::has_safe_slash_command_token(input)
 }
 
 /// Whether the floating command-suggestion palette may be on screen for the
@@ -467,6 +467,7 @@ impl StatusSpinnerRenderer {
     ) -> Result<()> {
         // Painting a frame is progress, including during long streaming turns.
         crate::logging::watchdog::beat("tui.draw");
+        app.refresh_terminal_title_metrics();
         let invalidation = full_frame_invalidation(app.force_full_redraw, app.force_full_repaint);
         let force_full_redraw = invalidation != FullFrameInvalidation::None;
         // Wrap the whole frame (optional clear + diff flush) in a synchronized update so the
@@ -623,8 +624,9 @@ fn render_status_spinner_into_buffer_mut(buffer: &mut Buffer, area: Rect, symbol
         1,
         // The spinner cell is patched outside the full-frame draw, so apply
         // light-theme adaptation here explicitly (no-op on dark themes).
-        Style::default().fg(jcode_tui_style::adapt_color_for_theme(
+        Style::default().fg(jcode_tui_style::adapt_foreground_for_display(
             jcode_tui_style::theme::ai_color(),
+            ratatui::style::Color::Reset,
         )),
     );
 }

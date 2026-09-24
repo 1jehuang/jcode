@@ -32,7 +32,13 @@ impl Agent {
     /// Set logging context for this agent's session/provider
     pub(super) fn set_log_context(&self) {
         logging::set_session(&self.session.id);
-        logging::set_provider_info(self.provider.name(), &self.provider.model());
+        // Log the profile this session actually talks to. `name()` is the
+        // stable machine id for the provider class, which the multiplexing
+        // slot reports as `OpenRouter` (a concrete runtime instance reports
+        // `openrouter`); that slot also serves every direct OpenAI-compatible
+        // profile, so it tagged DeepSeek sessions `prv:OpenRouter` /
+        // `prv:openrouter` (issue #1286).
+        logging::set_provider_info(&self.provider.display_name(), &self.provider.model());
     }
 
     /// Record a lightweight environment snapshot for post-mortem debugging
@@ -94,5 +100,71 @@ impl Agent {
             testing_build: self.session.testing_build.clone(),
             working_git,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::{Message, ToolDefinition};
+    use crate::provider::{EventStream, Provider};
+    use crate::tool::Registry;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    /// A stand-in for the multiplexing OpenRouter slot: the machine-facing
+    /// `name()` is the transport, while the runtime it executes is a direct
+    /// OpenAI-compatible profile. A concrete runtime instance reports the
+    /// lowercase `openrouter` instead; both tag the same sessions.
+    struct MultiplexedSlotProvider;
+
+    #[async_trait]
+    impl Provider for MultiplexedSlotProvider {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _system: &str,
+            _resume_session_id: Option<&str>,
+        ) -> Result<EventStream> {
+            Err(anyhow::anyhow!(
+                "the log context test never completes a call"
+            ))
+        }
+
+        fn name(&self) -> &str {
+            "OpenRouter"
+        }
+
+        fn display_name(&self) -> String {
+            "DeepSeek".to_string()
+        }
+
+        fn fork(&self) -> Arc<dyn Provider> {
+            Arc::new(MultiplexedSlotProvider)
+        }
+    }
+
+    /// The log prefix must name the profile the session talks to. `name()` is
+    /// the transport slot that also serves every direct OpenAI-compatible
+    /// profile, so it tagged DeepSeek sessions as `prv:openrouter` (issue #1286).
+    #[tokio::test]
+    async fn log_context_names_the_profile_not_the_transport_slot() {
+        // `Agent::new` only builds in-memory session state, so the test needs
+        // no `JCODE_HOME`, and it must not set one either: the crate's tests
+        // run in parallel.
+        let provider: Arc<dyn Provider> = Arc::new(MultiplexedSlotProvider);
+        let registry = Registry::new(provider.clone()).await;
+        let agent = Agent::new(provider, registry);
+
+        agent.set_log_context();
+
+        let context = logging::current_context_snapshot();
+        assert_eq!(
+            context.provider.as_deref(),
+            Some("DeepSeek"),
+            "the log prefix must name the profile, not the slot"
+        );
     }
 }

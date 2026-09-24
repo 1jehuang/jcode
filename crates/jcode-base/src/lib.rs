@@ -8,7 +8,8 @@
 //!
 //! `jcode-app-core` re-exports this crate via `pub use jcode_base::*`, so every
 //! existing `crate::<module>` path in the upper layers keeps resolving.
-
+// Tests hold the std env/home serialization lock across awaits on purpose.
+#![cfg_attr(test, allow(clippy::await_holding_lock))]
 #![allow(
     unknown_lints,
     clippy::collapsible_match,
@@ -17,9 +18,11 @@
     clippy::useless_conversion
 )]
 
+pub mod account_login;
 pub mod auth;
 pub mod background;
 pub mod browser;
+pub mod browser_detect;
 pub mod bus;
 pub mod cache_invalidation;
 pub mod cache_tracker;
@@ -36,6 +39,7 @@ pub mod embedding_backend;
 #[cfg(not(feature = "embeddings"))]
 pub mod embedding_stub;
 pub mod env;
+pub mod external_auth;
 pub mod gateway;
 pub mod generated_image;
 pub mod github;
@@ -44,6 +48,7 @@ pub mod goal;
 pub mod hooks;
 pub mod id;
 pub mod import;
+pub mod jev;
 pub mod live_tests;
 pub mod logging;
 pub mod login_qr;
@@ -51,12 +56,14 @@ pub mod mcp;
 pub mod memory;
 pub mod memory_agent;
 pub mod memory_graph;
+pub mod memory_jev;
 pub mod memory_judge_metrics;
 pub mod memory_log;
 pub mod memory_rerank;
 pub mod memory_types;
 pub mod message;
 pub mod model_pricing;
+pub mod model_usage;
 pub mod output_style;
 pub mod plan;
 pub mod platform;
@@ -91,9 +98,12 @@ pub mod telemetry {
 }
 pub mod terminal_launch;
 pub mod todo;
+pub mod transcript_sample;
 pub mod transport;
 pub mod usage;
 pub mod util;
+pub mod voice;
+pub mod voice_intent;
 #[cfg(not(feature = "embeddings"))]
 pub use embedding_stub as embedding;
 pub use jcode_core::{terminal_eprint, terminal_eprintln, terminal_print, terminal_println};

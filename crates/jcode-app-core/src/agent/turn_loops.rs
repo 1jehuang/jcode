@@ -44,6 +44,7 @@ impl Agent {
 
     pub(super) async fn run_turn(&mut self, print_output: bool) -> Result<String> {
         self.set_log_context();
+        let usage_turn_id = self.model_usage_turn_id();
         crate::session_metrics::record_turn(&self.session.id);
         // Mark this session as actively streaming for presence UIs (e.g. the
         // macOS menu bar indicator). Cleared automatically on every exit path.
@@ -229,8 +230,8 @@ impl Agent {
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut current_tool: Option<ToolCall> = None;
-            let mut current_tool_input = String::new();
+            let mut current_tool: Option<String> = None;
+            let mut streaming_tools: HashMap<String, (ToolCall, String)> = HashMap::new();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut usage_input: Option<u64> = None;
             let mut usage_output: Option<u64> = None;
@@ -295,6 +296,11 @@ impl Agent {
                     }
                 };
 
+                let input_tool_id = match &event {
+                    StreamEvent::ToolInputDeltaFor { id, .. }
+                    | StreamEvent::ToolUseEndFor { id } => Some(id.clone()),
+                    _ => current_tool.clone(),
+                };
                 match event {
                     StreamEvent::ThinkingStart => {
                         // Track start but don't print - wait for ThinkingDone
@@ -332,6 +338,11 @@ impl Agent {
                         text_content.push_str(&text);
                     }
                     StreamEvent::ToolUseStart { id, name } => {
+                        if streaming_tools.contains_key(&id)
+                            || tool_calls.iter().any(|tool: &ToolCall| tool.id == id)
+                        {
+                            continue;
+                        }
                         if trace {
                             eprintln!("\n[trace] tool_use_start name={} id={}", name, id);
                         }
@@ -339,20 +350,34 @@ impl Agent {
                             print!("\n[{}] ", name);
                             io::stdout().flush()?;
                         }
-                        current_tool = Some(ToolCall {
-                            id,
-                            name,
-                            input: serde_json::Value::Null,
-                            intent: None,
-                            thought_signature: None,
+                        current_tool = Some(id.clone());
+                        streaming_tools.entry(id.clone()).or_insert_with(|| {
+                            (
+                                ToolCall {
+                                    id,
+                                    name,
+                                    input: serde_json::Value::Null,
+                                    intent: None,
+                                    thought_signature: None,
+                                },
+                                String::new(),
+                            )
                         });
-                        current_tool_input.clear();
                     }
-                    StreamEvent::ToolInputDelta(delta) => {
-                        current_tool_input.push_str(&delta);
+                    StreamEvent::ToolInputDelta(delta)
+                    | StreamEvent::ToolInputDeltaFor { delta, .. } => {
+                        if let Some((_, input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.get_mut(id))
+                        {
+                            input.push_str(&delta);
+                        }
                     }
-                    StreamEvent::ToolUseEnd => {
-                        if let Some(mut tool) = current_tool.take() {
+                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                        if let Some((mut tool, current_tool_input)) = input_tool_id
+                            .as_ref()
+                            .and_then(|id| streaming_tools.remove(id))
+                        {
                             // Parse the accumulated JSON
                             let tool_input =
                                 ToolCall::parse_streamed_input_to_object(&current_tool_input);
@@ -380,7 +405,20 @@ impl Agent {
                             }
 
                             tool_calls.push(tool);
-                            current_tool_input.clear();
+                            if current_tool == input_tool_id {
+                                current_tool = None;
+                            }
+                        }
+                    }
+                    StreamEvent::ToolUseSignatureFor { id, signature } => {
+                        if !signature.is_empty() {
+                            if let Some((tool, _)) = streaming_tools.get_mut(&id) {
+                                tool.thought_signature = Some(signature);
+                            } else if let Some(tool) =
+                                tool_calls.iter_mut().find(|tool| tool.id == id)
+                            {
+                                tool.thought_signature = Some(signature);
+                            }
                         }
                     }
                     StreamEvent::ToolUseSignature(signature) => {
@@ -528,7 +566,7 @@ impl Agent {
                         text_content.clear();
                         tool_calls.clear();
                         current_tool = None;
-                        current_tool_input.clear();
+                        streaming_tools.clear();
                         sdk_tool_results.clear();
                         generated_image_contexts.clear();
                         reasoning_content.clear();
@@ -538,6 +576,7 @@ impl Agent {
                         saw_message_end = false;
                         stop_reason = None;
                     }
+                    StreamEvent::TextDone => {}
                     StreamEvent::MessageEnd {
                         stop_reason: reason,
                     } => {
@@ -802,17 +841,17 @@ impl Agent {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: tc.thought_signature.clone(),
-                });
+                content_blocks.push(tc.to_tool_use_block());
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
                 crate::telemetry::record_assistant_response();
                 let token_usage = Some(crate::session::StoredTokenUsage {
+                    prompt_tokens: Some(self.effective_context_tokens_from_usage(
+                        self.last_usage.input_tokens,
+                        self.last_usage.cache_read_input_tokens,
+                        self.last_usage.cache_creation_input_tokens,
+                    )),
                     input_tokens: self.last_usage.input_tokens,
                     output_tokens: self.last_usage.output_tokens,
                     cache_read_input_tokens: self.last_usage.cache_read_input_tokens,
@@ -822,6 +861,7 @@ impl Agent {
                     self.add_message_ext(Role::Assistant, content_blocks, None, token_usage);
                 self.push_embedding_snapshot_if_semantic(&text_content);
                 self.session.save()?;
+                self.record_model_turn_usage(&usage_turn_id);
                 Some(message_id)
             } else {
                 None

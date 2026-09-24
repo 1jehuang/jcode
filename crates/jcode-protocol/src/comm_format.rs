@@ -690,6 +690,7 @@ mod truncation_tests {
             "probe must straddle a code point"
         );
         let messages = vec![HistoryMessage {
+            response_stats: None,
             role: "user".to_string(),
             content,
             tool_calls: None,

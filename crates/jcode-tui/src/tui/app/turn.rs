@@ -1,6 +1,62 @@
 use super::*;
 use crate::message::ToolDefinition;
 
+/// Keep raw JSON separate for every in-flight call. Unkeyed providers address
+/// the most recently started call, preserving the legacy sequential behavior.
+#[derive(Default)]
+struct PendingStreamingTools {
+    calls: Vec<(ToolCall, String)>,
+}
+
+impl PendingStreamingTools {
+    fn start(&mut self, tool: ToolCall) {
+        self.calls.push((tool, String::new()));
+    }
+
+    fn input(&mut self, id: Option<&str>, delta: &str) {
+        let call = match id {
+            Some(id) => self.calls.iter_mut().find(|(tool, _)| tool.id == id),
+            None => self.calls.last_mut(),
+        };
+        if let Some((_, input)) = call {
+            input.push_str(delta);
+        }
+    }
+
+    fn finish(&mut self, id: Option<&str>) -> Option<ToolCall> {
+        let index = match id {
+            Some(id) => self.calls.iter().position(|(tool, _)| tool.id == id)?,
+            None => self.calls.len().checked_sub(1)?,
+        };
+        let (mut tool, input) = self.calls.remove(index);
+        tool.input = ToolCall::parse_streamed_input_to_object(&input);
+        tool.refresh_intent_from_input();
+        Some(tool)
+    }
+
+    fn signature(&mut self, id: &str, signature: &str) {
+        if let Some((tool, _)) = self.calls.iter_mut().find(|(tool, _)| tool.id == id) {
+            tool.thought_signature = Some(signature.to_owned());
+        }
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = ToolCall> + '_ {
+        self.calls.drain(..).map(|(mut tool, input)| {
+            tool.input = ToolCall::parse_streamed_input_to_object(&input);
+            tool.refresh_intent_from_input();
+            tool
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.calls.clear();
+    }
+}
+
 impl App {
     pub(super) fn append_current_turn_system_reminder(
         &self,
@@ -156,6 +212,19 @@ impl App {
                                 status_spinner_renderer.draw_full(self, terminal)?;
                                 super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                             }
+                            Some(Ok(Event::FocusGained)) => {
+                                // Track focus state during the API wait so unfocused
+                                // animations and feature unlocks behave the same as
+                                // in the primary handler. Without this arm the
+                                // terminal's focus-in byte leaks into the catch-all
+                                // and the app stays stuck in "unfocused" mode.
+                                crate::tui::reapply_configured_terminal_modes_after_focus();
+                                self.note_client_focus(true);
+                                let _ = self.set_client_focused(true);
+                            }
+                            Some(Ok(Event::FocusLost)) => {
+                                self.set_client_focused(false);
+                            }
                             Some(Ok(Event::Mouse(mouse))) => {
                                 if !matches!(mouse.kind, MouseEventKind::Moved) {
                                     let scroll_only = self.handle_mouse_event(mouse);
@@ -170,6 +239,15 @@ impl App {
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                     super::run_shell::reset_status_spinner_interval(&mut status_spinner_interval, self);
                                 }
+                            }
+                            Some(Err(error)) => {
+                                // Never propagate Err out of the event loop; a
+                                // transient ConPTY sync error during a focus event
+                                // used to crash the tokio task and shut the runtime
+                                // down. Log and keep going.
+                                crate::logging::warn(&format!(
+                                    "tui: transient event-stream error during api wait: {error}"
+                                ));
                             }
                             _ => {}
                         }
@@ -233,8 +311,7 @@ impl App {
 
             let mut text_content = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
-            let mut current_tool: Option<ToolCall> = None;
-            let mut current_tool_input = String::new();
+            let mut pending_tools = PendingStreamingTools::default();
             let mut generated_image_contexts: Vec<Vec<ContentBlock>> = Vec::new();
             let mut first_event = true;
             let mut saw_message_end = false;
@@ -305,9 +382,7 @@ impl App {
                                         self.pending_soft_interrupts.clear();
                                         self.pending_soft_interrupt_requests.clear();
                                         // Save partial assistant response before clearing
-                                        if let Some(tool) = current_tool.take() {
-                                            tool_calls.push(tool);
-                                        }
+                                        tool_calls.extend(pending_tools.drain());
                                         if !text_content.is_empty() || !tool_calls.is_empty() {
                                             let mut content_blocks = Vec::new();
                                             if !text_content.is_empty() {
@@ -327,10 +402,7 @@ impl App {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
                                             for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
+                                                content_blocks.push(tc.to_tool_use_block());
                                             }
                                             if !content_blocks.is_empty() {
                                                 let content_clone = content_blocks.clone();
@@ -371,11 +443,9 @@ impl App {
                                     // Check for interleave request (Shift+Enter)
                                     if let Some(interleave_msg) = self.interleave_message.take() {
                                         // Save partial assistant response if any
-                                        if !text_content.is_empty() || !tool_calls.is_empty() {
+                                        if !text_content.is_empty() || !tool_calls.is_empty() || !pending_tools.is_empty() {
                                             // Complete any pending tool
-                                            if let Some(tool) = current_tool.take() {
-                                                tool_calls.push(tool);
-                                            }
+                                            tool_calls.extend(pending_tools.drain());
                                             // Build content blocks for partial response
                                             let mut content_blocks = Vec::new();
                                             if !text_content.is_empty() {
@@ -395,10 +465,7 @@ impl App {
                                                 content_blocks.extend(openai_reasoning_items.iter().cloned());
                                             }
                                             for tc in &tool_calls {
-                                                content_blocks.push(ContentBlock::ToolUse {
-                                                    id: tc.id.clone(),
-                                                    name: tc.name.clone(),
-                                                    input: tc.input.clone(), thought_signature: None, });
+                                                content_blocks.push(tc.to_tool_use_block());
                                             }
                                             // Add partial assistant response to messages
                                             if !content_blocks.is_empty() {
@@ -454,6 +521,20 @@ impl App {
                                 self.handle_paste(text);
                                 status_spinner_renderer.draw_full(self, terminal)?;
                             }
+                            Some(Ok(Event::FocusGained)) => {
+                                // Track focus state mid-stream so unfocused
+                                // animations and feature unlocks react to the
+                                // user clicking back into the terminal. Without
+                                // this arm the focus-in byte leaks into the
+                                // catch-all and the app stays stuck in
+                                // "unfocused" mode for the rest of the stream.
+                                crate::tui::reapply_configured_terminal_modes_after_focus();
+                                self.note_client_focus(true);
+                                let _ = self.set_client_focused(true);
+                            }
+                            Some(Ok(Event::FocusLost)) => {
+                                self.set_client_focused(false);
+                            }
                             Some(Ok(Event::Mouse(mouse))) => {
                                 if !matches!(mouse.kind, MouseEventKind::Moved) {
                                     let scroll_only = self.handle_mouse_event(mouse);
@@ -466,6 +547,15 @@ impl App {
                                 if self.should_redraw_after_resize() {
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                 }
+                            }
+                            Some(Err(error)) => {
+                                // Never propagate Err out of the streaming event
+                                // loop; a transient ConPTY sync error during a
+                                // focus event used to crash the tokio task and
+                                // shut the runtime down. Log and keep going.
+                                crate::logging::warn(&format!(
+                                    "tui: transient event-stream error during stream: {error}"
+                                ));
                             }
                             _ => {}
                         }
@@ -539,12 +629,11 @@ impl App {
                                             name: name.clone(),
                                             input: serde_json::Value::Null,
                                             intent: None, thought_signature: None, });
-                                        current_tool = Some(ToolCall {
+                                        pending_tools.start(ToolCall {
                                             id,
                                             name,
                                             input: serde_json::Value::Null,
                                             intent: None, thought_signature: None, });
-                                        current_tool_input.clear();
                                         if eager_stream_redraw {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
@@ -553,18 +642,26 @@ impl App {
                                         self.broadcast_debug(crate::tui::backend::DebugEvent::ToolInput {
                                             delta: delta.clone()
                                         });
-                                        current_tool_input.push_str(&delta);
+                                        pending_tools.input(None, &delta);
                                     }
-                                    StreamEvent::ToolUseEnd => {
+                                    StreamEvent::ToolInputDeltaFor { id, delta } => {
+                                        self.broadcast_debug(crate::tui::backend::DebugEvent::ToolInput {
+                                            delta: delta.clone()
+                                        });
+                                        pending_tools.input(Some(&id), &delta);
+                                    }
+                                    StreamEvent::ToolUseEnd | StreamEvent::ToolUseEndFor { .. } => {
+                                        let id = match &event {
+                                            StreamEvent::ToolUseEndFor { id } => Some(id.as_str()),
+                                            _ => None,
+                                        };
                                         // Provider output generation for this tool call is complete,
                                         // but final usage often arrives after MessageEnd. Keep
                                         // collecting output-token deltas while excluding tool runtime.
-                                        self.pause_streaming_tps(true);
-                                        if let Some(mut tool) = current_tool.take() {
-                                            tool.input = crate::message::ToolCall::parse_streamed_input_to_object(
-                                                &current_tool_input,
-                                            );
-                                            tool.refresh_intent_from_input();
+                                        if let Some(tool) = pending_tools.finish(id) {
+                                            if pending_tools.is_empty() {
+                                                self.pause_streaming_tps(true);
+                                            }
                                             if let Some(key) = Self::experimental_feature_key_for_tool(&tool) {
                                                 self.note_experimental_feature_use(key);
                                             }
@@ -596,24 +693,27 @@ impl App {
                                             });
 
                                             tool_calls.push(tool);
-                                            current_tool_input.clear();
                                             if eager_stream_redraw {
                                                 status_spinner_renderer.draw_full(self, terminal)?;
                                             }
                                         }
                                     }
-                                    StreamEvent::ToolUseSignature(signature) => {
-                                        // Attach Gemini 3 thought signature to the
-                                        // most recent tool call so it can be
-                                        // persisted and replayed on later turns.
-                                        if !signature.is_empty() {
-                                            if let Some(tool) = tool_calls.last_mut() {
-                                                tool.thought_signature = Some(signature.clone());
-                                            }
-                                            if let Some(streaming_tool) =
-                                                self.streaming_tool_calls.last_mut()
+                                    StreamEvent::ToolUseSignature(_) | StreamEvent::ToolUseSignatureFor { .. } => {
+                                        let (id, signature) = match event {
+                                            StreamEvent::ToolUseSignatureFor { id, signature } => (Some(id), signature),
+                                            StreamEvent::ToolUseSignature(signature) => (tool_calls.last().map(|tool| tool.id.clone()), signature),
+                                            _ => unreachable!(),
+                                        };
+                                        // Keyed signatures may arrive before or after completion.
+                                        // Legacy signatures still target the last completed call.
+                                        if !signature.is_empty() && let Some(id) = id {
+                                            pending_tools.signature(&id, &signature);
+                                            for tool in tool_calls.iter_mut()
+                                                .chain(self.streaming_tool_calls.iter_mut())
+                                                .chain(self.display_messages.iter_mut().filter_map(|message| message.tool_data.as_mut()))
+                                                .filter(|tool| tool.id == id)
                                             {
-                                                streaming_tool.thought_signature = Some(signature);
+                                                tool.thought_signature = Some(signature.clone());
                                             }
                                         }
                                     }
@@ -682,7 +782,8 @@ impl App {
                                             status_spinner_renderer.draw_full(self, terminal)?;
                                         }
                                     }
-                                    StreamEvent::MessageEnd { .. } => {
+                                    StreamEvent::TextDone => {}
+                    StreamEvent::MessageEnd { .. } => {
                                         self.pause_streaming_tps(true);
                                         self.stream_message_ended = true;
                                         saw_message_end = true;
@@ -705,8 +806,7 @@ impl App {
                                         ));
                                         text_content.clear();
                                         tool_calls.clear();
-                                        current_tool = None;
-                                        current_tool_input.clear();
+                                        pending_tools.clear();
                                         generated_image_contexts.clear();
                                         sdk_tool_results.clear();
                                         reasoning_content.clear();
@@ -735,7 +835,7 @@ impl App {
                                     StreamEvent::Error { message, .. } => {
                                         let no_partial_output = text_content.is_empty()
                                             && tool_calls.is_empty()
-                                            && current_tool.is_none()
+                                            && pending_tools.is_empty()
                                             && self.streaming.streaming_text.is_empty()
                                             && !saw_message_end;
                                         if no_partial_output
@@ -1004,7 +1104,7 @@ impl App {
                             Some(Err(e)) => {
                                 let no_partial_output = text_content.is_empty()
                                     && tool_calls.is_empty()
-                                    && current_tool.is_none()
+                                    && pending_tools.is_empty()
                                     && self.streaming.streaming_text.is_empty()
                                     && !saw_message_end;
                                 if no_partial_output
@@ -1030,7 +1130,7 @@ impl App {
                             None => {
                                 let no_partial_output = text_content.is_empty()
                                     && tool_calls.is_empty()
-                                    && current_tool.is_none()
+                                    && pending_tools.is_empty()
                                     && self.streaming.streaming_text.is_empty()
                                     && !saw_message_end;
                                 if no_partial_output {
@@ -1080,12 +1180,7 @@ impl App {
                 content_blocks.extend(openai_reasoning_items.iter().cloned());
             }
             for tc in &tool_calls {
-                content_blocks.push(ContentBlock::ToolUse {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    input: tc.input.clone(),
-                    thought_signature: None,
-                });
+                content_blocks.push(tc.to_tool_use_block());
             }
 
             let assistant_message_id = if !content_blocks.is_empty() {
@@ -1343,6 +1438,20 @@ impl App {
                                     self.handle_paste(text);
                                     status_spinner_renderer.draw_full(self, terminal)?;
                                 }
+                                Some(Ok(Event::FocusGained)) => {
+                                    // Track focus state during tool execution so
+                                    // unfocused animations and feature unlocks
+                                    // react to the user clicking back into the
+                                    // terminal. Without this arm the focus-in
+                                    // byte leaks into the catch-all and the app
+                                    // stays stuck in "unfocused" mode.
+                                    crate::tui::reapply_configured_terminal_modes_after_focus();
+                                    self.note_client_focus(true);
+                                    let _ = self.set_client_focused(true);
+                                }
+                                Some(Ok(Event::FocusLost)) => {
+                                    self.set_client_focused(false);
+                                }
                                 Some(Ok(Event::Mouse(mouse))) => {
                                     if !matches!(mouse.kind, MouseEventKind::Moved) {
                                         let scroll_only = self.handle_mouse_event(mouse);
@@ -1355,6 +1464,16 @@ impl App {
                                     if self.should_redraw_after_resize() {
                                         status_spinner_renderer.draw_full(self, terminal)?;
                                     }
+                                }
+                                Some(Err(error)) => {
+                                    // Never propagate Err out of the tool-execution
+                                    // event loop; a transient ConPTY sync error
+                                    // during a focus event used to crash the tokio
+                                    // task and shut the runtime down. Log and keep
+                                    // going.
+                                    crate::logging::warn(&format!(
+                                        "tui: transient event-stream error during tool exec: {error}"
+                                    ));
                                 }
                                 _ => {}
                             }
@@ -1481,5 +1600,72 @@ impl App {
         super::commands::maybe_trigger_autoreview_local(self);
         super::commands::maybe_trigger_autojudge_local(self);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod keyed_tool_tests {
+    use super::*;
+
+    fn tool(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            input: serde_json::Value::Null,
+            intent: None,
+            thought_signature: None,
+        }
+    }
+
+    #[test]
+    fn keyed_tool_inputs_interleave_and_finish_out_of_order() {
+        let mut pending = PendingStreamingTools::default();
+        pending.start(tool("a"));
+        pending.input(Some("a"), r#"{"file_path":"a","intent":"Read "#);
+        pending.start(tool("b"));
+        pending.input(Some("b"), r#"{"file_path":"b","intent":"Read B"}"#);
+        pending.input(Some("a"), r#"A"}"#);
+        pending.signature("a", "signature-a");
+        let b = pending.finish(Some("b")).unwrap();
+        assert_eq!(b.input["file_path"], "b");
+        assert_eq!(b.intent.as_deref(), Some("Read B"));
+        assert_eq!(b.thought_signature, None);
+        let a = pending.finish(Some("a")).unwrap();
+        assert_eq!(a.input["file_path"], "a");
+        assert_eq!(a.intent.as_deref(), Some("Read A"));
+        assert_eq!(a.thought_signature.as_deref(), Some("signature-a"));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn keyed_tool_inputs_preserve_unkeyed_fallback_and_ignore_unknown_ids() {
+        let mut pending = PendingStreamingTools::default();
+        pending.start(tool("legacy"));
+        pending.input(None, r#"{"file_path":"legacy"}"#);
+        pending.input(Some("unknown"), "corruption");
+        assert!(pending.finish(Some("unknown")).is_none());
+        assert_eq!(pending.finish(None).unwrap().input["file_path"], "legacy");
+        assert!(pending.finish(None).is_none());
+    }
+
+    #[test]
+    fn keyed_tool_inputs_rollback_and_interruption_cover_all_pending_calls() {
+        let mut pending = PendingStreamingTools::default();
+        pending.start(tool("a"));
+        pending.input(None, r#"{"file_path":"a"}"#);
+        pending.start(tool("b"));
+        pending.input(None, r#"{"file_path":"b"}"#);
+        let calls: Vec<_> = pending.drain().collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].input["file_path"], "a");
+        assert_eq!(calls[1].input["file_path"], "b");
+        assert!(pending.is_empty());
+        pending.start(tool("old"));
+        pending.clear();
+        pending.start(tool("new"));
+        pending.input(Some("old"), "stale");
+        pending.input(None, r#"{"file_path":"new"}"#);
+        assert!(pending.finish(Some("old")).is_none());
+        assert_eq!(pending.finish(None).unwrap().input["file_path"], "new");
     }
 }

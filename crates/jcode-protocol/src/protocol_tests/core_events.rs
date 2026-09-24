@@ -114,6 +114,29 @@ fn test_notify_auth_changed_provider_hint_is_optional() -> Result<()> {
 }
 
 #[test]
+fn test_invalidate_openai_usage_roundtrip_pins_account_scope() -> Result<()> {
+    for account_label in [None, Some("reset-target".to_string())] {
+        let request = Request::InvalidateOpenAiUsage {
+            id: 41,
+            account_label: account_label.clone(),
+        };
+        let json = serde_json::to_string(&request)?;
+        assert!(json.contains("\"type\":\"invalidate_openai_usage\""));
+        let decoded = parse_request_json(&json)?;
+        assert_eq!(decoded.id(), 41);
+        let Request::InvalidateOpenAiUsage {
+            account_label: decoded_label,
+            ..
+        } = decoded
+        else {
+            return Err(anyhow!("wrong request type"));
+        };
+        assert_eq!(decoded_label, account_label);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_notify_auth_changed_typed_auth_payload_roundtrip() -> Result<()> {
     let req = Request::NotifyAuthChanged {
         id: 11,
@@ -358,6 +381,7 @@ fn test_side_pane_images_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePaneImages {
         session_id: "session_active".to_string(),
         images: vec![jcode_session_types::RenderedImage {
+            history_message_index: None,
             media_type: "image/png".to_string(),
             data: "base64-data".to_string(),
             label: Some("openclaw.png".to_string()),
@@ -441,6 +465,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         id: 101,
         session_id: "ses_test_456".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "hello".to_string(),
             tool_calls: None,
@@ -455,6 +480,7 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         skills: Vec::new(),
         total_tokens: Some((123, 45)),
         token_usage_totals: Some(TokenUsageTotals {
+            cache_prompt_tokens: Some(130),
             messages_with_token_usage: 2,
             input_tokens: 123,
             output_tokens: 45,
@@ -483,12 +509,14 @@ fn test_history_event_roundtrip_preserves_side_panel_snapshot() -> Result<()> {
         compaction_mode: jcode_config_types::CompactionMode::Reactive,
         activity: None,
         side_panel: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "# Notes".to_string(),
                 updated_at_ms: 42,
@@ -532,6 +560,7 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
         id: 77,
         session_id: "ses_compact_123".to_string(),
         messages: vec![HistoryMessage {
+            response_stats: None,
             role: "assistant".to_string(),
             content: "older response".to_string(),
             tool_calls: None,
@@ -572,12 +601,14 @@ fn test_compacted_history_event_roundtrip() -> Result<()> {
 fn test_side_panel_state_event_roundtrip() -> Result<()> {
     let event = ServerEvent::SidePanelState {
         snapshot: jcode_side_panel_types::SidePanelSnapshot {
+            focus_revision: 0,
             focused_page_id: Some("page-1".to_string()),
             pages: vec![jcode_side_panel_types::SidePanelPage {
                 id: "page-1".to_string(),
                 title: "Notes".to_string(),
                 file_path: "/tmp/notes.md".to_string(),
                 format: jcode_side_panel_types::SidePanelPageFormat::Markdown,
+                pdf_data: None,
                 source: jcode_side_panel_types::SidePanelPageSource::Managed,
                 content: "updated".to_string(),
                 updated_at_ms: 99,

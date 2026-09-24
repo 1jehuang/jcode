@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 /// Claude Code billing attribution text observed in the official CLI's system
 /// prompt blocks.
-pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.257; cc_entrypoint=sdk-cli; cch=33f85;";
+pub const OAUTH_BILLING_HEADER: &str = "cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
 
 const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
@@ -406,9 +406,10 @@ pub fn format_content_blocks(blocks: &[ContentBlock], is_oauth: bool) -> Vec<Api
 /// while the handler requires `task` + `wake_in_minutes`/`wake_at`), so every
 /// call failed with "task is required for action=create" (#706). Forwarding the
 /// real schema under the remapped name keeps the two in sync by construction.
+/// `bash` is likewise forwarded: its curated schema omitted timeout units and
+/// execution options (#1223). Only its OAuth name changes, not its definition.
 const OAUTH_BUILTIN_LOCAL_TOOLS: &[&str] = &[
     "subagent",
-    "bash",
     "edit",
     "glob",
     "grep",
@@ -456,16 +457,6 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Launch a new agent to handle complex, multi-step tasks."
                         .to_string(),
                     input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
-                    cache_control: None,
-                },
-            ),
-            (
-                &["bash"],
-                ApiTool {
-                    name: "Bash".to_string(),
-                    description: "Executes a given bash command and returns its output."
-                        .to_string(),
-                    input_schema: json!({"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"integer"},"run_in_background":{"type":"boolean"},"justification":{"type":"string","description":"Only when re-issuing a command the destructive gate refused; explain which user request it serves."}},"required":["command"],"additionalProperties":false}),
                     cache_control: None,
                 },
             ),
@@ -533,8 +524,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
         // Forward every other registered tool, remapping its name to the
         // OAuth-accepted form. This restores websearch/webfetch/browser/
         // codesearch/memory/swarm/multiedit/open/etc. for subscription users,
-        // matching the documented "remap names, keep the full toolset" behavior
-        // and the (deprecated) Claude CLI transport.
+        // matching the documented "remap names, keep the full toolset" behavior.
         for tool in tools {
             if OAUTH_BUILTIN_LOCAL_TOOLS.contains(&tool.name.as_str()) {
                 continue;
@@ -600,10 +590,19 @@ pub enum ApiThinking {
     Adaptive {
         #[serde(skip_serializing_if = "Option::is_none")]
         display: Option<&'static str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_binding: Option<ApiThinkingBlockBinding>,
     },
     Enabled {
         budget_tokens: u32,
     },
+}
+
+/// Permit the API to discard stale signed reasoning after compaction or a
+/// changed system prompt/tool schema instead of rejecting the whole request.
+#[derive(Serialize, Clone)]
+pub struct ApiThinkingBlockBinding {
+    pub prefix_mismatch_behavior: &'static str,
 }
 
 #[derive(Serialize, Clone)]

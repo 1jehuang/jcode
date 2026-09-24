@@ -1,3 +1,5 @@
+mod response_stats;
+
 use super::{Session, StoredDisplayRole};
 use crate::message::{ContentBlock, Role, ToolCall};
 use jcode_config_types::ReasoningDisplayMode;
@@ -395,6 +397,7 @@ pub fn render_messages_and_images_with_compacted_history(
             )
         };
         rendered.push(RenderedMessage {
+            response_stats: None,
             role: "system".to_string(),
             content,
             tool_calls: Vec::new(),
@@ -423,6 +426,7 @@ pub fn render_messages_and_images_with_compacted_history(
         // check happened, so replace the body with a one-liner.
         if let Some(summary) = auto_poke_user_message_display_summary(msg) {
             rendered.push(RenderedMessage {
+                response_stats: None,
                 role: "system".to_string(),
                 content: summary.to_string(),
                 tool_calls: Vec::new(),
@@ -497,6 +501,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         text.clear();
                         reasoning.clear();
                         rendered.push(RenderedMessage {
+                            response_stats: None,
                             role: role.to_string(),
                             content: combined,
                             tool_calls: tool_calls.clone(),
@@ -517,6 +522,7 @@ pub fn render_messages_and_images_with_compacted_history(
                     current_tool = tool_data.clone();
 
                     rendered.push(RenderedMessage {
+                        response_stats: None,
                         role: "tool".to_string(),
                         content: content.clone(),
                         tool_calls: Vec::new(),
@@ -533,6 +539,7 @@ pub fn render_messages_and_images_with_compacted_history(
                         image_anchor_for_message(role, current_tool.as_ref(), user_prompt_count);
                     let is_pending_prompt_anchor = current_tool.is_none() && role == "user";
                     images.push(RenderedImage {
+                        history_message_index: current_tool.as_ref().map(|_| rendered.len()),
                         media_type: media_type.clone(),
                         data: data.clone(),
                         label: current_tool
@@ -559,6 +566,7 @@ pub fn render_messages_and_images_with_compacted_history(
                 user_prompt_count += 1;
             }
             rendered.push(RenderedMessage {
+                response_stats: None,
                 role: role.to_string(),
                 content: combined,
                 tool_calls,
@@ -577,5 +585,6 @@ pub fn render_messages_and_images_with_compacted_history(
         }
     }
 
+    response_stats::attach(&session.messages, &mut rendered);
     (rendered, images, compacted_info)
 }

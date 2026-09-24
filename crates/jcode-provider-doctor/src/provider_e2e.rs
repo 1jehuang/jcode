@@ -2026,6 +2026,7 @@ fn run_wiring_checks_for_contract(
             api_method: api_method.clone(),
             available: true,
             detail: "live-catalog route".to_string(),
+            usage: None,
             cheapness: None,
         })
         .collect();

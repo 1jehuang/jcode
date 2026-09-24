@@ -653,10 +653,8 @@ fn check_for_main_update_blocking() -> Result<Option<GitHubRelease>> {
             .assets
             .iter()
             .any(|a| a.name.starts_with(asset_name));
-        if has_asset {
-            if release_is_update(&release)? {
-                return Ok(Some(release));
-            }
+        if has_asset && release_is_update(&release)? {
+            return Ok(Some(release));
         }
     }
 

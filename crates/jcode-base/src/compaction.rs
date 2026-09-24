@@ -166,6 +166,10 @@ pub struct CompactionManager {
     /// Token budget
     token_budget: usize,
 
+    /// Model window before the operator cap, retained so removing/raising a cap
+    /// can restore the budget without switching models.
+    model_token_budget: usize,
+
     /// Provider-reported input token usage from the latest request.
     /// Used to trigger compaction with real token counts instead of only heuristics.
     observed_input_tokens: Option<u64>,
@@ -217,7 +221,8 @@ impl CompactionManager {
             pending_cutoff: 0,
             total_turns: 0,
             suppress_compaction_until_new_message: false,
-            token_budget: DEFAULT_TOKEN_BUDGET,
+            token_budget: Self::capped_budget(&cfg, DEFAULT_TOKEN_BUDGET),
+            model_token_budget: DEFAULT_TOKEN_BUDGET,
             observed_input_tokens: None,
             last_compaction: None,
             mode,
@@ -236,13 +241,30 @@ impl CompactionManager {
     }
 
     pub fn with_budget(mut self, budget: usize) -> Self {
-        self.token_budget = budget;
+        self.set_budget(budget);
         self
     }
 
     /// Update the token budget (e.g., when model changes)
     pub fn set_budget(&mut self, budget: usize) {
-        self.token_budget = budget;
+        self.model_token_budget = budget;
+        self.refresh_context_cap();
+    }
+
+    fn refresh_context_cap(&mut self) {
+        self.compaction_config.max_context_tokens =
+            crate::config::config().compaction.max_context_tokens;
+        self.token_budget = Self::capped_budget(&self.compaction_config, self.model_token_budget);
+    }
+
+    /// Apply `[compaction] max_context_tokens` so a large-window model cannot
+    /// push per-turn context past the operator's chosen ceiling.
+    fn capped_budget(cfg: &crate::config::CompactionConfig, budget: usize) -> usize {
+        if cfg.max_context_tokens > 0 {
+            budget.min(cfg.max_context_tokens)
+        } else {
+            budget
+        }
     }
 
     /// Get current token budget
@@ -934,6 +956,7 @@ impl CompactionManager {
         all_messages: &[Message],
         provider: Arc<dyn Provider>,
     ) -> CompactionAction {
+        self.refresh_context_cap();
         // If we're already critically full, hard-compact synchronously *before*
         // kicking off any background compaction. Starting a background task here
         // would only get aborted by the hard compact (its summary is computed

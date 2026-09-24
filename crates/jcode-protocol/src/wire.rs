@@ -32,10 +32,41 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// SDK-owned session tool declaration. Parameters is a JSON schema object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// Replaces the session SDK overlay. None inherits normal selection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionToolConfig {
+    #[serde(default)]
+    pub enabled: Option<Vec<String>>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    #[serde(default)]
+    pub custom: Vec<SessionToolDefinition>,
+}
+
 /// Client request to server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Request {
+    #[serde(rename = "configure_tools")]
+    ConfigureTools { id: u64, tools: SessionToolConfig },
+    #[serde(rename = "list_tools")]
+    ListTools { id: u64 },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        id: u64,
+        call_id: String,
+        output: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
     /// Send a message to the agent
     #[serde(rename = "message")]
     Message {
@@ -120,6 +151,12 @@ pub enum Request {
     #[serde(rename = "subscribe")]
     Subscribe {
         id: u64,
+        /// Full system prompt override for a new session only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        /// Opt in to PDF panel payloads. Older clients only accept Markdown.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        supports_pdf_panels: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_dir: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -162,7 +199,13 @@ pub enum Request {
 
     /// Get only provider/model metadata and available models.
     #[serde(rename = "get_model_catalog")]
-    GetModelCatalog { id: u64 },
+    GetModelCatalog {
+        id: u64,
+        /// Older clients cannot decode new event variants. Only clients that
+        /// explicitly opt in receive incremental model_usage_updated events.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        subscribe_usage_updates: bool,
+    },
 
     /// Get a bounded view of compacted historical messages for lazy transcript expansion.
     #[serde(rename = "get_compacted_history")]
@@ -322,6 +365,17 @@ pub enum Request {
         title: Option<String>,
     },
 
+    /// Bookmark (`saved: true`, optional label) or unbookmark the active
+    /// session. Routed through the daemon so its in-memory session, which
+    /// owns later writes, does not overwrite the flag.
+    #[serde(rename = "set_session_saved")]
+    SetSessionSaved {
+        id: u64,
+        saved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+
     /// Split the current session — clone conversation into a new session
     #[serde(rename = "split")]
     Split { id: u64 },
@@ -368,6 +422,24 @@ pub enum Request {
     /// This keeps account overrides and provider credential caches in sync.
     #[serde(rename = "switch_openai_account")]
     SwitchOpenAiAccount { id: u64, label: String },
+
+    /// Invalidate daemon-local usage and quota cooldown state after a banked reset.
+    /// This never redeems a reset or switches accounts. `None` pins the default
+    /// account scope, not whichever account is active when the request arrives.
+    #[serde(rename = "invalidate_openai_usage")]
+    InvalidateOpenAiUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
+
+    /// Invalidate daemon-local usage and quota cooldown state after a Claude
+    /// session-limit reset. Like the OpenAI variant it never claims a reset.
+    /// `None` pins the default account scope.
+    #[serde(rename = "invalidate_anthropic_usage")]
+    InvalidateAnthropicUsage {
+        id: u64,
+        account_label: Option<String>,
+    },
 
     /// Send stdin input to a running command that requested it
     #[serde(rename = "stdin_response")]
@@ -749,6 +821,18 @@ pub enum Request {
     reason = "wire protocol prioritizes straightforward serde payloads over boxing every larger event variant"
 )]
 pub enum ServerEvent {
+    #[serde(rename = "tools")]
+    Tools {
+        id: u64,
+        tools: Vec<SessionToolDefinition>,
+    },
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     /// An autonomous wake was requested. In external wake mode this event is
     /// emitted instead of starting or injecting into a turn.
     #[serde(rename = "wake_requested")]
@@ -765,6 +849,10 @@ pub enum ServerEvent {
     /// Streaming text delta
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
+
+    /// Assistant text message boundary within a provider response.
+    #[serde(rename = "text_done")]
+    TextDone,
 
     /// Streaming reasoning/thinking delta (raw, unformatted model text).
     ///
@@ -799,7 +887,11 @@ pub enum ServerEvent {
 
     /// Tool input delta (streaming JSON)
     #[serde(rename = "tool_input")]
-    ToolInput { delta: String },
+    ToolInput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        delta: String,
+    },
 
     /// Tool call ended, now executing
     #[serde(rename = "tool_exec")]
@@ -960,6 +1052,15 @@ pub enum ServerEvent {
         tools_skipped: Option<usize>,
     },
 
+    /// Structured abnormal turn outcome, emitted before the terminal Done/Error.
+    #[serde(rename = "turn_stopped")]
+    TurnStopped {
+        reason: TurnStopReason,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_stop_reason: Option<String>,
+    },
+
     /// Current turn was interrupted by explicit user cancel.
     ///
     /// This is rendered as a system/status notice (not assistant content),
@@ -1062,6 +1163,8 @@ pub enum ServerEvent {
         /// Omitted by older daemons, which a new SSH bridge must reject.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         native_ssh_protocol: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
 
     /// Current state (debug)
@@ -1256,6 +1359,10 @@ pub enum ServerEvent {
         provider_name: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Credential the switched-to route will bill against (OAuth vs API
+        /// key). Lets clients update the auth badge on an OAuth<->API switch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)
@@ -1295,6 +1402,12 @@ pub enum ServerEvent {
         mode: jcode_config_types::CompactionMode,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+
+    /// Usage delta for a route, independent of catalog availability or Agent locks.
+    #[serde(rename = "model_usage_updated")]
+    ModelUsageUpdated {
+        route: jcode_provider_core::ModelRoute,
     },
 
     /// Available models updated (pushed after auth changes)
