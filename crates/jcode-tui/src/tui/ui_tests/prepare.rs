@@ -529,6 +529,7 @@ fn test_prepare_messages_centered_live_batch_rows_keep_dedicated_padding_span() 
 
 #[test]
 fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
+    let _lock = viewport_snapshot_test_lock();
     let state = TestState {
         display_messages: vec![DisplayMessage {
             role: "user".to_string(),
@@ -582,9 +583,9 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
     };
 
     // The Updates box lists recent commit subjects ("… PR #1440"); they trip the #N check below.
-    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
+    let _fixture =
+        crate::tui::ui::header::scoped_unseen_changelog_entries_override_for_tests(Vec::new());
     let prepared = prepare::prepare_messages(&state, 100, 30);
-    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     let rendered: Vec<String> = prepared
         .materialize_all_lines()
         .iter()
