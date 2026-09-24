@@ -148,6 +148,7 @@ fn test_tool_row_duration_badge_survives_narrow_width() {
             intent: Some("a very long intent summary that must truncate first".to_string()),
             thought_signature: None,
         }),
+        timestamp: None,
         tool_duration_ms: Some(48_300),
     };
 

@@ -133,6 +133,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
             DisplayMessage {
@@ -142,6 +143,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
         ];
@@ -375,6 +377,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
             DisplayMessage {
@@ -385,6 +388,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
         ];
@@ -802,6 +806,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
             DisplayMessage {
@@ -811,6 +816,7 @@ impl App {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
         ];

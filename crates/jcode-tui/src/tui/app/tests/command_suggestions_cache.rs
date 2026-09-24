@@ -81,6 +81,7 @@ fn advancing_the_epoch_forces_recomputation_for_identical_input() {
         }],
         display_role: None,
         timestamp: None,
+        timestamp: None,
         tool_duration_ms: None,
         token_usage: None,
     });

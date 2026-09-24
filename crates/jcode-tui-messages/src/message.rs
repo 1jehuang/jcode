@@ -14,6 +14,9 @@ pub struct DisplayMessage {
     pub title: Option<String>,
     /// Full tool call data for role="tool" messages.
     pub tool_data: Option<ToolCall>,
+    /// Wall-clock time when the stored message was recorded. Tool rows
+    /// render it as the HH:MM:SS stamp of when the call ran (#1454).
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     /// Tool execution duration in milliseconds (from the stored tool
     /// result). Tool rows render it as a compact duration badge (#1453).
     pub tool_duration_ms: Option<u64>,
@@ -29,6 +32,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -42,6 +46,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -55,6 +60,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -69,6 +75,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Usage".to_string()),
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -83,6 +90,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Overnight".to_string()),
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -99,6 +107,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some("Todos".to_string()),
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -112,6 +121,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -125,6 +135,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -138,6 +149,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -151,6 +163,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -164,6 +177,7 @@ impl DisplayMessage {
             duration_secs: Some(duration_secs),
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -177,6 +191,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: Some(tool_data),
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -190,6 +205,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -203,6 +219,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -219,6 +236,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -234,6 +252,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         }
     }
@@ -247,6 +266,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: None,
             tool_data: item.tool_data,
+            timestamp: item.timestamp,
             tool_duration_ms: item.tool_duration_ms,
         }
     }
@@ -264,6 +284,7 @@ impl DisplayMessage {
             duration_secs: None,
             title: Some(title.into()),
             tool_data: Some(tool_data),
+            timestamp: None,
             tool_duration_ms: None,
         }
     }

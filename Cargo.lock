@@ -4254,6 +4254,7 @@ dependencies = [
 name = "jcode-tui-messages"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "jcode-config-types",
  "jcode-message-types",
  "jcode-session-types",

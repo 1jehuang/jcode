@@ -83,6 +83,10 @@ pub struct RenderedMessage {
     /// transcript (issue #432).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stored_index: Option<usize>,
+    /// Wall-clock time when this stored message was recorded. Tool rows
+    /// render it as the HH:MM:SS stamp of when the call ran (#1454).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
     /// Tool execution duration in milliseconds, recorded by the agent loop
     /// when the tool result was stored (#1453). Tool rows show it as a
     /// compact duration badge.

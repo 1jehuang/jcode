@@ -48,6 +48,7 @@ fn create_scroll_test_app(
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
         DisplayMessage {
@@ -57,6 +58,7 @@ fn create_scroll_test_app(
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
     ];
@@ -84,6 +86,7 @@ fn create_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBacke
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
         DisplayMessage {
@@ -93,6 +96,7 @@ fn create_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend::TestBacke
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
     ];
@@ -119,6 +123,7 @@ fn create_blockquote_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
         DisplayMessage {
@@ -129,6 +134,7 @@ fn create_blockquote_copy_test_app() -> (App, ratatui::Terminal<ratatui::backend
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
     ];
@@ -408,6 +414,7 @@ fn test_chat_native_scrollbar_hidden_when_content_fits() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        timestamp: None,
         tool_duration_ms: None,
     }];
     app.bump_display_messages_version();

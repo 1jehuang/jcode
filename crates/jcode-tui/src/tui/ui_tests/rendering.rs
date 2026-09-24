@@ -573,6 +573,7 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
         DisplayMessage {
@@ -582,6 +583,7 @@ fn test_light_theme_adapted_frame_has_readable_contrast() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
     ];
@@ -646,6 +648,7 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
             DisplayMessage {
@@ -655,6 +658,7 @@ fn test_configured_palette_recolors_a_real_rendered_frame() {
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             },
         ];

@@ -1081,6 +1081,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         duration_secs: app.display_turn_duration_secs(),
                         title: None,
                         tool_data: None,
+                        timestamp: None,
                         tool_duration_ms: None,
                     });
                 }
@@ -1203,6 +1204,7 @@ pub(in crate::tui::app) fn handle_server_event(
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
                             tool_duration_ms: None,
                         });
                     }
@@ -1345,6 +1347,7 @@ pub(in crate::tui::app) fn handle_server_event(
                 duration_secs: None,
                 title: None,
                 tool_data: None,
+                timestamp: None,
                 tool_duration_ms: None,
             });
             app.is_processing = false;
@@ -1947,6 +1950,7 @@ pub(in crate::tui::app) fn handle_server_event(
                                 duration_secs: None,
                                 title: None,
                                 tool_data: msg.tool_data,
+                                timestamp: None,
                                 tool_duration_ms: None,
                             })
                             .collect();
@@ -2156,6 +2160,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: msg.tool_data,
+                    timestamp: None,
                     tool_duration_ms: None,
                 })
                 .collect();
@@ -2539,6 +2544,7 @@ pub(in crate::tui::app) fn handle_server_event(
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        timestamp: None,
                         tool_duration_ms: None,
                     });
                 }
@@ -2569,6 +2575,7 @@ pub(in crate::tui::app) fn handle_server_event(
                     duration_secs: None,
                     title: None,
                     tool_data: None,
+                    timestamp: None,
                     tool_duration_ms: None,
                 });
             }

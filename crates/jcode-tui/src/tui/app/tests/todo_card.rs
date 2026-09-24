@@ -351,6 +351,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
         DisplayMessage {
@@ -360,6 +361,7 @@ fn pinned_todo_band_renders_below_sticky_prompt_without_separator() {
             duration_secs: None,
             title: None,
             tool_data: None,
+            timestamp: None,
             tool_duration_ms: None,
         },
     ];

@@ -80,6 +80,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: Some("old title".to_string()),
         tool_data: Some(tool_call.clone()),
+        timestamp: None,
         tool_duration_ms: None,
     });
     app.push_display_message(DisplayMessage {
@@ -89,6 +90,7 @@ fn test_replace_latest_tool_display_message_updates_latest_match_and_bumps_versi
         duration_secs: None,
         title: None,
         tool_data: Some(tool_call),
+        timestamp: None,
         tool_duration_ms: None,
     });
     let before = app.display_messages_version;
@@ -135,6 +137,7 @@ fn test_replace_latest_tool_display_message_removes_background_lifecycle_card() 
             intent: None,
             thought_signature: None,
         }),
+        timestamp: None,
         tool_duration_ms: None,
     });
     let before = app.display_messages_version;
@@ -226,6 +229,7 @@ fn test_incremental_display_message_counts_match_full_recompute() {
                     intent: None,
                     thought_signature: None,
                 }),
+                timestamp: None,
                 tool_duration_ms: None,
             });
         }

@@ -429,6 +429,7 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
                                                     tool_duration_ms: None,
                                                 });
                                                 }
@@ -489,6 +490,7 @@ impl App {
                                                     duration_secs: None,
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
                                                     tool_duration_ms: None,
                                                 });
                                                 }
@@ -503,6 +505,7 @@ impl App {
                                             duration_secs: None,
                                             title: None,
                                             tool_data: None,
+                                            timestamp: None,
                                             tool_duration_ms: None,
                                         });
                                         // Clear streaming state and continue with new turn
@@ -693,6 +696,7 @@ impl App {
                                                 duration_secs: None,
                                                 title: None,
                                                 tool_data: Some(tool.clone()),
+                                                timestamp: None,
                                                 tool_duration_ms: None,
                                             });
 
@@ -1040,6 +1044,7 @@ impl App {
                                             duration_secs: None,
                                             title: Some("Generated image".to_string()),
                                             tool_data: Some(tool_call),
+                                            timestamp: None,
                                             tool_duration_ms: None,
                                         });
                                         if let Some(image) = crate::message::generated_image_rendered_image(
@@ -1236,6 +1241,7 @@ impl App {
                         duration_secs: duration,
                         title: None,
                         tool_data: None,
+                        timestamp: None,
                         tool_duration_ms: None,
                     });
                     self.push_turn_footer(duration);
@@ -1254,6 +1260,7 @@ impl App {
                             duration_secs: duration,
                             title: None,
                             tool_data: None,
+                            timestamp: None,
                             tool_duration_ms: None,
                         });
                     }
@@ -1424,6 +1431,7 @@ impl App {
                                                     duration_secs: self.display_turn_duration_secs(),
                                                     title: None,
                                                     tool_data: None,
+                                                    timestamp: None,
                                                     tool_duration_ms: None,
                                                 });
                                                 }

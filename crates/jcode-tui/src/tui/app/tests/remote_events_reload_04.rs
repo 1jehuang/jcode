@@ -968,6 +968,7 @@ fn test_new_for_remote_uses_startup_stub_without_loading_full_transcript() {
         }],
         display_role: None,
         timestamp: None,
+        timestamp: None,
         tool_duration_ms: None,
         token_usage: None,
     });

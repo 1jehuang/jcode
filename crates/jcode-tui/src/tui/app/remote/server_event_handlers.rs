@@ -44,9 +44,11 @@ pub(super) fn handle_tool_done(
         title: None,
         tool_data: Some(tool_call.clone()),
         // #1453: the live row shows the server-measured duration the moment
-        // the ToolDone event lands, no history reload needed. Timestamps are
-        // a separate feature and intentionally not set here.
+        // the ToolDone event lands, no history reload needed.
         tool_duration_ms: duration_ms,
+        // #1454: ToolDone carries no wall-clock time, so the opt-in time
+        // stamp appears once the transcript reloads from the stored session.
+        timestamp: None,
     });
     app.note_todo_gate_result(&tool_call, &output, error.is_some());
     if is_batch {
@@ -97,6 +99,7 @@ pub(super) fn handle_generated_image(
         duration_secs: None,
         title: Some("Generated image".to_string()),
         tool_data: Some(tool_call),
+        timestamp: None,
         tool_duration_ms: None,
     });
     app.status = ProcessingStatus::Streaming;

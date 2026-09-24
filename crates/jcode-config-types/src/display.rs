@@ -123,6 +123,16 @@ pub struct DisplayConfig {
     pub external_sessions: bool,
     /// Usage percentage wording: "left" (default) or "used".
     pub usage_display: String,
+    /// Show when each completed tool call ran: an opt-in " · HH:MM:SS"
+    /// stamp after the token count on tool transcript rows (default: false).
+    /// Has no effect unless `show_tool_timestamp` is enabled.
+    #[serde(default)]
+    pub show_tool_timestamp: bool,
+    /// Timezone for UI timestamps (tool row time stamps). "local" (default)
+    /// uses the machine's timezone; otherwise a fixed offset like "UTC+3",
+    /// "utc-5" or "UTC+05:30". Unknown values fall back to local.
+    #[serde(default)]
+    pub timestamp_tz: String,
     /// When to show the overscroll status line below the input
     /// (off/on/overscroll, default: on). "overscroll" is the elastic
     /// reveal when scrolling past the bottom, "on" keeps it always visible.
@@ -167,6 +177,8 @@ impl Default for DisplayConfig {
             active_sessions_manager: false,
             external_sessions: true,
             usage_display: "left".to_string(),
+            show_tool_timestamp: false,
+            timestamp_tz: String::new(),
             overscroll_status: OverscrollStatusMode::default(),
         }
     }
@@ -215,6 +227,33 @@ impl DisplayConfig {
 
     pub fn usage_display_used(&self) -> bool {
         self.usage_display.eq_ignore_ascii_case("used")
+    }
+
+    /// Fixed UTC offset (in seconds) for UI timestamps, when the user pinned
+    /// one via `display.timestamp_tz = "UTC+3"`. `None` = use local time.
+    /// Accepts "UTC+3", "utc-5", "UTC+0", "UTC+05:30" or a bare "3";
+    /// anything else falls back to local so a typo never breaks rendering.
+    pub fn timestamp_fixed_offset_secs(&self) -> Option<i32> {
+        let raw = self.timestamp_tz.trim().to_ascii_lowercase();
+        if raw.is_empty() || raw == "local" || raw == "system" {
+            return None;
+        }
+        let body = raw.strip_prefix("utc").map(str::trim).unwrap_or(&raw);
+        let body = body.strip_prefix(':').unwrap_or(body);
+        let (sign, digits) = match body.strip_prefix('-') {
+            Some(rest) => (-1i32, rest),
+            None => (1i32, body.strip_prefix('+').unwrap_or(body)),
+        };
+        let (hours, minutes) = match digits.split_once(':') {
+            Some((h, m)) => (h.trim(), m.trim()),
+            None => (digits, "0"),
+        };
+        let hours: i32 = hours.parse().ok()?;
+        let minutes: i32 = minutes.parse().ok()?;
+        if !(0..=14).contains(&hours) || !(0..=59).contains(&minutes) {
+            return None;
+        }
+        Some(sign * (hours * 3600 + minutes * 60))
     }
 }
 
@@ -267,5 +306,46 @@ mod tests {
         let enabled: DisplayConfig =
             serde_json::from_str(r#"{"show_tool_duration":true}"#).expect("display config");
         assert!(enabled.show_tool_duration);
+    }
+
+    /// Issue #1454: the tool row time stamp is strictly opt-in. Missing key
+    /// means off; explicit true turns it on.
+    #[test]
+    fn show_tool_timestamp_is_opt_in() {
+        assert!(!DisplayConfig::default().show_tool_timestamp);
+
+        let missing: DisplayConfig = serde_json::from_str("{}").expect("display config");
+        assert!(!missing.show_tool_timestamp);
+
+        let enabled: DisplayConfig =
+            serde_json::from_str(r#"{"show_tool_timestamp":true}"#).expect("display config");
+        assert!(enabled.show_tool_timestamp);
+    }
+
+    #[test]
+    fn timestamp_tz_resolves_offsets_and_falls_back_to_local() {
+        let parse = |value: &str| -> DisplayConfig {
+            serde_json::from_str(&format!(r#"{{"timestamp_tz":"{value}"}}"#))
+                .expect("display config")
+        };
+
+        // Empty/default and explicit local: no fixed offset.
+        assert_eq!(DisplayConfig::default().timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("local").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("system").timestamp_fixed_offset_secs(), None);
+
+        // Offsets in seconds.
+        assert_eq!(parse("UTC+3").timestamp_fixed_offset_secs(), Some(3 * 3600));
+        assert_eq!(parse("utc-5").timestamp_fixed_offset_secs(), Some(-5 * 3600));
+        assert_eq!(parse("UTC+0").timestamp_fixed_offset_secs(), Some(0));
+        assert_eq!(parse(" 3 ").timestamp_fixed_offset_secs(), Some(3 * 3600));
+        assert_eq!(
+            parse("UTC+05:30").timestamp_fixed_offset_secs(),
+            Some(5 * 3600 + 30 * 60)
+        );
+
+        // Garbage falls back to local instead of breaking rendering.
+        assert_eq!(parse("Moscow").timestamp_fixed_offset_secs(), None);
+        assert_eq!(parse("UTC+99").timestamp_fixed_offset_secs(), None);
     }
 }

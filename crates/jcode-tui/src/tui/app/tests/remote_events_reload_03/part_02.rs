@@ -21,6 +21,7 @@ fn test_metadata_only_history_preserves_fast_restored_startup_state() {
         }],
         display_role: None,
         timestamp: None,
+        timestamp: None,
         tool_duration_ms: None,
         token_usage: None,
     });
@@ -241,6 +242,7 @@ fn test_local_compacted_history_marker_scroll_expands_from_session() {
             duration_secs: None,
             title: None,
             tool_data: msg.tool_data,
+            timestamp: None,
             tool_duration_ms: None,
         })
         .collect();

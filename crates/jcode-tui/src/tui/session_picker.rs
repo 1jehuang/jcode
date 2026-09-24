@@ -1728,6 +1728,7 @@ impl SessionPicker {
                 duration_secs: None,
                 title: None,
                 tool_data: msg.tool_data.clone(),
+                timestamp: None,
                 tool_duration_ms: None,
             };
 
@@ -1818,6 +1819,7 @@ impl SessionPicker {
                             duration_secs: None,
                             title: None,
                             tool_data: msg.tool_data.clone(),
+                            timestamp: None,
                             tool_duration_ms: None,
                         },
                         assistant_width,
@@ -1837,6 +1839,7 @@ impl SessionPicker {
                             duration_secs: None,
                             title: None,
                             tool_data: msg.tool_data.clone(),
+                            timestamp: None,
                             tool_duration_ms: None,
                         },
                         assistant_width,

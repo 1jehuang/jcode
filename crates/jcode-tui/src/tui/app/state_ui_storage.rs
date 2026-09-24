@@ -497,6 +497,7 @@ mod tests {
 
     fn tool_message(name: &str, input: serde_json::Value) -> DisplayMessage {
         DisplayMessage {
+            timestamp: None,
             tool_duration_ms: None,
             role: "tool".to_string(),
             content: "output".to_string(),
