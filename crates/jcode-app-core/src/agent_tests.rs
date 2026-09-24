@@ -2522,10 +2522,13 @@ fn get_history_carries_stored_timestamp_and_duration() {
     });
     agent.session.append_stored_message(StoredMessage {
         id: "msg-stamp-2".to_string(),
-        role: Role::Assistant,
-        content: vec![ContentBlock::Text {
-            text: "answer".to_string(),
-            cache_control: None,
+        role: Role::User,
+        // A tool result row: the render layer keeps both the stored timestamp
+        // and the measured duration only on this row kind.
+        content: vec![ContentBlock::ToolResult {
+            tool_use_id: "tool-stamp-1".to_string(),
+            content: "ok".to_string(),
+            is_error: None,
         }],
         display_role: None,
         timestamp: Some(stamp),
