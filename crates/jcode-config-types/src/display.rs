@@ -371,3 +371,32 @@ mod tests {
         assert_eq!(parse("UTC+abc").timestamp_fixed_offset_secs(), None);
     }
 }
+
+#[test]
+fn timestamp_fixed_offset_always_representable_by_chrono() {
+    // Every offset the parser accepts must map onto a real chrono
+    // FixedOffset and format HH:MM:SS without panicking: the render path
+    // does FixedOffset::east_opt(secs) with this exact value.
+    let parse = |value: &str| -> DisplayConfig {
+        serde_json::from_str(&format!(r#"{{"timestamp_tz":"{value}"}}"#)).expect("display config")
+    };
+    for tz in [
+        "UTC+0",
+        "UTC+3",
+        "utc-5",
+        "UTC+5:30",
+        "UTC+9:45",
+        "UTC+13:59",
+        "UTC-11:59",
+        "3",
+    ] {
+        let config = parse(tz);
+        let secs = config
+            .timestamp_fixed_offset_secs()
+            .unwrap_or_else(|| panic!("{tz} should parse to a fixed offset"));
+        let offset = chrono::FixedOffset::east_opt(secs)
+            .unwrap_or_else(|| panic!("{tz} -> {secs}s must be a valid FixedOffset"));
+        let formatted = chrono::Utc::now().with_timezone(&offset).format("%H:%M:%S");
+        assert_eq!(formatted.to_string().len(), 8, "{tz} must format HH:MM:SS");
+    }
+}
