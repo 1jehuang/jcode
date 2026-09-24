@@ -204,8 +204,13 @@ fn save_github_token_creates_config_dir() -> Result<()> {
     let config_dir = dir.path().join("github-copilot");
     let prev_jcode_home = std::env::var_os("JCODE_HOME");
     let prev_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+    let prev_home = std::env::var_os("HOME");
 
+    // With JCODE_HOME unset, save_github_token's trust entry goes to
+    // $HOME/.jcode/config.toml. Point HOME at the tempdir so the test never
+    // writes into the developer's real config.
     crate::env::remove_var("JCODE_HOME");
+    crate::env::set_var("HOME", dir.path().join("home"));
     crate::env::set_var(
         "XDG_CONFIG_HOME",
         dir.path()
@@ -221,6 +226,13 @@ fn save_github_token_creates_config_dir() -> Result<()> {
 
     let loaded = load_token_from_json(&hosts_path)?;
     assert_eq!(loaded, "gho_newtoken");
+    assert!(dir.path().join("home/.jcode/config.toml").exists());
+
+    if let Some(prev) = prev_home {
+        crate::env::set_var("HOME", prev);
+    } else {
+        crate::env::remove_var("HOME");
+    }
 
     if let Some(prev) = prev_jcode_home {
         crate::env::set_var("JCODE_HOME", prev);
