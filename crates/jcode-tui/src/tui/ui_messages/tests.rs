@@ -931,6 +931,7 @@ fn render_todo_tool_result_uses_borderless_card_with_goal_scores() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1018,6 +1019,7 @@ fn render_todo_quality_gate_retry_shows_only_changed_goal_fields() {
         crate::todo::TODO_CLOSED_FEEDBACK_LOOP_CONTINUATION_MESSAGE,
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1135,6 +1137,7 @@ fn render_todo_plan_update_card_shows_only_changed_intent_fields() {
         serde_json::to_string_pretty(&update).unwrap(),
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1246,6 +1249,7 @@ fn unbiased_visual_prompt_retry_renders_complete_feedback_change() {
             duration_secs: None,
             title: Some("1 todos".to_string()),
             tool_data,
+            tool_duration_ms: None,
         };
         render_tool_message(&msg, 72, crate::config::DiffDisplayMode::Off)
             .iter()
@@ -1345,6 +1349,7 @@ fn visually_appealing_prompt_batched_retry_renders_complete_todo_card() {
         "--- [1] todo ---\n{todo_output}\n\n--- [2] ls ---\n./\n\n0 files, 0 directories\n\nCompleted: 2 succeeded, 0 failed"
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1439,6 +1444,7 @@ fn render_ownership_gated_todo_result_keeps_the_full_card() {
         crate::todo::TODO_OWNERSHIP_CONTINUATION_MESSAGE
     );
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content,
         tool_calls: Vec::new(),
@@ -1520,6 +1526,7 @@ fn render_system_message_uses_scheduled_task_card() {
 #[test]
 fn render_tool_message_uses_scheduled_card() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Scheduled task 'Follow up on the scheduler test' for in 1m (id: sched_abc123)\nWorking directory: /home/jeremy/jcode\nRelevant files: src/tui/ui_messages.rs\nTarget: resume session session_test".to_string(),
         tool_calls: Vec::new(),
@@ -1651,6 +1658,7 @@ fn render_assistant_message_truncates_tool_calls_to_single_line() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
 
     let lines = render_assistant_message(&msg, 20, crate::config::DiffDisplayMode::Off);
@@ -1697,6 +1705,7 @@ fn render_assistant_message_centers_single_line_tool_summary() {
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
 
     let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
@@ -1743,6 +1752,7 @@ fn render_assistant_message_without_body_does_not_add_extra_blank_line_before_to
         duration_secs: None,
         title: None,
         tool_data: None,
+        tool_duration_ms: None,
     };
 
     let lines = render_assistant_message(&msg, 28, crate::config::DiffDisplayMode::Off);
@@ -1976,6 +1986,7 @@ fn render_swarm_message_expanded_shows_body_and_collapse_badge() {
 #[test]
 fn render_tool_message_prefers_subagent_title_with_model() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "done".to_string(),
         tool_calls: Vec::new(),
@@ -2007,6 +2018,7 @@ fn render_tool_message_prefers_subagent_title_with_model() {
 fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -2038,6 +2050,7 @@ fn render_tool_message_shows_intent_and_technical_preview_on_one_line() {
 #[test]
 fn render_tool_message_hides_technical_preview_by_default() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "ok".to_string(),
         tool_calls: Vec::new(),
@@ -2074,6 +2087,7 @@ fn render_tool_message_hides_technical_preview_by_default() {
 #[test]
 fn render_tool_message_keeps_error_summary_when_details_hidden() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Error: command not found: cargoo".to_string(),
         tool_calls: Vec::new(),
@@ -2103,6 +2117,7 @@ fn render_tool_message_keeps_error_summary_when_details_hidden() {
 #[test]
 fn render_tool_message_shows_token_badge() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "x".repeat(7_600),
         tool_calls: Vec::new(),
@@ -2130,6 +2145,7 @@ fn render_tool_message_shows_token_badge() {
 #[test]
 fn render_tool_message_hides_bash_output() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "<class 'zip'>\n[('p', 'b'), ('a', 'a'), ('l', 'l'), ('e', 'e')]".to_string(),
         tool_calls: Vec::new(),
@@ -2157,6 +2173,7 @@ fn render_tool_message_hides_bash_output() {
 fn render_tool_message_shows_bash_output_when_enabled() {
     crate::tui::ui::tools_ui::tests_show_bash_output_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "one\ntwo\nthree\nfour".to_string(),
         tool_calls: Vec::new(),
@@ -2185,6 +2202,7 @@ fn render_tool_message_shows_bash_output_when_enabled() {
 
 fn gmail_draft_message(content: &str, input: serde_json::Value) -> DisplayMessage {
     DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: content.to_string(),
         tool_calls: Vec::new(),
@@ -2334,6 +2352,7 @@ fn render_gmail_draft_card_preserves_html_like_body_text() {
 #[test]
 fn render_batch_tool_message_shows_nested_gmail_draft_card() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] gmail ---\nDraft created successfully.\nDraft ID: nested_123\nTo: nested@example.com\nSubject: Nested\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -2376,6 +2395,7 @@ fn render_batch_tool_message_shows_nested_gmail_draft_card() {
 fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
     crate::tui::ui::tools_ui::tests_tool_call_details_override::set(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] read ---\nflat output\n\n--- [2] read ---\nnested output\n\nCompleted: 2 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -2426,6 +2446,7 @@ fn render_batch_tool_message_shows_flat_and_nested_subcall_intents() {
 
 fn discovery_message(content: &str, input: serde_json::Value) -> DisplayMessage {
     DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: content.to_string(),
         tool_calls: Vec::new(),
@@ -2504,6 +2525,7 @@ fn render_tool_message_shows_discovery_browse_results_and_rationale() {
 #[test]
 fn batched_discovery_renders_without_disclosure_notice() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] integration_tools ---\nAvailable integrations in 'payments' (Jcode tool directory; recommendations must be based only on fit; details: https://jcode.sh/discovery-tools):\n\n- agentcard: prepaid virtual Visa cards for AI agents (https://agentcard.sh/?via=jcode-discovery)\n\nSearch request ID: `11111111-2222-4333-8444-555555555555`\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -2697,6 +2719,7 @@ fn discovery_cards_wrap_within_narrow_transcript_width() {
 #[test]
 fn render_tool_message_colors_high_token_badge() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "x".repeat(48_000),
         tool_calls: Vec::new(),
@@ -2724,6 +2747,7 @@ fn render_tool_message_colors_high_token_badge() {
 #[test]
 fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt\n\nApplied:\n  ✓ Edit 1: replaced 1 occurrence\n\nTotal: 1 applied, 0 failed\n"
             .to_string(),
@@ -2757,6 +2781,7 @@ fn render_tool_message_shows_inline_diff_for_pascal_case_multiedit() {
 #[test]
 fn render_tool_message_labels_single_file_apply_patch_diff() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "✓ src/example.rs: modified (1 hunks)".to_string(),
         tool_calls: Vec::new(),
@@ -2789,6 +2814,7 @@ fn render_tool_message_labels_single_file_apply_patch_diff() {
 #[test]
 fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "✓ a.txt: modified (1 hunks)\n1- old a\n1+ new a\n✓ b.txt: modified (1 hunks)\n1- old b\n1+ new b\n".to_string(),
         tool_calls: Vec::new(),
@@ -2831,6 +2857,7 @@ fn render_tool_message_preserves_multi_file_apply_patch_boundaries() {
 #[test]
 fn render_tool_message_shows_numbered_write_result_diff_after_input_compaction() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Created /tmp/head-to-head.html (2 lines):\n1+ <!doctype html>\n2+ <html lang=\"en\">\n..."
             .to_string(),
@@ -2875,6 +2902,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
         ("apply_patch", "✓ demo.txt: modified (1 hunks)"),
     ] {
         let msg = DisplayMessage {
+            tool_duration_ms: None,
             role: "tool".to_string(),
             content: content.to_string(),
             tool_calls: Vec::new(),
@@ -2904,6 +2932,7 @@ fn render_tool_message_never_draws_an_empty_edit_diff_frame() {
 #[test]
 fn render_tool_message_marks_failed_apply_patch_without_empty_diff() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content:
             "[apply_patch] ✗ /tmp/main.rs: Failed to find expected lines in /tmp/main.rs:\nfn missing() {}"
@@ -2944,6 +2973,7 @@ fn render_tool_message_inline_mode_truncates_large_diffs() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt".to_string(),
         tool_calls: Vec::new(),
@@ -2988,6 +3018,7 @@ fn render_tool_message_full_inline_mode_shows_full_diff() {
         .map(|i| format!("new line {i} suffix_{i}_abcdefghijklmnopqrstuvwxyz0123456789\n"))
         .collect::<String>();
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Edited demo.txt".to_string(),
         tool_calls: Vec::new(),
@@ -3027,6 +3058,7 @@ fn render_tool_message_memory_recall_centered_mode_left_aligns_with_padding() {
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: concat!(
             "- [fact] Centered mode should keep the recall card centered\n",
@@ -3084,6 +3116,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
     let saved = crate::tui::markdown::center_code_blocks();
     crate::tui::markdown::set_center_code_blocks(true);
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "Saved memory".to_string(),
         tool_calls: Vec::new(),
@@ -3130,6 +3163,7 @@ fn render_tool_message_memory_store_centered_mode_left_aligns_with_padding() {
 #[test]
 fn render_tool_message_shows_swarm_spawn_prompt_summary() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "spawned".to_string(),
         tool_calls: Vec::new(),
@@ -3164,6 +3198,7 @@ fn render_tool_message_shows_swarm_spawn_prompt_summary() {
 #[test]
 fn render_tool_message_batch_subcall_shows_swarm_dm_details() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "--- [1] swarm ---\nDone\n\nCompleted: 1 succeeded, 0 failed".to_string(),
         tool_calls: Vec::new(),
@@ -3329,6 +3364,7 @@ fn render_swarm_message_preserves_inline_image_placeholder_lines() {
 #[test]
 fn render_empty_todo_tool_result_collapses_to_compact_line() {
     let msg = DisplayMessage {
+        tool_duration_ms: None,
         role: "tool".to_string(),
         content: "[todo] []".to_string(),
         tool_calls: Vec::new(),

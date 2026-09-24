@@ -48,6 +48,7 @@ fn test_remote_done_shows_footer_after_final_tool_result_without_trailing_text()
             name: "read".to_string(),
             output: "1 fn main() {}".to_string(),
             error: None,
+            duration_ms: None,
         },
         &mut remote,
     );
