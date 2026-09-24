@@ -2260,16 +2260,7 @@ mod kitty_viewport_leak_tests {
 
         let mut buf = Buffer::empty(Rect::new(0, 0, 24, 34));
         let image_area = Rect::new(1, 2, 20, 30);
-        let ok = render_kitty_virtual_viewport_for(
-            hash,
-            image_area,
-            &mut buf,
-            0,
-            0,
-            20,
-            30,
-            true,
-        );
+        let ok = render_kitty_virtual_viewport_for(hash, image_area, &mut buf, 0, 0, 20, 30, true);
         assert!(ok, "multiplexed viewport render failed");
 
         // No placeholder may appear anywhere in the image area.
@@ -2281,7 +2272,10 @@ mod kitty_viewport_leak_tests {
         }
         // The row-0 lead cell must carry the transmit and a real placement.
         let lead = row_lead_symbol(&buf, image_area.x, image_area.y);
-        assert!(lead.contains("\x1b_Gtransmit"), "missing transmit: {lead:?}");
+        assert!(
+            lead.contains("\x1b_Gtransmit"),
+            "missing transmit: {lead:?}"
+        );
         assert!(
             lead.contains("a=p,i="),
             "missing real placement APC: {lead:?}"
@@ -2327,8 +2321,7 @@ mod kitty_viewport_leak_tests {
         let lead = row_lead_symbol(&buf, image_area.x, image_area.y);
         // Crop offsets come from the state's cell size (8x16 px): y = 10*16.
         assert!(
-            lead.contains(",x=0,y=160,w=160,h=320,")
-                || lead.contains(",x=0,y=160,w=160,h=320\x1b"),
+            lead.contains(",x=0,y=160,w=160,h=320,") || lead.contains(",x=0,y=160,w=160,h=320\x1b"),
             "missing/incorrect source rect (expected y=160,h=320): {lead:?}"
         );
     }
@@ -2344,28 +2337,13 @@ mod kitty_viewport_leak_tests {
         let mut first = Buffer::empty(Rect::new(0, 0, 24, 34));
         let first_area = Rect::new(1, 2, 20, 30);
         assert!(render_kitty_virtual_viewport_for(
-            hash,
-            first_area,
-            &mut first,
-            0,
-            0,
-            20,
-            30,
-            true,
+            hash, first_area, &mut first, 0, 0, 20, 30, true,
         ));
 
         // Second render: pending_transmit is gone; only the placement repeats.
         let mut second = Buffer::empty(Rect::new(0, 0, 24, 34));
-        let ok = render_kitty_virtual_viewport_for(
-            hash,
-            first_area,
-            &mut second,
-            0,
-            0,
-            20,
-            30,
-            true,
-        );
+        let ok =
+            render_kitty_virtual_viewport_for(hash, first_area, &mut second, 0, 0, 20, 30, true);
         assert!(ok);
         let lead = row_lead_symbol(&second, first_area.x, first_area.y);
         assert!(!lead.contains("\x1b_Gtransmit"), "unexpected retransmit");
