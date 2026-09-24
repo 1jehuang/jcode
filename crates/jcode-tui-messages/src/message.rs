@@ -312,6 +312,11 @@ impl DisplayMessage {
             tool.name.hash(&mut hasher);
             hash_json_value(&tool.input, &mut hasher);
         }
+        // Timing badges (#1453/#1454) render from these fields, so a
+        // timing-only update (title and content unchanged) must change the
+        // message-cache key or the cached rows keep the badge-less render.
+        self.tool_duration_ms.hash(&mut hasher);
+        self.timestamp.hash(&mut hasher);
         hasher.finish()
     }
 }
