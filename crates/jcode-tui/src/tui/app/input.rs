@@ -356,12 +356,16 @@ where
 {
     match kind {
         ClipboardPasteKind::Smart => {
-            // Prioritize native images (screenshots, direct copies) over text.
-            // This handles the common case where copying an image also puts
-            // metadata like file paths in the text clipboard.
-            // The native-only image reader skips HTML fallback, so text with
-            // HTML-embedded images stays as text.
-            if let Some((media_type, base64_data)) = read_image() {
+            // Locally, prefer a native image (screenshot, copied picture) over
+            // text: copying an image often also puts a file path on the text
+            // clipboard. The native-only reader skips the HTML <img> fallback,
+            // so copied web text that contains images stays text.
+            //
+            // Over SSH the clipboard read happens on the remote host, so keep
+            // the original text-first order there and never probe for images
+            // when the user pasted text.
+            let prefer_image = !crate::tui::is_ssh_remote();
+            if prefer_image && let Some((media_type, base64_data)) = read_image() {
                 return image_content(media_type, base64_data);
             }
             // Only treat the clipboard as text when it has *non-empty* text.
@@ -375,6 +379,9 @@ where
                     return content;
                 }
                 return ClipboardPasteContent::Text(text);
+            }
+            if !prefer_image && let Some((media_type, base64_data)) = read_image() {
+                return image_content(media_type, base64_data);
             }
             ClipboardPasteContent::Empty
         }
