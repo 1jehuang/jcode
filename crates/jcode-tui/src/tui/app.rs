@@ -1494,9 +1494,9 @@ pub struct App {
     stashed_input: Option<(String, usize)>,
     // Undo history for in-progress input editing (Ctrl+Z)
     input_undo_stack: Vec<(String, usize)>,
-    /// Attachments discarded by the Ctrl+C draft clear, paired with the undo
-    /// depth they belong to, so Ctrl+Z restores images along with the text.
-    cleared_draft_images: Option<(usize, Vec<(String, String)>)>,
+    /// Attachments discarded by each Ctrl+C draft clear, keyed by the undo
+    /// depth of that clear's snapshot, so Ctrl+Z restores images with text.
+    cleared_draft_images: Vec<(usize, Vec<(String, String)>)>,
     // Draft replaced by an explicit jump into prompt history (Ctrl+Up),
     // restored when Down walks back past the newest entry
     history_draft: Option<(String, usize)>,

@@ -2776,12 +2776,11 @@ pub(super) fn clear_draft_or_request_quit(app: &mut App) {
     }
     app.input_undo_stack
         .push((app.input.clone(), app.cursor_pos.min(app.input.len())));
-    app.cleared_draft_images = (!app.pending_images.is_empty()).then(|| {
-        (
-            app.input_undo_stack.len(),
-            std::mem::take(&mut app.pending_images),
-        )
-    });
+    if !app.pending_images.is_empty() {
+        let depth = app.input_undo_stack.len();
+        app.cleared_draft_images
+            .push((depth, std::mem::take(&mut app.pending_images)));
+    }
     app.input.clear();
     app.cursor_pos = 0;
     app.reset_tab_completion();
@@ -3017,6 +3016,11 @@ fn paste_placeholder(content: &str) -> String {
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn handle_paste_image_for_test(&mut self, media_type: &str, base64_data: &str) {
+        attach_image(self, media_type.to_string(), base64_data.to_string());
+    }
+
     pub(super) fn handle_key_event(&mut self, event: crossterm::event::KeyEvent) {
         if self.remote_login.is_some() {
             if matches!(

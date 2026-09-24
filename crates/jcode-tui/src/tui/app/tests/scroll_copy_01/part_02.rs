@@ -709,3 +709,45 @@ fn test_disconnected_ctrl_d_forward_deletes_inside_draft() {
     assert_eq!(app.input, "hllo");
     assert!(app.quit_pending.is_none());
 }
+
+#[test]
+fn test_ctrl_z_restores_each_cleared_drafts_own_images() {
+    let mut app = create_test_app();
+    app.input = "first [image 1]".to_string();
+    app.cursor_pos = app.input.len();
+    app.pending_images
+        .push(("image/png".to_string(), "Zmlyc3Q=".to_string()));
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+
+    app.input = "second text only".to_string();
+    app.cursor_pos = app.input.len();
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+
+    app.undo_input_change();
+    assert_eq!(app.input, "second text only");
+    assert!(app.pending_images.is_empty());
+
+    app.undo_input_change();
+    app.undo_input_change();
+    assert_eq!(app.input, "first [image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), "Zmlyc3Q=".to_string())]);
+}
+
+#[test]
+fn test_undoing_image_paste_after_clear_keeps_attachments_consistent() {
+    let mut app = create_test_app();
+    app.handle_paste_image_for_test("image/png", "QQ==");
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+    app.handle_paste_image_for_test("image/png", "Qg==");
+    assert_eq!(app.input, "[image 1]");
+
+    // Undo the second paste: placeholder and attachment go together.
+    app.undo_input_change();
+    assert_eq!(app.input, "");
+    assert!(app.pending_images.is_empty(), "no invisible attachment");
+
+    // Undo the clear: the first draft comes back with its own image.
+    app.undo_input_change();
+    assert_eq!(app.input, "[image 1]");
+    assert_eq!(app.pending_images, vec![("image/png".to_string(), "QQ==".to_string())]);
+}

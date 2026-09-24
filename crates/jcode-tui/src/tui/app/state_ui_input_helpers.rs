@@ -3,6 +3,19 @@ use crate::tui::core;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+/// Highest `[image N]` placeholder in composer text (0 when none). Attached
+/// images are numbered by `attach_image` in paste order.
+fn max_image_placeholder(text: &str) -> usize {
+    text.match_indices("[image ")
+        .filter_map(|(at, tag)| {
+            let rest = &text[at + tag.len()..];
+            let end = rest.find(']')?;
+            rest[..end].parse::<usize>().ok()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy)]
 struct RegisteredCommand {
     name: &'static str,
@@ -1734,15 +1747,15 @@ impl App {
     /// the same snapshot (or dropping them if that snapshot is the one removed).
     pub(super) fn trim_oldest_input_undo_entry(&mut self) {
         self.input_undo_stack.remove(0);
-        self.cleared_draft_images = self
-            .cleared_draft_images
-            .take()
-            .and_then(|(at, images)| (at > 1).then(|| (at - 1, images)));
+        self.cleared_draft_images.retain_mut(|(at, _)| {
+            *at -= 1;
+            *at > 0
+        });
     }
 
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
-        self.cleared_draft_images = None;
+        self.cleared_draft_images.clear();
         self.history_draft = None;
     }
 
@@ -1752,15 +1765,25 @@ impl App {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
             self.history_draft = None;
+            let previous_input = std::mem::take(&mut self.input);
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
             if self
                 .cleared_draft_images
-                .as_ref()
+                .last()
                 .is_some_and(|(at, _)| *at == depth)
-                && let Some((_, images)) = self.cleared_draft_images.take()
+                && let Some((_, images)) = self.cleared_draft_images.pop()
             {
                 self.pending_images = images;
+            } else {
+                // Undo only restores text. If it removed `[image N]`
+                // placeholders (e.g. undoing an image paste), drop those
+                // attachments too so nothing stays attached invisibly.
+                let before = max_image_placeholder(&previous_input);
+                let after = max_image_placeholder(&self.input);
+                if after < before {
+                    self.pending_images.truncate(after);
+                }
             }
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
