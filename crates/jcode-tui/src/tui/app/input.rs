@@ -332,9 +332,13 @@ fn read_clipboard_for_paste(kind: &ClipboardPasteKind) -> ClipboardPasteContent 
                 super::clipboard_image_native,
                 download_image_url_content,
             ) {
-                ClipboardPasteContent::Empty => super::clipboard_image()
-                    .map(|(media_type, base64_data)| image_content(media_type, base64_data))
-                    .unwrap_or(ClipboardPasteContent::Empty),
+                // The HTML <img> fallback downloads a URL; never do that
+                // implicitly over SSH (direct image-URL paste has the same rule).
+                ClipboardPasteContent::Empty if !crate::tui::is_ssh_remote() => {
+                    super::clipboard_image()
+                        .map(|(media_type, base64_data)| image_content(media_type, base64_data))
+                        .unwrap_or(ClipboardPasteContent::Empty)
+                }
                 content => content,
             }
         }
@@ -389,7 +393,11 @@ where
             // Only then, or when there is no text at all, probe for native
             // image bytes and prefer them. Image-only clipboards (especially
             // on Wayland/arboard) frequently expose an empty text target.
-            if text.as_deref().is_none_or(text_names_an_image)
+            // Over SSH a path names a file on the remote host, so keep it as
+            // text there, matching bracketed paste.
+            let text_is_image_name =
+                text.as_deref().is_some_and(text_names_an_image) && !crate::tui::is_ssh_remote();
+            if (text.is_none() || text_is_image_name)
                 && let Some((media_type, base64_data)) = read_image()
             {
                 return image_content(media_type, base64_data);
@@ -454,6 +462,15 @@ mod tests {
             || Some("http://127.0.0.1/secret.png".to_string()),
             || panic!("text must stay text"),
             super::download_image_url_content,
+        );
+        assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
+        // A path names a file on the remote host: keep it as text even when
+        // the local clipboard also carries image bytes.
+        let content = super::read_clipboard_for_paste_with(
+            &super::ClipboardPasteKind::Smart,
+            || Some("/home/me/screenshot.png".to_string()),
+            || panic!("SSH image path must stay text"),
+            |_| None,
         );
         assert!(matches!(content, super::ClipboardPasteContent::Text(_)));
     }
