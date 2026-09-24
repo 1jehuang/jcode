@@ -403,6 +403,9 @@ impl Session {
         // survive attachment before the first visible message.
         // Canary (self-dev) and debug markers are likewise explicit: the
         // selfdev tool and debug-socket clients read them back from disk.
+        // `improve_mode` is explicit state for the same reason: `/improve` and
+        // `/refactor` can be the very first thing a user types in a new session,
+        // and dropping the flag here means `/improve resume` later finds nothing.
         if !force
             && !self.persist_state.snapshot_exists
             && !self
@@ -416,6 +419,7 @@ impl Session {
             && self.system_prompt.is_none()
             && !self.is_canary
             && !self.is_debug
+            && self.improve_mode.is_none()
         {
             return Ok(());
         }

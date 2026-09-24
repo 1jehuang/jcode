@@ -1313,3 +1313,89 @@ fn remote_submit_input_never_strands_a_local_pending_turn() {
         "the prompt should be queued for the remote tick loop"
     );
 }
+
+#[test]
+fn improve_mode_persistence_survives_a_session_with_no_snapshot_on_disk() {
+    // Regression: `/improve` on a freshly attached remote session used to call
+    // `Session::load` on a session the server had not flushed yet. The ENOENT
+    // propagated out of the key handler, through the TUI event loop, and ended
+    // the whole session. Persisting the mode must succeed in memory instead.
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+    app.remote_session_id = Some("session_never_written_to_disk".to_string());
+
+    assert!(
+        !crate::session::session_exists("session_never_written_to_disk"),
+        "fixture precondition: the session must have no snapshot on disk"
+    );
+
+    super::persist_improve_mode_or_warn(
+        &mut app,
+        Some(crate::session::SessionImproveMode::ImproveRun),
+    );
+
+    assert_eq!(
+        app.session.improve_mode,
+        Some(crate::session::SessionImproveMode::ImproveRun),
+        "the improve mode should be recorded on the in-memory session"
+    );
+
+    // The missing snapshot must be handled as an ordinary state, not rescued by
+    // the error fallback. If this trips, `persist_remote_session_metadata` is
+    // still raising ENOENT and only the warn-and-continue wrapper is saving us.
+    assert!(
+        !app.display_messages()
+            .iter()
+            .any(|message| message.content.contains("Could not save the improve")),
+        "a session with no snapshot is normal and must not surface a warning"
+    );
+}
+
+#[test]
+fn improve_mode_persistence_writes_through_to_an_existing_session_file() {
+    // The no-snapshot shortcut must not swallow the real write path: when the
+    // session does exist on disk, the mode still has to be persisted there.
+    let _guard = crate::storage::lock_test_env();
+    let temp_home = tempfile::TempDir::new().expect("temp home");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp_home.path());
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.runtime_mode = crate::tui::app::AppRuntimeMode::RemoteClient;
+
+    let session_id = app.session.id.clone();
+    app.remote_session_id = Some(session_id.clone());
+    // `Session::save` deliberately skips sessions that hold no visible
+    // conversation message, so seed one to get a real snapshot on disk.
+    app.session.add_message(
+        crate::message::Role::User,
+        vec![crate::message::ContentBlock::Text {
+            text: "seed a visible message".to_string(),
+            cache_control: None,
+        }],
+    );
+    app.session
+        .save()
+        .expect("seed the session snapshot on disk");
+    assert!(crate::session::session_exists(&session_id));
+
+    super::persist_improve_mode_or_warn(
+        &mut app,
+        Some(crate::session::SessionImproveMode::RefactorRun),
+    );
+
+    let reloaded = crate::session::Session::load(&session_id).expect("reload session");
+    assert_eq!(
+        reloaded.improve_mode,
+        Some(crate::session::SessionImproveMode::RefactorRun),
+        "the improve mode should be durable across a reload"
+    );
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
