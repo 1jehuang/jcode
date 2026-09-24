@@ -673,3 +673,39 @@ fn test_remote_ctrl_c_clears_text_draft_and_resets_completion() {
     assert_eq!(app.cursor_pos, 0);
     assert!(!app.should_quit);
 }
+
+#[test]
+fn test_ctrl_z_restores_images_cleared_by_ctrl_c() {
+    let mut app = create_test_app();
+    app.input = "describe this".to_string();
+    app.cursor_pos = app.input.len();
+    app.pending_images
+        .push(("image/png".to_string(), "aW1hZ2U=".to_string()));
+
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+    assert!(app.input.is_empty() && app.pending_images.is_empty());
+
+    app.undo_input_change();
+    assert_eq!(app.input, "describe this");
+    assert_eq!(app.pending_images.len(), 1, "undo must restore the image");
+
+    // Image-only draft round-trips too.
+    let mut app = create_test_app();
+    seed_image_only_draft(&mut app);
+    app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+    assert!(app.pending_images.is_empty());
+    app.undo_input_change();
+    assert_eq!(app.pending_images.len(), 1);
+}
+
+#[test]
+fn test_disconnected_ctrl_d_forward_deletes_inside_draft() {
+    let mut app = create_test_app();
+    app.input = "hello".to_string();
+    app.cursor_pos = 1;
+
+    remote::handle_disconnected_key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL).unwrap();
+
+    assert_eq!(app.input, "hllo");
+    assert!(app.quit_pending.is_none());
+}
