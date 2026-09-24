@@ -151,7 +151,7 @@ struct ToolState {
 
 pub(crate) struct ResponsesStream {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
-    buffer: String,
+    buffer: Vec<u8>,
     pending: Vec<StreamEvent>,
     tools: HashMap<String, ToolState>,
     thinking: bool,
@@ -164,7 +164,7 @@ impl ResponsesStream {
     ) -> Self {
         Self {
             inner: Box::pin(stream),
-            buffer: String::new(),
+            buffer: Vec::new(),
             pending: Vec::new(),
             tools: HashMap::new(),
             thinking: false,
@@ -319,6 +319,21 @@ impl ResponsesStream {
         }
     }
 
+    fn event_data(raw: &[u8]) -> Option<String> {
+        let decoded = String::from_utf8_lossy(raw);
+        let data = decoded
+            .lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .map(str::trim_start)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if data.is_empty() || data == "[DONE]" {
+            None
+        } else {
+            Some(data)
+        }
+    }
+
     fn emit_tool(&mut self, state: ToolState, fallback_id: &str) {
         if state.name.is_empty() {
             return;
@@ -346,24 +361,24 @@ impl ResponsesStream {
             return Some(event);
         }
         while let Some((pos, separator_len)) = [
-            self.buffer.find("\n\n").map(|pos| (pos, 2)),
-            self.buffer.find("\r\n\r\n").map(|pos| (pos, 4)),
+            self.buffer
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|pos| (pos, 2)),
+            self.buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|pos| (pos, 4)),
         ]
         .into_iter()
         .flatten()
         .min_by_key(|(pos, _)| *pos)
         {
-            let raw = self.buffer[..pos].to_string();
-            self.buffer = self.buffer[pos + separator_len..].to_string();
-            let data = raw
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(str::trim_start)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() || data == "[DONE]" {
+            let raw = self.buffer[..pos].to_vec();
+            self.buffer.drain(..pos + separator_len);
+            let Some(data) = Self::event_data(&raw) else {
                 continue;
-            }
+            };
             self.parse_event(&data);
             if let Some(event) = self.pending.first().cloned() {
                 self.pending.remove(0);
@@ -387,18 +402,20 @@ impl Stream for ResponsesStream {
             }
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(error))) => {
                     return Poll::Ready(Some(Err(anyhow::anyhow!("Stream error: {error}"))));
                 }
                 Poll::Ready(None) => {
-                    if !self.buffer.trim().is_empty() {
+                    if !self.buffer.is_empty() {
                         let tail = std::mem::take(&mut self.buffer);
-                        self.parse_event(tail.trim());
-                        if let Some(event) = self.pending.first().cloned() {
-                            self.pending.remove(0);
-                            return Poll::Ready(Some(Ok(event)));
+                        if let Some(data) = Self::event_data(&tail) {
+                            self.parse_event(&data);
+                            if let Some(event) = self.pending.first().cloned() {
+                                self.pending.remove(0);
+                                return Poll::Ready(Some(Ok(event)));
+                            }
                         }
                     }
                     if !self.ended {
@@ -519,5 +536,63 @@ mod tests {
             events.last(),
             Some(StreamEvent::MessageEnd { .. })
         ));
+    }
+
+    #[test]
+    fn responses_stream_preserves_utf8_split_across_chunks() {
+        let payload = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"café\"}\n\n";
+        let bytes = payload.as_bytes();
+        let split = bytes
+            .windows("é".len())
+            .position(|window| window == "é".as_bytes())
+            .expect("UTF-8 character")
+            + 1;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let text = runtime.block_on(async {
+            let chunks = vec![
+                Ok(Bytes::copy_from_slice(&bytes[..split])),
+                Ok(Bytes::copy_from_slice(&bytes[split..])),
+            ];
+            let mut stream = ResponsesStream::new(futures::stream::iter(chunks));
+            let mut text = String::new();
+            while let Some(event) = stream.next().await {
+                if let StreamEvent::TextDelta(delta) = event.expect("response event") {
+                    text.push_str(&delta);
+                }
+            }
+            text
+        });
+        assert_eq!(text, "café");
+    }
+
+    #[test]
+    fn responses_stream_parses_eof_terminated_error_envelope() {
+        let payload =
+            "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"EOF failure\"}}";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let events = runtime.block_on(async {
+            let mut stream =
+                ResponsesStream::new(futures::stream::iter(vec![Ok(Bytes::from(payload))]));
+            let mut events = Vec::new();
+            while let Some(event) = stream.next().await {
+                events.push(event.expect("response event"));
+            }
+            events
+        });
+        assert!(events.iter().any(|event| matches!(
+            event,
+            StreamEvent::Error { message, .. } if message == "EOF failure"
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StreamEvent::MessageEnd { .. }))
+        );
     }
 }
