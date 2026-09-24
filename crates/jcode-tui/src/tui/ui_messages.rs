@@ -4498,10 +4498,14 @@ fn severity_badge_color(
 
 /// #1453: duration badge for a tool row, rendered after the token count:
 /// " · 2m 3s" (how long the call took). Present only when the row carries a
-/// stored/live duration. Returns (label, severity) for coloring.
+/// stored/live duration AND the user opted in via `display.show_tool_duration`
+/// (default off). Returns (label, severity) for coloring.
 fn tool_row_duration_suffix(
     msg: &DisplayMessage,
 ) -> Option<(String, crate::util::ApproxTokenSeverity)> {
+    if !tools_ui::show_tool_duration() {
+        return None;
+    }
     let duration_ms = msg.tool_duration_ms.filter(|ms| *ms > 0)?;
     Some((
         format!(" · {}", format_tool_row_duration(duration_ms)),

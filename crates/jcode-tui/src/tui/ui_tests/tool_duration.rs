@@ -3,10 +3,18 @@
 
 use super::*;
 
+/// Enable the opt-in badge for the duration-acceptance tests below. Each test
+/// that flips this must reset it (see `reset_tool_duration_opt_in`), and tests
+/// that assert the default-off behavior must not enable it at all.
+fn enable_tool_duration_opt_in() {
+    crate::tui::ui::tools_ui::tests_show_tool_duration_override::set(true);
+}
+
+fn reset_tool_duration_opt_in() {
+    crate::tui::ui::tools_ui::tests_show_tool_duration_override::set(false);
+}
+
 fn duration_tool_msg(tool_duration_ms: Option<u64>) -> DisplayMessage {
-    let stamp = chrono::DateTime::parse_from_rfc3339("2026-09-23T20:15:42Z")
-        .expect("parse stamp")
-        .with_timezone(&chrono::Utc);
     DisplayMessage {
         role: "tool".to_string(),
         content: "ok".to_string(),
@@ -29,9 +37,11 @@ fn duration_tool_msg(tool_duration_ms: Option<u64>) -> DisplayMessage {
 #[test]
 fn test_tool_row_renders_duration_badge() {
     let _lock = viewport_snapshot_test_lock();
+    enable_tool_duration_opt_in();
     let msg = duration_tool_msg(Some(48_300));
 
     let lines = messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off);
+    reset_tool_duration_opt_in();
     let row: String = lines
         .first()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -44,12 +54,33 @@ fn test_tool_row_renders_duration_badge() {
     assert!(tok_pos < dur_pos, "duration trails token badge: {row}");
 }
 
+/// With `display.show_tool_duration` at its default (false), rows carrying a
+/// stored duration render no badge at all: the feature is strictly opt-in.
+#[test]
+fn test_tool_row_duration_badge_is_opt_in_default_off() {
+    let _lock = viewport_snapshot_test_lock();
+    // Override stays at its default false, mirroring an unset config key.
+    let msg = duration_tool_msg(Some(48_300));
+
+    let lines = messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off);
+    let row: String = lines
+        .first()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .unwrap_or_default();
+
+    assert!(!row.contains("48.3s"), "badge must be opt-in: {row}");
+    assert!(!row.contains("ms"), "no duration expected: {row}");
+    assert!(row.contains("tok"), "token badge remains: {row}");
+}
+
 /// Rows without a duration (older sessions, synthetic messages) keep the
 /// classic token-only badge: no empty separator pair.
 #[test]
 fn test_tool_row_without_duration_has_no_badge() {
+    enable_tool_duration_opt_in();
     let msg = duration_tool_msg(None);
     let lines = messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off);
+    reset_tool_duration_opt_in();
     let row: String = lines
         .first()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
@@ -63,6 +94,7 @@ fn test_tool_row_without_duration_has_no_badge() {
 #[test]
 fn test_tool_row_duration_badge_severity_colors() {
     let _lock = viewport_snapshot_test_lock();
+    enable_tool_duration_opt_in();
 
     let warn = duration_tool_msg(Some(48_300));
     let lines = messages::render_tool_message(&warn, 200, crate::config::DiffDisplayMode::Off);
@@ -88,6 +120,7 @@ fn test_tool_row_duration_badge_severity_colors() {
 
     let danger = duration_tool_msg(Some(87_456));
     let lines = messages::render_tool_message(&danger, 200, crate::config::DiffDisplayMode::Off);
+    reset_tool_duration_opt_in();
     let span = lines[0]
         .spans
         .iter()
@@ -101,6 +134,7 @@ fn test_tool_row_duration_badge_severity_colors() {
 #[test]
 fn test_tool_row_duration_badge_survives_narrow_width() {
     let _lock = viewport_snapshot_test_lock();
+    enable_tool_duration_opt_in();
     let msg = DisplayMessage {
         role: "tool".to_string(),
         content: "ok".to_string(),
@@ -129,6 +163,7 @@ fn test_tool_row_duration_badge_survives_narrow_width() {
         );
         assert!(row.contains("tok"), "tokens lost at width {width}: {row}");
     }
+    reset_tool_duration_opt_in();
 }
 
 /// Observed-behavior proof for the "0.0s" noise complaint: near-instant
@@ -136,8 +171,10 @@ fn test_tool_row_duration_badge_survives_narrow_width() {
 #[test]
 fn test_tool_row_ms_duration_no_zero_noise() {
     let _lock = viewport_snapshot_test_lock();
+    enable_tool_duration_opt_in();
     let msg = duration_tool_msg(Some(45));
     let lines = messages::render_tool_message(&msg, 200, crate::config::DiffDisplayMode::Off);
+    reset_tool_duration_opt_in();
     let row: String = lines
         .first()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
