@@ -861,6 +861,51 @@ pub fn todos_exist(session_id: &str) -> Result<bool> {
     Ok(todo_path(session_id)?.exists())
 }
 
+/// Cap on the rendered plan-context block injected after compaction
+/// summaries. Todo lists are small; this only guards against a pathological
+/// list blowing up the post-compaction context.
+const PLAN_CONTEXT_MAX_CHARS: usize = 4_000;
+
+/// Render the session's todo list as a compact plan-status block for
+/// injection after a compaction summary, or `None` when there are no todos.
+///
+/// Motivation (observed 2026-09-24, 48-compaction Gemini session): compaction
+/// summaries are lossy and model-written, so multi-step plan state drifted
+/// out of them and "continue with the plan" redid finished work. The todo
+/// store survives compaction on disk; this renders it back into context as
+/// ground truth.
+pub fn format_plan_context(session_id: &str) -> Option<String> {
+    let todos = load_todos(session_id).ok()?;
+    if todos.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "## Live Plan Status (todo store, survives compaction)\n\nThis list is ground truth for plan progress. Do not redo completed items; continue from the first pending or in-progress item.\n\n",
+    );
+    let mut last_group: Option<&str> = None;
+    for todo in &todos {
+        if todo.group.as_deref() != last_group {
+            if let Some(group) = todo.group.as_deref() {
+                out.push_str(&format!("**{}**\n", group));
+            }
+            last_group = todo.group.as_deref();
+        }
+        let marker = match todo.status.as_str() {
+            "completed" => "[x]",
+            "in_progress" => "[>]",
+            "cancelled" => "[-]",
+            _ => "[ ]",
+        };
+        out.push_str(&format!("- {} {}\n", marker, todo.content));
+        if out.len() > PLAN_CONTEXT_MAX_CHARS {
+            out.push_str("- ... (list truncated)\n");
+            break;
+        }
+    }
+    out.push_str("\n---\n");
+    Some(out)
+}
+
 pub fn save_todos(session_id: &str, todos: &[TodoItem]) -> Result<()> {
     let path = todo_path(session_id)?;
     storage::write_json_fast(&path, todos)?;
@@ -2311,6 +2356,49 @@ mod tests {
 
         let loaded = load_plan("user-intention-round-trip").expect("load plan");
         assert_eq!(loaded, plan);
+
+        match previous_home {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+
+    #[test]
+    fn format_plan_context_renders_grouped_statuses() {
+        let _guard = crate::storage::lock_test_env();
+        let previous_home = std::env::var_os("JCODE_HOME");
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        crate::env::set_var("JCODE_HOME", dir.path());
+
+        let session = "plan-context-format";
+        assert!(format_plan_context(session).is_none(), "no todos, no block");
+
+        let todos = vec![
+            TodoItem {
+                content: "Build competitor page".to_string(),
+                status: "completed".to_string(),
+                priority: "high".to_string(),
+                id: "1".to_string(),
+                group: Some("lead plan".to_string()),
+                ..Default::default()
+            },
+            TodoItem {
+                content: "Implement call tracking".to_string(),
+                status: "pending".to_string(),
+                priority: "high".to_string(),
+                id: "2".to_string(),
+                group: Some("lead plan".to_string()),
+                ..Default::default()
+            },
+        ];
+        save_todos(session, &todos).expect("save");
+
+        let block = format_plan_context(session).expect("block");
+        assert!(block.contains("Live Plan Status"));
+        assert!(block.contains("**lead plan**"));
+        assert!(block.contains("- [x] Build competitor page"));
+        assert!(block.contains("- [ ] Implement call tracking"));
+        assert!(block.contains("Do not redo completed items"));
 
         match previous_home {
             Some(value) => crate::env::set_var("JCODE_HOME", value),

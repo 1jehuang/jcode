@@ -1166,3 +1166,117 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
     manager.ensure_context_fits(&[], Arc::new(MockSummaryProvider));
     assert_eq!(manager.token_budget(), 128_000);
 }
+
+// ── plan-context injection tests ───────────────────────────
+
+/// Regression: multi-step plan state must survive compaction. In a
+/// 48-compaction Gemini session (2026-09-24) the model-written summary
+/// dropped the original plan, and every "continue with the plan" redid
+/// finished work. The live todo snapshot now rides after the summary block.
+#[test]
+fn plan_context_is_injected_after_text_summary() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let messages: Vec<Message> = (0..10)
+        .map(|i| make_text_message(Role::User, &format!("turn {i}")))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "prior work".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        },
+        messages.len(),
+    );
+    manager.set_plan_context(Some(
+        "## Live Plan Status\n- [x] item A\n- [ ] item B\n".to_string(),
+    ));
+
+    let api_messages = manager.messages_for_api_with(&messages);
+    let first = api_messages.first().expect("summary message");
+    assert_eq!(first.role, Role::User);
+    assert_eq!(
+        first.content.len(),
+        2,
+        "summary message should carry summary + plan blocks"
+    );
+    match (&first.content[0], &first.content[1]) {
+        (ContentBlock::Text { text: summary, .. }, ContentBlock::Text { text: plan, .. }) => {
+            assert!(summary.contains("Previous Conversation Summary"));
+            assert!(plan.contains("Live Plan Status"));
+            assert!(plan.contains("item B"));
+        }
+        other => panic!("expected two text blocks, got {other:?}"),
+    }
+}
+
+#[test]
+fn plan_context_empty_or_cleared_is_not_injected() {
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let messages: Vec<Message> = (0..10)
+        .map(|i| make_text_message(Role::User, &format!("turn {i}")))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "prior work".to_string(),
+            openai_encrypted_content: None,
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        },
+        messages.len(),
+    );
+
+    // Whitespace-only plan context is treated as absent.
+    manager.set_plan_context(Some("   \n".to_string()));
+    let api_messages = manager.messages_for_api_with(&messages);
+    assert_eq!(api_messages[0].content.len(), 1);
+
+    // Set then clear.
+    manager.set_plan_context(Some("- [ ] item".to_string()));
+    manager.set_plan_context(None);
+    let api_messages = manager.messages_for_api_with(&messages);
+    assert_eq!(api_messages[0].content.len(), 1);
+}
+
+#[test]
+fn plan_context_not_appended_to_openai_encrypted_summary() {
+    // The OpenAI native replay path is shape-sensitive: the encrypted block
+    // must stand alone, so the plan snapshot is skipped there.
+    let mut manager = CompactionManager::new().with_budget(1_000);
+    let messages: Vec<Message> = (0..10)
+        .map(|i| make_text_message(Role::User, &format!("turn {i}")))
+        .collect();
+    for _ in &messages {
+        manager.notify_message_added();
+    }
+    manager.restore_persisted_state(
+        &crate::session::StoredCompactionState {
+            summary_text: "prior work".to_string(),
+            openai_encrypted_content: Some("enc".to_string()),
+            covers_up_to_turn: 8,
+            original_turn_count: 8,
+            compacted_count: 8,
+        },
+        messages.len(),
+    );
+    manager.set_plan_context(Some("- [ ] item".to_string()));
+
+    let api_messages = manager.messages_for_api_with(&messages);
+    assert_eq!(
+        api_messages[0].content.len(),
+        1,
+        "encrypted summary block must stand alone"
+    );
+    assert!(matches!(
+        api_messages[0].content[0],
+        ContentBlock::OpenAICompaction { .. }
+    ));
+}

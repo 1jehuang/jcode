@@ -206,6 +206,15 @@ pub struct CompactionManager {
 
     /// Monotonic recency counter for the semantic embedding cache LRU.
     semantic_embed_cache_counter: u64,
+
+    /// Live plan snapshot (formatted todo list) injected after the summary
+    /// block so multi-step plan state survives compaction. Summaries are
+    /// lossy (~2.5k chars replacing ~150k tokens); in a 48-compaction Gemini
+    /// session (2026-09-24) the original plan was compacted away on day one
+    /// and every "continue with the plan" re-derived the plan from the most
+    /// recent sprint, redoing finished work. Set by the agent from the todo
+    /// store each turn; not persisted (rebuilt from the todo file).
+    plan_context: Option<String>,
 }
 
 impl CompactionManager {
@@ -232,6 +241,7 @@ impl CompactionManager {
             embedding_history: VecDeque::with_capacity(EMBEDDING_HISTORY_WINDOW + 1),
             semantic_embed_cache: HashMap::with_capacity(SEMANTIC_EMBED_CACHE_CAPACITY),
             semantic_embed_cache_counter: 0,
+            plan_context: None,
         }
     }
 
@@ -1334,9 +1344,26 @@ impl CompactionManager {
 
                 let mut result = Vec::with_capacity(active.len() + 1);
 
+                // Append the live plan snapshot after the summary. The summary
+                // is model-written and lossy; the todo store is ground truth
+                // for which plan items are actually done vs pending, so it
+                // rides along uncompacted (it is small and bounded). Skipped
+                // for OpenAI native encrypted summaries: that replay path is
+                // shape-sensitive and the encrypted block must stand alone.
+                let is_text_summary = matches!(summary_block, ContentBlock::Text { .. });
+                let mut blocks = vec![summary_block];
+                if is_text_summary {
+                    if let Some(plan_context) = self.plan_context.as_ref() {
+                        blocks.push(ContentBlock::Text {
+                            text: plan_context.clone(),
+                            cache_control: None,
+                        });
+                    }
+                }
+
                 result.push(Message {
                     role: Role::User,
-                    content: vec![summary_block],
+                    content: blocks,
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -1348,6 +1375,12 @@ impl CompactionManager {
             }
             None => active.to_vec(),
         }
+    }
+
+    /// Set the live plan snapshot injected after the compaction summary.
+    /// Pass `None` (or an empty string) to clear it.
+    pub fn set_plan_context(&mut self, plan_context: Option<String>) {
+        self.plan_context = plan_context.filter(|text| !text.trim().is_empty());
     }
 
     /// Check if compaction is in progress
