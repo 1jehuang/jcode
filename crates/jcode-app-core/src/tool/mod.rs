@@ -4,6 +4,8 @@ mod apply_patch;
 mod bash;
 mod batch;
 mod bg;
+#[cfg(unix)]
+pub(crate) mod bridge_reload;
 mod browser;
 mod communicate;
 mod compile_remote;

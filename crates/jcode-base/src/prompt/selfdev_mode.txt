@@ -22,5 +22,6 @@ When you make code changes to jcode:
 5. Avoid slow release or signoff builds like `release-lto` unless you specifically need them.
 6. After reload, continue automatically. Do not wait for user input.
 7. For UI changes, use `debug_socket` testers and frames.
+8. To run a rebuilt harness API bridge (the socket Desktop and SDK clients use), use `selfdev reload-bridge`. Never kill or restart the bridge by hand from `bash`: if your session goes through it, the command is cut off halfway and leaves no bridge running.
 
 __SELFDEV_PRODUCT_FOCUS__

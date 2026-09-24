@@ -4,13 +4,14 @@ You are working on Jcode Desktop itself. This mode is detected from the Desktop 
 
 ## Desktop development loop
 
-- `desktop_selfdev` actions: `status`, `build`, `reload`, `build-reload`, `test`, `screenshot`, and `inspect`.
+- `desktop_selfdev` actions: `status`, `build`, `reload`, `build-reload`, `reload-bridge`, `test`, `screenshot`, and `inspect`.
 - Start with `status` to identify the running Desktop host and checkout before changing runtime state. Use `inspect` for the UI preview catalog, not as a dump of live application state.
 - Use `build` for a Desktop-only build and `test` for Desktop tests. These actions do not rebuild the Jcode CLI.
 - `reload` and `build-reload` invoke the running Desktop host's Ctrl+R action. Ctrl+R builds and hot-reloads the Desktop UI, preserving the current application state. It is not a CLI daemon reload and must not rebuild the CLI.
 - A reload acknowledgement only confirms the host queued the action, not that the build or reload succeeded. Verify completion separately before claiming the running UI changed.
 - Prefer this state-preserving UI loop. Preserve open sessions, windows, terminals, workspace layout, and unsaved work. Do not kill the host or reset its state merely to refresh the UI.
 - Changes to the Desktop host, startup behavior, or host/UI ABI require a safe restart, not UI hot reload. Explain the restart requirement, preserve recoverable state, and coordinate a safe restart rather than forcing an unsafe reload.
+- To run a rebuilt harness API bridge (`jcode-harness-api-bridge`), use `reload-bridge`. This session reaches the runtime through that bridge, so killing it from `bash` cuts your own turn off mid-command and strands every Desktop panel. `reload-bridge` runs as a daemon task that survives the disconnect, verifies the new bridge accepts, and rolls back if it does not.
 
 ## Visual verification
 

@@ -514,12 +514,13 @@ impl SelfDevTool {
                             "test",
                             "cancel-build",
                             "reload",
+                            "reload-bridge",
                             "status",
                             "find-config",
                             "socket-info",
                             "socket-help"
                         ],
-                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step."
+                        "description": "Action. `build-reload` queues a build and, once it finishes successfully, reloads onto the new binary in one step. `reload-bridge` restarts the harness API bridge (Desktop/SDK socket) onto the latest build as a daemon task that survives this connection dropping; never restart the bridge by hand from bash."
                     },
                     "prompt": { "type": "string" },
                     "context": { "type": "string" },
@@ -648,6 +649,31 @@ impl Tool for SelfDevTool {
                 self.do_cancel_build(params.request_id, params.task_id, &ctx)
                     .await
             }
+            "reload-bridge" | "reload_bridge" => {
+                if !is_selfdev {
+                    Ok(ToolOutput::new(SelfDevTool::selfdev_only_action_message(
+                        "reload-bridge",
+                    )))
+                } else {
+                    #[cfg(unix)]
+                    {
+                        match crate::tool::bridge_reload::cli_bridge_launch() {
+                            Ok(launch) => Ok(crate::tool::bridge_reload::spawn_bridge_reload(
+                                &ctx.session_id,
+                                launch,
+                            )
+                            .await),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        Ok(ToolOutput::new(
+                            "reload-bridge is only supported on Unix platforms.",
+                        ))
+                    }
+                }
+            }
             "socket-info" => {
                 if is_selfdev {
                     self.do_socket_info().await
@@ -668,7 +694,7 @@ impl Tool for SelfDevTool {
             }
             _ => Ok(ToolOutput::new(format!(
                 "Unknown action: {}. In a self-dev session use 'enter', 'setup', 'build', \
-                 'build-reload', 'test', 'cancel-build', 'reload', 'status', 'find-config', \
+                 'build-reload', 'test', 'cancel-build', 'reload', 'reload-bridge', 'status', 'find-config', \
                  'socket-info', or 'socket-help'. Outside self-dev mode use 'enter', 'setup', \
                  'reload', 'status', or 'find-config'.",
                 action
