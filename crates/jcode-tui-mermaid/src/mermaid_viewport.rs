@@ -186,7 +186,128 @@ pub(super) fn take_kitty_delete_payloads() -> String {
     for id in ids {
         payloads.push_str(&kitty_delete_image_payload(id));
     }
+    // Placement-only deletes (pixel data retained): a placement that is no longer
+    // drawn must not keep painting its last slice wherever the cells are blank.
+    for (id, placement_id) in take_kitty_placement_delete_ids() {
+        payloads.push_str(&kitty_placement_delete_payload(id, Some(placement_id)));
+    }
     payloads
+}
+
+/// A real placement as the terminal knows it: image id plus placement id.
+type KittyPlacementKey = (u32, u32);
+
+/// Real placements emitted during the current frame, keyed by image hash. The
+/// frame boundary diffs this against the previous frame so placements that are no
+/// longer drawn (the image scrolled away, or moved to another rectangle) can be
+/// deleted: under a grid multiplexer nothing else ever clears them.
+#[derive(Default)]
+struct PlacedImages {
+    current: HashMap<u64, Vec<KittyPlacementKey>>,
+    previous: HashMap<u64, Vec<KittyPlacementKey>>,
+}
+
+static PLACED_IMAGES: LazyLock<Mutex<PlacedImages>> =
+    LazyLock::new(|| Mutex::new(PlacedImages::default()));
+
+/// Placements (not pixel data) whose terminal state still needs deleting.
+static KITTY_PENDING_PLACEMENT_DELETE_IDS: LazyLock<Mutex<VecDeque<KittyPlacementKey>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+
+/// Placement id for a real placement covering `area` (its cell rectangle).
+///
+/// Kitty and Ghostty key a placement by `(image id, placement id)`, so the id has
+/// to be stable while the rectangle is unchanged (a crop change re-places in
+/// place and must replace, not stack) and different once the image sits somewhere
+/// else (a moved image must not take the copy that is still on screen with it).
+/// Deriving it from the rectangle gives both without extra bookkeeping.
+fn kitty_placement_id_for_area(area: Rect) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hash as _;
+
+    let mut hasher = DefaultHasher::new();
+    (area.x, area.y, area.width, area.height).hash(&mut hasher);
+    // Kitty rejects placement id 0.
+    (hasher.finish() as u32) | 1
+}
+
+fn note_placed_image(hash: u64, unique_id: u32, placement_id: u32) {
+    if let Ok(mut placed) = PLACED_IMAGES.lock() {
+        let entry = placed.current.entry(hash).or_default();
+        if !entry.contains(&(unique_id, placement_id)) {
+            entry.push((unique_id, placement_id));
+        }
+    }
+}
+
+/// Queue a placement-only delete (the pixel data stays in the terminal).
+pub(super) fn queue_kitty_placement_delete(unique_id: u32, placement_id: u32) {
+    if unique_id == 0 {
+        return;
+    }
+    if let Ok(mut pending) = KITTY_PENDING_PLACEMENT_DELETE_IDS.lock()
+        && !pending.contains(&(unique_id, placement_id))
+    {
+        pending.push_back((unique_id, placement_id));
+    }
+}
+
+/// Delete every placement of an image while keeping its pixel data in the
+/// terminal (`d=i`, lowercase).
+///
+/// A real Kitty placement is persistent terminal state: only an explicit delete
+/// (or the terminal trimming the anchor row out of scrollback) removes it. Inside
+/// a grid multiplexer the pane never repaints the cells an image covered - the
+/// APC is stripped before the multiplexer's cell grid sees it - so nothing else
+/// ever cleared a stale placement.
+fn kitty_placement_delete_payload(id: u32, placement_id: Option<u32>) -> String {
+    use std::fmt::Write as _;
+
+    let (start, escape, end) = Parser::escape_tmux(kitty_is_tmux());
+    let mut data = String::with_capacity(start.len() + end.len() + 64);
+    data.push_str(start);
+    data.push_str(escape);
+    match placement_id {
+        Some(placement_id) => {
+            let _ = write!(data, "_Gq=2,a=d,d=i,i={id},p={placement_id}");
+        }
+        None => {
+            let _ = write!(data, "_Gq=2,a=d,d=i,i={id}");
+        }
+    }
+    data.push_str(escape);
+    data.push('\\');
+    data.push_str(end);
+    data
+}
+
+fn take_kitty_placement_delete_ids() -> Vec<KittyPlacementKey> {
+    KITTY_PENDING_PLACEMENT_DELETE_IDS
+        .lock()
+        .map(|mut pending| pending.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Close the current frame: return `(hash, image id, placement id)` for every
+/// placement that was drawn in the previous frame and is not drawn in this one, so
+/// it can be deleted. Called once per frame from
+/// `render_pending_terminal_image_cleanup`.
+pub(super) fn take_placements_no_longer_drawn() -> Vec<(u64, u32, u32)> {
+    let Ok(mut placed) = PLACED_IMAGES.lock() else {
+        return Vec::new();
+    };
+    let current: std::collections::HashSet<KittyPlacementKey> =
+        placed.current.values().flatten().copied().collect();
+    let stale: Vec<(u64, u32, u32)> = placed
+        .previous
+        .iter()
+        .flat_map(|(hash, keys)| keys.iter().map(move |key| (*hash, key.0, key.1)))
+        .filter(|(_, image_id, placement_id)| !current.contains(&(*image_id, *placement_id)))
+        .collect();
+    // Roll the frame: this frame's placements become the next baseline.
+    let current = std::mem::take(&mut placed.current);
+    placed.previous = current;
+    stale
 }
 
 fn kitty_transmit_virtual(img: &DynamicImage, id: u32) -> String {
@@ -569,6 +690,13 @@ fn render_kitty_virtual_viewport_for(
 /// channel; the source-rectangle keys (`x,y,w,h`) crop to the visible window
 /// when the image is only partially visible. One small APC per render
 /// re-paints after the multiplexer's text cells erase the previous placement.
+///
+/// Unlike a Unicode placeholder a real placement is persistent terminal state,
+/// so each render deletes the placement it wrote for this rectangle before
+/// re-placing it (`p=` gives it a stable id derived from the rectangle, the
+/// delete keeps the pixel data). Without that pair every geometry change stacked
+/// another cropped slice onto the screen, and under a grid multiplexer nothing
+/// ever cleared them.
 fn render_kitty_real_placement(
     hash: u64,
     area: Rect,
@@ -609,9 +737,26 @@ fn render_kitty_real_placement(
     } else {
         String::new()
     };
+    // The placement's identity is its anchor cell plus the cell rectangle it
+    // covers: the same rectangle re-places in place (and is deleted first so the
+    // terminal replaces instead of stacking), a different one is a different
+    // placement that the frame boundary cleans up when it is abandoned.
+    let placement_id = kitty_placement_id_for_area(Rect {
+        x: area.left(),
+        y: area.top(),
+        width: visible_width,
+        height: visible_height,
+    });
     let placement = format!(
-        "\x1b_Gq=2,C=1,a=p,i={unique_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
+        "\x1b_Gq=2,C=1,a=p,i={unique_id},p={placement_id},c={visible_width},r={visible_height}{source_rect}\x1b\\"
     );
+    // Delete this rectangle's previous placement (and only that one) before
+    // re-placing: a crop change keeps the same rectangle and must replace its
+    // copy, while another copy of the same image elsewhere on screen survives.
+    // `d=i` is the lowercase form, so the terminal keeps the pixel data and the
+    // placement that follows needs no re-transmit.
+    let placement_reset = kitty_placement_delete_payload(unique_id, Some(placement_id));
+    note_placed_image(hash, unique_id, placement_id);
 
     for row in 0..area.height {
         let y = area.top() + row;
@@ -627,6 +772,7 @@ fn render_kitty_real_placement(
 
         let symbol = if row == 0 {
             let mut symbol = pending_deletes.take().unwrap_or_default();
+            symbol.push_str(&placement_reset);
             if let Some(transmit) = pending_transmit.take() {
                 symbol.push_str(&transmit);
             }
@@ -2224,5 +2370,141 @@ mod kitty_viewport_leak_tests {
         let lead = row_lead_symbol(&second, first_area.x, first_area.y);
         assert!(!lead.contains("\x1b_Gtransmit"), "unexpected retransmit");
         assert!(lead.contains("a=p,i="), "missing steady-state placement");
+    }
+
+    /// A real placement is terminal-side state, so each render must delete the
+    /// copy it wrote for that rectangle before re-placing: otherwise every
+    /// scroll/resize step leaves another cropped slice on screen forever (under a
+    /// grid multiplexer nothing else ever erases it).
+    #[test]
+    fn multiplexed_placement_replaces_its_own_previous_copy() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let hash = 0x5AFE_F010_u64;
+        seed_state(hash, 20, 30);
+        let area = Rect::new(1, 2, 20, 30);
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: area.left(),
+            y: area.top(),
+            width: 20,
+            height: 30,
+        });
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash, area, &mut buf, 0, 0, 20, 30, true,
+        ));
+
+        let lead = row_lead_symbol(&buf, area.x, area.y);
+        let delete = lead
+            .find(&format!("a=d,d=i,i=11189196,p={placement_id}"))
+            .unwrap_or_else(|| panic!("missing placement-scoped delete: {lead:?}"));
+        let place = lead
+            .find(&format!("a=p,i=11189196,p={placement_id}"))
+            .unwrap_or_else(|| panic!("missing placement with a stable id: {lead:?}"));
+        assert!(
+            delete < place,
+            "delete must precede its own placement: {lead:?}"
+        );
+
+        // Another copy of the same image elsewhere on screen has its own id, so
+        // this rectangle's delete must not take it with it.
+        let other_area = Rect::new(1, 10, 20, 12);
+        let other_id = kitty_placement_id_for_area(Rect {
+            x: other_area.left(),
+            y: other_area.top(),
+            width: 20,
+            height: 12,
+        });
+        assert_ne!(placement_id, other_id);
+        let mut other = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash, other_area, &mut other, 0, 0, 20, 12, true,
+        ));
+        let other_lead = row_lead_symbol(&other, other_area.x, other_area.y);
+        assert!(
+            other_lead.contains(&format!("a=d,d=i,i=11189196,p={other_id}")),
+            "the new rectangle must delete only its own placement: {other_lead:?}"
+        );
+        assert!(
+            !other_lead.contains(&format!("a=d,d=i,i=11189196,p={placement_id}")),
+            "the new rectangle must not delete the other copy: {other_lead:?}"
+        );
+    }
+
+    /// Frame boundary: a placement written last frame and not in this one still
+    /// owns terminal state. It has to be deleted or the terminal keeps painting
+    /// the last slice wherever the cells are blank (the band above the composer).
+    #[test]
+    fn frame_boundary_deletes_placements_of_images_no_longer_drawn() {
+        let _guard = crate::IMAGE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Flush whatever placement state earlier tests left behind.
+        let _ = take_placements_no_longer_drawn();
+        let _ = take_placements_no_longer_drawn();
+        let _ = take_kitty_placement_delete_ids();
+        let _ = take_kitty_delete_ids();
+
+        let hash = 0x5AFE_F011_u64;
+        seed_state(hash, 20, 30);
+        let area = Rect::new(1, 2, 20, 30);
+        let placement_id = kitty_placement_id_for_area(Rect {
+            x: area.left(),
+            y: area.top(),
+            width: 20,
+            height: 30,
+        });
+        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 34));
+        assert!(render_kitty_virtual_viewport_for(
+            hash, area, &mut buf, 0, 0, 20, 30, true,
+        ));
+
+        // First boundary: the image was drawn in this frame, so nothing is stale.
+        assert!(
+            take_placements_no_longer_drawn().is_empty(),
+            "a placement from the current frame is not stale yet"
+        );
+        // Second boundary: no placement was emitted this frame.
+        assert_eq!(
+            take_placements_no_longer_drawn(),
+            vec![(hash, 0x00AA_BBCC, placement_id)]
+        );
+
+        queue_kitty_placement_delete(0x00AA_BBCC, placement_id);
+        let payload = take_kitty_delete_payloads();
+        assert!(
+            payload.contains(&format!("a=d,d=i,i=11189196,p={placement_id}")),
+            "missing placement delete: {payload:?}"
+        );
+        assert!(
+            !payload.contains("d=I"),
+            "placement deletes must keep the pixel data: {payload:?}"
+        );
+
+        // Deleting the placements leaves the pixels unreferenced, so the cached
+        // state goes too: the next draw re-transmits instead of trusting pixels
+        // the terminal may have evicted, and the terminal gets its memory back.
+        assert!(
+            KITTY_VIEWPORT_STATE
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&hash),
+            "fixture state must be warm before the frame boundary"
+        );
+        crate::forget_kitty_viewport_state(hash);
+        assert!(
+            !KITTY_VIEWPORT_STATE
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&hash),
+            "state must be dropped once its placements are gone"
+        );
+        assert!(
+            take_kitty_delete_ids().contains(&0x00AA_BBCC),
+            "terminal image data must be reclaimed"
+        );
     }
 }

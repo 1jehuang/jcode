@@ -1570,6 +1570,29 @@ pub fn evict_old_cache() {
     }
 }
 
+/// Drop the cached Kitty viewport state for `hash` and queue the terminal-side
+/// image delete for it.
+///
+/// Called when every placement of an image was deleted because it left the
+/// screen. The pixels are unreferenced now, and a terminal evicts unreferenced
+/// images first once its image budget is exceeded (Ghostty: oldest unused image
+/// when the 320MB budget is hit), so a later re-display must re-transmit instead
+/// of trusting that they are still there. Freeing them here also hands the
+/// terminal its memory back.
+fn forget_kitty_viewport_state(hash: u64) {
+    let Ok(mut cache) = KITTY_VIEWPORT_STATE.lock() else {
+        return;
+    };
+    let Some(state) = cache.entries.remove(&hash) else {
+        return;
+    };
+    cache.recency.remove(&hash);
+    cache.total_pending_transmit_bytes = cache
+        .total_pending_transmit_bytes
+        .saturating_sub(state.pending_transmit_bytes);
+    queue_kitty_delete(state.unique_id);
+}
+
 /// Clear image state (call on app exit to free memory)
 pub fn clear_image_state() {
     if let Ok(mut state) = IMAGE_STATE.lock() {
@@ -1600,6 +1623,16 @@ pub fn take_terminal_image_cleanup_payload() -> String {
 /// frame. Escape sequences are zero-width, so preserving the original symbol
 /// keeps the rendered frame visually unchanged even when no image remains.
 pub fn render_pending_terminal_image_cleanup(buf: &mut Buffer) -> bool {
+    // Close the frame first: a real Kitty placement is terminal-side state, so an
+    // image that emitted one last frame and none in this frame still owns a
+    // placement the terminal keeps painting (the multiplexer never repaints the
+    // cells it covered). This must run even for a zero-sized buffer so the frame
+    // bookkeeping stays in step.
+    for (hash, unique_id, placement_id) in viewport_render::take_placements_no_longer_drawn() {
+        viewport_render::queue_kitty_placement_delete(unique_id, placement_id);
+        forget_kitty_viewport_state(hash);
+    }
+
     let area = *buf.area();
     if area.width == 0 || area.height == 0 {
         return false;
