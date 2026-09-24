@@ -581,7 +581,10 @@ fn test_prepare_messages_shows_live_batch_progress_in_chat_history() {
         ..Default::default()
     };
 
+    // The Updates box lists recent commit subjects ("… PR #1440"); they trip the #N check below.
+    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(Some(Vec::new()));
     let prepared = prepare::prepare_messages(&state, 100, 30);
+    crate::tui::ui::header::set_unseen_changelog_entries_override_for_tests(None);
     let rendered: Vec<String> = prepared
         .materialize_all_lines()
         .iter()
