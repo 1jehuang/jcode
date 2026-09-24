@@ -1325,7 +1325,10 @@ impl App {
                         title: None,
                     }));
 
-                    // Update the tool's DisplayMessage with the output
+                    // Update the tool's DisplayMessage with the output. The
+                    // SDK executes remotely, so there is no locally measured
+                    // duration, but the completion wall-clock time is known
+                    // and stamps the live row (#1454).
                     let display_output = if sdk_is_error
                         && !sdk_content.starts_with("Error:")
                         && !sdk_content.starts_with("error:")
@@ -1335,7 +1338,13 @@ impl App {
                     } else {
                         sdk_content.clone()
                     };
-                    let _ = self.replace_latest_tool_display_message(&tc.id, None, display_output);
+                    let _ = self.replace_latest_tool_display_message_with_timing(
+                        &tc.id,
+                        None,
+                        display_output,
+                        None,
+                        Some(chrono::Utc::now()),
+                    );
 
                     self.observe_tool_result(&tc, &sdk_content, sdk_is_error, None);
                     self.note_tool_completed(&tc, sdk_is_error);
