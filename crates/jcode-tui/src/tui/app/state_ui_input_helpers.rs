@@ -1725,23 +1725,43 @@ impl App {
             return;
         }
         if self.input_undo_stack.len() >= Self::INPUT_UNDO_LIMIT {
-            self.input_undo_stack.remove(0);
+            self.trim_oldest_input_undo_entry();
         }
         self.input_undo_stack.push(snapshot);
     }
 
+    /// Drop the oldest undo entry, keeping any stashed Ctrl+C images pointed at
+    /// the same snapshot (or dropping them if that snapshot is the one removed).
+    pub(super) fn trim_oldest_input_undo_entry(&mut self) {
+        self.input_undo_stack.remove(0);
+        self.cleared_draft_images = self
+            .cleared_draft_images
+            .take()
+            .and_then(|(at, images)| (at > 1).then(|| (at - 1, images)));
+    }
+
     pub(super) fn clear_input_undo_history(&mut self) {
         self.input_undo_stack.clear();
+        self.cleared_draft_images = None;
         self.history_draft = None;
     }
 
     pub(super) fn undo_input_change(&mut self) {
+        let depth = self.input_undo_stack.len();
         if let Some((input, cursor_pos)) = self.input_undo_stack.pop() {
             // The composer now holds a restored draft, so the copy stashed by a
             // history jump is stale: a later Down must not resurrect it.
             self.history_draft = None;
             self.input = input;
             self.cursor_pos = cursor_pos.min(self.input.len());
+            if self
+                .cleared_draft_images
+                .as_ref()
+                .is_some_and(|(at, _)| *at == depth)
+                && let Some((_, images)) = self.cleared_draft_images.take()
+            {
+                self.pending_images = images;
+            }
             self.reset_tab_completion();
             self.sync_model_picker_preview_from_input();
             self.set_status_notice("↶ Input restored");

@@ -2769,9 +2769,20 @@ pub(super) fn clear_draft_or_request_quit(app: &mut App) {
         app.handle_quit_request();
         return;
     }
-    app.remember_input_undo_state();
+    // Always push a snapshot (even for an image-only draft that matches the
+    // previous entry) so the stashed images have their own undo step.
+    if app.input_undo_stack.len() >= App::INPUT_UNDO_LIMIT {
+        app.trim_oldest_input_undo_entry();
+    }
+    app.input_undo_stack
+        .push((app.input.clone(), app.cursor_pos.min(app.input.len())));
+    app.cleared_draft_images = (!app.pending_images.is_empty()).then(|| {
+        (
+            app.input_undo_stack.len(),
+            std::mem::take(&mut app.pending_images),
+        )
+    });
     app.input.clear();
-    app.pending_images.clear();
     app.cursor_pos = 0;
     app.reset_tab_completion();
     app.sync_model_picker_preview_from_input();
