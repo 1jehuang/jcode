@@ -75,21 +75,6 @@ pub fn binary_name() -> &'static str {
 
 pub const SELFDEV_CARGO_PROFILE: &str = "selfdev";
 
-/// Resolve a channel/launcher binary path to the file that actually runs.
-///
-/// Release archives install a tiny `jcode` wrapper script alongside the real
-/// `jcode-<platform>.bin` payload (the wrapper sets `LD_LIBRARY_PATH` and execs
-/// the payload). Channel symlinks point at the wrapper and reload/exec must
-/// keep using the wrapper, but the *running process* (`current_exe()`) is the
-/// payload. Any "is the candidate the same/newer binary than the running one?"
-/// comparison must therefore compare payloads. Comparing the wrapper against
-/// the payload compares two different files with unrelated mtimes, which made
-/// `server_has_newer_binary()` report a phantom update forever and locked
-/// post-`/update` sessions into an infinite reload loop.
-///
-/// Returns the canonicalized payload path when `path` resolves to a wrapper
-/// script with a unique sibling `<stem>-*.bin` payload; otherwise returns the
-/// canonicalized input path.
 /// Canonical payload path of the binary this process is actually running,
 /// captured once (see [`capture_running_binary`]).
 static RUNNING_BINARY: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -121,6 +106,21 @@ fn resolve_running_binary() -> Option<PathBuf> {
         .map(|exe| resolve_binary_payload(&exe))
 }
 
+/// Resolve a channel/launcher binary path to the file that actually runs.
+///
+/// Release archives install a tiny `jcode` wrapper script alongside the real
+/// `jcode-<platform>.bin` payload (the wrapper sets `LD_LIBRARY_PATH` and execs
+/// the payload). Channel symlinks point at the wrapper and reload/exec must
+/// keep using the wrapper, but the *running process* (`current_exe()`) is the
+/// payload. Any "is the candidate the same/newer binary than the running one?"
+/// comparison must therefore compare payloads. Comparing the wrapper against
+/// the payload compares two different files with unrelated mtimes, which made
+/// `server_has_newer_binary()` report a phantom update forever and locked
+/// post-`/update` sessions into an infinite reload loop.
+///
+/// Returns the canonicalized payload path when `path` resolves to a wrapper
+/// script with a unique sibling `<stem>-*.bin` payload; otherwise returns the
+/// canonicalized input path.
 pub fn resolve_binary_payload(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     wrapper_payload_sibling(&canonical).unwrap_or(canonical)
