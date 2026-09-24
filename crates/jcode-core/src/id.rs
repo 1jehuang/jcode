@@ -271,6 +271,14 @@ pub fn new_memorable_session_id_avoiding(used_names: &HashSet<String>) -> (Strin
             let (word, _) = SESSION_NAMES[idx];
             (!used_names.contains(word)).then_some(word)
         })
+        // Concurrent creators advance the shared cursor between our steps, so the loop above can
+        // skip every free name; scan deterministically before falling back to reuse.
+        .or_else(|| {
+            SESSION_NAMES
+                .iter()
+                .map(|(word, _)| *word)
+                .find(|word| !used_names.contains(*word))
+        })
         .unwrap_or_else(|| {
             let idx = cursor.fetch_add(1, Ordering::Relaxed) % SESSION_NAMES.len();
             SESSION_NAMES[idx].0
@@ -433,6 +441,38 @@ mod tests {
         let (id, reused) = new_memorable_session_id_avoiding(&used);
         assert!(id.starts_with(&format!("session_{reused}_")));
         assert!(used.contains(&reused));
+    }
+
+    #[test]
+    fn avoiding_allocator_finds_the_last_free_identity_while_others_advance_the_cursor() {
+        let free = SESSION_NAMES[SESSION_NAMES.len() / 2].0;
+        let used: HashSet<String> = SESSION_NAMES
+            .iter()
+            .map(|(word, _)| word.to_string())
+            .filter(|word| word != free)
+            .collect();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let noise: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = new_memorable_session_id();
+                    }
+                })
+            })
+            .collect();
+        let names: Vec<String> = (0..200)
+            .map(|_| new_memorable_session_id_avoiding(&used).1)
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        for thread in noise {
+            let _ = thread.join();
+        }
+        assert!(
+            names.iter().all(|name| name == free),
+            "reused an occupied identity while one was free"
+        );
     }
 
     /// Returns true for emoji that commonly fail to render as a single glyph on
