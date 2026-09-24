@@ -244,12 +244,17 @@ async fn wait_for_socket(socket: &Path, timeout: Duration, bridge: Option<&Spawn
 }
 
 async fn preflight(launch: &BridgeLaunch) -> Result<()> {
-    let output = tokio::process::Command::new(&launch.program)
+    // A binary that ignores `--help` may start serving instead of exiting.
+    // Bound the probe and kill it rather than hanging the reload forever.
+    let probe = tokio::process::Command::new(&launch.program)
         .args(&launch.args)
         .arg("--help")
         .stdin(std::process::Stdio::null())
-        .output()
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(Duration::from_secs(10), probe)
         .await
+        .map_err(|_| anyhow::anyhow!("{} --help did not exit within 10s", launch.display()))?
         .with_context(|| format!("run {} --help", launch.display()))?;
     if !output.status.success() {
         bail!(
