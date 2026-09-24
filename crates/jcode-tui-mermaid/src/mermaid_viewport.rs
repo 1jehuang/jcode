@@ -2460,9 +2460,10 @@ mod kitty_viewport_leak_tests {
             "placement deletes must keep the pixel data: {payload:?}"
         );
 
-        // Deleting the placements leaves the pixels unreferenced, so the cached
-        // state goes too: the next draw re-transmits instead of trusting pixels
-        // the terminal may have evicted, and the terminal gets its memory back.
+        // The cached state goes so the geometry is re-fitted, but the pixel data
+        // must stay: the next draw places the same image id without re-sending
+        // the payload, and Ghostty frees the data on `d=I` (`deleteById` ->
+        // `deleteIfUnused`), which would leave the returning image blank.
         assert!(
             KITTY_VIEWPORT_STATE
                 .lock()
@@ -2481,8 +2482,8 @@ mod kitty_viewport_leak_tests {
             "state must be dropped once its placements are gone"
         );
         assert!(
-            take_kitty_delete_ids().contains(&0x00AA_BBCC),
-            "terminal image data must be reclaimed"
+            !take_kitty_delete_ids().contains(&0x00AA_BBCC),
+            "image data must stay in the terminal while the image can come back"
         );
     }
 }

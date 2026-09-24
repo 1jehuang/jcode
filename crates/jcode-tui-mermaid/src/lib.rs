@@ -1570,15 +1570,19 @@ pub fn evict_old_cache() {
     }
 }
 
-/// Drop the cached Kitty viewport state for `hash` and queue the terminal-side
-/// image delete for it.
+/// Drop the cached Kitty viewport state for `hash`.
 ///
 /// Called when every placement of an image was deleted because it left the
-/// screen. The pixels are unreferenced now, and a terminal evicts unreferenced
-/// images first once its image budget is exceeded (Ghostty: oldest unused image
-/// when the 320MB budget is hit), so a later re-display must re-transmit instead
-/// of trusting that they are still there. Freeing them here also hands the
-/// terminal its memory back.
+/// screen; the placement deletes themselves are queued by the frame boundary
+/// (`take_placements_no_longer_drawn` -> `queue_kitty_placement_delete`).
+///
+/// The pixel data stays in the terminal on purpose. A later re-display re-places
+/// the same image id **without** re-transmitting (`render_kitty_real_placement`
+/// only sends the payload carried by the cached state), so freeing the data here
+/// with the uppercase `d=I` would make the returning image render blank: Ghostty
+/// 1.3.1 frees the data on `d=I` (`deleteById` -> `deleteIfUnused`). Terminal
+/// memory is still reclaimed when jcode's own image cache drops the id, which is
+/// where `queue_kitty_delete_if_transmitted` belongs.
 fn forget_kitty_viewport_state(hash: u64) {
     let Ok(mut cache) = KITTY_VIEWPORT_STATE.lock() else {
         return;
@@ -1590,7 +1594,6 @@ fn forget_kitty_viewport_state(hash: u64) {
     cache.total_pending_transmit_bytes = cache
         .total_pending_transmit_bytes
         .saturating_sub(state.pending_transmit_bytes);
-    queue_kitty_delete(state.unique_id);
 }
 
 /// Clear image state (call on app exit to free memory)
