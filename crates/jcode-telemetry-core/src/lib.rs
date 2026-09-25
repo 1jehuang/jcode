@@ -49,6 +49,7 @@ static TELEMETRY_QUEUE_OVERFLOW_WARNED: AtomicBool = AtomicBool::new(false);
 #[cfg(not(test))]
 static TELEMETRY_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 #[cfg(not(test))]
+#[allow(dead_code)] // live in non-test builds; shadowed by cfg(test) early return in send_transcript_payload
 static TRANSCRIPT_BACKGROUND_SENDER: OnceLock<SyncSender<Value>> = OnceLock::new();
 #[cfg(not(test))]
 static TELEMETRY_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -1363,7 +1364,7 @@ fn post_payload_with_retry(payload: serde_json::Value, timeout: Duration) -> boo
     false
 }
 
-#[cfg(not(test))]
+#[allow(dead_code)] // called from transcript_background_sender, which is cfg(not(test))-only path
 fn post_transcript_payload(payload: serde_json::Value, timeout: Duration) -> bool {
     let client = TELEMETRY_HTTP_CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
@@ -1421,7 +1422,7 @@ fn background_sender() -> &'static SyncSender<Value> {
     })
 }
 
-#[cfg(not(test))]
+#[allow(dead_code)] // live in non-test builds; send_transcript_payload returns early in cfg(test)
 fn transcript_background_sender() -> &'static SyncSender<Value> {
     TRANSCRIPT_BACKGROUND_SENDER.get_or_init(|| {
         spawn_background_worker(64, |payload| {
