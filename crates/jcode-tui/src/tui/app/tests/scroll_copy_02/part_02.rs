@@ -1165,10 +1165,8 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "image should start at Fit before any click"
     );
 
-    // The click also copies the image when its payload is staged; the notice
-    // must say exactly that. Staging can be requested asynchronously by the
-    // prewarm worker, so read it at the click instead of assuming either way.
-    let copied = crate::tui::ui::inline_image_ui::payload_for_copy(image_id).is_some();
+    // Discard any previous lookup so the assertion observes this click alone.
+    crate::tui::ui::inline_image_ui::take_copy_payload_lookup_for_tests();
 
     // REAL click on the rendered label cell. A terminal delivers a *pair* of
     // events for one physical click: `Down` then `Up`. We must replay both, just
@@ -1193,7 +1191,11 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
         "clicking the rendered image label must cycle Fit -> Large \
          (this is the exact path the user reported as broken)"
     );
-    let expected = if copied {
+    // Prewarming can evict a staged payload between two reads. Observe the
+    // click handler's actual lookup rather than predicting it before the event.
+    let available_at_click = crate::tui::ui::inline_image_ui::take_copy_payload_lookup_for_tests()
+        .expect("click handler must inspect the image payload");
+    let expected = if available_at_click {
         "Image size: large · Image copied"
     } else {
         "Image size: large"

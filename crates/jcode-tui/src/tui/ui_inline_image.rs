@@ -140,10 +140,23 @@ static PAYLOAD_RESTAGE_ALL: AtomicBool = AtomicBool::new(false);
 const PAYLOAD_RESTAGE_MAX: usize = 512;
 
 pub(crate) fn payload_for_copy(id: u64) -> Option<(String, String)> {
-    PAYLOAD_REGISTRY
+    let payload = PAYLOAD_REGISTRY
         .lock()
         .ok()
-        .and_then(|registry| registry.map.get(&id).cloned())
+        .and_then(|registry| registry.map.get(&id).cloned());
+    #[cfg(test)]
+    LAST_COPY_PAYLOAD_LOOKUP.with(|last| last.set(Some(payload.is_some())));
+    payload
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_COPY_PAYLOAD_LOOKUP: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_copy_payload_lookup_for_tests() -> Option<bool> {
+    LAST_COPY_PAYLOAD_LOOKUP.with(|last| last.take())
 }
 
 const PAYLOAD_REGISTRY_MAX: usize = 512;
