@@ -429,3 +429,53 @@ fn test_search_bar_always_rendered_with_placeholder() {
     );
     assert!(!first_row.contains("Type to search sessions"));
 }
+
+fn rendered_text(picker: &mut SessionPicker) -> String {
+    let backend = ratatui::backend::TestBackend::new(200, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| picker.render(frame))
+        .expect("render picker");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol().to_string())
+        .collect()
+}
+
+#[test]
+fn test_search_live_claude_t_is_text_and_hint_points_at_tab() {
+    let session = make_claude_session("claude-search-id");
+    let mut picker = SessionPicker::new(vec![session]);
+    picker.set_live_presence_for_test(vec![live_presence("claude:claude-search-id", false)]);
+    picker.focus_search_input();
+
+    assert!(
+        rendered_text(&mut picker).contains("Tab, T take over live Claude"),
+        "search mode keeps the takeover hint, pointing at Tab first"
+    );
+
+    picker
+        .handle_overlay_key(KeyCode::Char('T'), KeyModifiers::empty())
+        .unwrap();
+    assert!(!picker.claude_takeover_confirmation_active_for_test());
+    assert_eq!(
+        picker.search_query, "T",
+        "T is query text in the search box"
+    );
+
+    picker
+        .handle_overlay_key(KeyCode::Backspace, KeyModifiers::empty())
+        .unwrap();
+    picker
+        .handle_overlay_key(KeyCode::Tab, KeyModifiers::empty())
+        .unwrap();
+    assert!(rendered_text(&mut picker).contains(" T take over live Claude"));
+    picker
+        .handle_overlay_key(KeyCode::Char('T'), KeyModifiers::empty())
+        .unwrap();
+    assert!(
+        picker.claude_takeover_confirmation_active_for_test(),
+        "after Tab, T starts the explicit takeover confirmation"
+    );
+}

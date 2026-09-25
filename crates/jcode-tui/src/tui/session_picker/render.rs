@@ -650,8 +650,10 @@ impl SessionPicker {
                 }
             }
         };
-        if self.selected_live_claude_target().is_some() && !self.search_active {
-            help = format!(" T take over live Claude ·{}", help);
+        if self.selected_live_claude_target().is_some() {
+            // In the search box `T` is text, so point at Tab first.
+            let keys = if self.search_active { "Tab, T" } else { "T" };
+            help = format!(" {keys} take over live Claude ·{}", help);
         }
 
         let border_dim: Color = rgb(70, 70, 70);
