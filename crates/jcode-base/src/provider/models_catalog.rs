@@ -27,10 +27,45 @@ fn catalog_status_error(status: reqwest::StatusCode, context: String) -> anyhow:
 pub struct OpenAIModelCatalog {
     pub available_models: Vec<String>,
     pub context_limits: HashMap<String, usize>,
+    /// Larger windows the Codex catalog advertises as `max_context_window`.
+    /// Used only when `provider.openai_use_max_context_window` is enabled.
+    pub max_context_limits: HashMap<String, usize>,
     /// Ordered reasoning-effort values advertised by each Codex model.
     pub reasoning_efforts: HashMap<String, Vec<String>>,
     /// Empty entries explicitly deny optional tiers, missing entries are unknown.
     pub service_tiers: HashMap<String, Vec<String>>,
+}
+
+impl OpenAIModelCatalog {
+    /// Context limits to publish, honoring the user's max-window opt-in.
+    pub fn effective_context_limits(&self) -> HashMap<String, usize> {
+        effective_openai_context_limits(
+            &self.context_limits,
+            &self.max_context_limits,
+            crate::config::config()
+                .provider
+                .openai_use_max_context_window,
+        )
+    }
+}
+
+/// Merge advertised maximum windows over default windows when opted in.
+/// A maximum only replaces the default when it is positive. It may be lower
+/// than the default, since the provider's stated maximum is authoritative.
+pub fn effective_openai_context_limits(
+    defaults: &HashMap<String, usize>,
+    maximums: &HashMap<String, usize>,
+    use_max: bool,
+) -> HashMap<String, usize> {
+    let mut limits = defaults.clone();
+    if use_max {
+        for (model, max) in maximums {
+            if *max > 0 {
+                limits.insert(model.clone(), *max);
+            }
+        }
+    }
+    limits
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,6 +127,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
     let mut available: HashSet<String> = HashSet::new();
     let mut limits: HashMap<String, usize> = HashMap::new();
     let mut service_tiers = HashMap::new();
+    let mut max_limits: HashMap<String, usize> = HashMap::new();
     let mut reasoning_efforts: HashMap<String, Vec<String>> = HashMap::new();
 
     for model in models.into_iter().flatten() {
@@ -155,6 +191,14 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
             limits.insert(slug.clone(), ctx as usize);
         }
 
+        if let Some(max) = model
+            .get("max_context_window")
+            .and_then(|c| c.as_u64())
+            .filter(|max| *max > 0)
+        {
+            max_limits.insert(slug.clone(), max as usize);
+        }
+
         if let Some(values) = model
             .get("supported_reasoning_levels")
             .or_else(|| model.get("supported_reasoning_efforts"))
@@ -189,6 +233,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
     OpenAIModelCatalog {
         available_models,
         context_limits: limits,
+        max_context_limits: max_limits,
         reasoning_efforts,
         service_tiers,
     }
@@ -403,6 +448,52 @@ mod tests {
         for model in ["missing", "null", "wrong", "invalid", "mixed", "blank"] {
             assert!(!catalog.service_tiers.contains_key(model), "{model}");
         }
+    }
+
+    #[test]
+    fn openai_catalog_records_max_context_window_separately() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [
+                { "slug": "gpt-6-sol", "context_window": 272000, "max_context_window": 872000 },
+                { "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 272000 },
+                { "slug": "no-max", "context_window": 128000 },
+                { "slug": "bad-max", "context_window": 128000, "max_context_window": 0 },
+                { "slug": "str-max", "context_window": 128000, "max_context_window": "872000" }
+            ]
+        }));
+        assert_eq!(catalog.context_limits["gpt-6-sol"], 272000);
+        assert_eq!(catalog.max_context_limits["gpt-6-sol"], 872000);
+        assert_eq!(catalog.max_context_limits["gpt-5.5"], 272000);
+        assert!(!catalog.max_context_limits.contains_key("no-max"));
+        assert!(!catalog.max_context_limits.contains_key("bad-max"));
+        assert!(!catalog.max_context_limits.contains_key("str-max"));
+    }
+
+    #[test]
+    fn effective_openai_limits_use_max_only_when_opted_in() {
+        let defaults: HashMap<String, usize> = [
+            ("gpt-6-sol".to_string(), 272000),
+            ("no-max".to_string(), 128000),
+        ]
+        .into_iter()
+        .collect();
+        let maximums: HashMap<String, usize> =
+            [("gpt-6-sol".to_string(), 872000)].into_iter().collect();
+
+        let off = effective_openai_context_limits(&defaults, &maximums, false);
+        assert_eq!(off, defaults);
+
+        let on = effective_openai_context_limits(&defaults, &maximums, true);
+        assert_eq!(on["gpt-6-sol"], 872000);
+        assert_eq!(on["no-max"], 128000);
+    }
+
+    #[test]
+    fn effective_openai_limits_honor_a_lower_advertised_maximum() {
+        let defaults: HashMap<String, usize> = [("m".to_string(), 272000)].into_iter().collect();
+        let maximums: HashMap<String, usize> = [("m".to_string(), 128000)].into_iter().collect();
+        let on = effective_openai_context_limits(&defaults, &maximums, true);
+        assert_eq!(on["m"], 128000);
     }
 
     #[test]
