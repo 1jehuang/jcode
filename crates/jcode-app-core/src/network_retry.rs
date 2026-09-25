@@ -81,12 +81,12 @@ pub fn wait_plan() -> NetworkWaitPlan {
     }
     #[cfg(target_os = "macos")]
     {
-        return NetworkWaitPlan {
+        NetworkWaitPlan {
             reason: "stream interrupted by a likely network disconnect".to_string(),
             listener_summary:
                 "listening for macOS route/interface changes via `route -n monitor`; also verifying with reconnect probes"
                     .to_string(),
-        };
+        }
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

@@ -90,8 +90,7 @@ use serde_json::{Value, json};
 // The `Reply` variant is far larger than `Legacy`. Boxing it would touch the 33
 // construction sites in this crate, which does not belong in a lint fix.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]// Short-lived per-request value; boxing ServerFrame would touch every reply site.
-#[allow(clippy::large_enum_variant)]
+#[derive(Debug)] // Short-lived per-request value; boxing ServerFrame would touch every reply site.
 pub enum Outbound {
     /// Forward to the legacy daemon connection.
     Legacy(Value),

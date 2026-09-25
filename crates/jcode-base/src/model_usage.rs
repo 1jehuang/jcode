@@ -12,7 +12,6 @@ use serde::Deserialize;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 type RouteKey = (String, String, String);
-type UsageRow = (RouteKey, u64, Option<u64>);
 
 fn key(model: &str, provider: &str, api_method: &str) -> RouteKey {
     let provider = jcode_provider_core::normalize_model_route_provider_label(provider);

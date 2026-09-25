@@ -363,7 +363,7 @@ async fn open_target(target: &ResolvedTarget) -> Result<String> {
             }
         }
         spawn_with_grace(cmd, "open").await?;
-        return Ok("open".to_string());
+        Ok("open".to_string())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -403,7 +403,7 @@ async fn reveal_target(path: &Path, kind: LocalTargetKind) -> Result<(String, bo
             cmd.arg("-R").arg(path);
         }
         spawn_with_grace(cmd, "open").await?;
-        return Ok(("open".to_string(), true));
+        Ok(("open".to_string(), true))
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

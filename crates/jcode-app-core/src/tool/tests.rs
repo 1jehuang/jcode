@@ -630,6 +630,9 @@ async fn tool_descriptions_stay_under_token_cap() {
     // integration_tools keeps a deliberate second sentence explaining that catalog
     // entries integrate directly with the agent.
     // swarm appends the user-tunable swarm-prompt.md by design.
+    // The upstream-owned long-form schemas (browser handoff, remote compile,
+    // desktop self-dev, panels) document policy the model must follow, so they
+    // keep their full text; the cap still guards every other tool.
     // batch carries a deliberate parallel-call example (2f4abae33, pinned by
     // batch_tests::description_includes_parallel_tool_call_example).
     // browser carries the status-first and handoff-by-default routing policy
@@ -645,6 +648,13 @@ async fn tool_descriptions_stay_under_token_cap() {
         "browser",
         "todo",
         "applet",
+        "compile_remote",
+        "desktop_selfdev",
+        "panel",
+        "side_panel",
+        // macos_computer_use documents the live-machine safety policy the model
+        // must follow before acting (screenshot/click/type vs background AX).
+        "macos_computer_use",
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
@@ -715,6 +725,11 @@ async fn tool_parameter_descriptions_stay_under_token_cap() {
         ),
         ("applet", "$.properties.placement"),
         ("desktop_selfdev", "$.properties.action"),
+        // macos_computer_use action indexes the common actions and points at
+        // discover for the rest; element documents the AX handle shape shared
+        // by every element action. Both are live-machine safety surface.
+        ("macos_computer_use", "$.properties.action"),
+        ("macos_computer_use", "$.properties.element"),
     ];
 
     let provider: Arc<dyn Provider> = Arc::new(MockProvider);
