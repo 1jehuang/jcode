@@ -2434,6 +2434,12 @@ impl App {
     }
 
     pub(super) fn open_session_picker(&mut self) {
+        self.open_session_picker_with_query(None);
+    }
+
+    /// Open the session picker, optionally starting in search mode with the
+    /// given initial query (from `/sessions <query>` and aliases).
+    pub(super) fn open_session_picker_with_query(&mut self, query: Option<&str>) {
         if super::commands_dispatch::ssh_local_action_blocked(self, "Local session picker") {
             return;
         }
@@ -2450,6 +2456,9 @@ impl App {
         };
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+        if let Some(query) = query {
+            picker.start_search(query);
+        }
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(status);

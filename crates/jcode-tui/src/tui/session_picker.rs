@@ -481,6 +481,15 @@ impl SessionPicker {
         self.current_dir = dir.map(|d| normalize_dir(&d));
     }
 
+    /// Enter search mode with an initial query, e.g. from `/sessions <query>`.
+    /// Applies the filter immediately so the picker opens pre-filtered, with
+    /// the search bar active so typing continues refining the same query.
+    pub fn start_search(&mut self, query: impl Into<String>) {
+        self.search_query = query.into();
+        self.search_active = true;
+        self.rebuild_items();
+    }
+
     /// Whether the given session's working directory matches the directory the
     /// picker was opened from.
     pub(super) fn session_in_current_dir(&self, session: &SessionInfo) -> bool {
@@ -775,6 +784,18 @@ impl SessionPicker {
             .iter()
             .filter_map(|session_ref| self.session_by_ref(*session_ref))
             .count()
+    }
+
+    /// Current search query (empty string when no search is active).
+    #[cfg(test)]
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    /// Whether the search bar is active (the picker is in search input mode).
+    #[cfg(test)]
+    pub fn search_is_active(&self) -> bool {
+        self.search_active
     }
 
     /// Resume target for the most recently active visible session, used by the
