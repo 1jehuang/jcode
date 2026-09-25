@@ -1363,6 +1363,12 @@ pub enum ServerEvent {
         /// key). Lets clients update the auth badge on an OAuth<->API switch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_credential: Option<jcode_provider_core::ResolvedCredential>,
+        /// Effort the switched-to model runs with. A switch can clear an
+        /// effort the new model does not advertise, so clients must not keep
+        /// showing the old one. Always serialized (`null` = no effort) so a
+        /// client can tell "cleared" from an older server that omits it.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
     },
 
     /// Reasoning effort changed (response to set_reasoning_effort)

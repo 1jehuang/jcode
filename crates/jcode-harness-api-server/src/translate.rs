@@ -1880,6 +1880,12 @@ impl BridgeState {
                 if let Some(provider) = event["provider_name"].as_str() {
                     self.note_provider(provider);
                 }
+                // Newer daemons report the effort the switched-to model runs
+                // with (`null` when the switch cleared it). Older ones omit
+                // the key, so the cached value is kept as before.
+                if event.get("reasoning_effort").is_some() {
+                    self.current_effort = event["reasoning_effort"].as_str().map(str::to_string);
+                }
                 let info = ApiEvent::ModelInfo {
                     session_id: session(self),
                     provider: self.current_provider.clone(),
@@ -1901,13 +1907,14 @@ impl BridgeState {
                 let id = event["id"].as_u64().unwrap_or(0);
                 // Remember the new effort even when the change was requested by
                 // another client, so later identity events stay truthful.
-                let changed = event["error"].as_str().is_none()
-                    && event["effort"].as_str().is_some_and(|effort| {
-                        let effort = Some(effort.to_string());
-                        let moved = self.current_effort != effort;
-                        self.current_effort = effort;
-                        moved
-                    });
+                // A success without `effort` means the provider now runs with
+                // none (e.g. `none` normalised away), which is also a change.
+                let changed = event["error"].as_str().is_none() && {
+                    let effort = event["effort"].as_str().map(str::to_string);
+                    let moved = self.current_effort != effort;
+                    self.current_effort = effort;
+                    moved
+                };
                 // A successful change is also broadcast as identity, mirroring
                 // model_changed: every attached client needs to know the
                 // effort moved under it, not only the one that asked.

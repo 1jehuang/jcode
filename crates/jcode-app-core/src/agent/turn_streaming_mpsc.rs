@@ -1133,6 +1133,7 @@ impl Agent {
                     provider_name: Some(provider_name),
                     error: None,
                     resolved_credential: self.provider.active_resolved_credential(),
+                    reasoning_effort: self.provider.reasoning_effort(),
                 });
             }
 

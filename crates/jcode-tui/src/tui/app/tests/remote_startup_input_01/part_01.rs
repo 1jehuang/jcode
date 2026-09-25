@@ -958,6 +958,7 @@ fn test_remote_model_switch_failure_shows_actionable_guidance() {
             provider_name: Some("Copilot".to_string()),
             error: Some("credentials expired".to_string()),
             resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );
@@ -1070,6 +1071,7 @@ fn test_remote_model_switch_failure_restores_deferred_prompt() {
             provider_name: Some("Chutes".to_string()),
             error: Some("model switch failed".to_string()),
             resolved_credential: None,
+            reasoning_effort: None,
         },
         &mut remote,
     );

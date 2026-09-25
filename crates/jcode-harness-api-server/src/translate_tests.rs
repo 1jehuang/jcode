@@ -2270,6 +2270,53 @@ fn model_change_without_provider_preserves_known_provider() {
     );
 }
 
+/// A successful change that leaves no effort must clear the cache, or later
+/// identity events would keep advertising the old level.
+#[test]
+fn a_successful_change_to_no_effort_clears_the_cached_effort() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"reasoning_effort": "high"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "reasoning_effort_changed", "id": 999,
+    }));
+    assert!(state.current_effort.is_none());
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+}
+
+/// A model switch can clear or change the effort (the new model may not
+/// advertise the old level). The daemon now reports it on `model_changed`,
+/// and the broadcast identity must follow it instead of the stale cache.
+#[test]
+fn model_change_reports_the_effort_the_new_model_runs_with() {
+    let mut state = state_with_session();
+    state.note_models(&json!({"provider_name": "known", "reasoning_effort": "max"}));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "new", "reasoning_effort": "high",
+    }));
+    assert!(
+        matches!(&frames[0].event, ApiEvent::ModelInfo { reasoning_effort, .. }
+        if reasoning_effort.as_deref() == Some("high"))
+    );
+
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "model_changed", "id": 99, "model": "plain", "reasoning_effort": null,
+    }));
+    assert!(matches!(
+        &frames[0].event,
+        ApiEvent::ModelInfo {
+            reasoning_effort: None,
+            ..
+        }
+    ));
+    assert!(state.current_effort.is_none());
+}
+
 #[test]
 fn observer_and_server_initiated_turns_finish_without_a_local_message_id() {
     for id in [0, 999_999] {
