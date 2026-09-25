@@ -11,8 +11,9 @@ use anyhow::Result;
 pub(crate) use catalog::parse_anthropic_model_catalog;
 pub use catalog::{
     AnthropicModelCatalog, ModelCatalogHttpStatus, OpenAIModelCatalog,
-    fetch_anthropic_model_catalog, fetch_anthropic_model_catalog_oauth,
-    fetch_openai_api_key_model_catalog, fetch_openai_context_limits, fetch_openai_model_catalog,
+    effective_openai_context_limits, fetch_anthropic_model_catalog,
+    fetch_anthropic_model_catalog_oauth, fetch_openai_api_key_model_catalog,
+    fetch_openai_context_limits, fetch_openai_model_catalog,
 };
 use catalog_service::{ModelCatalogService, RuntimeModelUnavailability};
 use jcode_provider_core::{
@@ -40,6 +41,8 @@ struct PersistedModelCatalogScope {
     models: Vec<String>,
     #[serde(default)]
     context_limits: HashMap<String, usize>,
+    #[serde(default)]
+    max_context_limits: HashMap<String, usize>,
     #[serde(default)]
     reasoning_efforts: HashMap<String, Vec<String>>,
     observed_at_unix_secs: u64,
@@ -376,6 +379,7 @@ fn persist_scoped_model_catalog(
     scope: &str,
     models: &[String],
     context_limits: &HashMap<String, usize>,
+    max_context_limits: &HashMap<String, usize>,
     reasoning_efforts: &HashMap<String, Vec<String>>,
     observed_at: SystemTime,
 ) {
@@ -395,6 +399,7 @@ fn persist_scoped_model_catalog(
         PersistedModelCatalogScope {
             models: models.to_vec(),
             context_limits: context_limits.clone(),
+            max_context_limits: max_context_limits.clone(),
             reasoning_efforts: reasoning_efforts.clone(),
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
@@ -426,8 +431,15 @@ fn hydrate_catalog_cache_from_disk(
 
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
     service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
-    if !persisted.context_limits.is_empty() {
-        populate_context_limits(persisted.context_limits.clone());
+    let context_limits = effective_openai_context_limits(
+        &persisted.context_limits,
+        &persisted.max_context_limits,
+        crate::config::config()
+            .provider
+            .openai_use_max_context_window,
+    );
+    if !context_limits.is_empty() {
+        populate_context_limits(context_limits);
     }
 
     Some(model_ids_with_context_aliases(persisted.models))
@@ -475,6 +487,7 @@ pub fn persist_openai_model_catalog(catalog: &OpenAIModelCatalog) {
         &current_openai_account_scope(),
         &catalog.available_models,
         &catalog.context_limits,
+        &catalog.max_context_limits,
         &catalog.reasoning_efforts,
         SystemTime::now(),
     );
@@ -490,6 +503,7 @@ pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &Anthropi
         scope,
         &catalog.available_models,
         &catalog.context_limits,
+        &HashMap::new(),
         &HashMap::new(),
         SystemTime::now(),
     );
@@ -912,8 +926,9 @@ pub fn refresh_openai_model_catalog_in_background(
                     catalog.context_limits.len()
                 ));
                 persist_openai_model_catalog(&catalog);
-                if !catalog.context_limits.is_empty() {
-                    populate_context_limits(catalog.context_limits.clone());
+                let context_limits = catalog.effective_context_limits();
+                if !context_limits.is_empty() {
+                    populate_context_limits(context_limits);
                 }
                 if !catalog.available_models.is_empty() {
                     populate_account_models_for_scope(&scope, catalog.available_models.clone());
