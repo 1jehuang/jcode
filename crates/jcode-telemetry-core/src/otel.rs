@@ -71,6 +71,29 @@ struct OtelConfig {
 
 static OTEL_CONFIG: OnceLock<Option<OtelConfig>> = OnceLock::new();
 
+// In test builds, allow individual tests to inject a local OtelConfig
+// so that export_session_span / export_turn_span can be called through
+// their real public signatures without touching the process-wide OnceLock.
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_OVERRIDE: std::cell::RefCell<Option<OtelConfig>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// Clone helper only needed in test builds (OtelConfig is not Clone in prod).
+#[cfg(test)]
+fn clone_config(cfg: &OtelConfig) -> OtelConfig {
+    OtelConfig {
+        traces_url: cfg.traces_url.clone(),
+        headers: cfg.headers.clone(),
+        timeout: cfg.timeout,
+        service_name: cfg.service_name.clone(),
+        service_version: cfg.service_version.clone(),
+        resource_attrs: cfg.resource_attrs.clone(),
+        protocol: cfg.protocol,
+    }
+}
+
 /// Parse `key=value,key2=value2` pairs, tolerating extra whitespace.
 pub(crate) fn parse_kv_pairs(input: &str) -> Vec<(String, String)> {
     input
@@ -88,22 +111,34 @@ pub(crate) fn parse_kv_pairs(input: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Resolve the traces URL from env vars. Returns None when disabled.
+/// Extracted for unit-testability without mutating the global OnceLock.
+pub(crate) fn resolve_traces_url(
+    traces_endpoint: Option<&str>,
+    base_endpoint: Option<&str>,
+) -> Option<String> {
+    if let Some(ep) = traces_endpoint {
+        let ep = ep.trim().to_string();
+        if ep.is_empty() { return None; }
+        Some(ep)
+    } else if let Some(base) = base_endpoint {
+        let base = base.trim().trim_end_matches('/').to_string();
+        if base.is_empty() { return None; }
+        Some(format!("{base}/v1/traces"))
+    } else {
+        None
+    }
+}
+
 fn otel_config() -> &'static Option<OtelConfig> {
     OTEL_CONFIG.get_or_init(|| {
         // Traces endpoint: specific var takes priority over base URL + suffix.
-        let traces_url = if let Ok(ep) =
-            std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
-        {
-            let ep = ep.trim().to_string();
-            if ep.is_empty() { return None; }
-            ep
-        } else if let Ok(base) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
-            let base = base.trim().trim_end_matches('/').to_string();
-            if base.is_empty() { return None; }
-            format!("{base}/v1/traces")
-        } else {
-            return None;
-        };
+        let traces_ep = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").ok();
+        let base_ep = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        let traces_url = resolve_traces_url(
+            traces_ep.as_deref(),
+            base_ep.as_deref(),
+        )?;
 
         let headers = std::env::var("OTEL_EXPORTER_OTLP_HEADERS")
             .map(|s| parse_kv_pairs(&s))
@@ -174,7 +209,15 @@ fn otel_config() -> &'static Option<OtelConfig> {
 }
 
 /// Returns true if the OTEL exporter is configured (endpoint env var set).
+/// In test builds, also returns true when a thread-local override is active.
 pub fn is_otel_enabled() -> bool {
+    #[cfg(test)]
+    {
+        let has_override = TEST_CONFIG_OVERRIDE.with(|c| c.borrow().is_some());
+        if has_override {
+            return true;
+        }
+    }
     otel_config().is_some()
 }
 
@@ -680,40 +723,65 @@ fn post_otlp(cfg: &OtelConfig, payload: OtlpPayload) -> bool {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/// Run `f` with the active OtelConfig (thread-local override in tests, else
+/// the process singleton). Returns without calling `f` when OTEL is disabled.
+fn with_config<F: FnOnce(&OtelConfig)>(f: F) {
+    #[cfg(test)]
+    {
+        // Clone the override (if any) before calling f, so the RefCell borrow
+        // is dropped before the potentially-panicking user closure runs.
+        let override_cfg: Option<OtelConfig> =
+            TEST_CONFIG_OVERRIDE.with(|cell| cell.borrow().as_ref().map(clone_config));
+        if let Some(cfg) = override_cfg {
+            f(&cfg);
+            return;
+        }
+    }
+    if let Some(cfg) = otel_config().as_ref() {
+        f(cfg);
+    }
+}
+
+/// Set a per-thread config override used only in tests.
+/// Call with `None` to clear it after the test.
+#[cfg(test)]
+#[allow(private_interfaces)]
+pub(crate) fn set_test_config(cfg: Option<OtelConfig>) {
+    TEST_CONFIG_OVERRIDE.with(|cell| *cell.borrow_mut() = cfg);
+}
+
 /// Export a session lifecycle span. Safe to call even when OTEL is disabled.
 pub fn export_session_span(data: &SessionSpanData<'_>) {
-    let Some(cfg) = otel_config().as_ref() else {
-        return;
-    };
-    let payload = match cfg.protocol {
-        OtlpProtocol::HttpJson => {
-            let span = build_session_span_json(cfg, data);
-            OtlpPayload::Json(build_export_request_json(cfg, span))
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let span_bytes = build_session_span_proto(data, cfg);
-            OtlpPayload::Proto(build_export_request_proto(cfg, span_bytes))
-        }
-    };
-    let _ = post_otlp(cfg, payload);
+    with_config(|cfg| {
+        let payload = match cfg.protocol {
+            OtlpProtocol::HttpJson => {
+                let span = build_session_span_json(cfg, data);
+                OtlpPayload::Json(build_export_request_json(cfg, span))
+            }
+            OtlpProtocol::HttpProtobuf => {
+                let span_bytes = build_session_span_proto(data, cfg);
+                OtlpPayload::Proto(build_export_request_proto(cfg, span_bytes))
+            }
+        };
+        let _ = post_otlp(cfg, payload);
+    });
 }
 
 /// Export a turn span. Safe to call even when OTEL is disabled.
 pub fn export_turn_span(data: &TurnSpanData<'_>) {
-    let Some(cfg) = otel_config().as_ref() else {
-        return;
-    };
-    let payload = match cfg.protocol {
-        OtlpProtocol::HttpJson => {
-            let span = build_turn_span_json(data);
-            OtlpPayload::Json(build_export_request_json(cfg, span))
-        }
-        OtlpProtocol::HttpProtobuf => {
-            let span_bytes = build_turn_span_proto(data);
-            OtlpPayload::Proto(build_export_request_proto(cfg, span_bytes))
-        }
-    };
-    let _ = post_otlp(cfg, payload);
+    with_config(|cfg| {
+        let payload = match cfg.protocol {
+            OtlpProtocol::HttpJson => {
+                let span = build_turn_span_json(data);
+                OtlpPayload::Json(build_export_request_json(cfg, span))
+            }
+            OtlpProtocol::HttpProtobuf => {
+                let span_bytes = build_turn_span_proto(data);
+                OtlpPayload::Proto(build_export_request_proto(cfg, span_bytes))
+            }
+        };
+        let _ = post_otlp(cfg, payload);
+    });
 }
 
 // ─── Span-ID generation ───────────────────────────────────────────────────────
@@ -841,9 +909,9 @@ mod tests {
 
     #[test]
     fn build_session_span_proto_is_nonempty() {
-        let cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
+        let _cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
         let data = make_test_session_data();
-        let span_bytes = build_session_span_proto(&data, &cfg);
+        let span_bytes = build_session_span_proto(&data, &_cfg);
         assert!(!span_bytes.is_empty(), "proto span should not be empty");
         // First field should be trace_id (field 1, wire type 2 = tag 0x0A)
         assert_eq!(span_bytes[0], 0x0A, "first byte should be tag for trace_id");
@@ -853,10 +921,10 @@ mod tests {
 
     #[test]
     fn build_export_request_proto_wraps_in_resource_spans() {
-        let cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
+        let _cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
         let data = make_test_session_data();
-        let span_bytes = build_session_span_proto(&data, &cfg);
-        let req_bytes = build_export_request_proto(&cfg, span_bytes);
+        let span_bytes = build_session_span_proto(&data, &_cfg);
+        let req_bytes = build_export_request_proto(&_cfg, span_bytes);
         assert!(!req_bytes.is_empty());
         // Top-level field 1 (resource_spans), wire type 2 -> tag 0x0A
         assert_eq!(req_bytes[0], 0x0A, "first byte should be ExportTraceServiceRequest.resource_spans tag");
@@ -874,5 +942,1092 @@ mod tests {
         // rely on is_otel_enabled() returning false here. Just confirm the
         // function does not panic.
         let _ = is_otel_enabled();
+    }
+
+    // ── Mini proto decoder for verification ──────────────────────────────────
+    //
+    // Decodes a flat protobuf message into (field_number, wire_type, bytes)
+    // triples so tests can assert individual field values without an external
+    // proto library.
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    enum PbValue {
+        Varint(u64),
+        Fixed64(u64),
+        Bytes(Vec<u8>),
+        Fixed32(u32),
+    }
+
+    struct PbField {
+        field: u32,
+        value: PbValue,
+    }
+
+    /// Decode varint from buf[pos..], return (value, new_pos).
+    fn decode_varint(buf: &[u8], mut pos: usize) -> (u64, usize) {
+        let mut result = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let b = buf[pos];
+            pos += 1;
+            result |= ((b & 0x7F) as u64) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        (result, pos)
+    }
+
+    /// Decode all top-level fields from a protobuf message.
+    fn decode_pb(buf: &[u8]) -> Vec<PbField> {
+        let mut fields = Vec::new();
+        let mut pos = 0;
+        while pos < buf.len() {
+            let (tag, p) = decode_varint(buf, pos);
+            pos = p;
+            let field = (tag >> 3) as u32;
+            let wire_type = (tag & 0x7) as u8;
+            match wire_type {
+                0 => {
+                    let (v, p) = decode_varint(buf, pos);
+                    pos = p;
+                    fields.push(PbField { field, value: PbValue::Varint(v) });
+                }
+                1 => {
+                    let n = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+                    pos += 8;
+                    fields.push(PbField { field, value: PbValue::Fixed64(n) });
+                }
+                2 => {
+                    let (len, p) = decode_varint(buf, pos);
+                    pos = p;
+                    let data = buf[pos..pos + len as usize].to_vec();
+                    pos += len as usize;
+                    fields.push(PbField { field, value: PbValue::Bytes(data) });
+                }
+                5 => {
+                    let n = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    fields.push(PbField { field, value: PbValue::Fixed32(n) });
+                }
+                _ => break, // unknown wire type, stop
+            }
+        }
+        fields
+    }
+
+    fn get_bytes(fields: &[PbField], field_num: u32) -> Option<&[u8]> {
+        fields.iter().find(|f| f.field == field_num).and_then(|f| {
+            if let PbValue::Bytes(b) = &f.value { Some(b.as_slice()) } else { None }
+        })
+    }
+
+    fn get_varint(fields: &[PbField], field_num: u32) -> Option<u64> {
+        fields.iter().find(|f| f.field == field_num).and_then(|f| {
+            if let PbValue::Varint(v) = f.value { Some(v) } else { None }
+        })
+    }
+
+    fn get_fixed64(fields: &[PbField], field_num: u32) -> Option<u64> {
+        fields.iter().find(|f| f.field == field_num).and_then(|f| {
+            if let PbValue::Fixed64(v) = f.value { Some(v) } else { None }
+        })
+    }
+
+    fn get_string(fields: &[PbField], field_num: u32) -> Option<String> {
+        get_bytes(fields, field_num).and_then(|b| String::from_utf8(b.to_vec()).ok())
+    }
+
+    fn all_bytes<'a>(fields: &'a [PbField], field_num: u32) -> Vec<&'a [u8]> {
+        fields.iter().filter(|f| f.field == field_num).filter_map(|f| {
+            if let PbValue::Bytes(b) = &f.value { Some(b.as_slice()) } else { None }
+        }).collect()
+    }
+
+    // ── Deep field-by-field protobuf verification ────────────────────────────
+
+    #[test]
+    fn proto_session_span_fields_are_correct() {
+        let cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
+        let data = make_test_session_data();
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let fields = decode_pb(&span_bytes);
+
+        // field 1 = trace_id (bytes, 16 bytes = aaaabbbbccccddddaaaabbbbccccdddd)
+        let trace_id = get_bytes(&fields, 1).expect("trace_id field 1 missing");
+        assert_eq!(trace_id.len(), 16, "trace_id must be 16 bytes");
+        assert_eq!(trace_id, &hex_to_bytes("aaaabbbbccccddddaaaabbbbccccdddd"));
+
+        // field 2 = span_id (bytes, 8 bytes = aaaabbbbccccdddd)
+        let span_id = get_bytes(&fields, 2).expect("span_id field 2 missing");
+        assert_eq!(span_id.len(), 8, "span_id must be 8 bytes");
+        assert_eq!(span_id, &hex_to_bytes("aaaabbbbccccdddd"));
+
+        // field 4 = parent_span_id — must NOT be present for root session span
+        let parent_field: Vec<_> = fields.iter().filter(|f| f.field == 4).collect();
+        assert!(parent_field.is_empty(), "root session span must not have parent_span_id (field 4)");
+
+        // field 5 = name (string)
+        let name = get_string(&fields, 5).expect("name field 5 missing");
+        assert_eq!(name, "jcode.session");
+
+        // field 6 = kind (varint, SPAN_KIND_INTERNAL = 1)
+        let kind = get_varint(&fields, 6).expect("kind field 6 missing");
+        assert_eq!(kind, 1, "kind must be SPAN_KIND_INTERNAL=1");
+
+        // field 7 = start_time_unix_nano (fixed64)
+        let start = get_fixed64(&fields, 7).expect("start_time_unix_nano field 7 missing");
+        assert_eq!(start, 1_000_000_000u64);
+
+        // field 8 = end_time_unix_nano (fixed64)
+        let end = get_fixed64(&fields, 8).expect("end_time_unix_nano field 8 missing");
+        assert_eq!(end, 2_000_000_000u64);
+
+        // field 9 = attributes (repeated LEN). Decode each KeyValue and collect.
+        let attr_blobs = all_bytes(&fields, 9);
+        assert!(!attr_blobs.is_empty(), "no attributes in proto span");
+
+        // Decode each KeyValue: field 1 = key (string), field 2 = value (embedded AnyValue)
+        let mut attr_map = std::collections::HashMap::new();
+        for blob in &attr_blobs {
+            let kv_fields = decode_pb(blob);
+            let key = get_string(&kv_fields, 1).unwrap_or_default();
+            let val_blob = get_bytes(&kv_fields, 2).unwrap_or_default();
+            let val_fields = decode_pb(val_blob);
+            // AnyValue: string_value=1, bool_value=2, int_value=3
+            let val_str = get_string(&val_fields, 1);
+            let val_int = get_varint(&val_fields, 3);
+            let val_bool = get_varint(&val_fields, 2);
+            attr_map.insert(key, (val_str, val_int, val_bool));
+        }
+
+        // Check key string attributes
+        let check_str = |key: &str, expected: &str| {
+            let (s, _, _) = attr_map.get(key).unwrap_or_else(|| panic!("attr {key} missing"));
+            assert_eq!(s.as_deref(), Some(expected), "attr {key}");
+        };
+        let check_int = |key: &str, expected: u64| {
+            let (_, i, _) = attr_map.get(key).unwrap_or_else(|| panic!("attr {key} missing"));
+            assert_eq!(*i, Some(expected), "attr {key}");
+        };
+        let check_bool = |key: &str, expected: bool| {
+            let (_, _, b) = attr_map.get(key).unwrap_or_else(|| panic!("attr {key} missing"));
+            assert_eq!(*b, Some(if expected { 1 } else { 0 }), "attr {key}");
+        };
+
+        check_str("jcode.session.id", "sess-1");
+        check_str("jcode.session.correlation_id", "corr-1");
+        check_str("jcode.provider", "anthropic");
+        check_str("jcode.model", "claude");
+        check_str("jcode.session.end_reason", "normal_exit");
+        check_int("jcode.session.turns", 3);
+        check_int("jcode.tokens.input", 100);
+        check_int("jcode.tokens.output", 50);
+        check_int("jcode.tokens.total", 150);
+        check_int("jcode.tool_calls", 5);
+        check_int("jcode.tool_failures", 0);
+        check_bool("jcode.session.resumed", false);
+        check_str("jcode.os", "linux");
+        check_str("jcode.arch", "x86_64");
+        check_str("jcode.version", "0.80.0");
+        check_str("service.name", "jcode");
+
+        // field 15 = status { code=3 (STATUS_CODE_OK=1) }
+        let status_blob = get_bytes(&fields, 15).expect("status field 15 missing");
+        let status_fields = decode_pb(status_blob);
+        let code = get_varint(&status_fields, 3).expect("status.code field 3 missing");
+        assert_eq!(code, 1, "status.code must be STATUS_CODE_OK=1");
+    }
+
+    #[test]
+    fn proto_turn_span_has_parent_span_id() {
+        let data = TurnSpanData {
+            trace_id: "aaaabbbbccccddddaaaabbbbccccdddd",
+            span_id: "1122334455667788",
+            parent_span_id: "aaaabbbbccccdddd",
+            session_id: "sess-1",
+            turn_index: 2,
+            start_nanos: 1_000_000_000,
+            end_nanos: 1_500_000_000,
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+            tool_calls: 1,
+            tool_failures: 0,
+            executed_tool_calls: 1,
+            file_write_calls: 0,
+            tests_run: 0,
+            tests_passed: 0,
+            turn_success: true,
+            turn_abandoned: false,
+            end_reason: "assistant_turn",
+            provider: "anthropic",
+            model: "claude",
+        };
+        let span_bytes = build_turn_span_proto(&data);
+        let fields = decode_pb(&span_bytes);
+
+        // trace_id = field 1, 16 bytes
+        let trace_id = get_bytes(&fields, 1).expect("trace_id missing");
+        assert_eq!(trace_id.len(), 16);
+
+        // span_id = field 2, 8 bytes
+        let span_id = get_bytes(&fields, 2).expect("span_id missing");
+        assert_eq!(span_id, &hex_to_bytes("1122334455667788"));
+
+        // parent_span_id = field 4, must be present and equal session span_id
+        let parent = get_bytes(&fields, 4).expect("parent_span_id field 4 missing in turn span");
+        assert_eq!(parent, &hex_to_bytes("aaaabbbbccccdddd"), "parent_span_id must match session span_id");
+
+        // name = field 5
+        let name = get_string(&fields, 5).expect("name missing");
+        assert_eq!(name, "jcode.turn");
+
+        // start/end timestamps
+        let start = get_fixed64(&fields, 7).expect("start_time missing");
+        assert_eq!(start, 1_000_000_000u64);
+        let end = get_fixed64(&fields, 8).expect("end_time missing");
+        assert_eq!(end, 1_500_000_000u64);
+
+        // Decode attributes and check turn-specific ones
+        let attr_blobs = all_bytes(&fields, 9);
+        let mut attr_map = std::collections::HashMap::new();
+        for blob in &attr_blobs {
+            let kv_fields = decode_pb(blob);
+            let key = get_string(&kv_fields, 1).unwrap_or_default();
+            let val_blob = get_bytes(&kv_fields, 2).unwrap_or_default();
+            let val_fields = decode_pb(val_blob);
+            attr_map.insert(key, (
+                get_string(&val_fields, 1),
+                get_varint(&val_fields, 3),
+                get_varint(&val_fields, 2),
+            ));
+        }
+
+        let (_, ti, _) = attr_map.get("jcode.turn.index").expect("jcode.turn.index missing");
+        assert_eq!(*ti, Some(2u64));
+        let (_, _, success) = attr_map.get("jcode.turn.success").expect("jcode.turn.success missing");
+        assert_eq!(*success, Some(1u64), "turn_success=true should encode as 1");
+        let (_, _, abandoned) = attr_map.get("jcode.turn.abandoned").expect("jcode.turn.abandoned missing");
+        assert_eq!(*abandoned, Some(0u64), "turn_abandoned=false should encode as 0");
+    }
+
+    #[test]
+    fn proto_session_with_parent_session_id() {
+        // When a resumed session has a parent_session_id, the attribute must appear.
+        let cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
+        // Build with parent_session_id and resumed=true directly
+        let data = SessionSpanData {
+            trace_id: "aaaabbbbccccddddaaaabbbbccccdddd",
+            span_id: "aaaabbbbccccdddd",
+            session_id: "sess-1",
+            correlation_id: "corr-1",
+            provider: "anthropic",
+            model: "claude",
+            start_nanos: 1_000_000_000,
+            end_nanos: 2_000_000_000,
+            end_reason: "normal_exit",
+            turns: 3,
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            tool_calls: 5,
+            tool_failures: 0,
+            resumed: true,
+            parent_session_id: Some("parent-sess-999"),
+            os: "linux",
+            arch: "x86_64",
+            version: "0.80.0",
+        };
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let fields = decode_pb(&span_bytes);
+        let attr_blobs = all_bytes(&fields, 9);
+        let mut found_parent = false;
+        let mut found_resumed = false;
+        for blob in &attr_blobs {
+            let kv_fields = decode_pb(blob);
+            let key = get_string(&kv_fields, 1).unwrap_or_default();
+            let val_blob = get_bytes(&kv_fields, 2).unwrap_or_default();
+            let val_fields = decode_pb(val_blob);
+            if key == "jcode.session.parent_id" {
+                let val = get_string(&val_fields, 1);
+                assert_eq!(val.as_deref(), Some("parent-sess-999"));
+                found_parent = true;
+            }
+            if key == "jcode.session.resumed" {
+                let val = get_varint(&val_fields, 2);
+                assert_eq!(val, Some(1), "resumed=true must encode as 1");
+                found_resumed = true;
+            }
+        }
+        assert!(found_parent, "jcode.session.parent_id attribute missing");
+        assert!(found_resumed, "jcode.session.resumed attribute missing");
+    }
+
+    #[test]
+    fn parse_kv_pairs_with_base64_auth_header() {
+        // Real header from user's env var setup:
+        // Authorization=Basic aU5OWnZNZDJnZjZNalh3UncwSGpVaEVqOlZQMzVqcGhwS1FPWFdMNUk3VzV0QjFlSA==
+        // The Base64 value contains trailing "==" which must NOT be treated as a
+        // key-value separator — it is part of the value after the first "=".
+        let input = "Authorization=Basic aU5OWnZNZDJnZjZNalh3UncwSGpVaEVqOlZQMzVqcGhwS1FPWFdMNUk3VzV0QjFlSA==";
+        let pairs = parse_kv_pairs(input);
+        assert_eq!(pairs.len(), 1, "should parse as exactly one key-value pair");
+        assert_eq!(pairs[0].0, "Authorization");
+        // Value should be everything after the first '='
+        assert_eq!(pairs[0].1, "Basic aU5OWnZNZDJnZjZNalh3UncwSGpVaEVqOlZQMzVqcGhwS1FPWFdMNUk3VzV0QjFlSA==");
+        // Sanity: the Base64 == at the end is preserved
+        assert!(pairs[0].1.ends_with("=="), "trailing == in Base64 must be preserved");
+    }
+
+    #[test]
+    fn parse_kv_pairs_resource_attributes_with_email() {
+        // OTEL_RESOURCE_ATTRIBUTES=user.email=you@domain.com
+        let pairs = parse_kv_pairs("user.email=you@domain.com");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "user.email");
+        assert_eq!(pairs[0].1, "you@domain.com");
+    }
+
+    #[test]
+    fn proto_resource_attrs_appear_in_resource_message() {
+        // OTEL_RESOURCE_ATTRIBUTES=user.email=you@domain.com must flow through
+        // to the Resource.attributes in the exported proto.
+        let cfg = OtelConfig {
+            traces_url: "http://localhost:4318/v1/traces".to_string(),
+            headers: vec![],
+            timeout: Duration::from_secs(5),
+            service_name: "jcode".to_string(),
+            service_version: "0.0.0".to_string(),
+            resource_attrs: vec![("user.email".to_string(), "you@domain.com".to_string())],
+            protocol: OtlpProtocol::HttpProtobuf,
+        };
+        let resource_bytes = encode_resource_proto(&cfg);
+        let fields = decode_pb(&resource_bytes);
+        // Resource.attributes = field 1 (repeated KeyValue)
+        let attr_blobs = all_bytes(&fields, 1);
+        let mut found_email = false;
+        for blob in &attr_blobs {
+            let kv_fields = decode_pb(blob);
+            let key = get_string(&kv_fields, 1).unwrap_or_default();
+            if key == "user.email" {
+                let val_blob = get_bytes(&kv_fields, 2).unwrap_or_default();
+                let val_fields = decode_pb(val_blob);
+                let val = get_string(&val_fields, 1);
+                assert_eq!(val.as_deref(), Some("you@domain.com"));
+                found_email = true;
+            }
+        }
+        assert!(found_email, "user.email resource attribute missing from proto resource");
+        // Also check the standard attrs are present
+        let keys: Vec<String> = attr_blobs.iter().filter_map(|blob| {
+            let kv_fields = decode_pb(blob);
+            get_string(&kv_fields, 1)
+        }).collect();
+        assert!(keys.contains(&"service.name".to_string()));
+        assert!(keys.contains(&"telemetry.sdk.name".to_string()));
+    }
+
+    #[test]
+    fn proto_zero_token_span_does_not_panic() {
+        // Edge case: a span where all numeric fields are zero
+        let data = TurnSpanData {
+            trace_id: "00000000000000000000000000000000",
+            span_id: "0000000000000000",
+            parent_span_id: "0000000000000000",
+            session_id: "zero-sess",
+            turn_index: 0,
+            start_nanos: 0,
+            end_nanos: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            tool_failures: 0,
+            executed_tool_calls: 0,
+            file_write_calls: 0,
+            tests_run: 0,
+            tests_passed: 0,
+            turn_success: false,
+            turn_abandoned: true,
+            end_reason: "abandoned",
+            provider: "anthropic",
+            model: "claude",
+        };
+        // Must not panic
+        let span_bytes = build_turn_span_proto(&data);
+        assert!(!span_bytes.is_empty());
+        // trace_id is 16 zero bytes — verify they decode correctly
+        let fields = decode_pb(&span_bytes);
+        let trace_id = get_bytes(&fields, 1).expect("trace_id missing");
+        assert_eq!(trace_id, &[0u8; 16]);
+    }
+
+    #[test]
+    fn export_request_proto_envelope_is_parseable() {
+        // Verify the full ExportTraceServiceRequest envelope structure by
+        // walking the nested message chain: request -> resource_spans ->
+        // resource -> attributes, scope_spans -> spans -> trace_id.
+        let cfg = make_test_cfg(OtlpProtocol::HttpProtobuf);
+        let data = make_test_session_data();
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let req_bytes = build_export_request_proto(&cfg, span_bytes);
+
+        // Level 1: ExportTraceServiceRequest { resource_spans = field 1 }
+        let req_fields = decode_pb(&req_bytes);
+        let resource_spans_blob = get_bytes(&req_fields, 1)
+            .expect("ExportTraceServiceRequest.resource_spans (field 1) missing");
+
+        // Level 2: ResourceSpans { resource=1, scope_spans=2 }
+        let rs_fields = decode_pb(resource_spans_blob);
+        let resource_blob = get_bytes(&rs_fields, 1)
+            .expect("ResourceSpans.resource (field 1) missing");
+        let scope_spans_blob = get_bytes(&rs_fields, 2)
+            .expect("ResourceSpans.scope_spans (field 2) missing");
+
+        // Level 3a: Resource { attributes = field 1 }
+        let resource_fields = decode_pb(resource_blob);
+        let res_attrs = all_bytes(&resource_fields, 1);
+        assert!(!res_attrs.is_empty(), "Resource must have attributes");
+        let service_name_kv = res_attrs.iter().find(|blob| {
+            let kv = decode_pb(blob);
+            get_string(&kv, 1).as_deref() == Some("service.name")
+        });
+        assert!(service_name_kv.is_some(), "Resource must contain service.name attribute");
+
+        // Level 3b: ScopeSpans { scope=1, spans=2 }
+        let ss_fields = decode_pb(scope_spans_blob);
+        let scope_blob = get_bytes(&ss_fields, 1)
+            .expect("ScopeSpans.scope (InstrumentationScope, field 1) missing");
+        let span_blob = get_bytes(&ss_fields, 2)
+            .expect("ScopeSpans.spans (field 2) missing");
+
+        // Level 4a: InstrumentationScope { name=1, version=2 }
+        let scope_fields = decode_pb(scope_blob);
+        let scope_name = get_string(&scope_fields, 1).expect("scope name missing");
+        assert_eq!(scope_name, "jcode.telemetry");
+
+        // Level 4b: Span — verify trace_id is present and correct
+        let span_fields = decode_pb(span_blob);
+        let trace_id = get_bytes(&span_fields, 1).expect("Span.trace_id missing in envelope");
+        assert_eq!(trace_id.len(), 16);
+        assert_eq!(trace_id, &hex_to_bytes("aaaabbbbccccddddaaaabbbbccccdddd"));
+    }
+
+    #[test]
+    fn json_export_request_structure_is_correct() {
+        // Verify the JSON path as well: resourceSpans -> resource -> attributes
+        // and scopeSpans -> spans -> traceId.
+        let cfg = make_test_cfg(OtlpProtocol::HttpJson);
+        let data = make_test_session_data();
+        let span = build_session_span_json(&cfg, &data);
+        let req = build_export_request_json(&cfg, span);
+
+        let rs = &req["resourceSpans"][0];
+        assert!(!rs.is_null(), "resourceSpans[0] missing");
+
+        // resource.attributes must contain service.name
+        let attrs = rs["resource"]["attributes"].as_array().expect("resource.attributes missing");
+        let has_service_name = attrs.iter().any(|a| a["key"] == "service.name");
+        assert!(has_service_name, "resource must contain service.name attribute");
+
+        // scopeSpans[0].scope.name
+        let scope_name = &rs["scopeSpans"][0]["scope"]["name"];
+        assert_eq!(scope_name, "jcode.telemetry");
+
+        // spans[0] trace/span IDs
+        let span = &rs["scopeSpans"][0]["spans"][0];
+        assert_eq!(span["traceId"], "aaaabbbbccccddddaaaabbbbccccdddd");
+        assert_eq!(span["spanId"], "aaaabbbbccccdddd");
+        assert_eq!(span["name"], "jcode.session");
+
+        // JSON intValue is a string (per OTLP JSON spec)
+        let attrs = span["attributes"].as_array().expect("span attributes missing");
+        let turns_attr = attrs.iter().find(|a| a["key"] == "jcode.session.turns")
+            .expect("jcode.session.turns missing");
+        let turns_val = &turns_attr["value"]["intValue"];
+        assert!(turns_val.is_string(), "OTLP JSON intValue must be a string, got: {turns_val}");
+        assert_eq!(turns_val.as_str().unwrap().parse::<u64>().unwrap(), 3u64);
+    }
+
+    // ── HTTP integration boundary tests ───────────────────────────────────────
+    //
+    // Spin up a minimal HTTP/1.1 server on a random OS-assigned port using only
+    // std::net::TcpListener (no new deps). The test calls the real build +
+    // post_otlp pipeline and asserts on what the server receives: method, path,
+    // Content-Type, custom headers, and decoded body bytes.
+    //
+    // This exercises the full integration boundary:
+    //   OtelConfig -> build_*_span_proto/json -> build_export_request_*
+    //   -> post_otlp -> TCP -> HTTP/1.1 framing -> collector
+    //
+    // ACCEPTANCE CONSTRAINT: no TLS; the real Emerson endpoint uses HTTPS.
+    // The plain-HTTP path verifies all application-layer behaviour except the
+    // TLS handshake itself, which is owned by reqwest/rustls and not specific
+    // to this implementation.
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc;
+
+    /// One captured HTTP request from the test collector.
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    /// Serve a single HTTP/1.1 request on `stream` and return the parsed
+    /// request plus send the given `status_line` response (e.g. "HTTP/1.1 200 OK").
+    fn serve_one(stream: TcpStream, status_line: &str) -> CapturedRequest {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut stream = stream;
+
+        // Read request line
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut parts = request_line.trim().splitn(3, ' ');
+        let method = parts.next().unwrap_or("").to_string();
+        let path = parts.next().unwrap_or("").to_string();
+
+        // Read headers until blank line
+        let mut headers = Vec::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim();
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                let name = name.trim().to_lowercase();
+                let value = value.trim().to_string();
+                if name == "content-length" {
+                    content_length = value.parse().unwrap_or(0);
+                }
+                headers.push((name, value));
+            }
+        }
+
+        // Read body
+        let mut body = vec![0u8; content_length];
+        use std::io::Read;
+        reader.read_exact(&mut body).unwrap_or(());
+
+        // Write response
+        let response = format!(
+            "{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(response.as_bytes());
+
+        CapturedRequest { method, path, headers, body }
+    }
+
+    fn header_value<'a>(req: &'a CapturedRequest, name: &str) -> Option<&'a str> {
+        let name_lc = name.to_lowercase();
+        req.headers.iter()
+            .find(|(k, _)| *k == name_lc)
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn make_http_cfg(port: u16, protocol: OtlpProtocol) -> OtelConfig {
+        OtelConfig {
+            traces_url: format!("http://127.0.0.1:{port}/v1/traces"),
+            headers: vec![
+                ("X-Test-Header".to_string(), "sentinel-value".to_string()),
+            ],
+            timeout: Duration::from_secs(5),
+            service_name: "jcode-test".to_string(),
+            service_version: "0.0.0".to_string(),
+            resource_attrs: vec![],
+            protocol,
+        }
+    }
+
+    #[test]
+    fn http_proto_post_sends_correct_content_type_and_binary_body() {
+        // Bind on a random port; the OS picks one that's free.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+
+        // Spawn the server thread — serves one request then exits.
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let req = serve_one(stream, "HTTP/1.1 200 OK");
+                tx.send(req).unwrap();
+            }
+        });
+
+        // Build a real proto payload and post it.
+        let cfg = make_http_cfg(port, OtlpProtocol::HttpProtobuf);
+        let data = make_test_session_data();
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let req_bytes = build_export_request_proto(&cfg, span_bytes);
+        let result = post_otlp(&cfg, OtlpPayload::Proto(req_bytes.clone()));
+
+        assert!(result, "post_otlp must return true on HTTP 200");
+
+        let captured = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server did not receive request within 5s");
+
+        // Method and path
+        assert_eq!(captured.method, "POST", "must be POST");
+        assert_eq!(captured.path, "/v1/traces", "must POST to /v1/traces");
+
+        // Content-Type must be application/x-protobuf for http/protobuf protocol
+        let ct = header_value(&captured, "content-type")
+            .expect("Content-Type header missing");
+        assert_eq!(ct, "application/x-protobuf",
+            "http/protobuf must send Content-Type: application/x-protobuf");
+
+        // Custom header must be forwarded
+        let xh = header_value(&captured, "x-test-header")
+            .expect("X-Test-Header missing");
+        assert_eq!(xh, "sentinel-value", "custom headers must be forwarded");
+
+        // User-Agent must contain jcode/
+        let ua = header_value(&captured, "user-agent")
+            .unwrap_or("");
+        assert!(ua.starts_with("jcode/"), "user-agent must start with jcode/, got: {ua}");
+
+        // Body must be the exact proto bytes we sent
+        assert_eq!(captured.body, req_bytes,
+            "HTTP body must equal the proto bytes returned by build_export_request_proto");
+
+        // The received body must parse as a valid OTLP envelope (level-1 decode)
+        let envelope_fields = decode_pb(&captured.body);
+        let rs_blob = get_bytes(&envelope_fields, 1)
+            .expect("ExportTraceServiceRequest.resource_spans missing in received body");
+        let rs_fields = decode_pb(rs_blob);
+        let ss_blob = get_bytes(&rs_fields, 2)
+            .expect("ResourceSpans.scope_spans missing in received body");
+        let ss_fields = decode_pb(ss_blob);
+        let span_blob = get_bytes(&ss_fields, 2)
+            .expect("ScopeSpans.spans missing in received body");
+        let span_fields = decode_pb(span_blob);
+        let received_trace_id = get_bytes(&span_fields, 1)
+            .expect("Span.trace_id missing in received body");
+        assert_eq!(received_trace_id, &hex_to_bytes("aaaabbbbccccddddaaaabbbbccccdddd"),
+            "trace_id in received HTTP body must match input");
+    }
+
+    #[test]
+    fn http_json_post_sends_correct_content_type_and_json_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let req = serve_one(stream, "HTTP/1.1 200 OK");
+                tx.send(req).unwrap();
+            }
+        });
+
+        let cfg = make_http_cfg(port, OtlpProtocol::HttpJson);
+        let data = make_test_session_data();
+        let span = build_session_span_json(&cfg, &data);
+        let req_json = build_export_request_json(&cfg, span);
+        let payload_bytes = serde_json::to_vec(&req_json).unwrap();
+        let result = post_otlp(&cfg, OtlpPayload::Json(req_json));
+
+        assert!(result, "post_otlp must return true on HTTP 200");
+
+        let captured = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("no request received");
+
+        let ct = header_value(&captured, "content-type").unwrap_or("");
+        assert!(ct.contains("application/json"),
+            "http/json must send Content-Type: application/json, got: {ct}");
+
+        // Body must be valid JSON containing resourceSpans
+        let body_json: serde_json::Value = serde_json::from_slice(&captured.body)
+            .expect("HTTP body must be valid JSON");
+        assert!(!body_json["resourceSpans"].is_null(),
+            "JSON body must contain resourceSpans");
+
+        // Custom header forwarded
+        let xh = header_value(&captured, "x-test-header").unwrap_or("");
+        assert_eq!(xh, "sentinel-value");
+
+        // The body bytes sent over the wire must match what we computed
+        assert_eq!(captured.body, payload_bytes,
+            "HTTP body bytes must match serde_json serialization of the request");
+    }
+
+    #[test]
+    fn http_400_response_returns_false() {
+        // Verifies that a non-2xx response causes post_otlp to return false.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                serve_one(stream, "HTTP/1.1 400 Bad Request");
+            }
+        });
+
+        let cfg = make_http_cfg(port, OtlpProtocol::HttpProtobuf);
+        let data = make_test_session_data();
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let req_bytes = build_export_request_proto(&cfg, span_bytes);
+        let result = post_otlp(&cfg, OtlpPayload::Proto(req_bytes));
+
+        assert!(!result, "post_otlp must return false on HTTP 400");
+    }
+
+    #[test]
+    fn http_connection_refused_returns_false() {
+        // Verifies that a connection error (no server at port) returns false.
+        // Use a port that is almost certainly unused.
+        let cfg = OtelConfig {
+            traces_url: "http://127.0.0.1:19999/v1/traces".to_string(),
+            headers: vec![],
+            timeout: Duration::from_millis(500),
+            service_name: "jcode".to_string(),
+            service_version: "0.0.0".to_string(),
+            resource_attrs: vec![],
+            protocol: OtlpProtocol::HttpProtobuf,
+        };
+        let data = make_test_session_data();
+        let span_bytes = build_session_span_proto(&data, &cfg);
+        let req_bytes = build_export_request_proto(&cfg, span_bytes);
+        let result = post_otlp(&cfg, OtlpPayload::Proto(req_bytes));
+        assert!(!result, "connection refused must return false");
+    }
+
+    // ── Public interface tests (export_session_span / export_turn_span) ───────
+    //
+    // These test the real public functions through set_test_config, which injects
+    // a per-thread OtelConfig. This is the only way to exercise the actual crate
+    // public interface without mutating the process-wide OnceLock singleton.
+
+    fn make_test_cfg_for_port(port: u16, protocol: OtlpProtocol) -> OtelConfig {
+        OtelConfig {
+            traces_url: format!("http://127.0.0.1:{port}/v1/traces"),
+            headers: vec![("X-Api-Token".to_string(), "test-token-abc".to_string())],
+            timeout: Duration::from_secs(5),
+            service_name: "jcode".to_string(),
+            service_version: "0.0.0".to_string(),
+            resource_attrs: vec![("user.email".to_string(), "you@domain.com".to_string())],
+            protocol,
+        }
+    }
+
+    #[test]
+    fn export_session_span_public_api_proto_sends_valid_otlp() {
+        // Exercise the real public export_session_span() function end-to-end
+        // through a local TCP server.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let req = serve_one(stream, "HTTP/1.1 200 OK");
+                tx.send(req).unwrap();
+            }
+        });
+
+        // Install per-thread config and call the real public function.
+        set_test_config(Some(make_test_cfg_for_port(port, OtlpProtocol::HttpProtobuf)));
+        export_session_span(&make_test_session_data());
+        set_test_config(None); // always clear
+
+        let captured = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("export_session_span did not POST within 5s");
+
+        // Verify via the public interface that the right wire format was used.
+        assert_eq!(captured.method, "POST");
+        assert_eq!(captured.path, "/v1/traces");
+        let ct = header_value(&captured, "content-type").unwrap_or("");
+        assert_eq!(ct, "application/x-protobuf",
+            "export_session_span with http/protobuf must send application/x-protobuf");
+
+        // Custom header from OTEL_EXPORTER_OTLP_HEADERS must be forwarded.
+        let token = header_value(&captured, "x-api-token").unwrap_or("");
+        assert_eq!(token, "test-token-abc",
+            "OTEL_EXPORTER_OTLP_HEADERS value must appear in HTTP request");
+
+        // Body must be a parseable OTLP proto envelope with correct span name.
+        let env_fields = decode_pb(&captured.body);
+        let rs = get_bytes(&env_fields, 1).expect("resource_spans missing");
+        let rs_fields = decode_pb(rs);
+        let ss = get_bytes(&rs_fields, 2).expect("scope_spans missing");
+        let ss_fields = decode_pb(ss);
+        let sp = get_bytes(&ss_fields, 2).expect("spans missing");
+        let sp_fields = decode_pb(sp);
+        let name = get_string(&sp_fields, 5).expect("span name missing");
+        assert_eq!(name, "jcode.session",
+            "export_session_span must produce a span named jcode.session");
+
+        // user.email resource attribute must appear in Resource.
+        let resource_blob = get_bytes(&rs_fields, 1).expect("resource missing");
+        let res_fields = decode_pb(resource_blob);
+        let res_attrs = all_bytes(&res_fields, 1);
+        let email_kv = res_attrs.iter().find(|b| {
+            let kv = decode_pb(b);
+            get_string(&kv, 1).as_deref() == Some("user.email")
+        });
+        assert!(email_kv.is_some(),
+            "user.email resource attribute must appear in exported proto");
+    }
+
+    #[test]
+    fn export_turn_span_public_api_json_sends_valid_otlp() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                let req = serve_one(stream, "HTTP/1.1 200 OK");
+                tx.send(req).unwrap();
+            }
+        });
+
+        set_test_config(Some(make_test_cfg_for_port(port, OtlpProtocol::HttpJson)));
+        export_turn_span(&TurnSpanData {
+            trace_id: "aaaabbbbccccddddaaaabbbbccccdddd",
+            span_id: "1122334455667788",
+            parent_span_id: "aaaabbbbccccdddd",
+            session_id: "sess-pub-api",
+            turn_index: 1,
+            start_nanos: 1_000_000_000,
+            end_nanos: 1_500_000_000,
+            input_tokens: 42,
+            output_tokens: 17,
+            total_tokens: 59,
+            tool_calls: 2,
+            tool_failures: 0,
+            executed_tool_calls: 2,
+            file_write_calls: 1,
+            tests_run: 3,
+            tests_passed: 3,
+            turn_success: true,
+            turn_abandoned: false,
+            end_reason: "assistant_turn",
+            provider: "anthropic",
+            model: "claude",
+        });
+        set_test_config(None);
+
+        let captured = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("export_turn_span did not POST within 5s");
+
+        assert_eq!(captured.method, "POST");
+        let ct = header_value(&captured, "content-type").unwrap_or("");
+        assert!(ct.contains("application/json"),
+            "export_turn_span with http/json must send application/json, got: {ct}");
+
+        let body: serde_json::Value = serde_json::from_slice(&captured.body)
+            .expect("export_turn_span JSON body must be valid JSON");
+        let span = &body["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+        assert_eq!(span["name"], "jcode.turn",
+            "export_turn_span must produce a span named jcode.turn");
+
+        // parentSpanId must be present (linking turn to session).
+        assert!(!span["parentSpanId"].is_null(),
+            "export_turn_span JSON must include parentSpanId");
+        assert_eq!(span["parentSpanId"], "aaaabbbbccccdddd");
+
+        // Spot-check a few turn attributes.
+        let attrs = span["attributes"].as_array().expect("attributes missing");
+        let find_attr = |key: &str| attrs.iter().find(|a| a["key"] == key);
+        let turn_idx = find_attr("jcode.turn.index").expect("jcode.turn.index missing");
+        assert_eq!(turn_idx["value"]["intValue"], "1");
+        let file_writes = find_attr("jcode.file_writes").expect("jcode.file_writes missing");
+        assert_eq!(file_writes["value"]["intValue"], "1");
+        let tests_passed = find_attr("jcode.tests.passed").expect("jcode.tests.passed missing");
+        assert_eq!(tests_passed["value"]["intValue"], "3");
+    }
+
+    #[test]
+    fn export_session_span_is_noop_when_no_config() {
+        // With no config set (no env var, no test override), the public function
+        // must be a silent no-op and not panic.
+        set_test_config(None); // ensure no override from prior test
+        // If OTEL_CONFIG singleton is already set from env, this test is a no-op
+        // for the assertion (can't prevent a real network call), but at least
+        // verifies the function doesn't panic.
+        export_session_span(&make_test_session_data()); // must not panic
+    }
+
+    // ── Remaining public-function and URL-resolution tests ────────────────────
+
+    #[test]
+    fn is_otel_enabled_true_when_test_config_set() {
+        // is_otel_enabled() must reflect the thread-local override so callers
+        // that guard on it before calling export_* behave consistently.
+        set_test_config(Some(make_test_cfg(OtlpProtocol::HttpJson)));
+        let enabled = is_otel_enabled();
+        set_test_config(None);
+        assert!(enabled, "is_otel_enabled must return true when test config is active");
+    }
+
+    #[test]
+    fn is_otel_enabled_false_when_no_test_config_and_no_env() {
+        set_test_config(None);
+        // Only meaningful when the process-wide singleton is also unset.
+        // We can't reset the OnceLock, so skip if it was already set.
+        if otel_config().is_some() {
+            return;
+        }
+        assert!(!is_otel_enabled(), "is_otel_enabled must be false with no config");
+    }
+
+    #[test]
+    fn now_unix_nanos_is_recent() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let t = now_unix_nanos();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        assert!(t >= before, "now_unix_nanos must be >= the timestamp taken just before");
+        assert!(t <= after, "now_unix_nanos must be <= the timestamp taken just after");
+        // Must be a plausible post-2020 value (> 1_580_000_000_000_000_000 ns).
+        assert!(t > 1_580_000_000_000_000_000, "now_unix_nanos looks implausibly old: {t}");
+    }
+
+    #[test]
+    fn end_nanos_adds_duration_correctly() {
+        // 1 second start + 500 ms duration = 1.5 seconds in nanos
+        let start = 1_000_000_000u64;
+        let result = end_nanos(start, 500);
+        assert_eq!(result, 1_500_000_000u64);
+
+        // Saturation: huge duration must not overflow
+        let result_saturating = end_nanos(u64::MAX - 1, u64::MAX);
+        assert_eq!(result_saturating, u64::MAX, "end_nanos must saturate on overflow");
+
+        // Zero duration = same as start
+        assert_eq!(end_nanos(42_000, 0), 42_000);
+    }
+
+    #[test]
+    fn resolve_traces_url_traces_endpoint_takes_priority() {
+        // OTEL_EXPORTER_OTLP_TRACES_ENDPOINT must win over the base endpoint.
+        let url = resolve_traces_url(
+            Some("https://collector.example.com/v1/traces"),
+            Some("https://should-be-ignored.example.com"),
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("https://collector.example.com/v1/traces"),
+            "traces-specific endpoint must take priority"
+        );
+    }
+
+    #[test]
+    fn resolve_traces_url_base_endpoint_appends_suffix() {
+        // OTEL_EXPORTER_OTLP_ENDPOINT must get /v1/traces appended.
+        let url = resolve_traces_url(None, Some("https://collector.example.com"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://collector.example.com/v1/traces"),
+            "base endpoint must have /v1/traces appended"
+        );
+        // Trailing slash on base must be stripped before appending.
+        let url_slash = resolve_traces_url(None, Some("https://collector.example.com/"));
+        assert_eq!(
+            url_slash.as_deref(),
+            Some("https://collector.example.com/v1/traces"),
+            "trailing slash must not cause double slash in path"
+        );
+    }
+
+    #[test]
+    fn resolve_traces_url_both_none_returns_none() {
+        // No env vars set -> exporter must be disabled.
+        assert_eq!(resolve_traces_url(None, None), None);
+    }
+
+    #[test]
+    fn resolve_traces_url_empty_strings_return_none() {
+        // Empty strings from env vars must disable the exporter.
+        assert_eq!(resolve_traces_url(Some(""), None), None);
+        assert_eq!(resolve_traces_url(Some("  "), None), None);
+        assert_eq!(resolve_traces_url(None, Some("")), None);
+        assert_eq!(resolve_traces_url(None, Some("  ")), None);
+    }
+
+    #[test]
+    fn uuid_span_ids_survive_proto_tcp_round_trip() {
+        // The production code derives trace_id and span_id from UUIDs.
+        // Verify that the hex->bytes->wire->decode path preserves the identity.
+        let uuid_session = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid_turn    = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+        let trace_id = trace_id_from_uuid(uuid_session); // 32-hex
+        let span_id  = span_id_from_uuid(uuid_session);  //  16-hex
+        let turn_span_id = span_id_from_uuid(uuid_turn);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                tx.send(serve_one(stream, "HTTP/1.1 200 OK")).unwrap();
+            }
+        });
+
+        set_test_config(Some(make_test_cfg_for_port(port, OtlpProtocol::HttpProtobuf)));
+        export_session_span(&SessionSpanData {
+            trace_id: &trace_id,
+            span_id: &span_id,
+            session_id: "uuid-test",
+            correlation_id: "corr",
+            provider: "anthropic",
+            model: "claude",
+            start_nanos: 1_000_000_000,
+            end_nanos: 2_000_000_000,
+            end_reason: "normal_exit",
+            turns: 1,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            tool_failures: 0,
+            resumed: false,
+            parent_session_id: None,
+            os: "windows",
+            arch: "x86_64",
+            version: "0.80.0",
+        });
+        set_test_config(None);
+
+        let captured = rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("export_session_span did not POST");
+
+        // Decode the wire proto and verify trace_id/span_id bytes.
+        let env_fields = decode_pb(&captured.body);
+        let rs = get_bytes(&env_fields, 1).unwrap();
+        let rs_fields = decode_pb(rs);
+        let ss = get_bytes(&rs_fields, 2).unwrap();
+        let ss_fields = decode_pb(ss);
+        let sp_blob = get_bytes(&ss_fields, 2).unwrap();
+        let sp_fields = decode_pb(sp_blob);
+
+        let wire_trace_id = get_bytes(&sp_fields, 1).expect("trace_id missing on wire");
+        let wire_span_id  = get_bytes(&sp_fields, 2).expect("span_id missing on wire");
+
+        // Expected raw bytes from the UUID hex strings.
+        assert_eq!(wire_trace_id, hex_to_bytes(&trace_id).as_slice(),
+            "trace_id derived from UUID must survive proto+TCP round trip");
+        assert_eq!(wire_span_id, hex_to_bytes(&span_id).as_slice(),
+            "span_id derived from UUID must survive proto+TCP round trip");
+
+        // Lengths must conform to OTLP spec (16 and 8 bytes respectively).
+        assert_eq!(wire_trace_id.len(), 16, "OTLP trace_id must be 16 bytes");
+        assert_eq!(wire_span_id.len(), 8,  "OTLP span_id must be 8 bytes");
+
+        // turn span_id_from_uuid produces an 8-byte-capable hex string too.
+        let _ = turn_span_id; // used implicitly above; confirm it's 16 hex chars
+        assert_eq!(span_id_from_uuid(uuid_turn).len(), 16);
     }
 }
