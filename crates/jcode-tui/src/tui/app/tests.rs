@@ -56,6 +56,7 @@ include!("tests/issue_998_model_status_overlay.rs");
 include!("tests/spinner_slash_commands.rs");
 include!("tests/command_suggestions_cache.rs");
 include!("tests/merge_command.rs");
+include!("tests/tui_prompt_rebuild_working_dir.rs");
 include!("tests/skill_invocation_multi_word.rs");
 include!("tests/slash_command_boundaries.rs");
 include!("tests/prompt_history_cross_session.rs");

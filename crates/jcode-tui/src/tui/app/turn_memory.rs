@@ -27,12 +27,22 @@ impl App {
                 description: s.description.clone(),
             })
             .collect();
+        // Session working dir, not process cwd: the TUI process cwd is
+        // wherever the user launched the client, but AGENTS.md/PROGRESS.md
+        // belong to the session's project. Passing None here loaded "." and
+        // silently showed zeros in the context report for every session
+        // whose project differs from the client cwd.
+        let working_dir = self
+            .session
+            .working_dir
+            .as_ref()
+            .map(std::path::PathBuf::from);
         let (mut split, context_info) = crate::prompt::build_system_prompt_split(
             skill_prompt.as_deref(),
             &available_skills,
             self.session.is_canary,
             memory_prompt,
-            None,
+            working_dir.as_deref(),
         );
         self.append_current_turn_system_reminder(&mut split);
         crate::prompt::append_swarm_effort_directive(
