@@ -1740,6 +1740,17 @@ pub(in crate::tui::app) fn handle_server_event(
             app.session.subagent_model = subagent_model;
             app.session.autoreview_enabled = autoreview_enabled;
             app.session.autojudge_enabled = autojudge_enabled;
+            // Mirror the AGENTS.md/PROGRESS.md presence flags into the local
+            // report. Remote clients never run the per-turn prompt rebuild
+            // (turns execute on the server), so without this the `/context`
+            // report stays at the constructor default and shows zeros even
+            // though the server loaded the files. Only the report flags are
+            // mirrored; the server remains the owner of the prompt itself.
+            // SSH remotes have no local working dir (reset at construction);
+            // they keep the startup pre-compute values.
+            if app.session.working_dir.is_some() {
+                app.refresh_agents_context_info();
+            }
             app.autoreview_enabled =
                 autoreview_enabled.unwrap_or(crate::config::config().autoreview.enabled);
             app.autojudge_enabled =
