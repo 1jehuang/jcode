@@ -467,6 +467,7 @@ fn truncate_for_widget(s: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
