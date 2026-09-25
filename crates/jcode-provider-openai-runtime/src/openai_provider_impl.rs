@@ -920,8 +920,9 @@ impl Provider for OpenAIProvider {
         }
         self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog(&catalog);
-        if !catalog.context_limits.is_empty() {
-            jcode_base::provider::populate_context_limits(catalog.context_limits);
+        let context_limits = catalog.effective_context_limits();
+        if !context_limits.is_empty() {
+            jcode_base::provider::populate_context_limits(context_limits);
         }
         if !catalog.available_models.is_empty() {
             jcode_base::provider::populate_account_models(catalog.available_models);

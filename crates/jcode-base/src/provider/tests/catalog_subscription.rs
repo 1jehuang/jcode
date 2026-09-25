@@ -165,6 +165,7 @@ fn test_openai_model_catalog_hydrates_from_disk_cache() {
             context_limits: [("openai-disk-only-model".to_string(), 424_242)]
                 .into_iter()
                 .collect(),
+            max_context_limits: HashMap::new(),
             reasoning_efforts: [(
                 "openai-disk-only-model".to_string(),
                 vec!["low".to_string(), "max".to_string()],

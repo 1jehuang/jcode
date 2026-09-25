@@ -370,6 +370,9 @@ openai_reasoning_effort = "low"
 # Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
 # (higher speed, higher usage). Set to "off" (or "standard") to disable.
 openai_service_tier = "priority"
+# Budget OpenAI OAuth models at the catalog's larger `max_context_window`
+# (for example 872K) instead of the default `context_window` (272K).
+# openai_use_max_context_window = true
 # Preserve provider-native reasoning/thinking for future-turn context when supported.
 # Applies to OpenRouter, Anthropic, and OpenAI native reasoning replay. Display is separate.
 preserve_reasoning_context = true
