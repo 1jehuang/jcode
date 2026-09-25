@@ -404,6 +404,43 @@ impl OpenRouterTransportState {
     }
 }
 
+/// Extra request headers configured on a named provider profile.
+pub(crate) type ExtraHeaders = Arc<Vec<(HeaderName, reqwest::header::HeaderValue)>>;
+
+/// Parse a profile's `headers` table. Invalid names or values are skipped with
+/// a warning so one bad entry does not disable the provider.
+fn parse_profile_headers(
+    profile_name: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+) -> ExtraHeaders {
+    Arc::new(
+        headers
+            .iter()
+            .filter_map(|(name, value)| {
+                let parsed = HeaderName::from_bytes(name.as_bytes())
+                    .ok()
+                    .zip(reqwest::header::HeaderValue::from_str(value).ok());
+                if parsed.is_none() {
+                    jcode_base::logging::warn(&format!(
+                        "Provider profile '{profile_name}': ignoring invalid header '{name}'"
+                    ));
+                }
+                parsed
+            })
+            .collect(),
+    )
+}
+
+fn apply_extra_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &[(HeaderName, reqwest::header::HeaderValue)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    req
+}
+
 /// Models the Grok CLI chat proxy serves to Grok Build subscribers.
 pub const GROK_BUILD_MODELS: &[&str] = &["grok-4.6", "grok-4.5", "grok-code-fast-1"];
 const GROK_BUILD_AUTH_LABEL: &str = "Grok Build subscription (Grok CLI OIDC)";
@@ -916,6 +953,9 @@ pub struct OpenRouterProvider {
     /// OpenCode (Zen / Go) endpoints, which require it for routing (issue #1167).
     /// Each provider instance (and each `fork()`) gets a fresh UUID.
     conversation_id: String,
+    /// Extra headers from a named provider profile's `headers` table (for
+    /// example a gateway's metadata header). Empty for built-in providers.
+    extra_headers: ExtraHeaders,
     models_cache: Arc<RwLock<ModelsCache>>,
     model_catalog_refresh: Arc<Mutex<ModelCatalogRefreshState>>,
     /// Provider routing preferences
@@ -1503,6 +1543,7 @@ impl OpenRouterProvider {
             static_image_input_support,
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
+            extra_headers: parse_profile_headers(profile_name, &profile.headers),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -1722,6 +1763,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers,
             conversation_id: new_conversation_id(),
+            extra_headers: ExtraHeaders::default(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(provider_routing)),
@@ -1778,6 +1820,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
+            extra_headers: ExtraHeaders::default(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -1826,6 +1869,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: true,
             conversation_id: new_conversation_id(),
+            extra_headers: ExtraHeaders::default(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(Self::parse_provider_routing())),
@@ -1906,6 +1950,7 @@ impl OpenRouterProvider {
             static_image_input_support: HashMap::new(),
             send_openrouter_headers: false,
             conversation_id: new_conversation_id(),
+            extra_headers: ExtraHeaders::default(),
             models_cache: Arc::new(RwLock::new(ModelsCache::default())),
             model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
             provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -2112,6 +2157,7 @@ impl OpenRouterProvider {
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
                 conversation_id: new_conversation_id(),
+            extra_headers: ExtraHeaders::default(),
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
