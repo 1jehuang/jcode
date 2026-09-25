@@ -29,6 +29,9 @@ pub struct OpenAIModelCatalog {
     pub context_limits: HashMap<String, usize>,
     /// Ordered reasoning-effort values advertised by each Codex model.
     pub reasoning_efforts: HashMap<String, Vec<String>>,
+    /// Cyber access programs each Codex model accepts in
+    /// `access_programs.cyber` (for example `standard`, `daybreak_blue`).
+    pub cyber_access_programs: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,6 +93,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
     let mut available: HashSet<String> = HashSet::new();
     let mut limits: HashMap<String, usize> = HashMap::new();
     let mut reasoning_efforts: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cyber_access_programs: HashMap<String, Vec<String>> = HashMap::new();
 
     for model in models.into_iter().flatten() {
         let Some(slug) = model
@@ -114,6 +118,22 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
             .and_then(|c| c.as_u64())
         {
             limits.insert(slug.clone(), ctx as usize);
+        }
+
+        if let Some(programs) = model
+            .get("available_access_programs")
+            .and_then(|value| value.get("cyber"))
+            .and_then(|value| value.as_array())
+        {
+            let programs: Vec<String> = programs
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.trim().to_ascii_lowercase())
+                .filter(|value| !value.is_empty())
+                .collect();
+            if !programs.is_empty() {
+                cyber_access_programs.insert(slug.clone(), programs);
+            }
         }
 
         if let Some(values) = model
@@ -151,6 +171,7 @@ pub(crate) fn parse_openai_model_catalog(data: &serde_json::Value) -> OpenAIMode
         available_models,
         context_limits: limits,
         reasoning_efforts,
+        cyber_access_programs,
     }
 }
 
@@ -330,12 +351,43 @@ pub async fn fetch_openai_api_key_model_catalog(api_key: &str) -> Result<OpenAIM
         available_models,
         context_limits: HashMap::new(),
         reasoning_efforts: HashMap::new(),
+        cyber_access_programs: HashMap::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_catalog_parses_cyber_access_programs() {
+        let catalog = parse_openai_model_catalog(&serde_json::json!({
+            "models": [
+                { "slug": "gpt-6-sol",
+                  "available_access_programs": { "cyber": ["standard", "daybreak_blue"] } },
+                { "slug": "gpt-6-astra",
+                  "available_access_programs": { "cyber": ["standard"] } },
+                { "slug": "gpt-daybreak-blue-latest",
+                  "available_access_programs": { "cyber": ["daybreak_blue"] } },
+                { "slug": "no-programs" },
+                { "slug": "empty-programs", "available_access_programs": { "cyber": [] } }
+            ]
+        }));
+        assert_eq!(
+            catalog.cyber_access_programs["gpt-6-sol"],
+            vec!["standard".to_string(), "daybreak_blue".to_string()]
+        );
+        assert_eq!(
+            catalog.cyber_access_programs["gpt-6-astra"],
+            vec!["standard".to_string()]
+        );
+        assert_eq!(
+            catalog.cyber_access_programs["gpt-daybreak-blue-latest"],
+            vec!["daybreak_blue".to_string()]
+        );
+        assert!(!catalog.cyber_access_programs.contains_key("no-programs"));
+        assert!(!catalog.cyber_access_programs.contains_key("empty-programs"));
+    }
 
     #[test]
     fn openai_catalog_parses_string_and_object_reasoning_efforts() {
