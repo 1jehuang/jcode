@@ -159,6 +159,45 @@ session_end   = "~/bin/jcode-event-log"
 post_tool     = "~/bin/jcode-event-log"
 ```
 
+## Example: historian-lite (session_end consolidation)
+
+On `session_end`, spawn a fire-and-forget headless worker that extracts
+durable facts from the just-closed session and writes them to memory.
+The closed session's transcript stays on disk, so the worker reads it by
+session id — no new API needed. Fail-open by design: the hook exits 0
+immediately after spawning; a failed consolidation never breaks the
+session that triggered it.
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/jcode-historian
+# session_end observer: consolidate the closed session into memory.
+# Env: JCODE_HOOK_SESSION_ID. Spawns headless, exits 0 immediately.
+[ "$JCODE_HOOK_EVENT" = "session_end" ] || exit 0
+[ -n "$JCODE_HOOK_SESSION_ID" ] || exit 0
+# Timeout-bounded; empty extraction writes nothing.
+# Provider auto-detect is the default; no --model flag needed.
+timeout 300 jcode run \
+  "Consolidate session $JCODE_HOOK_SESSION_ID into memory. Read its transcript, \
+extract durable facts in the resume-critical shape (decisions+why, discoveries, \
+failed attempts, open gaps). Search memory first and skip anything already stored \
+(dedup). Write new facts via the memory tool, project scope. If nothing durable, \
+write nothing." \
+  >/dev/null 2>&1 &
+exit 0
+```
+
+```toml
+[hooks]
+session_end = "~/bin/jcode-historian"
+```
+
+Extraction guidance (not a validation schema): decisions+why, discoveries,
+failed attempts, gaps — the resume-critical subset. The model owns what to
+keep; core only reads. Note: the hook fires on ANY ended session, including
+trivial one-turn fixtures — the worker should skip sessions with nothing
+durable rather than writing noise.
+
 ## Design notes
 
 - Hook lookups are config-driven and re-read on config reload; you can add or
