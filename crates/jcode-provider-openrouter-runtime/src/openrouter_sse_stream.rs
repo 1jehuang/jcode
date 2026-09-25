@@ -1,6 +1,31 @@
 use super::*;
 use jcode_provider_openrouter::stream::OpenRouterStream;
 
+fn is_loopback_base(api_base: &str) -> bool {
+    let lower = api_base.to_ascii_lowercase();
+    lower.contains("://localhost") || lower.contains("://127.0.0.1") || lower.contains("://[::1]")
+}
+
+/// Fail closed before a payment card number leaves the machine. Loopback
+/// endpoints are exempt (the text never leaves), and `JCODE_DISABLE_PAN_CHECK=1`
+/// is the escape hatch for a false positive. The error names the message, never
+/// the value, and keeps the gateway's wording so the TUI stops auto-retry.
+fn pan_pre_send_block(api_base: &str, request: &Value) -> Option<anyhow::Error> {
+    if is_loopback_base(api_base) || std::env::var_os("JCODE_DISABLE_PAN_CHECK").is_some() {
+        return None;
+    }
+    let finding =
+        jcode_provider_core::failover::pan_check::find_pan_in_messages(request.get("messages")?)?;
+    Some(anyhow::anyhow!(
+        "Local pre-send check: request blocked by content filter: [PAN]\n  \
+         a payment card number (issuer prefix + Luhn) is in message #{} (role: {}); nothing was sent.\n  \
+         Remove it from the conversation (compact or start a new session), or set \
+         JCODE_DISABLE_PAN_CHECK=1 if this is a false positive.",
+        finding.message_index,
+        finding.role
+    ))
+}
+
 fn local_endpoint_troubleshooting_hint(api_base: &str, model: &str) -> &'static str {
     let lower = api_base.to_ascii_lowercase();
     if lower.contains("localhost:11434") || lower.contains("127.0.0.1:11434") {
@@ -38,6 +63,10 @@ pub(super) async fn run_stream_with_retries(
     provider_pin: Arc<Mutex<Option<ProviderPin>>>,
     model: String,
 ) {
+    if let Some(blocked) = pan_pre_send_block(&api_base, &request) {
+        let _ = tx.send(Err(blocked)).await;
+        return;
+    }
     let mut last_error = None;
     let mut next_retry_delay = None;
     let config = jcode_base::config::config();
@@ -380,6 +409,30 @@ mod tests {
     fn content_filter_block_is_never_retried() {
         let blocked = "status: 403 forbidden\n  response: {\"error\":{\"message\":\"request blocked by content filter: [credit_card]\",\"code\":403}}";
         assert!(!should_retry(blocked, 0, 8));
+    }
+
+    #[test]
+    fn pan_pre_send_blocks_remote_and_spares_loopback() {
+        let pan = "4242".repeat(4);
+        let request = serde_json::json!({"messages": [
+            {"role": "user", "content": "issues 1113 1114 1115 1116"},
+            {"role": "assistant", "content": format!("card {pan}")},
+        ]});
+        let blocked = pan_pre_send_block("https://openrouter.ai/api/v1", &request)
+            .expect("remote base must block a PAN");
+        let text = format!("{blocked:#}");
+        assert!(text.contains("message #1 (role: assistant)"), "{text}");
+        assert!(!text.contains(&pan), "the value must never be echoed");
+        assert_eq!(
+            jcode_provider_core::failover::content_filter_block_label(&text).as_deref(),
+            Some("[PAN]"),
+            "the TUI fail-fast path must recognise the local block"
+        );
+        assert!(pan_pre_send_block("http://127.0.0.1:1234/v1", &request).is_none());
+        let clean = serde_json::json!({"messages": [
+            {"role": "user", "content": "for n in 1113 1114 1115 1116; do gh issue view $n; done"},
+        ]});
+        assert!(pan_pre_send_block("https://openrouter.ai/api/v1", &clean).is_none());
     }
 
     #[test]
