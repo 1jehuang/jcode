@@ -1113,10 +1113,32 @@ impl SessionPicker {
     ) -> Result<OverlayAction> {
         let ctrl = modifiers.contains(KeyModifiers::CONTROL);
         match code {
+            // Esc clears a non-empty query (staying in search); on an empty
+            // query it closes the picker so one Esc returns to the chat.
             KeyCode::Esc => {
-                self.search_active = false;
+                if self.search_query.is_empty() {
+                    return Ok(OverlayAction::Close);
+                }
                 self.search_query.clear();
                 self.rebuild_items();
+            }
+            // Tab leaves the search box for the list, keeping the query as the
+            // active filter, so the single-letter shortcuts work.
+            KeyCode::Tab => {
+                self.search_active = false;
+            }
+            // Crash-restore safety: the banner says "Press R (or B)", so honor
+            // uppercase R/B while the query is still empty.
+            KeyCode::Char('R') | KeyCode::Char('B') if self.search_query.is_empty() && !ctrl => {
+                if let Some(info) = &self.crashed_sessions {
+                    return Ok(OverlayAction::Selected(PickerResult::RestoreCrashedGroup(
+                        info.session_ids.clone(),
+                    )));
+                }
+                if let KeyCode::Char(c) = code {
+                    self.search_query.push(c);
+                    self.rebuild_items();
+                }
             }
             KeyCode::Enter => {
                 self.search_active = false;
@@ -1142,6 +1164,9 @@ impl SessionPicker {
                 self.delete_search_word_back();
                 self.rebuild_items();
             }
+            // Backspace on an empty query is a no-op: holding Backspace must
+            // not drop the user into list mode where the next 'q' closes.
+            KeyCode::Backspace if self.search_query.is_empty() => {}
             KeyCode::Backspace => {
                 self.search_query.pop();
                 self.rebuild_items();
@@ -1172,9 +1197,51 @@ impl SessionPicker {
             }
             KeyCode::Down => self.next(),
             KeyCode::Up => self.previous(),
+            // Page through results without leaving the search box.
+            KeyCode::PageDown | KeyCode::PageUp => {
+                self.handle_focus_navigation_key(code, modifiers);
+            }
             _ => {}
         }
         Ok(OverlayAction::Continue)
+    }
+
+    /// Characters that act as single-key shortcuts in the normal (non-search)
+    /// picker state. Any other printable character starts a search instead.
+    /// Keep in sync with the match in `handle_overlay_key` and
+    /// `handle_focus_navigation_key`.
+    fn is_normal_mode_shortcut_char(c: char) -> bool {
+        matches!(
+            c,
+            'q' | ' '
+                | 'd'
+                | 'T'
+                | 's'
+                | 'S'
+                | 'R'
+                | 'B'
+                | 'b'
+                | '/'
+                | 'h'
+                | 'l'
+                | 'j'
+                | 'k'
+                | 'J'
+                | 'K'
+        )
+    }
+
+    /// Focus the search box without touching the query. Resume-style pickers
+    /// open search-first so typing any word (even "quota") filters instead of
+    /// triggering single-letter shortcuts. Not used for catch-up, active
+    /// sessions, or onboarding pickers.
+    pub fn focus_search_input(&mut self) {
+        self.search_active = true;
+    }
+
+    /// Whether the search box currently has keyboard focus.
+    pub fn search_input_focused(&self) -> bool {
+        self.search_active
     }
 
     /// Handle a key event when used as an overlay inside the main TUI.
@@ -1192,6 +1259,22 @@ impl SessionPicker {
             return Ok(action);
         }
         if self.loading_message.is_some() {
+            let ctrl_or_alt = modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            // Search-first pickers accept typing while the index loads; the
+            // query survives `reseed_grouped` and filters the loaded list.
+            if self.search_active {
+                match code {
+                    KeyCode::Char(c) if !ctrl_or_alt && !c.is_control() => {
+                        self.search_query.push(c);
+                        return Ok(OverlayAction::Continue);
+                    }
+                    KeyCode::Backspace if !ctrl_or_alt => {
+                        self.search_query.pop();
+                        return Ok(OverlayAction::Continue);
+                    }
+                    _ => {}
+                }
+            }
             return match code {
                 KeyCode::Esc | KeyCode::Char('q') => Ok(OverlayAction::Close),
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1215,6 +1298,19 @@ impl SessionPicker {
             } else {
                 self.onboarding_action = Some(OnboardingAction::ReviewRecentProject);
             }
+            return Ok(OverlayAction::Continue);
+        }
+
+        // Type-to-search: a printable, non-shortcut character starts a search
+        // and is inserted into the query.
+        if let KeyCode::Char(c) = code
+            && !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            && !c.is_control()
+            && !Self::is_normal_mode_shortcut_char(c)
+        {
+            self.search_active = true;
+            self.search_query.push(c);
+            self.rebuild_items();
             return Ok(OverlayAction::Continue);
         }
 
@@ -2192,7 +2288,6 @@ impl SessionPicker {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let has_banner = self.crashed_sessions.is_some();
-        let has_search = self.search_active || !self.search_query.is_empty();
         let has_onboarding = self.onboarding_banner.is_some();
         // The first-run picker is action-only. Do not render the session list or
         // preview panes underneath it, which would make this look like `/resume`.
@@ -2215,9 +2310,9 @@ impl SessionPicker {
         if has_banner {
             v_constraints.push(Constraint::Length(1));
         }
-        if has_search {
-            v_constraints.push(Constraint::Length(1));
-        }
+        // The search bar row is always present so the picker reads like a
+        // search box: users can just start typing.
+        v_constraints.push(Constraint::Length(1));
         v_constraints.push(Constraint::Min(8));
 
         let v_chunks = Layout::default()
@@ -2239,27 +2334,51 @@ impl SessionPicker {
             chunk_idx += 1;
         }
 
-        // Render search bar if active
-        if has_search {
+        // Render search bar (always visible, placeholder when empty).
+        {
             let search_area = v_chunks[chunk_idx];
             chunk_idx += 1;
 
             let cursor_char = if self.search_active { "▎" } else { "" };
-            let search_line = Line::from(vec![
-                Span::styled(" 🔍 ", Style::default().fg(rgb(186, 139, 255))),
-                Span::styled(
+            let mut spans = vec![Span::styled(
+                " 🔍 ",
+                Style::default().fg(rgb(186, 139, 255)),
+            )];
+            if self.search_query.is_empty() {
+                spans.push(Span::styled(
+                    cursor_char,
+                    Style::default().fg(rgb(186, 139, 255)),
+                ));
+                let placeholder = if self.search_active {
+                    "Type to search sessions…  Tab for shortcuts"
+                } else {
+                    "Type or / to search"
+                };
+                spans.push(Span::styled(
+                    placeholder,
+                    Style::default().fg(rgb(90, 90, 100)),
+                ));
+            } else {
+                spans.push(Span::styled(
                     &self.search_query,
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(cursor_char, Style::default().fg(rgb(186, 139, 255))),
-                if self.search_active {
-                    Span::styled("  Esc to clear", Style::default().fg(rgb(60, 60, 60)))
+                ));
+                spans.push(Span::styled(
+                    cursor_char,
+                    Style::default().fg(rgb(186, 139, 255)),
+                ));
+                spans.push(if self.search_active {
+                    Span::styled(
+                        "  Esc to clear · Tab for shortcuts",
+                        Style::default().fg(rgb(60, 60, 60)),
+                    )
                 } else {
                     Span::styled("  / to edit", Style::default().fg(rgb(60, 60, 60)))
-                },
-            ]);
+                });
+            }
+            let search_line = Line::from(spans);
             let search_widget =
                 Paragraph::new(search_line).style(Style::default().bg(rgb(25, 25, 30)));
             frame.render_widget(search_widget, search_area);
@@ -2442,7 +2561,9 @@ pub fn pick_session() -> Result<Option<PickerResult>> {
         return Ok(None);
     }
 
-    let picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
+    // The standalone picker is the CLI resume flow: open search-first.
+    picker.focus_search_input();
     picker.run()
 }
 

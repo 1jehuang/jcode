@@ -2450,6 +2450,8 @@ impl App {
         };
         picker.set_current_dir(current_dir);
         picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+        // `/resume` opens search-first: typing filters immediately.
+        picker.focus_search_input();
         self.session_picker_overlay = Some(RefCell::new(picker));
         self.session_picker_mode = SessionPickerMode::Resume;
         self.set_status_notice(status);
@@ -2574,6 +2576,7 @@ impl App {
                 let mut picker = SessionPicker::new_grouped(server_groups, orphan_sessions);
                 picker.set_current_dir(self.session.working_dir.clone());
                 picker.set_current_session_id(Some(super::commands::active_session_id(self)));
+                picker.focus_search_input();
                 self.session_picker_overlay = Some(RefCell::new(picker));
                 self.set_status_notice("Sessions loaded");
                 true

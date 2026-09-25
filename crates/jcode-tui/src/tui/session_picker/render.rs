@@ -639,14 +639,14 @@ impl SessionPicker {
         let mut help = if self.loading_message.is_some() {
             " Esc cancel ".to_string()
         } else if self.search_active {
-            " type to filter · Ctrl+J/K or ↑↓ nav · Ctrl+W word-del · Esc cancel ".to_string()
+            " type to search · ↑↓ nav · Enter resume · Tab shortcuts · Esc clear/close ".to_string()
         } else {
             match crate::config::config().keybindings.session_picker_enter {
                 crate::config::SessionPickerResumeAction::CurrentTerminal => {
-                    " Space select · Enter in place · Ctrl+Enter new terminal · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter in place · Ctrl+Enter new terminal · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
                 crate::config::SessionPickerResumeAction::NewTerminal => {
-                    " Space select · Enter new terminal · Ctrl+Enter in place · d debug · / search · h/l focus · ↑↓ · q ".to_string()
+                    " type to search · Space select · Enter new terminal · Ctrl+Enter in place · d debug · h/l focus · ↑↓ · q ".to_string()
                 }
             }
         };
