@@ -54,3 +54,68 @@ fn promoted_channel_symlink_is_detected_only_with_a_pinned_identity() {
         [(candidate, candidate_mtime)],
     ));
 }
+
+/// Run a fresh test process through the same channel link as the daemon, so
+/// the process-global startup snapshot and the actual server decision are both
+/// exercised rather than supplying a synthetic pinned path to the pure helper.
+#[cfg(target_os = "macos")]
+#[test]
+fn promoted_channel_is_detected_through_startup_capture_and_server_decision() {
+    const CHILD_ROOT: &str = "JCODE_PINNED_RELOAD_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let channel = root.join("builds/shared-server/jcode");
+        assert_eq!(
+            std::env::current_exe().unwrap(),
+            channel,
+            "the test must launch through the channel path to exercise macOS symlink identity"
+        );
+        let old = std::fs::canonicalize(&channel).unwrap();
+        // Capture before promotion, as main.rs does before starting the server.
+        build::capture_running_binary();
+        assert_eq!(build::running_binary(), Some(old.clone()));
+        let new = root.join("builds/versions/new/jcode");
+        std::fs::remove_file(&channel).unwrap();
+        std::os::unix::fs::symlink(&new, &channel).unwrap();
+        assert_eq!(build::running_binary(), Some(old));
+        assert!(
+            server_has_newer_binary(),
+            "promoted channel must signal an update"
+        );
+        assert_eq!(reload_exec_target(true).unwrap().0, channel);
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let old = root.join("builds/versions/old/jcode");
+    let new = root.join("builds/versions/new/jcode");
+    let channel = root.join("builds/shared-server/jcode");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::copy(std::env::current_exe().unwrap(), &old).unwrap();
+    let t0 = SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(t0)
+        .unwrap();
+    write_binary(&new, t0 + Duration::from_secs(1800));
+    std::fs::create_dir_all(channel.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&old, &channel).unwrap();
+
+    let output = std::process::Command::new(&channel)
+        .arg("promoted_channel_is_detected_through_startup_capture_and_server_decision")
+        .arg("--nocapture")
+        .env(CHILD_ROOT, root)
+        .env("JCODE_HOME", root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "channel-launched child failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
