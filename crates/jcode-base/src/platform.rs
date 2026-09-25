@@ -441,7 +441,7 @@ pub fn spawn_detached_without_console_window(
     #[cfg(unix)]
     {
         // Same session detachment as `spawn_detached`; consoles are a Windows concept.
-        return spawn_detached(cmd);
+        spawn_detached(cmd)
     }
 
     #[cfg(windows)]
