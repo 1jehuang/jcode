@@ -136,7 +136,9 @@ impl SessionPicker {
 
     /// While the session index is still loading, a focused search box keeps
     /// collecting the query (it survives `reseed_grouped` and filters the
-    /// loaded list). Returns `true` when the key was consumed.
+    /// loaded list). Esc clears a non-empty query, matching the loaded picker;
+    /// on an empty query it falls through and closes. Returns `true` when the
+    /// key was consumed.
     pub(super) fn handle_loading_search_key(
         &mut self,
         code: KeyCode,
@@ -146,6 +148,10 @@ impl SessionPicker {
             return false;
         }
         match code {
+            KeyCode::Esc if !self.search_query.is_empty() => {
+                self.search_query.clear();
+                true
+            }
             KeyCode::Char(c) if !c.is_control() => {
                 self.search_query.push(c);
                 true

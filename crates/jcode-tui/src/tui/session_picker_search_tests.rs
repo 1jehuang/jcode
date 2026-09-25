@@ -365,22 +365,38 @@ fn test_search_typing_while_loading_survives_reseed_and_filters() {
 }
 
 #[test]
-fn test_loading_picker_esc_still_closes_while_searching() {
+fn test_loading_picker_esc_clears_query_then_closes() {
     let mut picker = SessionPicker::loading();
     picker.focus_search_input();
     picker
         .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
         .unwrap();
+    // Same as the loaded picker: a non-empty query is cleared first.
+    let action = picker
+        .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
+        .unwrap();
+    assert!(matches!(action, OverlayAction::Continue));
+    assert!(picker.search_query.is_empty());
+    assert!(
+        picker.search_active,
+        "search box keeps focus after clearing"
+    );
     let action = picker
         .handle_overlay_key(KeyCode::Esc, KeyModifiers::empty())
         .unwrap();
     assert!(matches!(action, OverlayAction::Close));
     let mut picker = SessionPicker::loading();
     picker.focus_search_input();
+    picker
+        .handle_overlay_key(KeyCode::Char('x'), KeyModifiers::empty())
+        .unwrap();
     let action = picker
         .handle_overlay_key(KeyCode::Char('c'), KeyModifiers::CONTROL)
         .unwrap();
-    assert!(matches!(action, OverlayAction::Close));
+    assert!(
+        matches!(action, OverlayAction::Close),
+        "Ctrl+C always closes"
+    );
 }
 
 #[test]

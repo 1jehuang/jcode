@@ -637,7 +637,11 @@ impl SessionPicker {
         title_parts.push(Span::styled(" ", Style::default()));
 
         let mut help = if self.loading_message.is_some() {
-            " Esc cancel ".to_string()
+            if self.search_query.is_empty() {
+                " Esc cancel ".to_string()
+            } else {
+                " type to search · Esc clear/close ".to_string()
+            }
         } else if self.search_active {
             " type to search · ↑↓ nav · Enter resume · Tab shortcuts · Esc clear/close ".to_string()
         } else {
