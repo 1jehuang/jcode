@@ -95,6 +95,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             },
             false,
             conversation_id.to_string(),
+            ExtraHeaders::default(),
             serde_json::json!({"model": "m", "messages": [], "stream": true}),
             tx,
             Arc::new(Mutex::new(None)),
