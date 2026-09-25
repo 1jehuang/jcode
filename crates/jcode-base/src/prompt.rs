@@ -482,6 +482,8 @@ pub fn build_system_prompt_full_with_capabilities(
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_project_progress_md = md_info.has_project_progress_md;
+    info.project_progress_md_chars = md_info.project_progress_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
@@ -620,6 +622,8 @@ fn build_system_prompt_split_with_capabilities_and_agents_md(
     info.project_agents_md_chars = md_info.project_agents_md_chars;
     info.has_global_agents_md = md_info.has_global_agents_md;
     info.global_agents_md_chars = md_info.global_agents_md_chars;
+    info.has_project_progress_md = md_info.has_project_progress_md;
+    info.project_progress_md_chars = md_info.project_progress_md_chars;
 
     // Add optional prompt overlays from ~/.jcode/ and ./.jcode/
     let (overlay_content, overlay_chars) = load_prompt_overlay_files_from_dir(working_dir);
