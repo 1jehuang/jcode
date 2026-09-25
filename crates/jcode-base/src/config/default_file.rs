@@ -370,6 +370,9 @@ openai_reasoning_effort = "low"
 # Defaults to `priority` to match Codex /fast behavior for OpenAI OAuth
 # (higher speed, higher usage). Set to "off" (or "standard") to disable.
 openai_service_tier = "priority"
+# Cyber access program for OpenAI OAuth, sent only to models whose catalog
+# lists it (for example Daybreak Blue on GPT-5.6/6 Sol). Needs an approved account.
+# openai_cyber_access_program = "daybreak_blue"
 # Preserve provider-native reasoning/thinking for future-turn context when supported.
 # Applies to OpenRouter, Anthropic, and OpenAI native reasoning replay. Display is separate.
 preserve_reasoning_context = true
