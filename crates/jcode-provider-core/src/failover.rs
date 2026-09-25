@@ -66,6 +66,11 @@ fn contains_independent_status_code(haystack: &str, code: &str) -> bool {
     })
 }
 
+/// Local pre-send card-number check, the harness-side twin of the gateway
+/// content filter that [`content_filter_block_label`] reads.
+#[path = "pan_check.rs"]
+pub mod pan_check;
+
 /// The entity label of a gateway content-filter block, e.g. `[CREDIT_CARD]`.
 ///
 /// OpenRouter guardrails answer `403 Request blocked by content filter: [LABEL]`.

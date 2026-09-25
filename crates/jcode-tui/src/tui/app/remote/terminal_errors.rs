@@ -12,7 +12,7 @@ pub(super) fn fail_fast_on_deterministic_error(
     failed_fallback_payload: Option<app_mod::FallbackResendPayload>,
 ) -> bool {
     let (notice, status) = if let Some(label) =
-        jcode_provider_core::content_filter_block_label(message)
+        jcode_provider_core::failover::content_filter_block_label(message)
     {
         // A gateway guardrail matched text in the conversation. Every turn
         // resends the full history, so the same block recurs until that text
