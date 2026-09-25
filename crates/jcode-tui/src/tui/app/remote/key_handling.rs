@@ -1999,6 +1999,14 @@ pub(in crate::tui::app) async fn submit_remote_enter_input(
             return Ok(());
         }
 
+        // `/sessions <query>` (and aliases) opens the picker pre-filtered
+        // with the search bar active.
+        if let Some(query) = super::super::commands::parse_session_picker_query(trimmed) {
+            app.open_session_picker_with_query(Some(query));
+            app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::Resume);
+            return Ok(());
+        }
+
         if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
             app.open_session_picker();
             app.record_keybinding_slow(crate::tui::app::shortcut_hints::LearnableAction::Resume);
