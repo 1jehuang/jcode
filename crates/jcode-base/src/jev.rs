@@ -89,6 +89,7 @@ enum JevProvider {
     OpenRouter,
     TypeSafe,
     Aimlapi,
+    OpenJev,
     Jcode,
 }
 
@@ -98,6 +99,7 @@ impl JevProvider {
             Self::OpenRouter => "openrouter",
             Self::TypeSafe => "typesafe",
             Self::Aimlapi => "aimlapi",
+            Self::OpenJev => "openjev",
             Self::Jcode => "jcode",
         }
     }
@@ -107,6 +109,7 @@ impl JevProvider {
             Self::OpenRouter => ("OPENROUTER_API_KEY", "openrouter.env"),
             Self::TypeSafe => ("TYPESAFE_API_KEY", "typesafe.env"),
             Self::Aimlapi => ("AIMLAPI_API_KEY", "aimlapi.env"),
+            Self::OpenJev => ("OPENJEV_API_KEY", "openjev.env"),
             Self::Jcode => (
                 crate::subscription_catalog::JCODE_API_KEY_ENV,
                 crate::subscription_catalog::JCODE_ENV_FILE,
@@ -126,6 +129,7 @@ impl JevProvider {
             Self::OpenRouter | Self::Jcode => "typesafe/jev-1.13",
             Self::TypeSafe => "jev-latest",
             Self::Aimlapi => "typesafe/jev",
+            Self::OpenJev => "openjev",
         }
     }
 
@@ -134,6 +138,7 @@ impl JevProvider {
             Self::OpenRouter => "https://openrouter.ai/api/alpha/decisions".into(),
             Self::TypeSafe => "https://api.typesafe.ai/v1/systemone".into(),
             Self::Aimlapi => "https://api.aimlapi.com/v1/decisions".into(),
+            Self::OpenJev => "https://api.openjev.sh/v1/systemone".into(),
             Self::Jcode => format!("{}/decisions", trusted_gateway_base(gateway_base)?),
         })
     }
@@ -438,14 +443,16 @@ fn resolve_with(
             // Typesafe serves Jev directly, so it beats resellers of the same model.
             JevProvider::Jcode,
             JevProvider::TypeSafe,
+            JevProvider::OpenJev,
             JevProvider::OpenRouter,
             JevProvider::Aimlapi,
         ],
         "openrouter" => &[JevProvider::OpenRouter],
         "typesafe" => &[JevProvider::TypeSafe],
         "aimlapi" => &[JevProvider::Aimlapi],
+        "openjev" => &[JevProvider::OpenJev],
         "jcode" | "subscription" | "jcode-subscription" => &[JevProvider::Jcode],
-        _ => bail!("Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, or jcode"),
+        _ => bail!("Invalid Jev provider. Choose auto, openrouter, typesafe, aimlapi, openjev, or jcode"),
     };
     resolve_providers(providers, load)
 }

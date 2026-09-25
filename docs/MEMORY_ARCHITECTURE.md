@@ -35,6 +35,7 @@ Startup warmup and automatic embedding backfill have been removed.
 | OpenRouter | `OPENROUTER_API_KEY` or `openrouter.env` | `https://openrouter.ai/api/alpha/decisions` |
 | TypeSafe | `TYPESAFE_API_KEY` or `typesafe.env` | `https://api.typesafe.ai/v1/systemone` |
 | AI/ML API | `AIMLAPI_API_KEY` or `aimlapi.env` | `https://api.aimlapi.com/v1/decisions` |
+| OpenJEV | `OPENJEV_API_KEY` or `openjev.env` | `https://api.openjev.sh/v1/systemone` |
 | Jcode subscription | Existing Jcode login | Trusted Jcode gateway `/v1/decisions` |
 
 Environment files use the existing Jcode provider-config directory and
@@ -51,7 +52,7 @@ memory_sidecar_enabled = false
 ```
 
 `auto` chooses the first configured credential route in this order: Jcode,
-OpenRouter, TypeSafe, then AI/ML API. Set `memory_jev_provider` (or
+TypeSafe, OpenJEV, OpenRouter, then AI/ML API. Set `memory_jev_provider` (or
 `JCODE_MEMORY_JEV_PROVIDER`) explicitly to choose the account to use. Neither
 `auto` nor an explicit provider falls back to another account after an
 entitlement, auth, billing, or network failure. This prevents a failed
@@ -71,7 +72,7 @@ or a separate charge. **The companion gateway change must be deployed and its
 upstream Jev credential configured before this route works.** Older gateways
 without the capability fail closed. With a Jcode login configured, `auto` still
 selects Jcode on an older gateway. To use BYOK in that situation, explicitly set
-`memory_jev_provider` to `openrouter`, `typesafe`, or `aimlapi` (or use
+`memory_jev_provider` to `openrouter`, `typesafe`, `openjev`, or `aimlapi` (or use
 `JCODE_MEMORY_JEV_PROVIDER`). There is no automatic fallback. BYOK does not depend
 on the gateway rollout.
 
@@ -153,6 +154,7 @@ remain useful without making remote requests.
 
 - [TypeSafe introduction](https://docs.typesafe.ai/introduction)
 - [TypeSafe HTTP API](https://docs.typesafe.ai/api)
+- [OpenJEV](https://openjev.sh)
 - [OpenRouter Jev](https://openrouter.ai/~typesafe/jev-latest)
 - [AI/ML API Jev](https://docs.aimlapi.com/api-references/decision-models/typesafe/jev)
 

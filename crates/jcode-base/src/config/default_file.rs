@@ -467,13 +467,13 @@ swarm_max_concurrent_agents = 32
 # swarm_strip_layout = "vertical"
 #
 # Recall uses Jev typed Decisions directly, without embeddings or a sidecar LLM.
-# Provider values: auto, jcode, openrouter, typesafe, aimlapi.
-# auto prefers Jcode, then OpenRouter, TypeSafe, AI/ML API credentials.
+# Provider values: auto, jcode, openrouter, typesafe, openjev, aimlapi.
+# auto prefers Jcode, then TypeSafe, OpenJEV, OpenRouter, AI/ML API credentials.
 # Env override: JCODE_MEMORY_JEV_PROVIDER
 # memory_jev_provider = "auto"
 # Minimum relevance probability (0.8..=1.0). Invalid values fail closed.
 # memory_jev_threshold = 0.8
-# BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, or AIMLAPI_API_KEY.
+# BYOK: OPENROUTER_API_KEY, TYPESAFE_API_KEY, OPENJEV_API_KEY, or AIMLAPI_API_KEY.
 # Jcode requires an eligible subscription and gateway memory_jev capability.
 # With a Jcode login and an older gateway, explicitly select a BYOK provider.
 # No fallback after entitlement, auth, billing, or network failure; no silent BYOK spend.
