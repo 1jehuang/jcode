@@ -2,6 +2,7 @@ use jcode_logging as logging;
 use jcode_storage as storage;
 mod concurrency;
 mod lifecycle;
+pub mod otel;
 pub use concurrency::{ConcurrencySession, begin_concurrency_session};
 pub mod onboarding_trace;
 mod state_support;
@@ -231,6 +232,7 @@ struct TurnTelemetry {
     todo_gate_intent_count: u32,
     todo_gate_completion_count: u32,
     todo_gate_spike_count: u32,
+    otel_start_nanos: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -347,6 +349,9 @@ struct SessionTelemetry {
     provider_switches: u32,
     model_switches: u32,
     todo: TodoSessionTelemetry,
+    // OTEL span tracking
+    otel_start_nanos: u64,
+    otel_session_span_id: String,
 }
 
 impl TurnTelemetry {
@@ -414,6 +419,7 @@ impl TurnTelemetry {
             todo_gate_intent_count: 0,
             todo_gate_completion_count: 0,
             todo_gate_spike_count: 0,
+            otel_start_nanos: otel::now_unix_nanos(),
         }
     }
 }
@@ -1566,6 +1572,8 @@ fn finalize_current_turn(
     let Some(turn) = state.current_turn.take() else {
         return;
     };
+    // Capture OTEL start timestamp before turn fields are consumed.
+    let turn_otel_start_nanos = turn.otel_start_nanos;
     let idle_after_turn_ms = now
         .checked_duration_since(turn.last_activity_at)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
@@ -1699,6 +1707,36 @@ fn finalize_current_turn(
         ran_from_cargo: from_cargo,
     };
     let _ = emit_turn_end_event(event, mode);
+    // Export OTEL turn span when a collector is configured.
+    if otel::is_otel_enabled() {
+        let turn_end_nanos = otel::now_unix_nanos();
+        let trace_id = otel::trace_id_from_uuid(&state.session_id);
+        let span_id_raw = uuid::Uuid::new_v4().to_string();
+        let span_id = otel::span_id_from_uuid(&span_id_raw);
+        otel::export_turn_span(&otel::TurnSpanData {
+            trace_id: &trace_id,
+            span_id: &span_id,
+            parent_span_id: &state.otel_session_span_id,
+            session_id: &state.session_id,
+            turn_index: state.turns,
+            start_nanos: turn_otel_start_nanos,
+            end_nanos: turn_end_nanos,
+            input_tokens: state.input_tokens,
+            output_tokens: state.output_tokens,
+            total_tokens: state.total_tokens,
+            tool_calls: state.tool_calls,
+            tool_failures: state.tool_failures,
+            executed_tool_calls: state.executed_tool_calls,
+            file_write_calls: state.file_write_calls,
+            tests_run: state.tests_run,
+            tests_passed: state.tests_passed,
+            turn_success,
+            turn_abandoned,
+            end_reason,
+            provider: &state.provider_start,
+            model: &state.model_start,
+        });
+    }
 }
 
 fn maybe_emit_session_start() {
@@ -2116,6 +2154,11 @@ fn begin_session_with_mode(
         provider_switches: 0,
         model_switches: 0,
         todo: TodoSessionTelemetry::default(),
+        otel_start_nanos: otel::now_unix_nanos(),
+        otel_session_span_id: {
+            let raw_id = uuid::Uuid::new_v4().to_string();
+            otel::span_id_from_uuid(&raw_id)
+        },
     };
     // A live session in the slot means the process is switching sessions
     // without anyone calling end_session (agent create/attach both call
