@@ -880,7 +880,7 @@ pub fn format_plan_context(session_id: &str) -> Option<String> {
         return None;
     }
     let mut out = String::from(
-        "## Live Plan Status (todo store, survives compaction)\n\nThis list is ground truth for plan progress. Do not redo completed items; continue from the first pending or in-progress item.\n\n",
+        "<system-reminder>\n## Live Plan Status (todo store, survives compaction)\n\nThis list is ground truth for plan progress. Do not redo completed items; continue from the first pending or in-progress item. This is injected context, not a user message.\n\n",
     );
     let mut last_group: Option<&str> = None;
     for todo in &todos {
@@ -902,7 +902,7 @@ pub fn format_plan_context(session_id: &str) -> Option<String> {
             break;
         }
     }
-    out.push_str("\n---\n");
+    out.push_str("</system-reminder>");
     Some(out)
 }
 
@@ -2394,6 +2394,15 @@ mod tests {
         save_todos(session, &todos).expect("save");
 
         let block = format_plan_context(session).expect("block");
+        // Must be an internal system-reminder, not a user-authored message:
+        // a bare text turn would render in the transcript, attract timestamp
+        // injection, and make ends_with_fresh_user_turn() report a fresh user
+        // prompt that the user never typed.
+        assert!(block.trim_start().starts_with("<system-reminder>"));
+        assert!(block.trim_end().ends_with("</system-reminder>"));
+        let message = crate::message::Message::user(&block);
+        assert!(message.is_internal_system_reminder());
+        assert!(!crate::message::ends_with_fresh_user_turn(&[message]));
         assert!(block.contains("Live Plan Status"));
         assert!(block.contains("**lead plan**"));
         assert!(block.contains("- [x] Build competitor page"));
