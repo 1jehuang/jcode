@@ -424,6 +424,36 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     cmd.spawn()
 }
 
+/// Spawn a fire-and-forget child that must never flash a console window.
+///
+/// Why not [`spawn_detached`]: `DETACHED_PROCESS` leaves the child with no console at
+/// all, so the first console-subsystem grandchild it starts — a `curl.exe` inside a
+/// hook script, say — allocates a brand new console for itself, which Windows Terminal
+/// surfaces as a tab. `CREATE_NO_WINDOW` instead gives the child a console that has no
+/// window, and descendants inherit it, so the whole subtree stays invisible.
+///
+/// The two flags cannot be combined: `CREATE_NO_WINDOW` is documented as ignored when
+/// `DETACHED_PROCESS` is also specified, which is why this is a separate entry point
+/// rather than an extra flag on `spawn_detached`.
+pub fn spawn_detached_without_console_window(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        // Same session detachment as `spawn_detached`; consoles are a Windows concept.
+        spawn_detached(cmd)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+        cmd.spawn()
+    }
+}
+
 /// Reap a detached child without blocking the caller.
 pub fn reap_detached(child: std::process::Child) {
     #[cfg(unix)]
