@@ -43,6 +43,7 @@ members = [
     "crates/jcode-setup-hints",
     "crates/jcode-storage",
     "crates/jcode-side-panel-types",
+    "crates/jcode-applet-types",
     "crates/jcode-azure-auth",
     "crates/jcode-notify-email",
     "crates/jcode-provider-metadata",
