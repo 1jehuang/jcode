@@ -31,7 +31,7 @@ pub use auth_mode::{
 };
 pub use catalog_refresh::{ModelCatalogRefreshSummary, summarize_model_catalog_refresh};
 pub use failover::{
-    FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message,
+    FailoverDecision, ProviderFailoverPrompt, classify_failover_error_message, content_filter_block_label,
     parse_failover_prompt_message,
 };
 pub use fallback_pick::{

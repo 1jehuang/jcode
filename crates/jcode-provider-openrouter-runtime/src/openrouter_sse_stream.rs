@@ -110,7 +110,7 @@ pub(super) async fn run_stream_with_retries(
                 // Full anyhow chain ({:#}) so a `.context(...)`-wrapped transport
                 // cause (e.g. TLS BadRecordMac) is visible to the classifier.
                 let error_str = format!("{e:#}").to_lowercase();
-                if is_retryable_error(&error_str) && attempt + 1 < max_retries {
+                if should_retry(&error_str, attempt, max_retries) {
                     if saw_output {
                         // Partial output already reached the consumer; tell it
                         // to discard the partial attempt so the retried
@@ -306,6 +306,21 @@ fn parsed_http_status(error_str: &str) -> Option<u16> {
     }
 }
 
+/// Retries allowed for a 429 that OpenRouter attributes to the upstream
+/// provider's shared key pool (`limit_source: upstream_provider_shared_pool`).
+/// OpenRouter has already tried every provider it could route to before
+/// answering, so a full backoff ladder mostly waits; measured 2026-09-24: 394
+/// such 429s against `openrouter/auto`, each held for the whole budget.
+const SHARED_POOL_429_MAX_RETRIES: u32 = 2;
+
+/// Whether a failed zero-based `attempt` should be retried.
+fn should_retry(error_str: &str, attempt: u32, max_retries: u32) -> bool {
+    if !is_retryable_error(error_str) || attempt + 1 >= max_retries {
+        return false;
+    }
+    !(error_str.contains("upstream_provider_shared_pool") && attempt >= SHARED_POOL_429_MAX_RETRIES)
+}
+
 fn is_retryable_error(error_str: &str) -> bool {
     // Explicit non-retryable HTTP statuses take precedence over the loose
     // substring heuristics below. These are deterministic client-side failures
@@ -348,6 +363,23 @@ mod tests {
         assert!(hint.contains("LM Studio"));
         assert!(hint.contains("Local Server"));
         assert!(hint.contains("/v1/models"));
+    }
+
+    #[test]
+    fn shared_pool_429_retries_at_most_twice() {
+        let pool = "status: 429 too many requests\n  response: {\"error\":{\"code\":429,\"metadata\":{\"limit_source\":\"upstream_provider_shared_pool\"}}}";
+        assert!(should_retry(pool, 0, 8));
+        assert!(should_retry(pool, 1, 8));
+        assert!(!should_retry(pool, 2, 8), "three sends is the cap");
+        // An ordinary rate limit keeps the configured ladder.
+        assert!(should_retry("status: 429 too many requests", 5, 8));
+        assert!(!should_retry("status: 429 too many requests", 7, 8));
+    }
+
+    #[test]
+    fn content_filter_block_is_never_retried() {
+        let blocked = "status: 403 forbidden\n  response: {\"error\":{\"message\":\"request blocked by content filter: [credit_card]\",\"code\":403}}";
+        assert!(!should_retry(blocked, 0, 8));
     }
 
     #[test]
