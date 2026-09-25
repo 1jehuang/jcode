@@ -148,6 +148,8 @@ pub(super) fn emit_lifecycle_event(
                 provider_switches: s.provider_switches,
                 model_switches: s.model_switches,
                 todo: s.todo.clone(),
+                otel_start_nanos: s.otel_start_nanos,
+                otel_session_span_id: s.otel_session_span_id.clone(),
             },
             None => return,
         };
@@ -202,6 +204,14 @@ pub(super) fn emit_lifecycle_event(
     let agent_role = infer_agent_role(&state);
     let time_to_first_agent_action_ms = time_to_first_agent_action_ms(&state);
     let time_to_first_useful_action_ms = time_to_first_useful_action_ms(&state);
+    // Clone before fields are moved into the event struct.
+    let otel_provider = state.provider_start.clone();
+    let otel_model = state.model_start.clone();
+    let otel_session_id = state.session_id.clone();
+    let otel_correlation_id = state.correlation_id.clone();
+    let otel_session_span_id = state.otel_session_span_id.clone();
+    let otel_start_nanos = state.otel_start_nanos;
+    let otel_parent_session_id = state.parent_session_id.clone();
     let todo_event = todo_session_event(
         &state,
         reason,
@@ -362,6 +372,34 @@ pub(super) fn emit_lifecycle_event(
     if let Ok(payload) = serde_json::to_value(&todo_event) {
         let _ = send_payload(payload, delivery);
     }
+    // Export an OTEL session span when a collector endpoint is configured.
+    {
+        let end_nanos = otel::now_unix_nanos();
+        let trace_id = otel::trace_id_from_uuid(&otel_session_id);
+        otel::export_session_span(&otel::SessionSpanData {
+            trace_id: &trace_id,
+            span_id: &otel_session_span_id,
+            session_id: &otel_session_id,
+            correlation_id: &otel_correlation_id,
+            provider: &otel_provider,
+            model: &otel_model,
+            start_nanos: otel_start_nanos,
+            end_nanos,
+            end_reason: reason.as_str(),
+            turns: state.turns,
+            input_tokens: state.input_tokens,
+            output_tokens: state.output_tokens,
+            total_tokens: state.total_tokens,
+            tool_calls: state.tool_calls,
+            tool_failures: state.tool_failures,
+            resumed: state.resumed_session,
+            parent_session_id: otel_parent_session_id.as_deref(),
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            version: version().as_str(),
+        });
+    }
+    unregister_active_session(&state.session_id);
     if session_success {
         emit_onboarding_step_once("first_session_success", None, None);
     }
