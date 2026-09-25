@@ -151,9 +151,43 @@ pub fn jcode_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("JCODE_HOME") {
         return Ok(PathBuf::from(path));
     }
+    if let Some(path) = test_harness_home() {
+        return Ok(path.to_path_buf());
+    }
 
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("No home directory"))?;
     Ok(home.join(".jcode"))
+}
+
+/// Per-process stand-in for `JCODE_HOME` inside Rust test binaries.
+///
+/// Test binaries always run from `<target-dir>/<profile>/deps/`, where no
+/// installed or self-dev jcode ever runs. A test that forgets to set `JCODE_HOME` would
+/// otherwise read and write the developer's real `~/.jcode` (session files,
+/// active-pid markers, config, model-picker usage). Suite-by-suite guards kept
+/// missing cases, so unsandboxed tests fall back here instead. Tests that set
+/// `JCODE_HOME` explicitly, including to the real home, are unaffected.
+fn test_harness_home() -> Option<&'static Path> {
+    static HOME: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        if !is_test_harness_exe(&exe) {
+            return None;
+        }
+        // Same name as the TUI suites' `ensure_test_jcode_home_if_unset`.
+        let path = std::env::temp_dir().join(format!("jcode-test-home-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&path);
+        Some(path)
+    })
+    .as_deref()
+}
+
+fn is_test_harness_exe(exe: &Path) -> bool {
+    // Match on the parent directory, not a `/target/` component, so a custom
+    // CARGO_TARGET_DIR is covered too.
+    exe.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|dir| dir == "deps")
 }
 
 /// Whether `JCODE_HOME` redirects this process away from the user's real
@@ -761,6 +795,41 @@ mod windows_hardening_tests {
 
         assert!(!state.enqueue(&file, false, now));
         assert!(state.pending_files.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod test_harness_home_tests {
+    use super::*;
+
+    #[test]
+    fn only_cargo_test_binaries_count_as_test_harnesses() {
+        assert!(is_test_harness_exe(Path::new(
+            "/repo/target/debug/deps/jcode_storage-0123abcd"
+        )));
+        assert!(is_test_harness_exe(Path::new(
+            "/scratch/custom-target/debug/deps/jcode_storage-0123abcd"
+        )));
+        #[cfg(windows)]
+        assert!(is_test_harness_exe(Path::new(
+            r"C:\repo\target\debug\deps\jcode_storage-0123abcd.exe"
+        )));
+        assert!(!is_test_harness_exe(Path::new(
+            "/repo/target/selfdev/jcode"
+        )));
+        assert!(!is_test_harness_exe(Path::new(
+            "/home/u/.jcode/builds/versions/0.88.0/jcode"
+        )));
+    }
+
+    #[test]
+    fn this_test_binary_never_resolves_to_the_real_jcode_home() {
+        let sandbox = test_harness_home().expect("cargo test binary is a test harness");
+        assert!(sandbox.starts_with(std::env::temp_dir()));
+        assert!(sandbox.is_dir());
+        if let Some(home) = dirs::home_dir() {
+            assert_ne!(sandbox, home.join(".jcode"));
+        }
     }
 }
 
