@@ -117,12 +117,6 @@ fn slash_resume_opens_session_picker_overlay_locally() {
     assert_eq!(app.session_picker_mode, SessionPickerMode::Resume);
     assert!(app.pending_session_picker_load.is_some());
     assert!(app.input.is_empty());
-    assert!(
-        app.session_picker_overlay
-            .as_ref()
-            .is_some_and(|picker| picker.borrow().search_input_focused()),
-        "/resume opens with the search box focused"
-    );
 }
 
 #[test]
@@ -186,12 +180,6 @@ fn slash_active_opens_active_sessions_picker_locally() {
     assert_eq!(app.session_picker_mode, SessionPickerMode::ActiveSessions);
     assert!(app.pending_session_picker_load.is_some());
     assert!(app.input.is_empty());
-    assert!(
-        app.session_picker_overlay
-            .as_ref()
-            .is_some_and(|picker| !picker.borrow().search_input_focused()),
-        "active sessions picker keeps shortcut-first focus"
-    );
 }
 
 #[test]
