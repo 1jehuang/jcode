@@ -1101,7 +1101,10 @@ impl Provider for CopilotApiProvider {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let model_for_fingerprint = self.model();
-        let uses_responses_api = copilot_model_uses_responses_api(&model_for_fingerprint);
+        // Use the same combined routing decision as stream_request: catalog first,
+        // falling back to the static prefix heuristic. This ensures the payload
+        // format (Responses vs. chat) and the endpoint always agree.
+        let uses_responses_api = self.model_needs_responses_api(&model_for_fingerprint);
         let (canonical_payload, fingerprint_input, system_value, built_tools) =
             if uses_responses_api {
                 let input = jcode_provider_openai::build_responses_input(messages);
