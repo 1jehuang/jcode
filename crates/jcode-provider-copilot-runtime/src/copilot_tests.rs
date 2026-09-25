@@ -172,6 +172,27 @@ fn context_window_handles_dot_and_dash_names() {
         ),
         Some(128_000)
     );
+    assert_eq!(
+        jcode_base::provider::context_limit_for_model_with_provider(
+            "grok-4.6",
+            Some("copilot")
+        ),
+        Some(500_000)
+    );
+    assert_eq!(
+        jcode_base::provider::context_limit_for_model_with_provider(
+            "grok-4-6",
+            Some("copilot")
+        ),
+        Some(500_000)
+    );
+    assert_eq!(
+        jcode_base::provider::context_limit_for_model_with_provider(
+            "grok-4.5",
+            Some("copilot")
+        ),
+        Some(131_072)
+    );
 }
 
 #[test]

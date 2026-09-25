@@ -171,6 +171,12 @@ fn copilot_context_limit_for_model(model: &str) -> usize {
         m if m.starts_with("gemini-2.0-flash") => 1_000_000,
         m if m.starts_with("gemini-2.5") => 1_000_000,
         m if m.starts_with("gemini-3") => 1_000_000,
+        // xAI grok-4.6: 500K context window.
+        "grok-4.6" | "grok-4-6" => 500_000,
+        // Other grok-4 variants: delegate to the open-weight family lookup.
+        m if m.starts_with("grok-4") || m.contains("grok-code-fast") => {
+            open_weight_family_context_limit(m).unwrap_or(128_000)
+        }
         _ => 128_000,
     }
 }
@@ -429,6 +435,19 @@ pub fn open_weight_family_context_limit(model: &str) -> Option<usize> {
         return Some(256_000);
     }
 
+    // --- xAI grok-4.6: 500K context ---
+    // grok-4.6 ships with a 500,000-token context window per xAI docs.
+    if m.contains("grok-4.6") || m.contains("grok-4p6") || m.contains("grok-4-6") {
+        return Some(500_000);
+    }
+
+    // --- xAI grok-4.x (other variants): 131K context ---
+    // Earlier grok-4 variants (grok-4.5 and the base grok-4) advertise 131,072 tokens.
+    // This is checked after grok-4.6 so the more specific match wins.
+    if m.starts_with("grok-4") {
+        return Some(131_072);
+    }
+
     // --- Perplexity Sonar: 128K context ---
     if m.contains("sonar") {
         return Some(128_000);
@@ -544,6 +563,27 @@ mod tests {
     #[test]
     fn celeris_family_resolves_to_131k_context() {
         assert_eq!(open_weight_family_context_limit("celeris-1"), Some(131_072));
+    }
+
+    #[test]
+    fn grok_4_6_resolves_to_500k_context() {
+        // grok-4.6 has a 500,000-token context window.
+        assert_eq!(open_weight_family_context_limit("grok-4.6"), Some(500_000));
+        assert_eq!(open_weight_family_context_limit("grok-4-6"), Some(500_000));
+        // Other grok-4 variants use the 131K fallback.
+        assert_eq!(open_weight_family_context_limit("grok-4.5"), Some(131_072));
+        assert_eq!(open_weight_family_context_limit("grok-4"), Some(131_072));
+        // grok-code-fast retains its 256K window.
+        assert_eq!(open_weight_family_context_limit("grok-code-fast-1"), Some(256_000));
+        // Global resolution path mirrors the open-weight lookup.
+        assert_eq!(
+            context_limit_for_model_with_provider("grok-4.6", None),
+            Some(500_000)
+        );
+        assert_eq!(
+            context_limit_for_model_with_provider("grok-4.6", Some("copilot")),
+            Some(500_000)
+        );
     }
 
     #[test]
