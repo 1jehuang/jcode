@@ -30,6 +30,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const OPENAI_MODEL_CATALOG_CACHE_FILE: &str = "openai_model_catalog_cache.json";
 const ANTHROPIC_MODEL_CATALOG_CACHE_FILE: &str = "anthropic_model_catalog_cache.json";
 
+/// Bump when a persisted catalog scope gains a field parsed from the live
+/// catalog. Older snapshots still hydrate for display, but are treated as stale
+/// so the next refresh fetches the new fields instead of waiting out the TTL.
+const MODEL_CATALOG_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct PersistedModelCatalogStore {
     scopes: HashMap<String, PersistedModelCatalogScope>,
@@ -44,6 +49,8 @@ struct PersistedModelCatalogScope {
     reasoning_efforts: HashMap<String, Vec<String>>,
     #[serde(default)]
     cyber_access_programs: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    schema_version: u32,
     observed_at_unix_secs: u64,
 }
 
@@ -400,6 +407,7 @@ fn persist_scoped_model_catalog(
             context_limits: context_limits.clone(),
             reasoning_efforts: reasoning_efforts.clone(),
             cyber_access_programs: cyber_access_programs.clone(),
+            schema_version: MODEL_CATALOG_SCHEMA_VERSION,
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
@@ -429,7 +437,13 @@ fn hydrate_catalog_cache_from_disk(
     }
 
     let observed_at = system_time_from_unix_secs(persisted.observed_at_unix_secs);
-    service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
+    // A snapshot from an older schema lacks newer catalog fields. Hydrate it as
+    // stale so a live refresh fetches them promptly instead of after the TTL.
+    if persisted.schema_version < MODEL_CATALOG_SCHEMA_VERSION {
+        service.hydrate_scope_models_from_stale_snapshot(scope, normalized, observed_at);
+    } else {
+        service.hydrate_scope_models_from_snapshot(scope, normalized, observed_at);
+    }
     if !persisted.context_limits.is_empty() {
         populate_context_limits(persisted.context_limits.clone());
     }
