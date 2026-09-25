@@ -78,6 +78,21 @@ pub(super) fn is_poke_message(message: &str) -> bool {
     crate::todo::is_auto_poke_message(message)
 }
 
+/// Extract the search query from `/sessions <query>` (and the `/session` /
+/// `/resume` aliases). Returns `None` for the bare commands and for
+/// whitespace-only queries, so those keep the exact pre-existing behavior.
+pub(super) fn parse_session_picker_query(trimmed: &str) -> Option<&str> {
+    ["/sessions", "/session", "/resume"]
+        .iter()
+        .find_map(|command| trimmed.strip_prefix(*command))
+        // Require at least one whitespace char after the command so bare
+        // commands fall through to the exact-match handler above, and
+        // `/resumeall`/`/resume-all` never match.
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+}
+
 pub(super) fn is_todo_confidence_summary_message(message: &str) -> bool {
     message.starts_with(TODO_COMPLETION_CONTINUATION_MESSAGE)
         || message.starts_with(TODO_CONFIDENCE_SPIKE_CONTINUATION_MESSAGE)
@@ -1735,6 +1750,15 @@ pub(super) fn handle_session_command(app: &mut App, trimmed: &str) -> bool {
 
     if trimmed == "/resume" || trimmed == "/sessions" || trimmed == "/session" {
         app.open_session_picker();
+        app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
+        return true;
+    }
+
+    // `/sessions <query>` / `/session <query>` open the picker pre-filtered,
+    // with the search bar active. `/resume <query>` is kept working the same
+    // way for consistency across the three aliases.
+    if let Some(query) = parse_session_picker_query(trimmed) {
+        app.open_session_picker_with_query(Some(query));
         app.record_keybinding_slow(super::shortcut_hints::LearnableAction::Resume);
         return true;
     }

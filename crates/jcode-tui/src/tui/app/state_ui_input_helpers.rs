@@ -194,7 +194,10 @@ const REGISTERED_COMMANDS: &[RegisteredCommand] = &[
     RegisteredCommand::public("/selfdev", "Open a new self-dev jcode session"),
     RegisteredCommand::public("/update", "Background update and auto reload"),
     RegisteredCommand::public("/update-sim", "Preview update UI safely (Alt+_)"),
-    RegisteredCommand::public("/resume", "Open session picker"),
+    RegisteredCommand::public(
+        "/resume",
+        "Open session picker (/resume <search> to filter)",
+    ),
     RegisteredCommand::public("/sessions", "Alias for /resume"),
     RegisteredCommand::public("/session", "Alias for /resume"),
     RegisteredCommand::public("/active", "Manage live sessions (working vs ready)"),
