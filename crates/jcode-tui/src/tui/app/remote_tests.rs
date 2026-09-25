@@ -674,6 +674,42 @@ fn startup_history(session_id: &str) -> ServerEvent {
 }
 
 #[test]
+fn history_event_refreshes_agents_report_flags_from_working_dir() {
+    // End-to-end wiring: a History event for a session whose working dir
+    // carries AGENTS.md/PROGRESS.md must flip the `/context` report flags.
+    // Remote clients never run the per-turn prompt rebuild, so without the
+    // History-handler sync the report stays at the constructor default.
+    ensure_test_jcode_home_if_unset();
+    let project = tempfile::TempDir::new().expect("temp project dir");
+    std::fs::write(project.path().join("AGENTS.md"), "project instructions marker")
+        .expect("write AGENTS.md");
+    std::fs::write(project.path().join("PROGRESS.md"), "progress marker")
+        .expect("write PROGRESS.md");
+
+    let mut app = create_test_app();
+    app.is_remote = true;
+    app.session.working_dir = Some(project.path().to_string_lossy().into_owned());
+    assert!(
+        !app.context_info.has_project_agents_md,
+        "precondition: fresh app reports no project AGENTS.md"
+    );
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    handle_server_event(&mut app, startup_history("history-sync-session"), &mut remote);
+
+    assert!(
+        app.context_info.has_project_agents_md,
+        "History must set the project AGENTS.md flag from the session working dir"
+    );
+    assert!(
+        app.context_info.has_project_progress_md,
+        "History must set the project PROGRESS.md flag from the session working dir"
+    );
+}
+
+#[test]
 fn startup_send_state_is_not_preserved_for_real_session_switch() {
     let mut app = create_test_app();
     app.is_remote = true;
