@@ -44,6 +44,8 @@ struct PersistedModelCatalogScope {
     reasoning_efforts: HashMap<String, Vec<String>>,
     #[serde(default)]
     service_tiers: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    cyber_access_programs: HashMap<String, Vec<String>>,
     observed_at_unix_secs: u64,
 }
 
@@ -431,6 +433,7 @@ fn persist_scoped_model_catalog(
     context_limits: &HashMap<String, usize>,
     reasoning_efforts: &HashMap<String, Vec<String>>,
     service_tiers: &HashMap<String, Vec<String>>,
+    cyber_access_programs: &HashMap<String, Vec<String>>,
     observed_at: SystemTime,
 ) {
     if models.is_empty() {
@@ -451,6 +454,7 @@ fn persist_scoped_model_catalog(
             context_limits: context_limits.clone(),
             reasoning_efforts: reasoning_efforts.clone(),
             service_tiers: service_tiers.clone(),
+            cyber_access_programs: cyber_access_programs.clone(),
             observed_at_unix_secs: observed_at_unix_secs(observed_at),
         },
     );
@@ -535,6 +539,22 @@ pub fn cached_openai_service_tiers_for_scope(scope: &str) -> Option<HashMap<Stri
     Some(store.scopes.get(scope)?.service_tiers.clone())
 }
 
+/// Return the cyber access programs each OpenAI model accepts for the active
+/// account, from its scoped disk snapshot.
+pub fn cached_openai_cyber_access_programs() -> Option<HashMap<String, Vec<String>>> {
+    cached_openai_cyber_access_programs_for_scope(&current_openai_account_scope())
+}
+
+/// Return the cyber access programs each OpenAI model accepts for `scope`,
+/// from that scope's disk snapshot.
+pub fn cached_openai_cyber_access_programs_for_scope(
+    scope: &str,
+) -> Option<HashMap<String, Vec<String>>> {
+    let store = load_persisted_model_catalog_store(OPENAI_MODEL_CATALOG_CACHE_FILE)?;
+    let programs = store.scopes.get(scope)?.cyber_access_programs.clone();
+    (!programs.is_empty()).then_some(programs)
+}
+
 /// Test-only: clear the process-global in-memory model catalogs. The catalog
 /// services are statics shared by every test in the process; a test that
 /// hydrates a scope (directly or via `persist_*` + `cached_*`) otherwise leaks
@@ -557,6 +577,7 @@ pub fn persist_openai_model_catalog_for_scope(scope: &str, catalog: &OpenAIModel
         &catalog.context_limits,
         &catalog.reasoning_efforts,
         &catalog.service_tiers,
+        &catalog.cyber_access_programs,
         SystemTime::now(),
     );
 }
@@ -571,6 +592,7 @@ pub fn persist_anthropic_model_catalog_for_scope(scope: &str, catalog: &Anthropi
         scope,
         &catalog.available_models,
         &catalog.context_limits,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         SystemTime::now(),

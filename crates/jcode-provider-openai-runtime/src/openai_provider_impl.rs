@@ -1011,6 +1011,10 @@ impl Provider for OpenAIProvider {
             .write()
             .unwrap_or_else(|p| p.into_inner()) = catalog.service_tiers.clone();
         self.warn_unsupported_service_tier();
+        match self.model_cyber_access_programs.write() {
+            Ok(mut programs) => *programs = catalog.cyber_access_programs.clone(),
+            Err(poisoned) => *poisoned.into_inner() = catalog.cyber_access_programs.clone(),
+        }
         self.revalidate_reasoning_effort();
         jcode_base::provider::persist_openai_model_catalog_for_scope(&scope, &catalog);
         if !catalog.context_limits.is_empty() {
@@ -1295,6 +1299,15 @@ impl Provider for OpenAIProvider {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             )),
+            // Per-account catalog metadata, refreshed beside the efforts map:
+            // a fork pinned to another account must not write into the parent's.
+            model_cyber_access_programs: Arc::new(StdRwLock::new(
+                self.model_cyber_access_programs
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .clone(),
+            )),
+            cyber_access_program: self.cyber_access_program.clone(),
             service_tier: Arc::new(StdRwLock::new(
                 self.service_tier
                     .read()
