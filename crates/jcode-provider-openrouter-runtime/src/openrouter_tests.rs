@@ -1444,6 +1444,7 @@ fn make_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: true,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1476,6 +1477,7 @@ fn make_custom_compatible_provider() -> OpenRouterProvider {
         static_image_input_support: HashMap::new(),
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         models_cache: Arc::new(RwLock::new(ModelsCache::default())),
         model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
         endpoint_refresh: Arc::new(Mutex::new(EndpointRefreshTracker::default())),
@@ -1848,6 +1850,7 @@ fn direct_deepseek_chat_request_sends_reasoning_effort() {
         supports_model_catalog: false,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     provider
@@ -1905,6 +1908,7 @@ fn direct_openai_compatible_chat_request_preserves_max_reasoning_effort() {
         supports_model_catalog: false,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     provider
@@ -1975,6 +1979,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         static_models: vec!["static-login-flow-fallback".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2025,6 +2030,7 @@ fn openai_compatible_model_catalog_refresh_calls_models_endpoint_and_updates_dis
         reasoning_effort_support: None,
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
     assert_eq!(fresh_provider.context_window(), 131_072);
@@ -2062,6 +2068,7 @@ fn built_in_openai_compatible_static_models_drop_out_after_live_catalog() {
         static_models: vec!["gpt-oss-120b".to_string(), "zai-glm-4.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2092,6 +2099,7 @@ fn direct_openai_compatible_static_models_are_marked_as_fallback_before_live_cat
         static_models: vec!["minimax-m2.7".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -2118,6 +2126,7 @@ fn cerebras_live_catalog_models_are_selectable_on_explicit_switch() {
         static_models: vec!["gpt-oss-120b".to_string()],
         send_openrouter_headers: false,
         conversation_id: new_conversation_id(),
+        extra_headers: ExtraHeaders::default(),
         ..make_custom_compatible_provider()
     };
 
@@ -3188,6 +3197,7 @@ fn midstream_transport_fault_emits_retry_rollback_before_replay() {
             },
             false,
             new_conversation_id(),
+            ExtraHeaders::default(),
             request,
             tx,
             Arc::new(Mutex::new(None)),
@@ -3699,6 +3709,7 @@ fn captured_request_for_host(host: &str, conversation_id: &str) -> String {
             },
             false,
             conversation_id.to_string(),
+            ExtraHeaders::default(),
             serde_json::json!({"model": "m", "messages": [], "stream": true}),
             tx,
             Arc::new(Mutex::new(None)),
