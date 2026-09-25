@@ -126,6 +126,18 @@ impl Transcript {
         while prefix < limit && hash(&old[prefix]) == hash(&items[prefix]) {
             prefix += 1;
         }
+        // Older history revealed above an unchanged tail. Prefix-first matching
+        // would hand a prepended duplicate the original's id and renumber the
+        // real message, so when the whole old transcript is a suffix of the new
+        // one, keep the tail's ids and mint only the head. `prefix < m` excludes
+        // a pure append, where the old transcript is a prefix instead.
+        if n > m && prefix < m && (0..m).all(|i| hash(&old[i]) == hash(&items[n - m + i])) {
+            let mut ids: Vec<ItemId> = (0..n - m).map(|_| self.mint()).collect();
+            ids.extend(self.ids.iter().copied());
+            self.items = items;
+            self.ids = ids;
+            return;
+        }
         let mut suffix = 0;
         while suffix < limit - prefix && hash(&old[m - 1 - suffix]) == hash(&items[n - 1 - suffix])
         {
@@ -201,6 +213,24 @@ mod tests {
             vec!["a", "c"]
         );
         assert_eq!(t.ids().collect::<Vec<_>>(), vec![before[0], before[2]]);
+    }
+
+    #[test]
+    fn prepend_of_a_duplicate_keeps_the_originals_id() {
+        // Older history contains a word-for-word duplicate of the first visible
+        // message. Prefix-first matching would give the copy the original's id
+        // and renumber the real message; the tail must keep its ids.
+        let mut t = Transcript::from_items(users(&["x", "y", "z"]));
+        let (x, y, z) = (
+            t.id_at(0).unwrap(),
+            t.id_at(1).unwrap(),
+            t.id_at(2).unwrap(),
+        );
+        t.replace(users(&["x", "x", "y", "z"]));
+        assert_eq!(t.id_at(1), Some(x), "the original x keeps its id");
+        assert_eq!(t.id_at(2), Some(y));
+        assert_eq!(t.id_at(3), Some(z));
+        assert_ne!(t.id_at(0), Some(x), "the prepended duplicate is fresh");
     }
 
     #[test]

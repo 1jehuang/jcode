@@ -1,10 +1,10 @@
+use self::transcript::Transcript;
 use super::DisplayMessageRoleExt;
 use super::keybind::{
     CenteredToggleKeys, ModelSwitchKeys, OptionalBinding, ScrollKeys, WorkspaceNavigationKeys,
 };
 use super::markdown::IncrementalMarkdownRenderer;
 use super::stream_buffer::StreamBuffer;
-use self::transcript::Transcript;
 use crate::bus::{Bus, BusEvent, LoginCompleted, ToolEvent, ToolStatus};
 use crate::compaction::CompactionEvent;
 use crate::config::config;
@@ -639,6 +639,12 @@ pub(super) struct HistoryScrollAnchor {
     /// to detect when a frame with the newly-loaded content has rendered (its
     /// total differs), so the anchor can be reconciled into `scroll_offset`.
     pub base_total: usize,
+    /// Transcript length at capture. A resize rewraps the transcript and changes
+    /// `base_total` without loading anything, so the wrapped total alone would
+    /// let a resize resolve (and drop) this anchor before the requested history
+    /// arrives. Requiring the transcript to have actually grown distinguishes
+    /// the two.
+    pub base_msg_count: usize,
 }
 
 /// Resize anchor captured against the pre-resize geometry.

@@ -1228,7 +1228,7 @@ pub(super) fn build_body_from_base(
     }
     // The selected base shares this key's width/mode/image signature. Find the
     // longest message prefix whose hashes still match the current transcript.
-    let k = matching_prefix_len(prev.as_ref(), msg_count, |i| display_item_id(app, i));
+    let k = matching_prefix_len(prev.as_ref(), msg_count, |i| display_item_key(app, i));
     if k == prev_count && prev_count == msg_count {
         // Exact same messages (the body differs only by something not in the
         // cache key, e.g. a width-independent flag); reuse as-is.
@@ -1244,7 +1244,7 @@ pub(super) fn build_body_from_base(
     // Instead, when a message suffix still matches, render only the new head
     // and stitch the prepared suffix below it.
     let base_msgs = prev.message_boundaries.len();
-    let s = matching_suffix_len(prev.as_ref(), msg_count, |i| display_item_id(app, i))
+    let s = matching_suffix_len(prev.as_ref(), msg_count, |i| display_item_key(app, i))
         .min(base_msgs.saturating_sub(1))
         .min(msg_count.saturating_sub(1));
     if s > k {
@@ -1324,7 +1324,7 @@ struct BodyAcc {
     /// wrapped body at a boundary cleanly drops the message together with its
     /// leading blank. `raw_len_after` is the contiguous raw count, used to
     /// truncate the raw array in lockstep.
-    segments: Vec<(ItemId, usize, usize, usize)>,
+    segments: Vec<(ItemId, u64, usize, usize, usize)>,
     /// Next 1-based prompt number to assign. Seeded from the reused base in the
     /// incremental path so numbering continues without rescanning the prefix.
     prompt_num: usize,
@@ -1740,6 +1740,7 @@ fn render_message_into(
 
     acc.segments.push((
         display_item_id(ctx.app, msg_global_idx),
+        ctx.app.display_messages()[msg_global_idx].stable_cache_hash(),
         acc.lines.len(),
         acc.raw_plain_lines.len(),
         acc.user_prompt_texts.len(),
@@ -1926,6 +1927,7 @@ pub(super) fn prepare_body_incremental(
                 .into_iter()
                 .map(|b| MessageBoundary {
                     item_id: b.item_id,
+                    msg_hash: b.msg_hash,
                     wrapped_len: b.wrapped_len + prev_len,
                     raw_len: b.raw_len + prev_raw_len,
                     user_prompt_len: b.user_prompt_len + prev_prompt_len,
@@ -2002,39 +2004,58 @@ pub(super) fn display_item_id(app: &dyn TuiState, idx: usize) -> ItemId {
         .unwrap_or_else(|| ItemId(app.display_messages()[idx].stable_cache_hash()))
 }
 
+/// Identity *and* content of the message at `idx`: the pair the body-cache
+/// matchers compare. Identity alone is not enough, because an in-place edit
+/// keeps the item id while changing the content, so comparing only the id would
+/// reuse the pre-edit body.
+pub(super) fn display_item_key(app: &dyn TuiState, idx: usize) -> (ItemId, u64) {
+    (
+        display_item_id(app, idx),
+        app.display_messages()[idx].stable_cache_hash(),
+    )
+}
+
 /// Longest message prefix length `k` such that `base.message_boundaries[..k]`
 /// names the same items as the first `k` messages of the current transcript.
 /// Returns `0` when nothing matches (caller then does a full rebuild). Bounded
 /// by the shorter of the two lengths.
 ///
-/// Identity, not content: comparing the stable item id means an edited or
-/// duplicated message cannot masquerade as the one the cached prefix rendered.
+/// Compares identity *and* content: an in-place edit keeps its item id but
+/// changes the content hash, and must break the prefix so the changed message
+/// (and everything below it) re-renders instead of reusing the stale body.
 pub(super) fn matching_prefix_len(
     base: &PreparedMessages,
     msg_n: usize,
-    id_at: impl Fn(usize) -> ItemId,
+    key_at: impl Fn(usize) -> (ItemId, u64),
 ) -> usize {
     let limit = base.message_boundaries.len().min(msg_n);
     let mut k = 0;
-    while k < limit && base.message_boundaries[k].item_id == id_at(k) {
+    while k < limit && boundary_key(&base.message_boundaries[k]) == key_at(k) {
         k += 1;
     }
     k
 }
 
+fn boundary_key(boundary: &MessageBoundary) -> (ItemId, u64) {
+    (boundary.item_id, boundary.msg_hash)
+}
+
 /// Longest message suffix length `s` such that the last `s` boundaries of
 /// `base` name the same items as the last `s` entries of the current
 /// transcript. Used to detect a prepend (older compacted history loaded above
-/// an unchanged tail).
+/// an unchanged tail). Identity and content are both compared; see
+/// [`matching_prefix_len`].
 pub(super) fn matching_suffix_len(
     base: &PreparedMessages,
     msg_n: usize,
-    id_at: impl Fn(usize) -> ItemId,
+    key_at: impl Fn(usize) -> (ItemId, u64),
 ) -> usize {
     let base_n = base.message_boundaries.len();
     let limit = base_n.min(msg_n);
     let mut s = 0;
-    while s < limit && base.message_boundaries[base_n - 1 - s].item_id == id_at(msg_n - 1 - s) {
+    while s < limit
+        && boundary_key(&base.message_boundaries[base_n - 1 - s]) == key_at(msg_n - 1 - s)
+    {
         s += 1;
     }
     s
@@ -2305,6 +2326,7 @@ pub(super) fn prepare_body_prepended(
         boundaries.extend(prepared.message_boundaries[drop_msgs..].iter().map(|b| {
             MessageBoundary {
                 item_id: b.item_id,
+                msg_hash: b.msg_hash,
                 wrapped_len: shift_wrapped(b.wrapped_len),
                 raw_len: b.raw_len - cut_raw + head_raw_len,
                 user_prompt_len: b.user_prompt_len - cut_prompt + head_prompt_len,
@@ -2556,7 +2578,7 @@ fn wrap_lines_with_map(
     width: u16,
     edit_ranges: &[(usize, String, usize, usize, bool)],
     copy_ranges: &[RawCopyTarget],
-    segments: &[(ItemId, usize, usize, usize)],
+    segments: &[(ItemId, u64, usize, usize, usize)],
 ) -> PreparedMessages {
     let full_width = width.saturating_sub(1) as usize;
     let user_width = width.saturating_sub(2) as usize;
@@ -2693,14 +2715,17 @@ fn wrap_lines_with_map(
     let message_boundaries: Vec<MessageBoundary> = segments
         .iter()
         .map(
-            |&(item_id, lines_len_after, raw_len_after, user_prompt_len_after)| MessageBoundary {
-                item_id,
-                wrapped_len: raw_to_wrapped
-                    .get(lines_len_after)
-                    .copied()
-                    .unwrap_or(wrapped_lines.len()),
-                raw_len: raw_len_after,
-                user_prompt_len: user_prompt_len_after,
+            |&(item_id, msg_hash, lines_len_after, raw_len_after, user_prompt_len_after)| {
+                MessageBoundary {
+                    item_id,
+                    msg_hash,
+                    wrapped_len: raw_to_wrapped
+                        .get(lines_len_after)
+                        .copied()
+                        .unwrap_or(wrapped_lines.len()),
+                    raw_len: raw_len_after,
+                    user_prompt_len: user_prompt_len_after,
+                }
             },
         )
         .collect();

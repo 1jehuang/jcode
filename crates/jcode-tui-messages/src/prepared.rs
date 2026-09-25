@@ -62,6 +62,13 @@ pub struct MessageBoundary {
     /// the transcript. Survives prepends, removals and compaction re-syncs, so
     /// it names the message where a content hash could only name its content.
     pub item_id: ItemId,
+    /// `stable_cache_hash()` of the source `DisplayMessage`. The body-cache
+    /// matchers compare this alongside `item_id`: identity alone is not enough,
+    /// because an in-place edit (an upserted plan graph, a finalized tool
+    /// result, a rewritten maintenance card) changes the content without
+    /// minting a new id, and a prefix match on identity alone would reuse the
+    /// pre-edit body.
+    pub msg_hash: u64,
     /// Cumulative `wrapped_lines` length after this message was rendered
     /// (including any blank separator line that preceded it).
     pub wrapped_len: usize,

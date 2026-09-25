@@ -207,6 +207,7 @@ fn matching_suffix_len_detects_prepended_history() {
             .iter()
             .map(|m| MessageBoundary {
                 item_id: ItemId(m.stable_cache_hash()),
+                msg_hash: m.stable_cache_hash(),
                 wrapped_len: 0,
                 raw_len: 0,
                 user_prompt_len: 0,
@@ -222,9 +223,10 @@ fn matching_suffix_len_detects_prepended_history() {
     ];
     new_msgs.extend(old.iter().cloned());
     assert_eq!(
-        matching_suffix_len(&base, new_msgs.len(), |i| ItemId(
-            new_msgs[i].stable_cache_hash()
-        )),
+        matching_suffix_len(&base, new_msgs.len(), |i| {
+            let m = &new_msgs[i];
+            (ItemId(m.stable_cache_hash()), m.stable_cache_hash())
+        }),
         4
     );
 
@@ -232,16 +234,62 @@ fn matching_suffix_len_detects_prepended_history() {
     let mut changed = new_msgs.clone();
     changed.last_mut().unwrap().content = "edited".to_string();
     assert_eq!(
-        matching_suffix_len(&base, changed.len(), |i| ItemId(
-            changed[i].stable_cache_hash()
-        )),
+        matching_suffix_len(&base, changed.len(), |i| {
+            let m = &changed[i];
+            (ItemId(m.stable_cache_hash()), m.stable_cache_hash())
+        }),
         0
     );
 
     // Identical transcript: full suffix match.
     assert_eq!(
-        matching_suffix_len(&base, old.len(), |i| ItemId(old[i].stable_cache_hash())),
+        matching_suffix_len(&base, old.len(), |i| {
+            let m = &old[i];
+            (ItemId(m.stable_cache_hash()), m.stable_cache_hash())
+        }),
         4
+    );
+}
+
+/// An in-place edit keeps its item id but changes the content hash. The prefix
+/// matcher must stop there rather than return the cached prefix verbatim, which
+/// is what rendered stale text for an edited message.
+#[test]
+fn matching_prefix_len_stops_at_a_same_id_content_edit() {
+    use jcode_tui_messages::{ItemId, MessageBoundary};
+
+    let base = PreparedMessages {
+        wrapped_lines: Vec::new(),
+        wrapped_plain_lines: Arc::new(Vec::new()),
+        wrapped_copy_offsets: Arc::new(Vec::new()),
+        raw_plain_lines: Arc::new(Vec::new()),
+        wrapped_line_map: Arc::new(Vec::new()),
+        wrapped_user_indices: Vec::new(),
+        wrapped_user_prompt_starts: Vec::new(),
+        wrapped_user_prompt_ends: Vec::new(),
+        user_prompt_texts: Vec::new(),
+        image_regions: Vec::new(),
+        edit_tool_ranges: Vec::new(),
+        copy_targets: Vec::new(),
+        message_boundaries: vec![MessageBoundary {
+            item_id: ItemId(7),
+            msg_hash: 100,
+            wrapped_len: 0,
+            raw_len: 0,
+            user_prompt_len: 0,
+        }],
+        mermaid_pending_epoch: None,
+    };
+
+    assert_eq!(
+        matching_prefix_len(&base, 1, |_| (ItemId(7), 100)),
+        1,
+        "same identity and content still matches"
+    );
+    assert_eq!(
+        matching_prefix_len(&base, 1, |_| (ItemId(7), 101)),
+        0,
+        "same identity with edited content must not match"
     );
 }
 

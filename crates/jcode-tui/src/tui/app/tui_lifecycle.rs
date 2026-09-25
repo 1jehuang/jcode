@@ -1,6 +1,6 @@
 use super::state_ui::RestoredReloadInput;
-use super::*;
 use super::transcript::Transcript;
+use super::*;
 use crate::tui::{backend, keybind};
 
 impl App {

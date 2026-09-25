@@ -97,6 +97,7 @@ mod tests {
             cumulative += rows;
             boundaries.push(MessageBoundary {
                 item_id: ItemId(*hash),
+                msg_hash: *hash,
                 wrapped_len: cumulative,
                 raw_len: 0,
                 user_prompt_len: 0,
@@ -131,11 +132,7 @@ mod tests {
         let f = frame(&[(1, 3), (2, 1), (3, 2)]);
         assert_eq!(
             message_row_ranges(&f),
-            vec![
-                (ItemId(1), 0, 3),
-                (ItemId(2), 3, 1),
-                (ItemId(3), 4, 2)
-            ]
+            vec![(ItemId(1), 0, 3), (ItemId(2), 3, 1), (ItemId(3), 4, 2)]
         );
         assert_eq!(message_row_ranges(&f).len(), 3);
         assert_eq!(f.total_wrapped_lines(), 6);

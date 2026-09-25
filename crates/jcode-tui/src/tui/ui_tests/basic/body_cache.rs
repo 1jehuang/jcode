@@ -1021,7 +1021,7 @@ fn test_prefix_reuse_tail_edit_matches_full_build() {
 
     let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
     let k =
-        super::prepare::matching_prefix_len(base.as_ref(), edited_state.display_messages.len(), |i| super::prepare::display_item_id(&edited_state, i));
+        super::prepare::matching_prefix_len(base.as_ref(), edited_state.display_messages.len(), |i| super::prepare::display_item_key(&edited_state, i));
     assert_eq!(k, 3, "only the last message changed");
 
     let mut reuse = base;
@@ -1055,7 +1055,7 @@ fn test_prefix_reuse_append_matches_full_build() {
     };
 
     let base = Arc::new(super::prepare::prepare_body(&base_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), grown_state.display_messages.len(), |i| super::prepare::display_item_id(&grown_state, i));
+    let k = super::prepare::matching_prefix_len(base.as_ref(), grown_state.display_messages.len(), |i| super::prepare::display_item_key(&grown_state, i));
     assert_eq!(k, 2);
     let reuse = super::prepare::prepare_body_incremental(&grown_state, width, base, k);
     let full = super::prepare::prepare_body(&grown_state, width, false);
@@ -1087,7 +1087,7 @@ fn test_prefix_reuse_truncation_matches_full_build() {
     };
 
     let base = Arc::new(super::prepare::prepare_body(&long_state, width, false));
-    let k = super::prepare::matching_prefix_len(base.as_ref(), short_state.display_messages.len(), |i| super::prepare::display_item_id(&short_state, i));
+    let k = super::prepare::matching_prefix_len(base.as_ref(), short_state.display_messages.len(), |i| super::prepare::display_item_key(&short_state, i));
     assert_eq!(k, 2);
     let mut reuse = base;
     super::prepare::truncate_prepared_to_boundary(Arc::make_mut(&mut reuse), k);

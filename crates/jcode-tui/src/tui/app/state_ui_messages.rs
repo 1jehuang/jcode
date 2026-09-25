@@ -659,6 +659,7 @@ impl App {
         self.pending_history_anchor = Some(super::HistoryScrollAnchor {
             lines_from_bottom,
             base_total: total,
+            base_msg_count: self.display_messages.len(),
         });
     }
 
@@ -669,9 +670,15 @@ impl App {
             return false;
         };
         let total = crate::tui::ui::last_total_wrapped_lines();
-        // Wait until a frame with the prepended content has actually rendered
-        // (its total wrapped-line count differs from the captured base).
-        if total == 0 || total == anchor.base_total {
+        // Wait until a frame with the prepended content has actually rendered:
+        // the wrapped total must differ from the captured base *and* the
+        // transcript must have grown. A resize alone changes the total without
+        // adding messages, and must not resolve (and drop) this anchor before
+        // the requested history arrives.
+        if total == 0
+            || total == anchor.base_total
+            || self.display_messages.len() == anchor.base_msg_count
+        {
             return false;
         }
         let resolved = crate::tui::ui::last_resolved_chat_scroll();
