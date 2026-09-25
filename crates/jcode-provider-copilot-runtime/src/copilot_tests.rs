@@ -785,15 +785,22 @@ fn fork_propagates_responses_model_ids() {
         let mut ids = provider.responses_model_ids.write().unwrap();
         ids.insert("grok-4.7".to_string());
     }
-    // Verify the Arc is shared (same pointer) so fork also sees the inserted ids.
-    // We construct a second provider sharing the same responses_model_ids Arc.
-    let forked = make_test_provider(Vec::new());
-    // Point forked at the same Arc
+    // Simulate what Provider::fork does: clone the Arc (shared pointer).
+    let forked_ids = provider.responses_model_ids.clone();
+    // IDs present before the fork are visible through the shared Arc.
+    assert!(forked_ids.read().unwrap().contains("grok-4.7"));
+    assert!(!forked_ids.read().unwrap().contains("claude-opus-4.6"));
+    // IDs inserted after the fork are also visible through the same Arc.
     {
-        let shared = provider.responses_model_ids.clone();
-        *forked.responses_model_ids.write().unwrap() =
-            shared.read().unwrap().clone();
+        let mut ids = provider.responses_model_ids.write().unwrap();
+        ids.insert("gpt-5.5".to_string());
     }
-    assert!(forked.model_needs_responses_api("grok-4.7"));
-    assert!(!forked.model_needs_responses_api("claude-opus-4.6"));
+    assert!(forked_ids.read().unwrap().contains("gpt-5.5"));
+    // Verify model_needs_responses_api sees the fork-shared set via a second provider
+    // built using the same Arc, mirroring what CopilotApiProvider::fork() does.
+    let mut forked_provider = make_test_provider(Vec::new());
+    forked_provider.responses_model_ids = provider.responses_model_ids.clone();
+    assert!(forked_provider.model_needs_responses_api("grok-4.7"));
+    assert!(forked_provider.model_needs_responses_api("gpt-5.5"));
+    assert!(!forked_provider.model_needs_responses_api("claude-opus-4.6"));
 }

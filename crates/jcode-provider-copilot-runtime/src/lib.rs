@@ -20,7 +20,6 @@ use jcode_provider_copilot::{
     build_messages as build_copilot_messages, build_tools as build_copilot_tools,
 };
 use jcode_provider_copilot::{DEFAULT_MODEL, FALLBACK_MODELS};
-use jcode_provider_openai::stream::parse_openai_response_event;
 pub use jcode_provider_core::PremiumMode;
 use jcode_provider_core::{EventStream, Provider};
 use serde_json::{Value, json};
@@ -69,14 +68,6 @@ fn copilot_model_supports_reasoning_effort(model: &str) -> bool {
 
 fn copilot_model_uses_responses_api(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("gpt-5.6")
-}
-
-fn copilot_api_path(uses_responses_api: bool) -> &'static str {
-    if uses_responses_api {
-        "responses"
-    } else {
-        "chat/completions"
-    }
 }
 
 impl CopilotApiProvider {
@@ -421,13 +412,16 @@ impl CopilotApiProvider {
     }
 
     /// Returns true when `model` should be routed to `/responses` rather
-    /// than `/chat/completions`. Falls back to `false` (chat/completions) for
-    /// models not seen in the catalog (safe default for older entries).
+    /// than `/chat/completions`. Checks the live catalog first (populated from
+    /// /models on startup), then falls back to the static prefix heuristic so
+    /// responses-only models work even when the catalog has not been fetched yet.
     fn model_needs_responses_api(&self, model: &str) -> bool {
-        self.responses_model_ids
+        let in_catalog = self
+            .responses_model_ids
             .read()
             .unwrap_or_else(|p| p.into_inner())
-            .contains(model)
+            .contains(model);
+        in_catalog || copilot_model_uses_responses_api(model)
     }
 
     pub fn complete_init_without_tier_detection(&self) {
@@ -538,9 +532,12 @@ impl CopilotApiProvider {
                 }
             };
 
-            // Route to /responses (OpenAI Responses API) for grok and other
-            // models that are not accessible via /chat/completions.
-            let use_responses_api = self.model_needs_responses_api(&model);
+            // Route to /responses for models flagged by caller or by catalog.
+            // uses_responses_api (from complete()) covers the static prefix heuristic
+            // (gpt-5.6-*). model_needs_responses_api covers the live catalog
+            // (grok-4.x, gpt-5.5, etc), so both paths work even if the catalog
+            // hasn't been fetched yet on first start.
+            let use_responses_api = uses_responses_api || self.model_needs_responses_api(&model);
 
             let request_id = Uuid::new_v4().to_string();
 
@@ -556,90 +553,8 @@ impl CopilotApiProvider {
             };
 
             if use_responses_api {
-                // Build Responses API request from the pre-built chat messages.
-                // Re-derive from the original messages via build_responses_input.
-                // (messages here is already the chat-format Vec<Value>; we pass
-                // a sentinel None system and rebuild from the raw messages field.)
-                // For the Responses API, rebuild input from the raw messages (already chat-format Vec<Value>).
-                // The key difference: use /responses endpoint with Responses API format.
-                let instructions = messages
-                    .first()
-                    .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
-                    .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                    .unwrap_or("")
-                    .to_string();
-                // Build the non-system messages as input items for the Responses API.
-                let api_input: Vec<Value> = messages.iter().skip(
-                    if messages.first().map(|m| m.get("role").and_then(|r| r.as_str()) == Some("system")).unwrap_or(false) { 1 } else { 0 }
-                ).map(|m| {
-                    let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
-                    match role {
-                        "assistant" => {
-                            let mut parts = Vec::new();
-                            if let Some(content) = m.get("content").and_then(|c| c.as_str()) {
-                                if !content.is_empty() {
-                                    parts.push(json!({"type": "output_text", "text": content}));
-                                }
-                            }
-                            if let Some(tool_calls) = m.get("tool_calls").and_then(|tc| tc.as_array()) {
-                                for tc in tool_calls {
-                                    let fn_obj = tc.get("function");
-                                    parts.push(json!({
-                                        "type": "function_call",
-                                        "call_id": tc.get("id").and_then(|i| i.as_str()).unwrap_or(""),
-                                        "name": fn_obj.and_then(|f| f.get("name")).and_then(|n| n.as_str()).unwrap_or(""),
-                                        "arguments": fn_obj.and_then(|f| f.get("arguments")).and_then(|a| a.as_str()).unwrap_or("{}"),
-                                    }));
-                                }
-                            }
-                            json!({"type": "message", "role": "assistant", "content": parts})
-                        }
-                        "tool" => {
-                            json!({
-                                "type": "function_call_output",
-                                "call_id": m.get("tool_call_id").and_then(|id| id.as_str()).unwrap_or(""),
-                                "output": m.get("content").and_then(|c| c.as_str()).unwrap_or(""),
-                            })
-                        }
-                        _ => {
-                            // user message
-                            let text = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                            json!({
-                                "type": "message",
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": text}]
-                            })
-                        }
-                    }
-                }).collect();
-
-                // Build the tools in Responses API format.
-                let api_tools: Vec<Value> = tools.iter().map(|t| {
-                    if let Some(func) = t.get("function") {
-                        json!({
-                            "type": "function",
-                            "name": func.get("name").and_then(|n| n.as_str()).unwrap_or(""),
-                            "description": func.get("description").and_then(|d| d.as_str()).unwrap_or(""),
-                            "parameters": func.get("parameters").cloned().unwrap_or(json!({})),
-                        })
-                    } else {
-                        t.clone()
-                    }
-                }).collect();
-
-                let mut body = json!({
-                    "model": model,
-                    "instructions": instructions,
-                    "input": api_input,
-                    "stream": true,
-                    "store": false,
-                });
-                if !api_tools.is_empty() {
-                    body["tools"] = json!(api_tools);
-                    body["tool_choice"] = json!("auto");
-                }
-                body["max_output_tokens"] = json!(max_tokens);
-
+                // The canonical payload was already built in Responses API format
+                // by complete(). Post it directly; the retry loop handles transient failures.
                 let resp = attempt_client
                     .post(format!("{}/responses", copilot_auth::COPILOT_API_BASE))
                     .header("Authorization", format!("Bearer {}", bearer_token))
@@ -647,7 +562,10 @@ impl CopilotApiProvider {
                     .header("Editor-Plugin-Version", copilot_auth::EDITOR_PLUGIN_VERSION)
                     .header("Copilot-Integration-Id", copilot_auth::COPILOT_INTEGRATION_ID)
                     .header("Content-Type", "application/json")
+                    .header("X-Initiator", initiator)
                     .header("X-Request-Id", &request_id)
+                    .header("Openai-Intent", "conversation-panel")
+                    .header("Openai-Organization", "github-copilot")
                     .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
                     .header("Vscode-Sessionid", &self.session_id)
                     .header("Vscode-Machineid", &self.machine_id)
@@ -658,49 +576,104 @@ impl CopilotApiProvider {
                 let resp = match resp {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("Copilot Responses API request failed: {}", e))).await;
+                        let error_str = format!("{e:#}").to_lowercase();
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            jcode_base::logging::info(&format!(
+                                "Transient Copilot Responses error, will retry: {}", e
+                            ));
+                            last_error =
+                                Some(anyhow::anyhow!("Copilot Responses request failed: {}", e));
+                            continue;
+                        }
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!("Copilot Responses request failed: {}", e)))
+                            .await;
                         return;
                     }
                 };
 
-                if !resp.status().is_success() {
-                    let status = resp.status();
-                    let body_text = jcode_base::util::http_error_body(resp, "HTTP error").await;
-                    let _ = tx.send(Err(anyhow::anyhow!("Copilot API error (HTTP {}): {}", status, body_text))).await;
+                let status = resp.status();
+                if Self::is_auth_error(status) && !attempted_auth_refresh {
+                    attempted_auth_refresh = true;
+                    *self.bearer_token.write().await = None;
+                    jcode_base::logging::info("Copilot bearer token expired, refreshing...");
+                    last_error = Some(anyhow::anyhow!("Copilot auth error (HTTP {})", status));
+                    continue;
+                }
+
+                if !status.is_success() {
+                    let body_text =
+                        jcode_base::util::http_error_body(resp, "HTTP error").await;
+                    let error_str =
+                        format!("Copilot API error (HTTP {}): {}", status, body_text)
+                            .to_lowercase();
+                    if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                        jcode_base::logging::info(&format!(
+                            "Retryable Copilot Responses HTTP error: {}", error_str
+                        ));
+                        last_error = Some(anyhow::anyhow!(
+                            "Copilot API error (HTTP {}): {}", status, body_text
+                        ));
+                        continue;
+                    }
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!(
+                            "Copilot API error (HTTP {}): {}", status, body_text
+                        )))
+                        .await;
                     return;
                 }
 
-                let _ = tx.send(Ok(StreamEvent::ConnectionType {
-                    connection: format!("copilot-responses-api ({})", model),
-                })).await;
+                let _ = tx
+                    .send(Ok(StreamEvent::ConnectionType {
+                        connection: format!("copilot-responses-api ({})", model),
+                    }))
+                    .await;
 
-                // Parse using the standard OpenAI Responses API SSE parser.
-                match self.process_responses_sse_stream(resp, tx.clone()).await {
-                    Ok(()) => return,
+                let (attempt_tx, attempt_guard) =
+                    jcode_provider_core::attempt_tracker::track_attempt_output(tx.clone());
+
+                match self.process_responses_sse_stream(resp, attempt_tx).await {
+                    Ok(()) => {
+                        let _ = attempt_guard.finish().await;
+                        return;
+                    }
                     Err(e) => {
+                        let saw_output = attempt_guard.finish().await;
+                        let error_str = format!("{e:#}").to_lowercase();
+                        if is_retryable_error(&error_str) && attempt + 1 < MAX_RETRIES {
+                            if saw_output {
+                                jcode_base::logging::warn(&format!(
+                                    "Copilot Responses stream failed after partial output                                      (attempt {}/{}); rolling back and retrying: {}",
+                                    attempt + 1, MAX_RETRIES, e
+                                ));
+                                let _ = tx
+                                    .send(Ok(StreamEvent::RetryRollback {
+                                        attempt: attempt + 2,
+                                        max: MAX_RETRIES,
+                                    }))
+                                    .await;
+                            } else {
+                                jcode_base::logging::info(&format!(
+                                    "Copilot Responses stream failed (attempt {}/{}),                                      will retry: {}",
+                                    attempt + 1, MAX_RETRIES, e
+                                ));
+                            }
+                            last_error = Some(e);
+                            continue;
+                        }
                         let _ = tx.send(Err(e)).await;
                         return;
                     }
                 }
             }
 
-            let mut body = json!({
-                "model": model,
-                "messages": messages,
-                "stream": true,
-            });
-            Self::add_max_token_parameter(&mut body, &model, max_tokens);
-            self.add_reasoning_effort_parameter(&mut body, &model);
-
-            if !tools.is_empty() {
-                body["tools"] = json!(tools);
-            }
+            // body is already the pre-built canonical chat-completions payload from complete().
 
             let resp = attempt_client
                 .post(format!(
-                    "{}/{}",
-                    copilot_auth::COPILOT_API_BASE,
-                    copilot_api_path(uses_responses_api)
+                    "{}/chat/completions",
+                    copilot_auth::COPILOT_API_BASE
                 ))
                 .header("Authorization", format!("Bearer {}", bearer_token))
                 .header("Editor-Version", copilot_auth::EDITOR_VERSION)
@@ -1086,78 +1059,7 @@ impl CopilotApiProvider {
         Ok(())
     }
 
-    async fn process_responses_sse_stream(
-        &self,
-        resp: reqwest::Response,
-        tx: mpsc::Sender<Result<StreamEvent>>,
-    ) -> Result<()> {
-        use futures::StreamExt;
-        use std::collections::{HashMap, HashSet, VecDeque};
 
-        let sse_chunk_timeout = jcode_base::provider::stream_idle_timeout();
-        let mut stream = resp.bytes_stream();
-        let mut buffer = String::new();
-        let mut saw_text_delta = false;
-        let mut saw_thinking_delta = false;
-        let mut streaming_tool_calls: HashMap<String, jcode_provider_openai::stream::StreamingToolCallState> = HashMap::new();
-        let mut completed_tool_items: HashSet<String> = HashSet::new();
-        let mut pending: VecDeque<StreamEvent> = VecDeque::new();
-
-        loop {
-            let chunk = match tokio::time::timeout(sse_chunk_timeout, stream.next()).await {
-                Ok(Some(Ok(c))) => c,
-                Ok(Some(Err(e))) => anyhow::bail!("Responses stream error: {}", e),
-                Ok(None) => break,
-                Err(_) => anyhow::bail!(
-                    "Responses stream read timeout: no data received for {} seconds",
-                    sse_chunk_timeout.as_secs()
-                ),
-            };
-
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim_end_matches('\r').to_string();
-                buffer = buffer[line_end + 1..].to_string();
-
-                if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
-                    continue;
-                }
-
-                if let Some(data) = jcode_base::util::sse_data_line(&line) {
-                    if let Some(event) = parse_openai_response_event(
-                        data,
-                        &mut saw_text_delta,
-                        &mut saw_thinking_delta,
-                        &mut streaming_tool_calls,
-                        &mut completed_tool_items,
-                        &mut pending,
-                    ) {
-                        match &event {
-                            StreamEvent::MessageEnd { .. } => {
-                                let _ = tx.send(Ok(event)).await;
-                                return Ok(());
-                            }
-                            _ => {
-                                let _ = tx.send(Ok(event)).await;
-                            }
-                        }
-                    }
-                    // Flush any pending events
-                    while let Some(pending_event) = pending.pop_front() {
-                        let is_end = matches!(pending_event, StreamEvent::MessageEnd { .. });
-                        let _ = tx.send(Ok(pending_event)).await;
-                        if is_end {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-
-        let _ = tx.send(Ok(StreamEvent::MessageEnd { stop_reason: None })).await;
-        Ok(())
-    }
 }
 
 fn is_retryable_error(error_str: &str) -> bool {
