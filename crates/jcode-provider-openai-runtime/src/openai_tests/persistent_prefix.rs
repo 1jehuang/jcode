@@ -56,6 +56,11 @@ async fn prefix_test_complete(provider: &OpenAIProvider, messages: &[ChatMessage
 }
 
 async fn prefix_test_provider() -> OpenAIProvider {
+    // Mark the model available so request setup never schedules a background
+    // `/models` fetch: that GET would land on the fixture's single accept.
+    // Without this, the fixture only passed when the developer's real catalog
+    // cache already listed the model.
+    jcode_base::provider::populate_account_models(vec!["gpt-5.6-sol".to_string()]);
     let provider = OpenAIProvider::new(prewarm_test_credentials());
     *provider.credentials.write().await = prewarm_test_credentials();
     provider.set_model("gpt-5.6-sol").unwrap();
