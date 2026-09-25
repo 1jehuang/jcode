@@ -382,6 +382,120 @@ sell or to train models. If that ever changes, it will be a separate, clearly di
 We do not attempt to re-identify users from telemetry, and the client does not link
 telemetry to account identity.
 
+## OpenTelemetry (OTEL) Export
+
+Jcode optionally exports spans to an OpenTelemetry-compatible collector endpoint.
+This is entirely separate from the anonymous usage telemetry described above and is
+disabled by default. No spans are sent unless you set an endpoint environment variable.
+
+### Enabling OTEL Export
+
+```bash
+# Full traces URL (takes priority over the base endpoint)
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
+
+# Or set the base URL; jcode appends /v1/traces automatically
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+### Supported Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(none)_ | Full traces endpoint URL. Takes priority over base endpoint. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Base collector URL. Jcode appends `/v1/traces`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/json` | Wire format: `http/json` or `http/protobuf`. `grpc` warns and falls back to `http/json`. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | _(none)_ | Extra HTTP headers, `Key=Value,Key2=Value2` format. Used for authorization. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Request timeout in milliseconds. |
+| `OTEL_SERVICE_NAME` | `jcode` | `service.name` resource attribute. |
+| `OTEL_SERVICE_VERSION` | _(package version)_ | `service.version` resource attribute. |
+| `OTEL_RESOURCE_ATTRIBUTES` | _(none)_ | Extra resource attributes, `Key=Value,Key2=Value2` format. |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `false` | Acknowledged; content is **never** captured regardless of this setting. |
+
+### Span Schema
+
+**Session span** (`jcode.session`) is emitted when a session ends:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `jcode.session.id` | string | Session UUID |
+| `jcode.session.correlation_id` | string | Correlation UUID for cross-event joins |
+| `jcode.provider` | string | LLM provider (e.g. `anthropic`) |
+| `jcode.model` | string | Model identifier |
+| `jcode.session.end_reason` | string | Why the session ended (e.g. `normal_exit`) |
+| `jcode.session.turns` | int | Number of turns |
+| `jcode.tokens.input` | int | Total input tokens |
+| `jcode.tokens.output` | int | Total output tokens |
+| `jcode.tokens.total` | int | Total tokens |
+| `jcode.tool_calls` | int | Total tool call attempts |
+| `jcode.tool_failures` | int | Failed tool calls |
+| `jcode.session.resumed` | bool | Whether this was a resumed session |
+| `jcode.session.parent_id` | string | Parent session ID (swarm/subagent sessions only) |
+| `jcode.os` | string | Operating system (e.g. `linux`, `windows`, `macos`) |
+| `jcode.arch` | string | CPU architecture (e.g. `x86_64`, `aarch64`) |
+| `jcode.version` | string | Jcode version |
+
+Resource attributes (on the `ResourceSpans` envelope, not the span itself):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `service.name` | string | From `OTEL_SERVICE_NAME` (default: `jcode`) |
+| `service.version` | string | From `OTEL_SERVICE_VERSION` (default: Jcode version) |
+
+**Turn span** (`jcode.turn`) is emitted when each user turn completes. Its
+`parent_span_id` points to the session span, forming a parent-child trace tree.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `jcode.session.id` | string | Parent session UUID |
+| `jcode.provider` | string | LLM provider |
+| `jcode.model` | string | Model identifier |
+| `jcode.turn.index` | int | 1-based turn number |
+| `jcode.tokens.input` | int | Input tokens for this turn |
+| `jcode.tokens.output` | int | Output tokens for this turn |
+| `jcode.tokens.total` | int | Total tokens for this turn |
+| `jcode.tool_calls` | int | Tool calls in this turn |
+| `jcode.tool_failures` | int | Failed tool calls in this turn |
+| `jcode.tool_calls.executed` | int | Actually-executed tool calls (after user approval) |
+| `jcode.file_writes` | int | File write calls |
+| `jcode.tests.run` | int | Tests run |
+| `jcode.tests.passed` | int | Tests passed |
+| `jcode.turn.success` | bool | Whether the turn produced useful output |
+| `jcode.turn.abandoned` | bool | Whether the turn had no useful output or failures |
+| `jcode.turn.end_reason` | string | Why the turn ended |
+
+### Privacy Guarantees
+
+OTEL spans **never** contain:
+
+- Prompt text or conversation content
+- File contents or source code
+- Tool inputs or outputs
+- Model response text
+
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` has no effect; content
+capture is unconditionally disabled.
+
+Spans contain only numeric metrics (token counts, durations), categorical labels
+(provider name, model name, end reason), and UUID identifiers.
+
+### Wire Format
+
+Both `http/json` and `http/protobuf` use a hand-rolled HTTP/1.1 POST over a stdlib
+`TcpStream` with no gRPC dependency and no additional crate dependencies. The
+protobuf encoder is also hand-rolled. This transport is safe to use from both
+async (tokio) and sync calling contexts. For enterprise collectors that require
+binary encoding (e.g. the Emerson endpoint), set
+`OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`.
+
+### Independence from Anonymous Telemetry Opt-Out
+
+OTEL export is **independent** of anonymous usage telemetry. Setting
+`JCODE_NO_TELEMETRY=1` or creating the `~/.jcode/no_telemetry` marker file
+disables only the anonymous telemetry POSTs to Jcode's Cloudflare backend. It has
+no effect on OTEL export. If an `OTEL_EXPORTER_OTLP_*` endpoint is configured,
+spans are exported regardless of the anonymous telemetry opt-out setting.
+
 ## How It Works
 
 1. On first launch, jcode generates a random UUID and sends an `install` event
