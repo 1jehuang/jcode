@@ -79,7 +79,8 @@ pub enum NodeKind {
         direction: Axis,
         #[serde(default)]
         gap: Space,
-        #[serde(default)]
+        /// Defaults to none: containers, not stacks, own insets.
+        #[serde(default = "no_space")]
         padding: Space,
         #[serde(default)]
         align: Align,
@@ -304,6 +305,9 @@ pub const KNOWN_TYPES: &[&str] = &[
 
 fn default_true() -> bool {
     true
+}
+fn no_space() -> Space {
+    Space::None
 }
 fn default_grid_column() -> u32 {
     160
