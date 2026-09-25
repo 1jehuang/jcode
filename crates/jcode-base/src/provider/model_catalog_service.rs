@@ -104,6 +104,21 @@ impl ModelCatalogService {
         self.replace_scope_models_inner(scope, models, observed_at, fetched_at)
     }
 
+    /// Hydrate from a snapshot that must not count as fresh (for example one
+    /// written before the persisted schema gained fields), keeping its real
+    /// `observed_at` for display while letting the next refresh run at once.
+    pub(crate) fn hydrate_scope_models_from_stale_snapshot(
+        &self,
+        scope: &str,
+        models: HashSet<String>,
+        observed_at: SystemTime,
+    ) -> bool {
+        let fetched_at = Instant::now()
+            .checked_sub(self.cache_ttl + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+        self.replace_scope_models_inner(scope, models, observed_at, fetched_at)
+    }
+
     fn replace_scope_models_inner(
         &self,
         scope: &str,
@@ -391,6 +406,24 @@ mod tests {
 
         assert!(service.is_fresh("default"));
         assert!(!service.should_refresh("default"));
+    }
+
+    #[test]
+    fn hydrating_old_schema_snapshot_forces_refresh_but_keeps_observed_at() {
+        let service = service();
+        let models = HashSet::from(["gpt-5.5".to_string()]);
+
+        // Even a seconds-old snapshot must refresh when its schema is outdated.
+        let observed_at = SystemTime::now() - Duration::from_secs(5);
+        assert!(service.hydrate_scope_models_from_stale_snapshot("default", models, observed_at));
+
+        assert_eq!(
+            service.model_ids("default"),
+            Some(vec!["gpt-5.5".to_string()])
+        );
+        assert!(!service.is_fresh("default"));
+        assert!(service.should_refresh("default"));
+        assert_eq!(service.observed_at("default"), Some(observed_at));
     }
 
     #[test]
