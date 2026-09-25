@@ -1,8 +1,41 @@
 use super::*;
 use tokio_tungstenite::tungstenite::handshake::server::Request;
 
+/// `DeviceRegistry` persists every pairing change to `$JCODE_HOME/devices.json`
+/// (default `~/.jcode`). Without this, registry tests paired a fake
+/// "Test iPhone" into the developer's real device registry on every run.
+struct TempHome {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<std::ffi::OsString>,
+    _temp: tempfile::TempDir,
+}
+
+impl TempHome {
+    fn new() -> Self {
+        let lock = crate::storage::lock_test_env();
+        let temp = tempfile::tempdir().expect("temp dir");
+        let previous = std::env::var_os("JCODE_HOME");
+        crate::env::set_var("JCODE_HOME", temp.path());
+        Self {
+            _lock: lock,
+            previous,
+            _temp: temp,
+        }
+    }
+}
+
+impl Drop for TempHome {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => crate::env::set_var("JCODE_HOME", value),
+            None => crate::env::remove_var("JCODE_HOME"),
+        }
+    }
+}
+
 #[test]
 fn test_device_registry_pairing() {
+    let _home = TempHome::new();
     let mut registry = DeviceRegistry::default();
 
     // Generate pairing code
@@ -18,8 +51,60 @@ fn test_device_registry_pairing() {
     assert!(!registry.validate_code(&code));
 }
 
+/// A different 6-digit code than `code`, so the guess is always wrong.
+fn wrong_code(code: &str) -> String {
+    let n: u32 = code.parse().unwrap();
+    format!("{:06}", (n + 1) % 1_000_000)
+}
+
+#[test]
+fn failed_pairing_guesses_revoke_pending_codes_at_the_cap() {
+    let _home = TempHome::new();
+    let mut registry = DeviceRegistry::default();
+    let code = registry.generate_pairing_code();
+
+    for _ in 0..registry::MAX_FAILED_PAIRING_ATTEMPTS {
+        assert!(!registry.validate_code(&wrong_code(&code)));
+    }
+    assert!(registry.pending_codes.is_empty());
+    // The real code no longer works: enumeration cannot outlast the cap.
+    assert!(!registry.validate_code(&code));
+
+    // The counter survives the reload the gateway does on every request.
+    let reloaded = DeviceRegistry::load();
+    assert!(reloaded.pending_codes.is_empty());
+
+    // A freshly issued code resets the budget and works.
+    let fresh = registry.generate_pairing_code();
+    assert_eq!(registry.failed_pairing_attempts, 0);
+    assert!(registry.validate_code(&fresh));
+}
+
+#[test]
+fn a_few_typos_still_allow_pairing() {
+    let _home = TempHome::new();
+    let mut registry = DeviceRegistry::default();
+    let code = registry.generate_pairing_code();
+
+    for _ in 1..registry::MAX_FAILED_PAIRING_ATTEMPTS {
+        assert!(!registry.validate_code(&wrong_code(&code)));
+    }
+    let mut reloaded = DeviceRegistry::load();
+    assert!(reloaded.validate_code(&code));
+    assert_eq!(reloaded.failed_pairing_attempts, 0);
+}
+
+#[test]
+fn guesses_without_pending_codes_are_not_counted() {
+    let _home = TempHome::new();
+    let mut registry = DeviceRegistry::default();
+    assert!(!registry.validate_code("123456"));
+    assert_eq!(registry.failed_pairing_attempts, 0);
+}
+
 #[test]
 fn test_device_registry_token_auth() {
+    let _home = TempHome::new();
     let mut registry = DeviceRegistry::default();
 
     // Pair a device
@@ -40,6 +125,7 @@ fn test_device_registry_token_auth() {
 
 #[test]
 fn test_device_re_pairing() {
+    let _home = TempHome::new();
     let mut registry = DeviceRegistry::default();
 
     // Pair same device twice
@@ -136,6 +222,7 @@ fn test_find_header_end() {
 
 #[test]
 fn test_authorize_ws_device_valid_token() {
+    let _home = TempHome::new();
     let mut registry = DeviceRegistry::default();
     let token = registry.pair_device("dev-1".to_string(), "iPhone".to_string(), None);
 
@@ -146,6 +233,7 @@ fn test_authorize_ws_device_valid_token() {
 
 #[test]
 fn test_authorize_ws_device_rejects_unknown_and_revoked_with_401() {
+    let _home = TempHome::new();
     let mut registry = DeviceRegistry::default();
     let token = registry.pair_device("dev-1".to_string(), "iPhone".to_string(), None);
 

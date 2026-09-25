@@ -4,6 +4,12 @@ use sha2::{Digest, Sha256};
 use crate::storage;
 use jcode_gateway_types::{PairedDevice, PairingCode};
 
+/// Failed `/pair` guesses tolerated while codes are pending. A code is 6
+/// digits, so without a cap any peer that reaches the gateway can enumerate
+/// the whole space inside one 5-minute window. Reaching the cap revokes every
+/// pending code; the operator issues a fresh one with `jcode pair`.
+pub const MAX_FAILED_PAIRING_ATTEMPTS: u32 = 5;
+
 // ---------------------------------------------------------------------------
 // Device registry (persisted to ~/.jcode/devices.json)
 // ---------------------------------------------------------------------------
@@ -13,6 +19,10 @@ pub struct DeviceRegistry {
     pub devices: Vec<PairedDevice>,
     #[serde(default)]
     pub pending_codes: Vec<PairingCode>,
+    /// Failed guesses since the last code was issued. Persisted because the
+    /// gateway reloads the registry from disk on every pairing request.
+    #[serde(default)]
+    pub failed_pairing_attempts: u32,
 }
 
 impl DeviceRegistry {
@@ -55,12 +65,16 @@ impl DeviceRegistry {
             created_at: now.to_rfc3339(),
             expires_at: expires.to_rfc3339(),
         });
+        self.failed_pairing_attempts = 0;
 
         let _ = self.save();
         code
     }
 
     /// Validate a pairing code and consume it. Returns true if valid.
+    ///
+    /// Every miss counts toward [`MAX_FAILED_PAIRING_ATTEMPTS`]; at the cap all
+    /// pending codes are revoked, so a correct guess after that still fails.
     pub fn validate_code(&mut self, code: &str) -> bool {
         let now = chrono::Utc::now().to_rfc3339();
         if let Some(idx) = self
@@ -69,9 +83,20 @@ impl DeviceRegistry {
             .position(|c| c.code == code && c.expires_at > now)
         {
             self.pending_codes.remove(idx);
+            self.failed_pairing_attempts = 0;
             let _ = self.save();
             true
         } else {
+            if !self.pending_codes.is_empty() {
+                self.failed_pairing_attempts = self.failed_pairing_attempts.saturating_add(1);
+                if self.failed_pairing_attempts >= MAX_FAILED_PAIRING_ATTEMPTS {
+                    self.pending_codes.clear();
+                    crate::logging::warn(
+                        "Gateway: too many failed pairing attempts; revoked pending pairing codes",
+                    );
+                }
+                let _ = self.save();
+            }
             false
         }
     }
