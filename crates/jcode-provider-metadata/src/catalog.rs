@@ -118,6 +118,20 @@ pub const ORCAROUTER_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile 
     requires_api_key: true,
 };
 
+// Requesty is an OpenAI-compatible gateway with `vendor/model` ids. Its
+// `/v1/models` catalog is public, so the full list is discovered after login;
+// `default_model` keeps a model that exists on Requesty selected until then.
+pub const REQUESTY_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfile {
+    id: "requesty",
+    display_name: "Requesty",
+    api_base: "https://router.requesty.ai/v1",
+    api_key_env: "REQUESTY_API_KEY",
+    env_file: "requesty.env",
+    setup_url: "https://app.requesty.ai/api-keys",
+    default_model: Some("anthropic/claude-sonnet-4-5"),
+    requires_api_key: true,
+};
+
 // Anthropic and OpenAI also expose OpenAI-compatible `/v1/chat/completions`
 // endpoints, so they can be driven by `provider-doctor` /
 // `provider-test-coverage` as OpenAI-compatible profiles. These profile ids
@@ -504,7 +518,7 @@ pub const OPENAI_COMPAT_PROFILE: OpenAiCompatibleProfile = OpenAiCompatibleProfi
     requires_api_key: true,
 };
 
-pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
+pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 44] = [
     OPENCODE_PROFILE,
     OPENCODE_GO_PROFILE,
     ZAI_PROFILE,
@@ -519,6 +533,7 @@ pub(crate) const OPENAI_COMPAT_PROFILES: [OpenAiCompatibleProfile; 43] = [
     CORTECS_PROFILE,
     OPENROUTER_OPENAI_COMPAT_PROFILE,
     ORCAROUTER_PROFILE,
+    REQUESTY_PROFILE,
     ANTHROPIC_OPENAI_COMPAT_PROFILE,
     OPENAI_NATIVE_OPENAI_COMPAT_PROFILE,
     GEMINI_OPENAI_COMPAT_PROFILE,
@@ -656,6 +671,19 @@ pub const ORCAROUTER_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDesc
     menu_detail: "API key, OpenAI-compatible gateway",
     recommended: false,
     target: LoginProviderTarget::OpenAiCompatible(ORCAROUTER_PROFILE),
+    order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
+};
+
+pub const REQUESTY_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescriptor {
+    id: "requesty",
+    display_name: "Requesty",
+    auth_kind: LoginProviderAuthKind::ApiKey,
+    auth_state_key: LoginProviderAuthStateKey::OpenRouterLike,
+    auth_status_method: "API key",
+    aliases: &[],
+    menu_detail: "API key, OpenAI-compatible gateway",
+    recommended: false,
+    target: LoginProviderTarget::OpenAiCompatible(REQUESTY_PROFILE),
     order: LoginProviderSurfaceOrder::new(Some(39), Some(39), Some(39), Some(39), Some(39)),
 };
 
@@ -1283,7 +1311,7 @@ pub const GOOGLE_LOGIN_PROVIDER: LoginProviderDescriptor = LoginProviderDescript
     order: LoginProviderSurfaceOrder::new(Some(13), None, None, None, None),
 };
 
-pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
+pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 56] = [
     AUTO_IMPORT_LOGIN_PROVIDER,
     CLAUDE_LOGIN_PROVIDER,
     ANTHROPIC_API_LOGIN_PROVIDER,
@@ -1292,6 +1320,7 @@ pub(crate) const LOGIN_PROVIDERS: [LoginProviderDescriptor; 55] = [
     JCODE_LOGIN_PROVIDER,
     OPENROUTER_LOGIN_PROVIDER,
     ORCAROUTER_LOGIN_PROVIDER,
+    REQUESTY_LOGIN_PROVIDER,
     BEDROCK_LOGIN_PROVIDER,
     AZURE_LOGIN_PROVIDER,
     OPENCODE_LOGIN_PROVIDER,
