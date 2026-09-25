@@ -1342,28 +1342,11 @@ impl CompactionManager {
                         cache_control: None,
                     });
 
-                let mut result = Vec::with_capacity(active.len() + 1);
-
-                // Append the live plan snapshot after the summary. The summary
-                // is model-written and lossy; the todo store is ground truth
-                // for which plan items are actually done vs pending, so it
-                // rides along uncompacted (it is small and bounded). Skipped
-                // for OpenAI native encrypted summaries: that replay path is
-                // shape-sensitive and the encrypted block must stand alone.
-                let is_text_summary = matches!(summary_block, ContentBlock::Text { .. });
-                let mut blocks = vec![summary_block];
-                if is_text_summary {
-                    if let Some(plan_context) = self.plan_context.as_ref() {
-                        blocks.push(ContentBlock::Text {
-                            text: plan_context.clone(),
-                            cache_control: None,
-                        });
-                    }
-                }
+                let mut result = Vec::with_capacity(active.len() + 2);
 
                 result.push(Message {
                     role: Role::User,
-                    content: blocks,
+                    content: vec![summary_block],
                     timestamp: None,
                     tool_duration_ms: None,
                 });
@@ -1371,16 +1354,63 @@ impl CompactionManager {
                 // Clone only the active (non-compacted) messages
                 result.extend(active.iter().cloned());
 
+                // Append the live plan snapshot at the END of the context, not
+                // next to the summary. The summary block is the cached prefix
+                // of every request; this snapshot is regenerated from the todo
+                // store each turn, so mutating message 0 invalidated the whole
+                // Anthropic prompt cache and forced a full re-write of history
+                // every turn (observed 2026-09-24: cache write ratio jumped
+                // 0% -> 16% and drove account rate limits). At the tail it sits
+                // after the stable prefix, so the cache still hits.
+                //
+                // Only append when it would not break a trailing tool-use
+                // handoff: inserting a user turn between an assistant
+                // tool_use and its tool_result is a provider-level error.
+                if let Some(plan_context) = self.plan_context.as_ref() {
+                    if Self::can_append_trailing_user_turn(&result) {
+                        result.push(Message {
+                            role: Role::User,
+                            content: vec![ContentBlock::Text {
+                                text: plan_context.clone(),
+                                cache_control: None,
+                            }],
+                            timestamp: None,
+                            tool_duration_ms: None,
+                        });
+                    }
+                }
+
                 result
             }
             None => active.to_vec(),
         }
     }
 
-    /// Set the live plan snapshot injected after the compaction summary.
+    /// Set the live plan snapshot injected at the end of the context.
     /// Pass `None` (or an empty string) to clear it.
     pub fn set_plan_context(&mut self, plan_context: Option<String>) {
         self.plan_context = plan_context.filter(|text| !text.trim().is_empty());
+    }
+
+    /// True when a synthetic trailing plan turn can be appended safely.
+    ///
+    /// Only a conversation that ends on a genuine user text turn qualifies,
+    /// which is the start of a turn, exactly when the plan snapshot matters.
+    /// Mid-tool-loop tails are excluded for two independent reasons:
+    /// appending after an assistant `tool_use` turn orphans its tool results,
+    /// and appending after a `user[tool_result]` turn produces a trailing
+    /// `user[functionResponse, text]` shape that Gemini 3.x rejects with a
+    /// 400 (see `merge_consecutive_function_turns`).
+    fn can_append_trailing_user_turn(messages: &[Message]) -> bool {
+        let Some(last) = messages.last() else {
+            return false;
+        };
+        if last.role != Role::User {
+            return false;
+        }
+        last.content
+            .iter()
+            .all(|block| matches!(block, ContentBlock::Text { .. }))
     }
 
     /// Check if compaction is in progress

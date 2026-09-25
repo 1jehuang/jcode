@@ -1169,114 +1169,172 @@ fn max_context_tokens_applies_at_construction_and_reloads_before_requests() {
 
 // ── plan-context injection tests ───────────────────────────
 
-/// Regression: multi-step plan state must survive compaction. In a
-/// 48-compaction Gemini session (2026-09-24) the model-written summary
-/// dropped the original plan, and every "continue with the plan" redid
-/// finished work. The live todo snapshot now rides after the summary block.
-#[test]
-fn plan_context_is_injected_after_text_summary() {
+fn compacted_manager_with(messages: &[Message]) -> CompactionManager {
     let mut manager = CompactionManager::new().with_budget(1_000);
-    let messages: Vec<Message> = (0..10)
-        .map(|i| make_text_message(Role::User, &format!("turn {i}")))
-        .collect();
-    for _ in &messages {
+    for _ in messages {
         manager.notify_message_added();
     }
     manager.restore_persisted_state(
         &crate::session::StoredCompactionState {
             summary_text: "prior work".to_string(),
             openai_encrypted_content: None,
-            covers_up_to_turn: 8,
-            original_turn_count: 8,
-            compacted_count: 8,
+            covers_up_to_turn: 2,
+            original_turn_count: 2,
+            compacted_count: 2,
         },
         messages.len(),
     );
+    manager
+}
+
+/// Regression: multi-step plan state must survive compaction. In a
+/// 48-compaction Gemini session (2026-09-24) the model-written summary
+/// dropped the original plan, and every "continue with the plan" redid
+/// finished work. The live todo snapshot now rides at the END of context.
+#[test]
+fn plan_context_is_appended_at_the_tail_not_the_cached_prefix() {
+    // Ends on a user text turn: the start of a turn, when the plan matters.
+    let messages: Vec<Message> = (0..7)
+        .map(|i| {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            make_text_message(role, &format!("turn {i}"))
+        })
+        .collect();
+    let mut manager = compacted_manager_with(&messages);
     manager.set_plan_context(Some(
         "## Live Plan Status\n- [x] item A\n- [ ] item B\n".to_string(),
     ));
 
     let api_messages = manager.messages_for_api_with(&messages);
+
+    // The summary block (cached prefix) must stay a single block: mutating
+    // message 0 each turn invalidated the whole Anthropic prompt cache and
+    // forced full history rewrites, which drove account rate limits.
     let first = api_messages.first().expect("summary message");
-    assert_eq!(first.role, Role::User);
-    assert_eq!(
-        first.content.len(),
-        2,
-        "summary message should carry summary + plan blocks"
-    );
-    match (&first.content[0], &first.content[1]) {
-        (ContentBlock::Text { text: summary, .. }, ContentBlock::Text { text: plan, .. }) => {
-            assert!(summary.contains("Previous Conversation Summary"));
-            assert!(plan.contains("Live Plan Status"));
-            assert!(plan.contains("item B"));
+    assert_eq!(first.content.len(), 1, "cached prefix must not be mutated");
+    match &first.content[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("Previous Conversation Summary"));
+            assert!(!text.contains("Live Plan Status"));
         }
-        other => panic!("expected two text blocks, got {other:?}"),
+        other => panic!("expected text summary block, got {other:?}"),
+    }
+
+    // The plan snapshot rides at the tail instead.
+    let last = api_messages.last().expect("plan message");
+    assert_eq!(last.role, Role::User);
+    match &last.content[0] {
+        ContentBlock::Text { text, .. } => {
+            assert!(text.contains("Live Plan Status"));
+            assert!(text.contains("item B"));
+        }
+        other => panic!("expected plan text block, got {other:?}"),
+    }
+}
+
+/// The cached prefix must be byte-identical across turns even when the plan
+/// snapshot changes, otherwise every turn is a full cache write.
+#[test]
+fn plan_context_changes_do_not_alter_the_cached_prefix() {
+    let messages: Vec<Message> = (0..7)
+        .map(|i| {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            make_text_message(role, &format!("turn {i}"))
+        })
+        .collect();
+    let mut manager = compacted_manager_with(&messages);
+
+    manager.set_plan_context(Some("- [ ] item A".to_string()));
+    let first_pass = manager.messages_for_api_with(&messages);
+    manager.set_plan_context(Some("- [x] item A\n- [>] item B".to_string()));
+    let second_pass = manager.messages_for_api_with(&messages);
+
+    // Everything except the appended tail turn must be unchanged.
+    let prefix_len = first_pass.len() - 1;
+    assert_eq!(prefix_len, second_pass.len() - 1);
+    for index in 0..prefix_len {
+        assert_eq!(
+            format!("{:?}", first_pass[index].content),
+            format!("{:?}", second_pass[index].content),
+            "cached prefix changed at message {index}"
+        );
     }
 }
 
 #[test]
 fn plan_context_empty_or_cleared_is_not_injected() {
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let messages: Vec<Message> = (0..10)
+    let messages: Vec<Message> = (0..4)
         .map(|i| make_text_message(Role::User, &format!("turn {i}")))
         .collect();
-    for _ in &messages {
-        manager.notify_message_added();
-    }
-    manager.restore_persisted_state(
-        &crate::session::StoredCompactionState {
-            summary_text: "prior work".to_string(),
-            openai_encrypted_content: None,
-            covers_up_to_turn: 8,
-            original_turn_count: 8,
-            compacted_count: 8,
-        },
-        messages.len(),
-    );
+    let mut manager = compacted_manager_with(&messages);
+    let baseline = manager.messages_for_api_with(&messages).len();
 
-    // Whitespace-only plan context is treated as absent.
     manager.set_plan_context(Some("   \n".to_string()));
-    let api_messages = manager.messages_for_api_with(&messages);
-    assert_eq!(api_messages[0].content.len(), 1);
+    assert_eq!(manager.messages_for_api_with(&messages).len(), baseline);
 
-    // Set then clear.
     manager.set_plan_context(Some("- [ ] item".to_string()));
     manager.set_plan_context(None);
-    let api_messages = manager.messages_for_api_with(&messages);
-    assert_eq!(api_messages[0].content.len(), 1);
+    assert_eq!(manager.messages_for_api_with(&messages).len(), baseline);
 }
 
+/// Appending after an assistant tool_use turn would orphan its tool results,
+/// and appending after a user[tool_result] turn produces the trailing
+/// functionResponse+text shape Gemini 3.x rejects with a 400.
 #[test]
-fn plan_context_not_appended_to_openai_encrypted_summary() {
-    // The OpenAI native replay path is shape-sensitive: the encrypted block
-    // must stand alone, so the plan snapshot is skipped there.
-    let mut manager = CompactionManager::new().with_budget(1_000);
-    let messages: Vec<Message> = (0..10)
-        .map(|i| make_text_message(Role::User, &format!("turn {i}")))
-        .collect();
-    for _ in &messages {
-        manager.notify_message_added();
-    }
-    manager.restore_persisted_state(
-        &crate::session::StoredCompactionState {
-            summary_text: "prior work".to_string(),
-            openai_encrypted_content: Some("enc".to_string()),
-            covers_up_to_turn: 8,
-            original_turn_count: 8,
-            compacted_count: 8,
+fn plan_context_is_skipped_mid_tool_loop() {
+    let tool_use_tail = vec![
+        make_text_message(Role::User, "start"),
+        make_text_message(Role::User, "more"),
+        make_text_message(Role::User, "still more"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                thought_signature: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
         },
-        messages.len(),
-    );
+    ];
+    let mut manager = compacted_manager_with(&tool_use_tail);
     manager.set_plan_context(Some("- [ ] item".to_string()));
-
-    let api_messages = manager.messages_for_api_with(&messages);
+    let api_messages = manager.messages_for_api_with(&tool_use_tail);
     assert_eq!(
-        api_messages[0].content.len(),
-        1,
-        "encrypted summary block must stand alone"
+        api_messages.last().expect("tail").role,
+        Role::Assistant,
+        "must not append after an unanswered tool_use"
     );
-    assert!(matches!(
-        api_messages[0].content[0],
-        ContentBlock::OpenAICompaction { .. }
-    ));
+
+    let tool_result_tail = vec![
+        make_text_message(Role::User, "start"),
+        make_text_message(Role::User, "more"),
+        make_text_message(Role::User, "still more"),
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call-1".to_string(),
+                content: "ok".to_string(),
+                is_error: None,
+            }],
+            timestamp: None,
+            tool_duration_ms: None,
+        },
+    ];
+    let mut manager = compacted_manager_with(&tool_result_tail);
+    manager.set_plan_context(Some("- [ ] item".to_string()));
+    let api_messages = manager.messages_for_api_with(&tool_result_tail);
+    match &api_messages.last().expect("tail").content[0] {
+        ContentBlock::ToolResult { .. } => {}
+        other => panic!("must not append text after a tool_result tail, got {other:?}"),
+    }
 }
