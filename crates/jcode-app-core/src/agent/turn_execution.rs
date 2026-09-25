@@ -775,7 +775,11 @@ impl Agent {
         output: crate::tool::ToolOutput,
         duration_ms: u64,
     ) -> Result<()> {
-        let blocks = tool_output_to_content_blocks(tool_call_id, output);
+        let blocks = tool_output_to_content_blocks_with_image_support(
+            tool_call_id,
+            output,
+            self.provider.supports_image_input(),
+        );
         self.add_message_with_duration(Role::User, blocks, Some(duration_ms));
         self.session.save()?;
         Ok(())

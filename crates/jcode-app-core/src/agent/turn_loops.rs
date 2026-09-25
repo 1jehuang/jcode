@@ -1158,7 +1158,11 @@ impl Agent {
                             println!("{}", preview.lines().next().unwrap_or("(done)"));
                         }
 
-                        let blocks = tool_output_to_content_blocks(tc.id, output);
+                        let blocks = tool_output_to_content_blocks_with_image_support(
+                            tc.id,
+                            output,
+                            self.provider.supports_image_input(),
+                        );
                         self.add_message_with_duration(
                             Role::User,
                             blocks,
