@@ -620,10 +620,12 @@ async fn fetch_models_from_api(
     auth: ProviderAuth,
     models_cache: Arc<RwLock<ModelsCache>>,
     cache_namespace: Option<String>,
+    extra_headers: ExtraHeaders,
 ) -> Result<Vec<ModelInfo>> {
     let url = format!("{}/models", api_base);
-    let response =
-        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None)
+    let request =
+        apply_kimi_coding_agent_headers(auth.apply(client.get(&url)).await?, &api_base, None);
+    let response = apply_extra_headers(request, &extra_headers)
             .send()
             .await
             .with_context(|| {
@@ -837,6 +839,7 @@ pub fn maybe_schedule_openai_compatible_profile_catalog_refresh(
             auth,
             models_cache,
             Some(profile_id.clone()),
+            ExtraHeaders::default(),
         )
         .await;
         let succeeded = result.is_ok();
@@ -945,6 +948,7 @@ pub fn maybe_schedule_standard_openrouter_catalog_refresh(context: &'static str)
             auth,
             models_cache,
             Some(namespace.to_string()),
+            ExtraHeaders::default(),
         )
         .await;
         let succeeded = result.is_ok();
@@ -2155,6 +2159,7 @@ impl OpenRouterProvider {
         let refresh_state = Arc::clone(&self.endpoint_refresh);
         let endpoints_cache = Arc::clone(&self.endpoints_cache);
         let previous_fingerprint = self.cached_endpoints_fingerprint(model);
+        let extra_headers = Arc::clone(&self.extra_headers);
 
         handle.spawn(async move {
             let provider = OpenRouterProvider {
@@ -2176,7 +2181,7 @@ impl OpenRouterProvider {
                 static_image_input_support: HashMap::new(),
                 send_openrouter_headers: true,
                 conversation_id: new_conversation_id(),
-            extra_headers: ExtraHeaders::default(),
+                extra_headers,
                 models_cache: Arc::new(RwLock::new(ModelsCache::default())),
                 model_catalog_refresh: Arc::new(Mutex::new(ModelCatalogRefreshState::default())),
                 provider_routing: Arc::new(RwLock::new(ProviderRouting::default())),
@@ -2241,8 +2246,11 @@ impl OpenRouterProvider {
         let refresh_state = Arc::clone(&self.model_catalog_refresh);
         let previous_fingerprint = self.cached_model_catalog_fingerprint();
         let ns = self.foreground_cache_namespace();
+        let extra_headers = Arc::clone(&self.extra_headers);
         handle.spawn(async move {
-            match fetch_models_from_api(client, api_base, auth, models_cache, ns).await {
+            match fetch_models_from_api(client, api_base, auth, models_cache, ns, extra_headers)
+                .await
+            {
                 Ok(models) => {
                     let updated = models_fingerprint(&models) != previous_fingerprint;
                     if updated {
@@ -2722,6 +2730,7 @@ impl OpenRouterProvider {
             self.auth.clone(),
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
+            Arc::clone(&self.extra_headers),
         )
         .await
     }
@@ -2734,6 +2743,7 @@ impl OpenRouterProvider {
             self.auth.clone(),
             Arc::clone(&self.models_cache),
             self.foreground_cache_namespace(),
+            Arc::clone(&self.extra_headers),
         )
         .await
     }
@@ -2769,10 +2779,8 @@ impl OpenRouterProvider {
 
         // Fetch from API
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = self
-            .auth
-            .apply(self.client.get(&url))
-            .await?
+        let request = self.auth.apply(self.client.get(&url)).await?;
+        let response = apply_extra_headers(request, &self.extra_headers)
             .send()
             .await
             .context("Failed to fetch endpoint data")?;
@@ -2824,10 +2832,8 @@ impl OpenRouterProvider {
             .unwrap_or(0);
 
         let url = format!("{}/models/{}/endpoints", self.api_base, model);
-        let response = self
-            .auth
-            .apply(self.client.get(&url))
-            .await?
+        let request = self.auth.apply(self.client.get(&url)).await?;
+        let response = apply_extra_headers(request, &self.extra_headers)
             .send()
             .await
             .context("Failed to refresh endpoint data")?;
