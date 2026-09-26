@@ -36,11 +36,15 @@ pub struct ProviderUsage {
     pub last_used_unix_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UsageLimit {
     pub name: String,
     pub usage_percent: f32,
     pub resets_at: Option<String>,
+    /// Window length as reported by the provider, when it reports one. Kept
+    /// because display labels like `Monthly` are lossy (OpenAI's monthly pool
+    /// is 2,628,000s, not 30 days).
+    pub window_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]

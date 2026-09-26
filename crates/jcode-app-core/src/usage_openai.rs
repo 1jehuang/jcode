@@ -74,6 +74,7 @@ fn to_openai_window(limit: &UsageLimit) -> OpenAIUsageWindow {
         name: limit.name.clone(),
         usage_ratio: usage_percent_to_ratio(limit.usage_percent),
         resets_at: limit.resets_at.clone(),
+        window_seconds: limit.window_seconds,
     }
 }
 
@@ -271,12 +272,14 @@ fn parse_wham_window(window: &serde_json::Value, fallback_name: &str) -> Option<
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_else(|| format!("{}", ts as i64))
     });
+    let window_seconds = parse_window_seconds(obj);
     Some(UsageLimit {
-        name: parse_window_seconds(obj)
+        name: window_seconds
             .map(window_duration_label)
             .unwrap_or_else(|| fallback_name.to_string()),
         usage_percent: used_percent,
         resets_at,
+        window_seconds,
     })
 }
 
@@ -353,6 +356,7 @@ pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpen
                     name: parse_limit_name(entry, "unknown"),
                     usage_percent,
                     resets_at: parse_resets_at_from_obj(obj),
+                    window_seconds: None,
                 });
             }
         }
@@ -372,6 +376,7 @@ pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpen
                         name: humanize_key(key),
                         usage_percent,
                         resets_at: parse_resets_at_from_obj(inner),
+                        window_seconds: None,
                     });
                     continue;
                 }
@@ -385,6 +390,7 @@ pub(super) fn parse_openai_usage_payload(json: &serde_json::Value) -> ParsedOpen
                                 name: parse_limit_name(entry, key),
                                 usage_percent,
                                 resets_at: parse_resets_at_from_obj(entry_obj),
+                                window_seconds: None,
                             });
                         }
                     }

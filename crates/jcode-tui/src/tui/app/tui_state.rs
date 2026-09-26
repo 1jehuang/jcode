@@ -438,6 +438,8 @@ impl App {
             cache_write_tokens: self.streaming.streaming_cache_creation_tokens,
             output_tps,
             available: true,
+            primary_window_seconds: None,
+            secondary_window_seconds: None,
         };
 
         match route.provider {
@@ -458,6 +460,8 @@ impl App {
                 cache_write_tokens: None,
                 output_tps,
                 available: display_input_tokens > 0 || display_output_tokens > 0,
+                primary_window_seconds: None,
+                secondary_window_seconds: None,
             }),
             WidgetProviderKind::Anthropic => {
                 match auth_method {
@@ -486,6 +490,8 @@ impl App {
                     cache_write_tokens: None,
                     output_tps,
                     available: usage.last_error.is_none(),
+                    primary_window_seconds: None,
+                    secondary_window_seconds: None,
                 })
             }
             WidgetProviderKind::OpenAI => {
@@ -513,6 +519,10 @@ impl App {
                         .five_hour
                         .as_ref()
                         .and_then(|w| w.resets_at.clone()),
+                    primary_window_seconds: openai_usage
+                        .five_hour
+                        .as_ref()
+                        .and_then(|w| w.window_seconds),
                     secondary_limit_label: openai_usage
                         .seven_day
                         .as_ref()
@@ -526,6 +536,10 @@ impl App {
                         .seven_day
                         .as_ref()
                         .and_then(|w| w.resets_at.clone()),
+                    secondary_window_seconds: openai_usage
+                        .seven_day
+                        .as_ref()
+                        .and_then(|w| w.window_seconds),
                     spark: openai_usage.spark.as_ref().map(|w| w.usage_ratio),
                     spark_resets_at: openai_usage
                         .spark
@@ -1661,6 +1675,7 @@ impl crate::tui::TuiState for App {
             background_info,
             usage_info,
             usage_display_used: crate::config::config().display.usage_display_used(),
+            usage_display_elapsed: crate::config::config().display.usage_display_elapsed(),
             tokens_per_second,
             provider_name: if uses_remote_widget_metadata {
                 self.remote_provider_name

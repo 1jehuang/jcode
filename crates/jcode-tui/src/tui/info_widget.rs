@@ -355,12 +355,16 @@ pub struct UsageInfo {
     pub five_hour: f32,
     /// Primary reset timestamp (RFC3339), if known
     pub five_hour_resets_at: Option<String>,
+    /// Primary window length as the provider reported it, when it reports one.
+    pub primary_window_seconds: Option<u64>,
     /// Secondary subscription window label, when one exists.
     pub secondary_limit_label: Option<String>,
     /// Secondary window utilization (0.0-1.0) - for OAuth providers
     pub seven_day: f32,
     /// Secondary reset timestamp (RFC3339), if known
     pub seven_day_resets_at: Option<String>,
+    /// Secondary window length as the provider reported it, when it reports one.
+    pub secondary_window_seconds: Option<u64>,
     /// Codex Spark window utilization (0.0-1.0), if available
     pub spark: Option<f32>,
     /// Codex Spark reset timestamp (RFC3339), if known
@@ -613,6 +617,9 @@ pub struct InfoWidgetData {
     pub usage_info: Option<UsageInfo>,
     /// Show consumed rather than remaining percentages in usage limits.
     pub usage_display_used: bool,
+    /// Replace the reset countdown with the window's elapsed percentage, so
+    /// consumed quota and elapsed time can be compared directly.
+    pub usage_display_elapsed: bool,
     /// Streaming output tokens per second (approximate)
     pub tokens_per_second: Option<f32>,
     /// Active provider name (openrouter/openai/anthropic/...)
@@ -2074,6 +2081,7 @@ fn render_sections(
             info,
             inner.width,
             data.usage_display_used,
+            data.usage_display_elapsed,
         ));
     }
 
