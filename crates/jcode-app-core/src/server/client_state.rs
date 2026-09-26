@@ -315,6 +315,7 @@ pub(super) async fn handle_get_model_catalog(
         compaction_mode: Default::default(),
         activity: None,
         side_panel: Default::default(),
+        applets: Default::default(),
     };
     let json = encode_event(&event);
     let encode_ms = encode_started.elapsed().as_millis();
@@ -628,6 +629,7 @@ async fn send_history_from_persisted_session(
         compaction_mode: crate::config::config().compaction.mode.clone(),
         activity,
         side_panel,
+        applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
 
     write_event(writer, &history_event).await
@@ -843,6 +845,7 @@ async fn send_history_with_guard(
         compaction_mode,
         activity,
         side_panel,
+        applets: crate::applets::snapshot_for_session(session_id).unwrap_or_default(),
     };
     let encode_start = Instant::now();
     let json = encode_event(&history_event);

@@ -1,4 +1,6 @@
-use super::client_actions::{NotifySessionContext, handle_notify_session};
+use super::client_actions::{
+    NotifySessionContext, handle_applet_action, handle_close_applet, handle_notify_session,
+};
 use super::client_comm::{
     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
     handle_comm_read, handle_comm_share, handle_comm_subscribe_channel,
@@ -176,6 +178,42 @@ pub(super) async fn handle_lightweight_control_request(
                 },
             )
             .await;
+        }
+        Request::AppletAction {
+            id,
+            session_id,
+            instance,
+            action,
+            state,
+            source_key,
+        } => {
+            handle_applet_action(
+                id,
+                session_id,
+                instance,
+                action,
+                state,
+                source_key,
+                NotifySessionContext {
+                    sessions,
+                    soft_interrupt_queues,
+                    client_connections,
+                    swarm_members,
+                    swarms_by_id,
+                    event_history,
+                    event_counter,
+                    swarm_event_tx,
+                    client_event_tx: &client_event_tx,
+                },
+            )
+            .await;
+        }
+        Request::CloseApplet {
+            id,
+            session_id,
+            instance,
+        } => {
+            handle_close_applet(id, session_id, instance, &client_event_tx);
         }
         Request::CommShare {
             id,

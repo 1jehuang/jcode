@@ -137,6 +137,14 @@ pub enum ApiEvent {
         snapshot: crate::SidePanelSnapshot,
     },
 
+    /// Complete set of agent-mounted applet instances for a session. Replace
+    /// the previous snapshot, including when empty. Sent live and during
+    /// attachment hydration, like `SidePanelState`.
+    AppletState {
+        session_id: String,
+        snapshot: jcode_applet_types::AgentApplets,
+    },
+
     /// Usage for the latest provider call, not cumulative session or turn totals.
     /// Input/cache accounting is provider-specific: Anthropic reports cache
     /// reads and writes separately, while OpenAI includes cache reads in input.

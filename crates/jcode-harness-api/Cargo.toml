@@ -12,5 +12,6 @@ serde_json = "1"
 jcode-usage-types = { path = "../jcode-usage-types" }
 
 jcode-side-panel-types = { path = "../jcode-side-panel-types" }
+jcode-applet-types = { path = "../jcode-applet-types" }
 
 [dev-dependencies]

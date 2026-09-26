@@ -174,6 +174,66 @@ pub(super) async fn handle_notify_session(
     }
 }
 
+/// A user pressed something in an agent applet: store its state, publish, then
+/// resolve a waiting `applet` tool call or wake the agent like a notification.
+pub(super) async fn handle_applet_action(
+    id: u64,
+    session_id: String,
+    instance: String,
+    action: jcode_applet_types::Action,
+    state: serde_json::Value,
+    source_key: Option<String>,
+    ctx: NotifySessionContext<'_>,
+) {
+    let stored = match crate::applets::set_state(&session_id, &instance, state) {
+        Ok(stored) => stored,
+        Err(error) => {
+            let _ = ctx.client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+            return;
+        }
+    };
+    let (snapshot, inst) = stored;
+    crate::tool::applet::publish(&session_id, snapshot);
+    let message = crate::tool::applet::format_action_message(
+        &instance,
+        &inst.document.title,
+        &action,
+        &inst.document.state,
+        source_key.as_deref(),
+    );
+    if crate::tool::applet::deliver_to_waiter(&session_id, &instance, message.clone()) {
+        let _ = ctx.client_event_tx.send(ServerEvent::Done { id });
+        return;
+    }
+    handle_notify_session(id, session_id, message, ctx).await;
+}
+
+/// The user closed an agent applet. No agent wake.
+pub(super) fn handle_close_applet(
+    id: u64,
+    session_id: String,
+    instance: String,
+    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
+) {
+    match crate::applets::close(&session_id, &instance) {
+        Ok((snapshot, _)) => {
+            crate::tool::applet::publish(&session_id, snapshot);
+            let _ = client_event_tx.send(ServerEvent::Done { id });
+        }
+        Err(error) => {
+            let _ = client_event_tx.send(ServerEvent::Error {
+                id,
+                message: error.to_string(),
+                retry_after_secs: None,
+            });
+        }
+    }
+}
+
 pub(super) fn handle_input_shell(
     id: u64,
     command: String,

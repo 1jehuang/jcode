@@ -952,6 +952,14 @@ pub(super) async fn handle_client(
                             });
                         }
                     }
+                    Ok(BusEvent::AppletsUpdated(update)) => {
+                        if update.session_id == client_session_id {
+                            let _ = client_event_tx.send(ServerEvent::AppletState {
+                                session_id: update.session_id,
+                                snapshot: update.snapshot,
+                            });
+                        }
+                    }
                     Ok(BusEvent::CompactionFinished) => {
                         let agent = Arc::clone(&agent);
                         let tx = client_event_tx.clone();
@@ -2293,6 +2301,49 @@ pub(super) async fn handle_client(
                     },
                 )
                 .await;
+            }
+
+            Request::AppletAction {
+                id,
+                session_id,
+                instance,
+                action,
+                state,
+                source_key,
+            } => {
+                super::client_actions::handle_applet_action(
+                    id,
+                    session_id,
+                    instance,
+                    action,
+                    state,
+                    source_key,
+                    NotifySessionContext {
+                        sessions: &sessions,
+                        soft_interrupt_queues: &soft_interrupt_queues,
+                        client_connections: &client_connections,
+                        swarm_members: &swarm_members,
+                        swarms_by_id: &swarms_by_id,
+                        event_history: &event_history,
+                        event_counter: &event_counter,
+                        swarm_event_tx: &swarm_event_tx,
+                        client_event_tx: &client_event_tx,
+                    },
+                )
+                .await;
+            }
+
+            Request::CloseApplet {
+                id,
+                session_id,
+                instance,
+            } => {
+                super::client_actions::handle_close_applet(
+                    id,
+                    session_id,
+                    instance,
+                    &client_event_tx,
+                );
             }
 
             Request::Transcript {

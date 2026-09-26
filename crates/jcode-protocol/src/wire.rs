@@ -255,6 +255,29 @@ pub enum Request {
         message: String,
     },
 
+    /// The user pressed something in an agent-mounted applet instance. The
+    /// server stores `state`, then wakes the agent (or resolves a waiting
+    /// `applet` tool call).
+    #[serde(rename = "applet_action")]
+    AppletAction {
+        id: u64,
+        session_id: String,
+        instance: String,
+        action: jcode_applet_types::Action,
+        #[serde(default)]
+        state: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_key: Option<String>,
+    },
+
+    /// The user closed an agent-mounted applet instance. No agent wake.
+    #[serde(rename = "close_applet")]
+    CloseApplet {
+        id: u64,
+        session_id: String,
+        instance: String,
+    },
+
     /// Inject externally transcribed text into a live TUI session.
     #[serde(rename = "transcript")]
     Transcript {
@@ -1306,6 +1329,9 @@ pub enum ServerEvent {
         /// Session-scoped side panel pages and active focus state
         #[serde(default, skip_serializing_if = "snapshot_is_empty")]
         side_panel: SidePanelSnapshot,
+        /// Session-scoped agent applet instances.
+        #[serde(default, skip_serializing_if = "applets_is_empty")]
+        applets: jcode_applet_types::AgentApplets,
     },
 
     /// Expanded compacted-history window (response to GetCompactedHistory).
@@ -1326,6 +1352,13 @@ pub enum ServerEvent {
     /// Side panel state changed for the active session
     #[serde(rename = "side_panel_state")]
     SidePanelState { snapshot: SidePanelSnapshot },
+
+    /// Agent applet instances changed for the active session (full snapshot).
+    #[serde(rename = "applet_state")]
+    AppletState {
+        session_id: String,
+        snapshot: jcode_applet_types::AgentApplets,
+    },
 
     /// Server is reloading (clients should reconnect)
     #[serde(rename = "reloading")]

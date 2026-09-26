@@ -68,6 +68,8 @@ const CAPABILITIES: &[Capability] = &[
     cap("compact", "compact"),
     cap("rename_session", "renameSession"),
     cap("set_session_saved", "setSessionSaved"),
+    cap("applet_action", "appletAction"),
+    cap("close_applet", "closeApplet"),
     cap("cancel_soft_interrupts", "cancelSoftInterrupts"),
     cap("ping", "ping"),
     cap("run", "run"),

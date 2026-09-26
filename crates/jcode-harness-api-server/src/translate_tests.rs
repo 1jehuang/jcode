@@ -2459,7 +2459,11 @@ fn delayed_history_activity_cannot_resurrect_or_stop_a_newer_turn() {
             state.legacy_event_to_api(&json!({"type":"text_delta", "text":"next"}));
         }
         let frames = state.legacy_event_to_api(&json!({"type":"history", "id":probe["id"], "messages":[], "activity":{"is_processing":active}}));
-        assert_eq!(frames.len(), 2, "history and panel only, no stale activity");
+        assert_eq!(
+            frames.len(),
+            3,
+            "history, panel and applets only, no stale activity"
+        );
         assert_eq!(state.observed_turn_active, !active);
     }
 }
@@ -2716,7 +2720,8 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
                 assert!(matches!(frames[0].event, ApiEvent::Attached { .. }));
             }
             let frames = state.legacy_event_to_api(&history);
-            assert_eq!(frames.len(), 2);
+            assert_eq!(frames.len(), 3);
+            assert!(matches!(frames[2].event, ApiEvent::AppletState { .. }));
             assert_eq!(
                 frames[0],
                 ServerFrame::event(ApiEvent::SessionRecovery {
@@ -2752,7 +2757,7 @@ fn attachment_recovery_preserves_directive_in_both_history_state_orders() {
             );
             // Each new attachment gets its own single opportunity.
             let (history, _) = recovery_attach(&mut state, target);
-            assert_eq!(state.legacy_event_to_api(&history).len(), 2);
+            assert_eq!(state.legacy_event_to_api(&history).len(), 3);
         }
     }
 }
@@ -2795,10 +2800,16 @@ fn attachment_recovery_suppresses_empty_active_completed_and_blank_directives_on
         assert!(
             matches!(
                 state.legacy_event_to_api(&history).as_slice(),
-                [ServerFrame {
-                    event: ApiEvent::SidePanelState { .. },
-                    ..
-                }]
+                [
+                    ServerFrame {
+                        event: ApiEvent::SidePanelState { .. },
+                        ..
+                    },
+                    ServerFrame {
+                        event: ApiEvent::AppletState { .. },
+                        ..
+                    }
+                ]
             ),
             "{case}"
         );
@@ -3826,4 +3837,36 @@ fn limited_session_list_always_includes_saved_sessions() {
         .find(|session| session.session_id == "indexed_0")
         .expect("saved session beyond the limit is listed");
     assert_eq!(saved.save_label.as_deref(), Some("old bookmark"));
+}
+
+/// Applet actions and closes forward to the daemon with their payload, and
+/// live applet state reaches clients as a full snapshot.
+#[test]
+fn applet_requests_and_state_translate() {
+    let mut state = state_with_session();
+    let out = state.api_request_to_legacy(&json!({
+        "id": 3, "req": "applet_action", "session_id": "s", "instance": "chart-1",
+        "action": {"action": "select", "args": {"i": 2}}, "state": {"q": "x"}, "source_key": "row",
+    }));
+    match &out[0] {
+        Outbound::Legacy(v) => {
+            assert_eq!(v["type"], "applet_action");
+            assert_eq!(v["instance"], "chart-1");
+            assert_eq!(v["action"]["action"], "select");
+            assert_eq!(v["state"]["q"], "x");
+            assert_eq!(v["source_key"], "row");
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let out = state.api_request_to_legacy(&json!({
+        "id": 4, "req": "close_applet", "session_id": "s", "instance": "chart-1",
+    }));
+    assert!(matches!(&out[0], Outbound::Legacy(v) if v["type"] == "close_applet"));
+    let frames = state.legacy_event_to_api(&json!({
+        "type": "applet_state", "session_id": "s", "snapshot": {"instances": []},
+    }));
+    assert!(matches!(
+        &frames[..],
+        [ServerFrame { event: ApiEvent::AppletState { snapshot, .. }, .. }] if snapshot.instances.is_empty()
+    ));
 }

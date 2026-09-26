@@ -15,6 +15,7 @@
 //! rendering. Unknown future node types deserialize to [`NodeKind::Unknown`]
 //! and render their fallback text, so older hosts degrade gracefully.
 
+pub mod agent;
 pub mod asset;
 pub mod manifest;
 pub mod message;
@@ -23,6 +24,7 @@ pub mod placement;
 pub mod validate;
 pub mod view;
 
+pub use agent::{AgentApplets, JCODE_APPLET_MIME};
 pub use asset::{AssetDecl, ImageFit, ImageSource};
 pub use manifest::{Capability, Launcher, Manifest, ToolCardClaim};
 pub use message::{Document, HostMessage, Instance, ProviderMessage};

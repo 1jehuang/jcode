@@ -33,6 +33,7 @@ mod ls;
 pub mod mcp;
 mod memory;
 mod open;
+pub mod applet;
 mod panel;
 mod patch;
 mod read;
@@ -385,6 +386,7 @@ impl Registry {
                 side_panel::SidePanelTool::new,
             );
             Self::insert_tool_timed(&mut m, &mut timings, "panel", panel::PanelTool::new);
+            Self::insert_tool_timed(&mut m, &mut timings, "applet", applet::AppletTool::new);
             Self::insert_tool_timed(&mut m, &mut timings, "edit", edit::EditTool::new);
             // `multiedit` merged into `edit`, and `patch` into `apply_patch`.
             // Both old names still resolve through `resolve_tool_name`.

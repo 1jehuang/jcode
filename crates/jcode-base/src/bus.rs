@@ -321,6 +321,12 @@ pub struct SidePanelUpdated {
     pub snapshot: SidePanelSnapshot,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppletsUpdated {
+    pub session_id: String,
+    pub snapshot: jcode_applet_types::AgentApplets,
+}
+
 #[derive(Clone, Debug)]
 pub enum UpdateStatus {
     Checking,
@@ -469,6 +475,7 @@ pub enum BusEvent {
     },
     /// Side panel pages were updated for a session
     SidePanelUpdated(SidePanelUpdated),
+    AppletsUpdated(AppletsUpdated),
     /// Deferred Mermaid rendering completed and cached content may now be visible
     MermaidRenderCompleted,
     /// Productivity report finished generating off the UI thread

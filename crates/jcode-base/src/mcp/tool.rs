@@ -50,7 +50,7 @@ impl Tool for McpTool {
         self.tool_def.input_schema.clone()
     }
 
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<ToolOutput> {
+    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let mut input = if input.is_null() {
             Value::Object(serde_json::Map::new())
         } else {
@@ -84,7 +84,15 @@ impl Tool for McpTool {
                     output_parts.push(format!("[Image: {} ({} bytes)]", mime_type, data.len()));
                 }
                 ContentBlock::Resource { resource } => {
-                    if let Some(text) = resource.text {
+                    if let Some(rendered) = crate::applets::mount_mcp_resource(
+                        &ctx.session_id,
+                        &ctx.tool_call_id,
+                        &resource.uri,
+                        resource.mime_type.as_deref(),
+                        resource.text.as_deref(),
+                    ) {
+                        output_parts.push(rendered);
+                    } else if let Some(text) = resource.text {
                         output_parts.push(text);
                     } else if let Some(blob) = resource.blob {
                         output_parts.push(format!(
