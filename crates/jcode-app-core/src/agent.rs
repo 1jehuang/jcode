@@ -699,6 +699,9 @@ impl Agent {
             covers_up_to_turn: compacted_count,
             original_turn_count: compacted_count,
             compacted_count,
+            trigger: None,
+            summarizer: Some("native".to_string()),
+            mode: None,
         };
 
         self.session.compaction = Some(state.clone());
@@ -732,6 +735,11 @@ impl Agent {
                 Ok(mut manager) => {
                     let discarded_oversized_native =
                         manager.discard_oversized_openai_native_compaction();
+                    // Pre-cloned for the compaction hooks below: `provider_messages`
+                    // holds `&mut self` for the rest of this block.
+                    let hook_session = self.session.id.clone();
+                    let hook_model = self.provider_model();
+                    let hook_cwd = self.working_dir().map(str::to_string);
                     let messages = {
                         let all_messages = self.session.provider_messages();
                         if self.provider.uses_jcode_compaction() {
@@ -745,12 +753,48 @@ impl Agent {
                                         "Background compaction started ({})",
                                         trigger
                                     ));
+                                    Self::fire_compaction_hook(
+                                        hook_session.clone(),
+                                        hook_model.clone(),
+                                        hook_cwd.clone(),
+                                        "compaction_started",
+                                        &[
+                                            ("TRIGGER", trigger.clone()),
+                                            ("MODE", manager.mode().as_str().to_string()),
+                                            ("ACTIVE_MESSAGES", all_messages.len().to_string()),
+                                            (
+                                                "ESTIMATED_TOKENS",
+                                                manager
+                                                    .effective_token_count_with(all_messages)
+                                                    .to_string(),
+                                            ),
+                                        ],
+                                    );
                                 }
                                 crate::compaction::CompactionAction::HardCompacted(dropped) => {
                                     logging::warn(&format!(
                                         "Emergency hard compact: dropped {} messages (context was critical)",
                                         dropped
                                     ));
+                                    Self::fire_compaction_hook(
+                                        hook_session.clone(),
+                                        hook_model.clone(),
+                                        hook_cwd.clone(),
+                                        "compaction_emergency",
+                                        &[
+                                            ("TRIGGER", "critical".to_string()),
+                                            ("MODE", manager.mode().as_str().to_string()),
+                                            ("MESSAGES_DROPPED", dropped.to_string()),
+                                            (
+                                                "USAGE_PCT",
+                                                format!(
+                                                    "{:.1}",
+                                                    manager.context_usage_with(all_messages)
+                                                        * 100.0
+                                                ),
+                                            ),
+                                        ],
+                                    );
                                 }
                                 crate::compaction::CompactionAction::None => {}
                             }
@@ -992,6 +1036,33 @@ impl Agent {
             crate::telemetry::SessionEndReason::NormalExit,
         );
         self.fire_session_lifecycle_hook("session_end", "close");
+    }
+
+    /// Fire a compaction lifecycle observer hook (`compaction_started` /
+    /// `compaction_completed` / `compaction_emergency`). No-op when the hook
+    /// is not configured. Free function (not a method): several call sites
+    /// hold a `&mut self` borrow from `provider_messages()`, so callers pass
+    /// pre-cloned identity values instead of `&self`.
+    pub(crate) fn fire_compaction_hook(
+        session_id: String,
+        model: String,
+        cwd: Option<String>,
+        event_name: &'static str,
+        fields: &[(&'static str, String)],
+    ) {
+        if !crate::hooks::hook_configured(event_name) {
+            return;
+        }
+        let mut event = crate::hooks::HookEvent::new(event_name)
+            .session_id(session_id)
+            .field("MODEL", model);
+        for (key, value) in fields {
+            event = event.field(key, value.clone());
+        }
+        if let Some(cwd) = cwd {
+            event = event.cwd(cwd);
+        }
+        crate::hooks::dispatch_observer(event);
     }
 
     /// Fire a session lifecycle observer hook (`session_start`/`session_end`).

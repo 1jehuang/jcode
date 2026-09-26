@@ -513,9 +513,37 @@ impl Config {
             self.hooks.pre_tool_transform_timeout_ms = parsed;
         }
         hook_env_override(&mut self.hooks.post_tool, "JCODE_HOOK_POST_TOOL");
+        hook_env_override(
+            &mut self.hooks.compaction_started,
+            "JCODE_HOOK_COMPACTION_STARTED",
+        );
+        hook_env_override(
+            &mut self.hooks.compaction_completed,
+            "JCODE_HOOK_COMPACTION_COMPLETED",
+        );
+        hook_env_override(
+            &mut self.hooks.compaction_emergency,
+            "JCODE_HOOK_COMPACTION_EMERGENCY",
+        );
         if let Ok(v) = std::env::var("JCODE_HOOK_PRE_TOOL_TIMEOUT_MS") {
             if let Ok(parsed) = v.trim().parse::<u64>() {
                 self.hooks.pre_tool_timeout_ms = parsed;
+            }
+        }
+
+        // Custom compaction summarizer. Empty env values disable the
+        // config-file command.
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_SUMMARY_COMMAND") {
+            let trimmed = v.trim();
+            self.compaction.summary_command = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+        if let Ok(v) = std::env::var("JCODE_COMPACTION_SUMMARY_COMMAND_TIMEOUT_MS") {
+            if let Ok(parsed) = v.trim().parse::<u64>() {
+                self.compaction.summary_command_timeout_ms = parsed;
             }
         }
 

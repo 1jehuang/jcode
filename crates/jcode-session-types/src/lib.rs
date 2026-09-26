@@ -301,6 +301,15 @@ pub struct StoredCompactionState {
     pub covers_up_to_turn: usize,
     pub original_turn_count: usize,
     pub compacted_count: usize,
+    /// What fired this compaction (reactive/proactive/semantic/manual/...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    /// Which summarizer produced the text (custom/native/builtin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summarizer: Option<String>,
+    /// Compaction mode label at apply time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl StoredMessage {

@@ -563,7 +563,9 @@ swarm_max_concurrent_agents = 32
 # (quotes work) but executed directly, with JCODE_HOOK_* env vars describing
 # the event:
 #   JCODE_HOOK_EVENT       - "turn_start", "turn_end", "session_start",
-#                            "session_end", "pre_tool", "post_tool"
+#                            "session_end", "pre_tool", "post_tool",
+#                            "compaction_started", "compaction_completed",
+#                            "compaction_emergency"
 #   JCODE_HOOK_SESSION_ID  - the session the event belongs to
 #   JCODE_HOOK_CWD         - session working directory (also the hook's cwd)
 #   JCODE_HOOK_PAYLOAD     - JSON mirror of all fields
@@ -572,7 +574,9 @@ swarm_max_concurrent_agents = 32
 # All hooks except pre_tool are observers: detached, fire-and-forget, failures
 # only logged. Env overrides: JCODE_HOOK_TURN_START, JCODE_HOOK_TURN_END,
 # JCODE_HOOK_SESSION_START, JCODE_HOOK_SESSION_END, JCODE_HOOK_PRE_TOOL,
-# JCODE_HOOK_POST_TOOL (set empty to disable a config hook).
+# JCODE_HOOK_POST_TOOL, JCODE_HOOK_COMPACTION_STARTED,
+# JCODE_HOOK_COMPACTION_COMPLETED, JCODE_HOOK_COMPACTION_EMERGENCY
+# (set empty to disable a config hook).
 #
 # Runs when an agent turn begins, before the model starts generating and before
 # the first pre_tool. Lets integrations detect the agent is working during the
@@ -605,6 +609,24 @@ swarm_max_concurrent_agents = 32
 # JCODE_HOOK_STATUS, JCODE_HOOK_DURATION_MS, JCODE_HOOK_OUTPUT_BYTES,
 # JCODE_HOOK_ERROR.
 # post_tool = ""
+#
+# Runs when background compaction starts summarizing. Extra fields:
+# JCODE_HOOK_TRIGGER, JCODE_HOOK_MODE, JCODE_HOOK_ACTIVE_MESSAGES,
+# JCODE_HOOK_ESTIMATED_TOKENS.
+# compaction_started = ""
+#
+# Runs when a background compaction result is applied. Extra fields:
+# JCODE_HOOK_TRIGGER, JCODE_HOOK_MODE, JCODE_HOOK_SUMMARIZER
+# (custom/native/builtin), JCODE_HOOK_PRE_TOKENS, JCODE_HOOK_POST_TOKENS,
+# JCODE_HOOK_TOKENS_SAVED, JCODE_HOOK_DURATION_MS,
+# JCODE_HOOK_MESSAGES_COMPACTED, JCODE_HOOK_SUMMARY_CHARS,
+# JCODE_HOOK_ACTIVE_MESSAGES.
+# compaction_completed = ""
+#
+# Runs when emergency compaction drops context. Extra fields:
+# JCODE_HOOK_TRIGGER (critical/context_limit), JCODE_HOOK_MODE,
+# JCODE_HOOK_MESSAGES_DROPPED, JCODE_HOOK_USAGE_PCT.
+# compaction_emergency = ""
 
 [ambient]
 # Ambient mode: background agent that maintains your codebase

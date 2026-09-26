@@ -420,6 +420,21 @@ pub struct CompactionConfig {
     /// on large-window providers. This bounds the compaction trigger budget,
     /// not the final request size when recent messages cannot be compacted.
     pub max_context_tokens: usize,
+    /// External command producing the compaction summary instead of the
+    /// built-in model prompt. Receives the summarization request as JSON on
+    /// stdin; its trimmed stdout becomes the summary text. Empty output,
+    /// non-zero exit, timeout, or spawn failure all fail open to the built-in
+    /// summarizer. Takes precedence over provider-native compaction while set.
+    ///
+    /// Preservation contract (what a summarizer must protect — a summary
+    /// that drops these strands the next session): architectural decisions
+    /// and why they were taken, unresolved bugs/errors, implementation
+    /// paths still in flight, and system state (working dir, branch, active
+    /// plan). Merge, don't replace, any `existing_summary` in the request.
+    pub summary_command: Option<String>,
+    /// Max milliseconds to wait for the summary command before failing open
+    /// to the built-in summarizer (default: 120000).
+    pub summary_command_timeout_ms: u64,
 }
 
 impl Default for CompactionConfig {
@@ -436,6 +451,8 @@ impl Default for CompactionConfig {
             relevance_keep_threshold: 0.65,
             goal_window_turns: 5,
             max_context_tokens: 0,
+            summary_command: None,
+            summary_command_timeout_ms: 120_000,
         }
     }
 }
@@ -953,6 +970,21 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Runs when background compaction starts summarizing.
+    /// Fields: TRIGGER, MODE, ACTIVE_MESSAGES, ESTIMATED_TOKENS.
+    /// Env override: JCODE_HOOK_COMPACTION_STARTED.
+    pub compaction_started: Option<HookCommands>,
+    /// Runs when a background compaction result is applied.
+    /// Fields: TRIGGER, MODE, SUMMARIZER (custom/native/builtin),
+    /// PRE_TOKENS, POST_TOKENS, TOKENS_SAVED, DURATION_MS,
+    /// MESSAGES_COMPACTED, SUMMARY_CHARS, ACTIVE_MESSAGES.
+    /// Env override: JCODE_HOOK_COMPACTION_COMPLETED.
+    pub compaction_completed: Option<HookCommands>,
+    /// Runs when emergency compaction drops context (hard compact at the
+    /// critical threshold, or auto-recovery after a context-limit error).
+    /// Fields: TRIGGER, MODE, MESSAGES_DROPPED, USAGE_PCT.
+    /// Env override: JCODE_HOOK_COMPACTION_EMERGENCY.
+    pub compaction_emergency: Option<HookCommands>,
 }
 
 impl Default for HooksConfig {
@@ -967,6 +999,9 @@ impl Default for HooksConfig {
             pre_tool: None,
             post_tool: None,
             pre_tool_timeout_ms: 5000,
+            compaction_started: None,
+            compaction_completed: None,
+            compaction_emergency: None,
         }
     }
 }
