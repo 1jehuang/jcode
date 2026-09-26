@@ -50,6 +50,8 @@ pub enum NariEvent {
 const NAME_CONTEXT: &str = "The user often addresses Jev, a voice assistant. \
 Jev is spelled J-E-V and sounds like Jeff. Write it as Jev. \
 Examples: \"Hey Jev, open settings.\" \"Okay Jev.\" \"Thanks Jev.\" \"Ask Jev.\" \
+The user also talks about Jcode, a coding app pronounced jay-code, and Jcode Desktop. \
+Jcode and Jev are different names: write \"Jcode Desktop\", never \"Jev Desktop\". \
 Other names: ";
 
 /// Names Qwen3-ASR otherwise mishears. Keep proper casing: it is copied as-is.
@@ -75,10 +77,15 @@ const BUILTIN_VOCABULARY: &[&str] = &[
 /// Mishearings the recognition prompt cannot fix, because the audio is
 /// genuinely ambiguous ("Jev" is pronounced like "Jeff"). Applied to every
 /// transcript revision as whole-word, case-insensitive replacements.
+/// Order matters: "Jeff Desktop" becomes "Jev Desktop", then "Jcode Desktop".
 const BUILTIN_CORRECTIONS: &[(&str, &str)] = &[
     (r"jeff", "Jev"),
     (r"j[\s.-]?code", "Jcode"),
     (r"jay[\s-]?code", "Jcode"),
+    (r"(?:jade|jake)[\s-]?code", "Jcode"),
+    // No product is called "Jev Desktop". The speaker meant Jcode Desktop.
+    (r"jev[\s-]?desktop", "Jcode Desktop"),
+    (r"jcode[\s-]?desktop", "Jcode Desktop"),
 ];
 
 fn corrections() -> &'static [(regex::Regex, &'static str)] {
@@ -469,7 +476,7 @@ mod tests {
     fn product_name_mishearings_are_corrected() {
         assert_eq!(
             correct_transcript("Hey, Jeff. Open the JCode desktop and ask jeff's route."),
-            "Hey, Jev. Open the Jcode desktop and ask Jev's route."
+            "Hey, Jev. Open the Jcode Desktop and ask Jev's route."
         );
         assert_eq!(
             correct_transcript("J code, j-code, Jay code"),
@@ -478,6 +485,22 @@ mod tests {
         // Whole words only.
         assert_eq!(correct_transcript("Jefferson jcoder"), "Jefferson jcoder");
         assert_eq!(correct_transcript("Jev and Jcode"), "Jev and Jcode");
+        // Jev Desktop is always a mishearing of Jcode Desktop.
+        assert_eq!(
+            correct_transcript(
+                "Can you fix the resume menu of Jev Desktop? jeff desktop, jcode desktop"
+            ),
+            "Can you fix the resume menu of Jcode Desktop? Jcode Desktop, Jcode Desktop"
+        );
+        assert_eq!(
+            correct_transcript("Jade code and jake-code"),
+            "Jcode and Jcode"
+        );
+        // Jev alone stays Jev.
+        assert_eq!(
+            correct_transcript("Hey Jev, open desktops"),
+            "Hey Jev, open desktops"
+        );
     }
 
     #[test]
