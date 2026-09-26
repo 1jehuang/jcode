@@ -105,13 +105,55 @@ fn corrections() -> &'static [(regex::Regex, &'static str)] {
     })
 }
 
-/// Apply product-name corrections to a transcript.
+/// Apply product-name corrections to a transcript. A transcript that only
+/// repeats the recognition prompt's example addresses is a prompt leak, which
+/// Qwen3-ASR produces on silence, so it becomes empty.
 pub fn correct_transcript(text: &str) -> String {
-    corrections()
+    let text = corrections()
         .iter()
         .fold(text.to_owned(), |text, (pattern, fixed)| {
             pattern.replace_all(&text, *fixed).into_owned()
-        })
+        });
+    if is_prompt_leak(&text) {
+        String::new()
+    } else {
+        text
+    }
+}
+
+/// Example addresses from `NAME_CONTEXT`, as lowercase words.
+const PROMPT_EXAMPLES: &[&[&str]] = &[
+    &["hey", "jev", "open", "settings"],
+    &["okay", "jev"],
+    &["ok", "jev"],
+    &["thanks", "jev"],
+    &["thank", "you", "jev"],
+    &["ask", "jev"],
+];
+
+/// True when the transcript is two or more prompt examples and nothing else.
+/// One genuine "Okay Jev" is kept. A garbled tail word is tolerated after
+/// three examples ("Thanks Jev, asked up").
+fn is_prompt_leak(text: &str) -> bool {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    let (mut at, mut matched) = (0, 0);
+    'outer: while at < words.len() {
+        for example in PROMPT_EXAMPLES {
+            let end = at + example.len();
+            if end <= words.len() && words[at..end].iter().zip(*example).all(|(w, e)| w == e) {
+                at = end;
+                matched += 1;
+                continue 'outer;
+            }
+        }
+        break;
+    }
+    let rest = words.len() - at;
+    matched >= 2 && (rest == 0 || (matched >= 3 && rest <= 2))
 }
 
 /// Conservative bound on the recognition context sent per session.
@@ -472,6 +514,24 @@ impl TranscriptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn silent_prompt_leaks_are_dropped_but_real_speech_is_kept() {
+        for leak in [
+            "Hey Jev, open settings. Okay Jev. Thanks Jev. Ask Jev.",
+            "Hey, Jeff, open settings. Okay, Jeff, thanks, Jeff, asked up.",
+            "Okay Jev. Thanks Jev.",
+        ] {
+            assert_eq!(correct_transcript(leak), "", "{leak}");
+        }
+        for real in [
+            "Okay Jev.",
+            "Hey Jev, open settings.",
+            "Okay Jev, thanks Jev, now fix the build.",
+            "Hey Jev, open settings and switch the theme.",
+        ] {
+            assert_eq!(correct_transcript(real), real, "{real}");
+        }
+    }
     #[test]
     fn product_name_mishearings_are_corrected() {
         assert_eq!(
