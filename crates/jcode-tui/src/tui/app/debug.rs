@@ -399,6 +399,9 @@ impl ProviderMessageMemoryStats {
                     self.openai_compaction_bytes += encrypted_content.len();
                     self.record_bytes(encrypted_content.len());
                 }
+                crate::message::ContentBlock::ToolReference { tool_name, .. } => {
+                    self.record_bytes(tool_name.len());
+                }
             }
         }
     }

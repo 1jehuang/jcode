@@ -400,6 +400,7 @@ fn test_build_tools_sets_strict_true() {
             "required": ["command"],
             "properties": { "command": { "type": "string" } }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -428,6 +429,7 @@ fn test_build_tools_disables_strict_for_free_form_object_nodes() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools.len(), 1);
@@ -460,6 +462,7 @@ fn test_build_tools_normalizes_object_schema_additional_properties() {
             },
             "required": ["path"]
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(
@@ -505,6 +508,7 @@ fn test_build_tools_rewrites_oneof_to_anyof_for_openai() {
                 }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert!(api_tools[0]["parameters"]["properties"]["tool_calls"]["items"]["oneOf"].is_null());
@@ -546,6 +550,7 @@ fn test_build_tools_keeps_strict_for_anyof_object_branches_with_properties() {
                 "wake_at": { "type": "string" }
             }
         }),
+        defer_loading: false,
     }];
     let api_tools = build_tools(&defs);
     assert_eq!(api_tools[0]["strict"], serde_json::json!(true));

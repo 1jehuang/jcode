@@ -75,12 +75,34 @@ pub(super) fn tool_output_side_pane_images(
         .collect()
 }
 
+/// Metadata key a tool sets to load deferred tool definitions into context.
+/// Value: array of registry tool names (e.g. `mcp__github__create_issue`).
+pub(crate) const TOOL_REFERENCES_METADATA_KEY: &str = "tool_references";
+
+/// Tool names a tool output asks to load via provider-native tool references.
+pub(crate) fn tool_output_references(output: &ToolOutput) -> Vec<String> {
+    output
+        .metadata
+        .as_ref()
+        .and_then(|meta| meta.get(TOOL_REFERENCES_METADATA_KEY))
+        .and_then(|refs| refs.as_array())
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|name| name.as_str())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(super) fn tool_output_to_content_blocks(
     tool_use_id: String,
     output: ToolOutput,
 ) -> Vec<ContentBlock> {
+    let references = tool_output_references(&output);
     let mut blocks = vec![ContentBlock::ToolResult {
-        tool_use_id,
+        tool_use_id: tool_use_id.clone(),
         content: output.output,
         is_error: None,
     }];
@@ -99,6 +121,17 @@ pub(super) fn tool_output_to_content_blocks(
             });
         }
     }
+    // References come last so image folding (which expects an image right
+    // after its tool_result) is unaffected. Providers without native deferred
+    // loading ignore them; the result text still names the tools.
+    blocks.extend(
+        references
+            .into_iter()
+            .map(|tool_name| ContentBlock::ToolReference {
+                tool_use_id: tool_use_id.clone(),
+                tool_name,
+            }),
+    );
     blocks
 }
 

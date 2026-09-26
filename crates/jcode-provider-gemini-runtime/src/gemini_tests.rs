@@ -451,6 +451,7 @@ fn build_tools_uses_function_declarations() {
         name: "read".to_string(),
         description: "Read a file".to_string(),
         input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).unwrap();
@@ -493,6 +494,7 @@ fn build_tools_rewrites_const_for_gemini_schema_compatibility() {
                 }
             }
         }),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).expect("gemini tools");
@@ -531,6 +533,7 @@ fn build_tools_strips_additional_properties_for_gemini_schema_compatibility() {
             "required": ["file_path"],
             "additionalProperties": false
         }),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).expect("gemini tools");
@@ -858,6 +861,7 @@ fn build_tools_prunes_required_names_not_defined_in_the_same_object() {
                 }
             ]
         }),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).expect("gemini tools");
@@ -886,6 +890,7 @@ fn build_tools_drops_a_required_array_left_empty_after_pruning() {
             "properties": { "a": { "type": "string" } },
             "required": ["missing"]
         }),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).expect("gemini tools");
@@ -907,6 +912,7 @@ fn build_tools_keeps_required_when_the_object_declares_no_properties() {
             "type": "object",
             "required": ["anything"]
         }),
+        defer_loading: false,
     }];
 
     let built = build_tools(&defs).expect("gemini tools");

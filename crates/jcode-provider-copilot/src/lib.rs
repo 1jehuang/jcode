@@ -280,6 +280,7 @@ mod tests {
                     }
                 ]
             }),
+            defer_loading: false,
         }
     }
 

@@ -629,6 +629,18 @@ impl MultiProvider {
         let clamped_messages = image_clamp::clamp_outbound_images(messages);
         let messages: &[Message] = clamped_messages.as_deref().unwrap_or(messages);
 
+        // Deferred definitions are only meaningful to providers with native
+        // deferred loading. Never let them reach a provider that would send
+        // them as ordinary eager tools (which would also defeat the point).
+        let eager_tools;
+        let tools: &[ToolDefinition] =
+            if !self.supports_deferred_tools() && tools.iter().any(|tool| tool.defer_loading) {
+                eager_tools = ToolDefinition::eager(tools);
+                &eager_tools
+            } else {
+                tools
+            };
+
         let active = self.active_provider();
         let sequence = Self::fallback_sequence(active);
         let mut notes: Vec<String> = Vec::new();
@@ -1958,6 +1970,21 @@ impl Provider for MultiProvider {
                 .active_openrouter_execution_provider()
                 .map(|provider| provider.supports_image_input())
                 .unwrap_or(false),
+        }
+    }
+
+    fn supports_deferred_tools(&self) -> bool {
+        // Only first-party Anthropic and OpenAI Responses paths implement
+        // provider-native deferred loading. Every other route receives an
+        // eager-only tool list (see `complete_with_failover`).
+        match self.active_provider() {
+            ActiveProvider::Claude => self
+                .anthropic_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            ActiveProvider::OpenAI => self
+                .openai_provider()
+                .is_some_and(|provider| provider.supports_deferred_tools()),
+            _ => false,
         }
     }
 

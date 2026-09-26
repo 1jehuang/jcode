@@ -1230,6 +1230,9 @@ impl crate::tui::TuiState for App {
                         ContentBlock::OpenAICompaction { encrypted_content } => {
                             user_chars += encrypted_content.len();
                         }
+                        ContentBlock::ToolReference { tool_name, .. } => {
+                            user_chars += tool_name.len();
+                        }
                     }
                 }
             }

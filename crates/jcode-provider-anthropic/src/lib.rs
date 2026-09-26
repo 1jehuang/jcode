@@ -16,8 +16,23 @@ const CLAUDE_CODE_IDENTITY: &str = "You are a Claude agent, built on Anthropic's
 pub(crate) const CONTINUATION_USER_TURN: &str = "Continue.";
 
 pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> {
-    use std::collections::HashSet;
+    format_messages_with_tools(messages, is_oauth, &[])
+}
 
+/// Like [`format_messages`], rendering `ContentBlock::ToolReference` blocks as
+/// native `tool_reference` blocks for tools present in `api_tools`.
+///
+/// A reference to a tool missing from the request's `tools` array is a hard
+/// 400, so references to tools that are no longer available (server
+/// disconnected, session resumed elsewhere) are dropped and the tool result
+/// keeps its plain text.
+pub fn format_messages_with_tools(
+    messages: &[Message],
+    is_oauth: bool,
+    api_tools: &[ApiTool],
+) -> Vec<ApiMessage> {
+    use std::collections::HashSet;
+    let available: HashSet<&str> = api_tools.iter().map(|tool| tool.name.as_str()).collect();
     // Pre-pass: drop duplicate tool_results for the same tool_use_id.
     //
     // Anthropic rejects the whole request (400 "unexpected `tool_use_id` found
@@ -67,7 +82,8 @@ pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> 
             Role::Assistant => "assistant",
         };
 
-        let content = format_content_blocks(&msg.content, is_oauth);
+        let mut content = format_content_blocks(&msg.content, is_oauth);
+        apply_tool_references(&mut content, &msg.content, is_oauth, &available);
 
         if !content.is_empty() {
             result.push(ApiMessage {
@@ -202,6 +218,93 @@ pub fn format_messages(messages: &[Message], is_oauth: bool) -> Vec<ApiMessage> 
     }
 
     merged
+}
+
+/// Fold `ContentBlock::ToolReference` blocks into their tool_result.
+///
+/// The API rejects a tool_result that mixes `tool_reference` blocks with any
+/// other content, so the referencing tool_result carries only references; its
+/// original text moves to a sibling text block right after the tool_results,
+/// keeping them contiguous. Only references to tools in this request's
+/// catalog are emitted.
+fn apply_tool_references(
+    content: &mut Vec<ApiContentBlock>,
+    blocks: &[ContentBlock],
+    is_oauth: bool,
+    available: &std::collections::HashSet<&str>,
+) {
+    use std::collections::HashMap;
+    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+    for block in blocks {
+        if let ContentBlock::ToolReference {
+            tool_use_id,
+            tool_name,
+        } = block
+        {
+            let name = if is_oauth {
+                map_tool_name_for_oauth(tool_name)
+            } else {
+                tool_name.clone()
+            };
+            if !available.contains(name.as_str()) {
+                continue;
+            }
+            let entry = refs.entry(sanitize_tool_id(tool_use_id)).or_default();
+            if !entry.contains(&name) {
+                entry.push(name);
+            }
+        }
+    }
+    if refs.is_empty() {
+        return;
+    }
+    let mut moved_text: Vec<ApiContentBlock> = Vec::new();
+    for block in content.iter_mut() {
+        let ApiContentBlock::ToolResult {
+            tool_use_id,
+            content: result_content,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        let Some(names) = refs.remove(tool_use_id.as_str()) else {
+            continue;
+        };
+        let previous = std::mem::replace(
+            result_content,
+            ToolResultContent::Blocks(
+                names
+                    .into_iter()
+                    .map(|tool_name| ToolResultContentBlock::ToolReference { tool_name })
+                    .collect(),
+            ),
+        );
+        let texts: Vec<String> = match previous {
+            ToolResultContent::Text(text) => vec![text],
+            ToolResultContent::Blocks(blocks) => blocks
+                .into_iter()
+                .filter_map(|b| match b {
+                    ToolResultContentBlock::Text { text } => Some(text),
+                    _ => None,
+                })
+                .collect(),
+        };
+        for text in texts.into_iter().filter(|t| !t.trim().is_empty()) {
+            moved_text.push(ApiContentBlock::Text {
+                text,
+                cache_control: None,
+            });
+        }
+    }
+    if moved_text.is_empty() {
+        return;
+    }
+    let insert_at = content
+        .iter()
+        .rposition(|b| matches!(b, ApiContentBlock::ToolResult { .. }))
+        .map_or(0, |i| i + 1);
+    content.splice(insert_at..insert_at, moved_text);
 }
 
 /// Returns true when a tool_result body is one of the synthetic placeholders
@@ -458,6 +561,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                         .to_string(),
                     input_schema: json!({"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -467,6 +571,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Performs exact string replacements in files.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -476,6 +581,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Fast file pattern matching tool.".to_string(),
                     input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -485,6 +591,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "A powerful search tool built on ripgrep.".to_string(),
                     input_schema: json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string","enum":["content","files_with_matches","count"]},"-B":{"type":"number"},"-A":{"type":"number"},"-C":{"type":"number"},"context":{"type":"number"},"-n":{"type":"boolean"},"-i":{"type":"boolean"},"type":{"type":"string"},"head_limit":{"type":"number"},"offset":{"type":"number"},"multiline":{"type":"boolean"}},"required":["pattern"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -494,6 +601,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Reads a file from the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","exclusiveMinimum":0},"pages":{"type":"string"}},"required":["file_path"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -503,6 +611,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Execute a skill within the main conversation".to_string(),
                     input_schema: json!({"type":"object","properties":{"skill":{"type":"string"},"args":{"type":"string"}},"required":["skill"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
             (
@@ -512,6 +621,7 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                     description: "Writes a file to the local filesystem.".to_string(),
                     input_schema: json!({"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"],"additionalProperties":false}),
                     cache_control: None,
+                    defer_loading: false,
                 },
             ),
         ];
@@ -534,32 +644,48 @@ pub fn format_tools(tools: &[ToolDefinition], is_oauth: bool, cache_ttl_1h: bool
                 description: tool.description.clone(),
                 input_schema: anthropic_input_schema(&tool.input_schema),
                 cache_control: None,
+                defer_loading: tool.defer_loading,
             });
         }
 
-        // Move the prompt-cache breakpoint to the final tool in the list.
-        if let Some(last) = out.last_mut() {
-            last.cache_control = Some(CacheControlParam::ephemeral(cache_ttl_1h));
-        }
-
-        return out;
+        return finish_tool_list(out, cache_ttl_1h);
     }
 
-    let len = tools.len();
-    tools
+    let out = tools
         .iter()
-        .enumerate()
-        .map(|(i, tool)| ApiTool {
+        .map(|tool| ApiTool {
             name: tool.name.clone(),
             description: tool.description.clone(),
             input_schema: anthropic_input_schema(&tool.input_schema),
-            cache_control: if i == len - 1 {
-                Some(CacheControlParam::ephemeral(cache_ttl_1h))
-            } else {
-                None
-            },
+            cache_control: None,
+            defer_loading: tool.defer_loading,
         })
-        .collect()
+        .collect();
+    finish_tool_list(out, cache_ttl_1h)
+}
+
+/// Order eager tools before deferred ones and put the prompt-cache breakpoint
+/// on the last eager tool.
+///
+/// Deferred tools stay out of the cached system-prompt prefix, so they must
+/// neither carry `cache_control` (the API rejects that with a 400) nor sit
+/// between cached tools, where adding or removing one would shift the prefix.
+/// The API also requires at least one non-deferred tool, so a list of only
+/// deferred tools is sent eagerly instead.
+fn finish_tool_list(tools: Vec<ApiTool>, cache_ttl_1h: bool) -> Vec<ApiTool> {
+    let (mut out, mut deferred): (Vec<ApiTool>, Vec<ApiTool>) =
+        tools.into_iter().partition(|tool| !tool.defer_loading);
+    if out.is_empty() {
+        for tool in &mut deferred {
+            tool.defer_loading = false;
+        }
+        std::mem::swap(&mut out, &mut deferred);
+    }
+    if let Some(last) = out.last_mut() {
+        last.cache_control = Some(CacheControlParam::ephemeral(cache_ttl_1h));
+    }
+    out.extend(deferred);
+    out
 }
 
 #[derive(Serialize, Clone)]
@@ -867,6 +993,10 @@ pub enum ToolResultContentBlock {
     Text { text: String },
     #[serde(rename = "image")]
     Image { source: ApiImageSource },
+    /// Loads a deferred tool definition (`defer_loading: true`) into context.
+    /// The API rejects a tool_result mixing references with other content.
+    #[serde(rename = "tool_reference")]
+    ToolReference { tool_name: String },
 }
 
 #[derive(Serialize, Clone)]
@@ -884,6 +1014,8 @@ pub struct ApiTool {
     pub input_schema: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControlParam>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 #[cfg(test)]
@@ -1048,6 +1180,7 @@ mod cache_prefix_invariant_tests {
             name: name.to_string(),
             description: format!("{name} description"),
             input_schema: json!({"type":"object","properties":{}}),
+            defer_loading: false,
         }
     }
 
@@ -1073,6 +1206,7 @@ mod cache_prefix_invariant_tests {
                     {"type": "object", "properties": {"intent": {"type": "string"}}, "required": ["intent"]}
                 ]
             }),
+            defer_loading: false,
         };
 
         let formatted = format_tools(&[tool], false, false);
@@ -1195,3 +1329,7 @@ mod duplicate_tool_result_tests;
 #[cfg(test)]
 #[path = "wedge_fixture_check.rs"]
 mod wedge_fixture_check;
+
+#[cfg(test)]
+#[path = "deferred_tools_tests.rs"]
+mod deferred_tools_tests;

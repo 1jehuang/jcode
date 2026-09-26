@@ -45,6 +45,7 @@ fn hostile_tool() -> Vec<ToolDefinition> {
         name: "mcp__hostile__probe".to_string(),
         description: "probe".to_string(),
         input_schema: hostile_schema(),
+        defer_loading: false,
     }]
 }
 
@@ -245,6 +246,7 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
                 { "properties": { "target": { "type": "string" } } }
             ]
         }),
+        defer_loading: false,
     }];
 
     let built = jcode_provider_anthropic::format_tools(&combiner_tool, false, false);
@@ -281,6 +283,7 @@ fn anthropic_sends_a_schema_without_a_top_level_combiner() {
         name: "noargs".to_string(),
         description: "probe".to_string(),
         input_schema: serde_json::json!({}),
+        defer_loading: false,
     }];
     let bare_wire =
         serde_json::to_value(jcode_provider_anthropic::format_tools(&bare, false, false))
@@ -317,6 +320,7 @@ fn a_keyword_no_deny_list_has_ever_heard_of_reaches_no_provider() {
             },
             "required": ["x"]
         }),
+        defer_loading: false,
     }];
     const NOVEL: &str = "someKeywordFromADraftThatDoesNotExistYet";
 

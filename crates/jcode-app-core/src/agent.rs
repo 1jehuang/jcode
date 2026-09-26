@@ -1149,6 +1149,7 @@ impl Agent {
                     ContentBlock::OpenAICompaction { .. } => {
                         md.push_str("[OpenAI native compaction]\n\n");
                     }
+                    ContentBlock::ToolReference { .. } => {}
                 }
             }
         }

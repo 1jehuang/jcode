@@ -175,6 +175,14 @@ pub trait Provider: Send + Sync {
         false
     }
 
+    /// Whether this provider path natively supports deferred tool definitions
+    /// (`ToolDefinition::defer_loading`) loaded by `ContentBlock::ToolReference`
+    /// without invalidating the prompt cache. Providers that return false must
+    /// tolerate (and drop) deferred definitions and reference blocks.
+    fn supports_deferred_tools(&self) -> bool {
+        false
+    }
+
     /// Set the model to use (returns error if model not supported).
     fn set_model(&self, _model: &str) -> Result<()> {
         Err(anyhow::anyhow!(

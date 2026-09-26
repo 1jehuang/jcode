@@ -315,7 +315,10 @@ impl Agent {
     /// Unlock tools if a tool execution may have changed the registry
     /// (e.g., mcp connect/disconnect/reload)
     pub(super) fn unlock_tools_if_needed(&mut self, tool_name: &str) {
-        if tool_name == "mcp" {
+        // With native deferred MCP loading the `mcp` tool only changes the
+        // deferred subset, which is refreshed every turn without touching the
+        // cached prefix. Unlocking would be a needless prompt-cache miss.
+        if tool_name == "mcp" && !self.native_deferred_mcp() {
             self.unlock_tools();
         }
     }
@@ -438,6 +441,14 @@ impl Agent {
             self.cache_tracker.reset();
         }
 
+        // Provider-native deferred MCP loading: MCP definitions live outside
+        // the cached prefix, so the eager snapshot never changes when servers
+        // connect, reconnect, or register late. Refresh the deferred subset
+        // every turn instead of unlocking.
+        if self.native_deferred_mcp() {
+            return self.native_deferred_tool_definitions().await;
+        }
+
         // Return locked tools if available (prevents cache invalidation from
         // tools arriving asynchronously after the first API request).
         //
@@ -510,6 +521,50 @@ impl Agent {
         tools
     }
 
+    /// Whether this session exposes MCP tools through provider-native deferred
+    /// loading (see [`ToolDefinition::defer_loading`]). Eager mode keeps
+    /// top-level definitions; every other mode prefers the native path when
+    /// the active provider supports it, and falls back to the fixed
+    /// `mcp_search`/`mcp_call` surface otherwise.
+    pub(crate) fn native_deferred_mcp(&self) -> bool {
+        self.mcp_tools_mode != crate::config::McpToolsMode::Eager
+            && self.provider.supports_deferred_tools()
+    }
+
+    /// Tool list for the native deferred MCP path.
+    ///
+    /// The eager part is locked exactly like the regular path. MCP
+    /// definitions are appended as deferred on every turn from the live
+    /// registry. They never enter the cached prefix, so adding, removing, or
+    /// reconnecting servers costs no prompt-cache miss.
+    async fn native_deferred_tool_definitions(&mut self) -> Vec<ToolDefinition> {
+        let current = self.build_filtered_tool_definitions().await;
+        let eager = match &self.locked_tools {
+            // A snapshot locked before switching to the native path may still
+            // carry eager MCP definitions; keep them eager for cache stability
+            // (they are still callable) but never duplicate them as deferred.
+            Some(locked) => locked.clone(),
+            None => {
+                let eager = ToolDefinition::eager(&current);
+                logging::info(&format!(
+                    "Locking eager tool list at {} tools for cache stability (MCP tools deferred)",
+                    eager.len()
+                ));
+                self.locked_tools = Some(eager.clone());
+                eager
+            }
+        };
+        self.mcp_late_register_resolved = true;
+        let mut tools = eager;
+        let eager_names: HashSet<String> = tools.iter().map(|t| t.name.clone()).collect();
+        tools.extend(
+            current
+                .into_iter()
+                .filter(|t| t.defer_loading && !eager_names.contains(&t.name)),
+        );
+        tools
+    }
+
     /// Build the agent's tool definitions from the registry, applying the
     /// session's `allowed_tools`, `disabled_tools`, and self-dev filters.
     async fn build_filtered_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -545,6 +600,23 @@ impl Agent {
     /// according to the configured mode. Auto mode estimates the actual
     /// serialized, already-filtered definitions the provider would receive.
     fn apply_mcp_tool_exposure(&self, tools: &mut Vec<ToolDefinition>) {
+        if self.native_deferred_mcp() {
+            // Keep `mcp_search` eager for discovery (its results load the
+            // matching definitions via tool references). Every MCP definition
+            // is deferred, and so is `mcp_call`: discovered tools are called
+            // natively, but a stable deferred entry matters for caching. Some
+            // models (observed on Opus 4.8) rebuild the prefix when the
+            // deferred set goes from empty to non-empty, while changes within
+            // a non-empty deferred set keep the cache. `mcp_call` stays in the
+            // set for the whole session, so the first server connecting later
+            // is still cache-neutral.
+            for tool in tools.iter_mut() {
+                if tool.name.starts_with("mcp__") || tool.name == "mcp_call" {
+                    tool.defer_loading = true;
+                }
+            }
+            return;
+        }
         let mcp_definitions: Vec<ToolDefinition> = tools
             .iter()
             .filter(|tool| tool.name.starts_with("mcp__"))
@@ -1101,7 +1173,8 @@ impl Agent {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    | ContentBlock::OpenAIReasoning { .. }
+                    | ContentBlock::ToolReference { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }

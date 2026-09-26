@@ -77,7 +77,7 @@ fn stored_message_visible_text(message: &crate::session::StoredMessage) -> Strin
             ContentBlock::Image { media_type, .. } => {
                 parts.push(format!("[image:{}]", media_type));
             }
-            ContentBlock::OpenAICompaction { .. } => {}
+            ContentBlock::OpenAICompaction { .. } | ContentBlock::ToolReference { .. } => {}
         }
     }
     parts.join("\n\n")

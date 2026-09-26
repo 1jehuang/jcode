@@ -34,6 +34,7 @@ fn bash_registry_definition() -> ToolDefinition {
             },
             "required": ["command"]
         }),
+        defer_loading: false,
     }
 }
 
@@ -80,6 +81,7 @@ fn oauth_schedule_wakeup_forwards_the_real_schedule_schema() {
         name: "schedule".to_string(),
         description: "Schedule, list, or cancel future tasks.".to_string(),
         input_schema: real_schema.clone(),
+        defer_loading: false,
     }];
 
     let formatted = format_tools(&registry, true, false);

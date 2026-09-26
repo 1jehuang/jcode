@@ -81,7 +81,8 @@ impl Agent {
                     ContentBlock::Reasoning { .. }
                     | ContentBlock::ReasoningTrace { .. }
                     | ContentBlock::AnthropicThinking { .. }
-                    | ContentBlock::OpenAIReasoning { .. } => {}
+                    | ContentBlock::OpenAIReasoning { .. }
+                    | ContentBlock::ToolReference { .. } => {}
                     ContentBlock::Image { .. } => {
                         transcript.push_str("[Image]\n");
                     }
