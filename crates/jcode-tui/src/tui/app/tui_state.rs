@@ -668,25 +668,20 @@ impl crate::tui::TuiState for App {
         &self.pending_soft_interrupts
     }
 
+    fn follow(&self) -> Option<jcode_tui_messages::ContentPos> {
+        self.follow
+    }
+
     fn scroll_offset(&self) -> usize {
-        self.scroll_offset
+        self.chat_top_row()
     }
 
     fn auto_scroll_paused(&self) -> bool {
-        self.auto_scroll_paused
+        self.follow.is_some()
     }
 
     fn terminal_clear_collapsed(&self) -> bool {
         self.terminal_clear_collapsed()
-    }
-
-    fn pending_resize_anchor(&self) -> Option<jcode_tui_messages::ContentPos> {
-        self.pending_resize_anchor.map(|pending| pending.target)
-    }
-
-    fn pending_history_anchor_lines_from_bottom(&self) -> Option<usize> {
-        self.pending_history_anchor
-            .map(|anchor| anchor.lines_from_bottom)
     }
 
     fn chat_overscroll_active(&self) -> bool {

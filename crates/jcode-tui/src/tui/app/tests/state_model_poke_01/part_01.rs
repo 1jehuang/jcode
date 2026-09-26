@@ -674,16 +674,15 @@ fn test_ctrl_l_terminal_clear_adds_spacer_and_keeps_everything() {
     app.queued_messages.push("queued".to_string());
     app.display_messages.replace(vec![DisplayMessage::system("visible chat".to_string())]);
     app.bump_display_messages_version();
-    app.scroll_offset = 25;
-    app.auto_scroll_paused = true;
+    app.anchor_chat_at_row(25);
     crate::tui::ui::set_last_chat_viewport_height(30);
     let session_messages_before = app.session.messages.len();
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL)
         .unwrap();
 
-    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
-    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
+    assert_eq!(app.chat_top_row(), 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.follow.is_some(), "Ctrl+L resumes tail-follow");
     assert_eq!(
         app.display_messages().len(),
         2,
@@ -750,15 +749,14 @@ fn test_cmd_l_terminal_clear_matches_ctrl_l() {
     let mut app = create_test_app();
     app.display_messages.replace(vec![DisplayMessage::system("visible chat".to_string())]);
     app.bump_display_messages_version();
-    app.scroll_offset = 12;
-    app.auto_scroll_paused = true;
+    app.anchor_chat_at_row(12);
     crate::tui::ui::set_last_chat_viewport_height(24);
 
     app.handle_key(KeyCode::Char('l'), KeyModifiers::SUPER)
         .unwrap();
 
-    assert_eq!(app.scroll_offset, 0, "Cmd+L snaps to the bottom");
-    assert!(!app.auto_scroll_paused, "Cmd+L resumes tail-follow");
+    assert_eq!(app.chat_top_row(), 0, "Cmd+L snaps to the bottom");
+    assert!(!app.follow.is_some(), "Cmd+L resumes tail-follow");
     assert_eq!(app.display_messages().len(), 2);
     assert_eq!(app.display_messages()[1].role, "spacer");
     assert_eq!(app.display_messages()[1].content, "24");

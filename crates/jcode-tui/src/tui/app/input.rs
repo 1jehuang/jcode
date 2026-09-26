@@ -3275,11 +3275,10 @@ impl App {
     fn commit_resize_redraw(&mut self, now: std::time::Instant) -> bool {
         self.last_resize_redraw = Some(now);
         self.resize_redraw_pending = false;
-        // A paused viewport holds a wrapped line index; capture the reading
-        // position in content coordinates before the rewrap, so the same
-        // message stays under the reader (issue #1412, persistent half).
-        self.capture_resize_anchor();
-        // Same for an in-progress transcript selection.
+        // A resize needs no scroll capture: the follow target is a content
+        // position, which is width-independent and resolves correctly against
+        // the rewrapped frame on its own.
+        // Re-base an in-progress transcript selection captured before the rewrap.
         self.capture_selection_rebase();
         self.handle_diagram_geometry_change();
         // A resize rewraps the transcript, so the wrapped-line extent changes
@@ -3508,7 +3507,7 @@ impl App {
         if self.turn_reasoning_traces.len() < 2 {
             return false;
         }
-        if self.auto_scroll_paused {
+        if self.follow.is_some() {
             // User is reading history; never remove anything they might see.
             return false;
         }

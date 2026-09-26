@@ -273,8 +273,8 @@ fn make_edit_badge_test_app(
     ]);
     app.bump_display_messages_version();
     app.diff_mode = crate::config::DiffDisplayMode::Inline;
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
@@ -1099,8 +1099,8 @@ fn test_real_draw_click_on_body_anchored_image_label_cycles_level() {
     app.invalidate_side_pane_images_signature();
     app.pin_images = true;
     app.inline_images_visible = true;
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
@@ -1252,8 +1252,8 @@ fn test_real_draw_never_emits_inline_image_marker_text() {
     app.invalidate_side_pane_images_signature();
     app.pin_images = true;
     app.inline_images_visible = true;
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
     app.is_processing = false;
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());

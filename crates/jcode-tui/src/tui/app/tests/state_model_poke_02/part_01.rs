@@ -221,8 +221,11 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
     // scroll_down treats a rendered max of 0 (e.g. an undrawn or empty
     // transcript) as "already at the bottom" and snaps back to follow mode.
     let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 24);
-    app.auto_scroll_paused = true;
-    app.scroll_offset = 6;
+    // Draw once so the viewport can anchor to a row, then park it at row 6.
+    terminal
+        .draw(|f| crate::tui::ui::draw(f, &app))
+        .expect("draw failed");
+    app.anchor_chat_at_row(6);
     terminal
         .draw(|f| crate::tui::ui::draw(f, &app))
         .expect("draw failed");
@@ -237,7 +240,7 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
         delta: -2,
     });
     assert_eq!(
-        app.scroll_offset, 5,
+        app.chat_top_row(), 5,
         "the first row should render immediately"
     );
     assert_eq!(
@@ -245,14 +248,14 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
         "the second row should remain queued"
     );
     app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 4);
+    assert_eq!(app.chat_top_row(), 4);
 
     app.apply_handterm_native_scroll(super::handterm_native_scroll::HostToApp::Scroll {
         pane: super::handterm_native_scroll::PaneKind::Chat,
         delta: 3,
     });
     assert_eq!(
-        app.scroll_offset, 5,
+        app.chat_top_row(), 5,
         "the first row should render immediately"
     );
     assert_eq!(
@@ -261,12 +264,12 @@ fn test_handterm_native_scroll_command_updates_chat_offset() {
     );
     app.progress_mouse_scroll_animation();
     assert_eq!(
-        app.scroll_offset, 6,
+        app.chat_top_row(), 6,
         "the queued rows should be revealed separately"
     );
     assert_eq!(app.mouse_scroll_queue, 1);
     app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 7);
+    assert_eq!(app.chat_top_row(), 7);
 }
 
 #[cfg(unix)]
@@ -292,8 +295,9 @@ fn test_handterm_native_scroll_client_roundtrips_over_socket() {
         .expect("set read timeout");
 
     let (mut app, mut terminal) = create_scroll_test_app(50, 12, 0, 24);
-    app.auto_scroll_paused = true;
-    app.scroll_offset = 6;
+    // Draw once so the viewport can anchor to a row, then park it at row 6.
+    let _ = render_and_snap(&app, &mut terminal);
+    app.anchor_chat_at_row(6);
     let _ = render_and_snap(&app, &mut terminal);
 
     client.sync_from_app(&app);
@@ -319,10 +323,10 @@ fn test_handterm_native_scroll_client_roundtrips_over_socket() {
         .expect("scroll command should arrive");
 
     app.apply_handterm_native_scroll(command);
-    assert_eq!(app.scroll_offset, 5);
+    assert_eq!(app.chat_top_row(), 5);
     assert_eq!(app.mouse_scroll_queue, -1);
     app.progress_mouse_scroll_animation();
-    assert_eq!(app.scroll_offset, 4);
+    assert_eq!(app.chat_top_row(), 4);
 
     unsafe {
         std::env::remove_var("HANDTERM_NATIVE_SCROLL_SOCKET");
@@ -446,10 +450,10 @@ fn test_mouse_scroll_over_diagram_pans_hovered_pane_without_changing_focus() {
                     assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), expected);
                     assert_eq!(app.diagram_focus, focused, "hover must not steal focus");
                     assert!(
-                        !app.auto_scroll_paused,
+                        !app.follow.is_some(),
                         "hover must not pause chat auto-scroll"
                     );
-                    assert_eq!(app.scroll_offset, 0, "hover must not scroll chat");
+                    assert!(!app.follow.is_some(), "hover must not scroll chat");
                     assert_eq!(app.mouse_scroll_queue, 0);
                     assert_eq!(app.mouse_scroll_target, None);
                     assert_eq!(app.diagram_pane_ratio, 40);
@@ -492,8 +496,8 @@ fn test_mouse_scroll_over_chat_ignores_diagram_keyboard_focus() {
         modifiers: KeyModifiers::empty(),
     });
 
-    assert!(app.auto_scroll_paused);
-    assert_ne!(app.scroll_offset, 0);
+    assert!(app.follow.is_some());
+    assert_ne!(app.chat_top_row(), 0);
     assert_eq!((app.diagram_scroll_x, app.diagram_scroll_y), (5, 5));
     assert!(app.diagram_focus, "wheel must not change keyboard focus");
 

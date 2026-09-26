@@ -624,51 +624,6 @@ pub(super) struct CompactedHistoryLazyState {
     pub pending_request_visible: Option<usize>,
 }
 
-/// Pending viewport anchor used to keep the chat stable when older compacted
-/// history is loaded in. Older messages are prepended above the current view,
-/// which would otherwise teleport the reader to the new absolute top. We instead
-/// remember the reader's distance from the bottom (which is invariant under a
-/// top-side prepend) and let the next render resolve it into an absolute offset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct HistoryScrollAnchor {
-    /// Wrapped lines between the top of the viewport and the bottom of the
-    /// transcript at the moment the load was requested. Invariant across the
-    /// prepend, so `new_total - lines_from_bottom` reproduces the same view.
-    pub lines_from_bottom: usize,
-    /// Total wrapped line count of the frame this anchor was captured from. Used
-    /// to detect when a frame with the newly-loaded content has rendered (its
-    /// total differs), so the anchor can be reconciled into `scroll_offset`.
-    pub base_total: usize,
-    /// Transcript length at capture. A resize rewraps the transcript and changes
-    /// `base_total` without loading anything, so the wrapped total alone would
-    /// let a resize resolve (and drop) this anchor before the requested history
-    /// arrives. Requiring the transcript to have actually grown distinguishes
-    /// the two.
-    pub base_msg_count: usize,
-}
-
-/// Resize anchor captured against the pre-resize geometry.
-///
-/// The stored `scroll_offset` is a wrapped line index, which only means
-/// something for the width that produced it. When a resize rewraps the
-/// transcript while the reader is paused in history, the reading position is
-/// captured in content coordinates instead, and the next frame resolves it
-/// against the new geometry so the same message stays under the reader
-/// (issue #1412, persistent half).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PendingResizeAnchor {
-    /// Where the reader was, in content coordinates. A message, or a row in a
-    /// section with no message boundaries (live streaming output, retained
-    /// reasoning, the header).
-    pub target: jcode_tui_messages::ContentPos,
-    /// Viewport width the anchor was captured at; the frame that resolves it
-    /// is laid out at a different one.
-    pub captured_width: u16,
-    /// Resolved row the screen was showing when the anchor was captured, used
-    /// to tell the stale published value from the post-resize one.
-    pub captured_scroll: usize,
-}
-
 /// A transcript selection captured against the pre-resize geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PendingSelectionRebase {
@@ -900,16 +855,6 @@ pub struct App {
     display_edit_line_counts: (usize, usize),
     terminal_title: RefCell<terminal_title::TerminalTitleState>,
     compacted_history_lazy: CompactedHistoryLazyState,
-    /// When older compacted history has just been loaded, this anchors the
-    /// viewport to the content the reader was looking at so the prepend does not
-    /// visibly jump. Resolved into `scroll_offset` by the next render frame.
-    pending_history_anchor: Option<HistoryScrollAnchor>,
-    /// Set when a resize rewraps the transcript while the reader is paused in
-    /// history. Holds the reading position in content coordinates (which
-    /// message, which row inside it) captured against the pre-resize geometry,
-    /// and is resolved against each new frame until the renderer reports that
-    /// it applied it. See `jcode_tui_messages::anchor`.
-    pending_resize_anchor: Option<PendingResizeAnchor>,
     input: String,
     command_candidates_cache: RefCell<Option<CommandCandidatesCache>>,
     /// Per-input memo for `command_suggestions()`; see
@@ -919,9 +864,10 @@ pub struct App {
     /// `command_suggestions_cache` to a single frame.
     command_suggestions_epoch: std::cell::Cell<u64>,
     cursor_pos: usize,
-    scroll_offset: usize,
-    /// Pauses auto-scroll when user scrolls up during streaming
-    auto_scroll_paused: bool,
+    /// Where the chat viewport follows. `None` follows the live tail (bottom);
+    /// `Some(pos)` anchors the top row to a content position, which survives a
+    /// reflow, a prepend and a compaction because it names an item id.
+    follow: Option<jcode_tui_messages::ContentPos>,
     active_skill: Option<String>,
     is_processing: bool,
     // Live streaming/turn progress (text, per-turn tokens, TPS tracking).

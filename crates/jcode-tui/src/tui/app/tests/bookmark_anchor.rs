@@ -7,12 +7,14 @@ fn bookmark_test_app() -> crate::tui::app::App {
     let mut app = create_test_app();
     app.diagram_mode = crate::config::DiagramDisplayMode::None;
     app.diagram_pane_enabled = false;
-    app.display_messages = (0..40)
-        .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
-        .collect();
+    app.display_messages.replace(
+        (0..40)
+            .map(|i| DisplayMessage::assistant(format!("TOKEN{i:03} - {}", "filler ".repeat(8))))
+            .collect(),
+    );
     app.bump_display_messages_version();
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
     app
@@ -53,7 +55,7 @@ fn bookmark_returns_to_the_same_message() {
     app.toggle_scroll_bookmark();
     assert!(app.scroll_bookmark.is_some());
     assert!(
-        !app.auto_scroll_paused,
+        !app.follow.is_some(),
         "setting a bookmark jumps to the bottom"
     );
 
@@ -82,7 +84,6 @@ fn bookmark_survives_a_resize_between_set_and_return() {
     let mut narrow = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 30)).unwrap();
     app.should_redraw_after_resize();
     render_and_snap(&app, &mut narrow);
-    let _ = app.reconcile_resize_anchor();
 
     app.toggle_scroll_bookmark();
     render_and_snap(&app, &mut narrow);
@@ -106,15 +107,15 @@ fn bookmark_on_a_removed_message_keeps_the_reader_put() {
 
     // The bookmarked message goes away (compaction/pruning leaves a shorter
     // transcript behind).
-    app.display_messages = vec![DisplayMessage::assistant("short replacement")];
+    app.display_messages.replace(vec![DisplayMessage::assistant("short replacement")]);
     app.bump_display_messages_version();
     render_and_snap(&app, &mut terminal);
-    let before = app.scroll_offset;
+    let before = app.chat_top_row();
 
     app.toggle_scroll_bookmark();
     assert!(app.scroll_bookmark.is_none());
     assert_eq!(
-        app.scroll_offset, before,
+        app.chat_top_row(), before,
         "an unresolvable bookmark must not move the viewport"
     );
 }

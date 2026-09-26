@@ -138,12 +138,7 @@ pub(super) async fn handle_tick(app: &mut App, remote: &mut RemoteConnection) ->
     // Dissolve stale (off-screen) reasoning traces with zero visible motion.
     needs_redraw |= app.gc_offscreen_reasoning_traces();
     needs_redraw |= dispatch_compacted_history_load(app, remote).await;
-    // Adopt the resolved scroll position once a frame containing newly loaded
-    // older history has rendered, so manual scrolling resumes seamlessly.
-    needs_redraw |= app.reconcile_history_anchor();
-    // Same for a resize: adopt the resolved row once the rewrap has rendered.
-    needs_redraw |= app.reconcile_resize_anchor();
-    // And re-base a transcript selection captured before the rewrap.
+    // Re-base a transcript selection captured before the rewrap.
     needs_redraw |= app.rebase_selection_after_resize();
     // Reveal buffered streaming text at the smooth paced rate on each tick, the
     // same as the local turn loop. When Done arrived with a backlog, leave one
@@ -1806,7 +1801,7 @@ async fn handle_debug_command(app: &mut App, cmd: &str, remote: &mut RemoteConne
             "display_messages": app.display_messages.len(),
             "input": app.input,
             "cursor_pos": app.cursor_pos,
-            "scroll_offset": app.scroll_offset,
+            "scroll_offset": app.chat_top_row(),
             "queued_messages": app.queued_messages.len(),
             "provider_session_id": app.provider_session_id,
             "provider_name": app.remote_provider_name.clone(),

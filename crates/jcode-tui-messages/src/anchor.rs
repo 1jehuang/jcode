@@ -27,22 +27,29 @@ pub struct Anchor {
 /// transcript order, as `(item_id, start, len)`.
 ///
 /// Boundaries are cumulative within a section, so the absolute start is the
-/// section's `line_start` plus the previous boundary's cumulative length.
-pub fn message_row_ranges(frame: &PreparedChatFrame) -> Vec<(ItemId, usize, usize)> {
-    let mut ranges = Vec::new();
-    for section in &frame.sections {
+/// section's `line_start` plus the previous boundary's cumulative length. This
+/// is an iterator rather than a `Vec` because the render path resolves an
+/// anchored position every frame and must not allocate the whole transcript.
+pub fn message_row_ranges(
+    frame: &PreparedChatFrame,
+) -> impl Iterator<Item = (ItemId, usize, usize)> + '_ {
+    frame.sections.iter().flat_map(|section| {
         let mut prev = 0usize;
-        for boundary in &section.prepared.message_boundaries {
-            let end = boundary.wrapped_len;
-            ranges.push((
-                boundary.item_id,
-                section.line_start + prev,
-                end.saturating_sub(prev),
-            ));
-            prev = end;
-        }
-    }
-    ranges
+        section
+            .prepared
+            .message_boundaries
+            .iter()
+            .map(move |boundary| {
+                let end = boundary.wrapped_len;
+                let range = (
+                    boundary.item_id,
+                    section.line_start + prev,
+                    end.saturating_sub(prev),
+                );
+                prev = end;
+                range
+            })
+    })
 }
 
 /// Capture the anchor for `row`, or `None` when the row is outside every
@@ -142,10 +149,10 @@ mod tests {
     fn ranges_tile_the_row_vector() {
         let f = frame(&[(1, 3), (2, 1), (3, 2)]);
         assert_eq!(
-            message_row_ranges(&f),
+            message_row_ranges(&f).collect::<Vec<_>>(),
             vec![(ItemId(1), 0, 3), (ItemId(2), 3, 1), (ItemId(3), 4, 2)]
         );
-        assert_eq!(message_row_ranges(&f).len(), 3);
+        assert_eq!(message_row_ranges(&f).count(), 3);
         assert_eq!(f.total_wrapped_lines(), 6);
     }
 
@@ -208,7 +215,7 @@ mod tests {
     #[test]
     fn frames_without_boundaries_yield_no_anchor() {
         let f = frame(&[]);
-        assert_eq!(message_row_ranges(&f), Vec::new());
+        assert_eq!(message_row_ranges(&f).count(), 0);
         assert_eq!(anchor_at_row(&f, 0), None);
         assert_eq!(
             resolve(
@@ -260,14 +267,21 @@ pub fn content_pos_at_row(frame: &PreparedChatFrame, row: usize) -> Option<Conte
     {
         return None;
     }
-    let entry = section
-        .prepared
-        .wrapped_line_map
-        .get(row - section.line_start)?;
+    let local = row - section.line_start;
+    let map = &section.prepared.wrapped_line_map;
+    let (raw_line, column) = match map.get(local) {
+        Some(entry) => (entry.raw_line, entry.start_col),
+        // ponytail: a section prepared without wrap provenance (the padded
+        // header, inline images, batch progress) has no map. Treat one rendered
+        // row as one raw line so its rows still anchor; revisit if such a
+        // section ever re-wraps in place.
+        None if map.is_empty() => (local, 0),
+        None => return None,
+    };
     Some(ContentPos::Section {
         kind: section.kind,
-        raw_line: entry.raw_line,
-        column: entry.start_col,
+        raw_line,
+        column,
     })
 }
 
@@ -299,11 +313,15 @@ pub fn resolve_content_pos(
             }
             // Last entry starting at or before the column: the row the offset
             // was wrapped into. The captured row is exactly one of these.
-            let local = section
-                .prepared
-                .wrapped_line_map
-                .iter()
-                .rposition(|entry| entry.raw_line == *raw_line && entry.start_col <= *column)?;
+            let map = &section.prepared.wrapped_line_map;
+            let local = if map.is_empty() {
+                // ponytail: identity, matching `content_pos_at_row` for a
+                // section prepared without wrap provenance.
+                (*raw_line).min(section.prepared.wrapped_lines.len().saturating_sub(1))
+            } else {
+                map.iter()
+                    .rposition(|entry| entry.raw_line == *raw_line && entry.start_col <= *column)?
+            };
             Some((section.line_start + local).min(max_scroll))
         }
     }

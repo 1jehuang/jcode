@@ -373,41 +373,17 @@ pub(super) fn draw_messages(
 
     super::set_last_max_scroll(max_scroll);
 
-    // When older compacted history is being loaded in, the app hands us the
-    // reader's distance-from-bottom instead of an absolute offset. Distance from
-    // the bottom is invariant under a top-side prepend, so resolving it against
-    // the *current* total keeps the same content under the reader and the load
-    // is seamless (no jump to the new absolute top).
-    let anchored_scroll = app
-        .pending_history_anchor_lines_from_bottom()
-        .map(|lines_from_bottom| {
-            total_lines
-                .saturating_sub(lines_from_bottom)
-                .min(max_scroll)
-        });
-    // A resize rewrapped the transcript while the reader was parked in history.
-    // The captured position is in content coordinates, so resolving it against
-    // this frame's geometry keeps the same message under the reader instead of
-    // reinterpreting a stale line index (issue #1412, persistent half).
-    let resize_anchor_scroll = if app.auto_scroll_paused() {
-        app.pending_resize_anchor()
-            .and_then(|pos| jcode_tui_messages::resolve_content_pos(&pos, &prepared, max_scroll))
-    } else {
-        // The anchor describes a reading position; following the tail is not one.
-        None
-    };
-    let user_scroll = app.scroll_offset().min(max_scroll);
-    let scroll = if let Some(anchored) = resize_anchor_scroll {
-        super::set_tail_catchup_active(false);
-        anchored
-    } else if let Some(anchored) = anchored_scroll {
-        super::set_tail_catchup_active(false);
-        anchored
-    } else if app.auto_scroll_paused() {
-        super::set_tail_catchup_active(false);
-        user_scroll.min(max_scroll)
-    } else {
-        resolve_tail_follow_scroll(max_scroll, viewport_height)
+    // One representation: the app either follows the live tail, or anchors the
+    // top row to a content position. A content position names an item id, so it
+    // survives a reflow (resize) and a prepend (older history) with no capture
+    // step and no second copy of the position to reconcile.
+    let scroll = match app.follow() {
+        None => resolve_tail_follow_scroll(max_scroll, viewport_height),
+        Some(pos) => {
+            super::set_tail_catchup_active(false);
+            jcode_tui_messages::resolve_content_pos(&pos, &prepared, max_scroll)
+                .unwrap_or_else(|| super::last_resolved_chat_scroll().min(max_scroll))
+        }
     };
 
     // Publish the resolved geometry so scroll handlers and the anchor-reconcile

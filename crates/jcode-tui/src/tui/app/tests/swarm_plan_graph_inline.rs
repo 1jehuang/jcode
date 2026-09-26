@@ -1251,14 +1251,13 @@ fn test_disconnected_ctrl_l_only_adds_spacer_and_touches_nothing() {
     let _stale_hash = seed_rendered_plan_graph(&mut app, &mut remote);
     app.queued_messages.push("queued".to_string());
     let messages_before = app.display_messages().len();
-    app.scroll_offset = 10;
-    app.auto_scroll_paused = true;
+    app.anchor_chat_at_row(10);
 
     super::remote::handle_disconnected_key(&mut app, KeyCode::Char('l'), KeyModifiers::CONTROL)
         .expect("disconnected Ctrl+L should succeed");
 
-    assert_eq!(app.scroll_offset, 0, "Ctrl+L snaps to the bottom");
-    assert!(!app.auto_scroll_paused, "Ctrl+L resumes tail-follow");
+    assert_eq!(app.chat_top_row(), 0, "Ctrl+L snaps to the bottom");
+    assert!(!app.follow.is_some(), "Ctrl+L resumes tail-follow");
     assert!(
         app.display_messages().len() >= messages_before,
         "transcript content is untouched (a spacer may be appended)"

@@ -21,8 +21,8 @@ struct MouseScrollTraceState {
 impl MouseScrollTraceState {
     fn capture(app: &App) -> Self {
         Self {
-            chat_offset: app.scroll_offset,
-            auto_scroll_paused: app.auto_scroll_paused,
+            chat_offset: app.chat_top_row(),
+            auto_scroll_paused: app.follow.is_some(),
             mouse_queue: app.mouse_scroll_queue,
             mouse_target: app.mouse_scroll_target,
             diff_offset: app.diff_pane_scroll,
@@ -370,6 +370,55 @@ impl App {
             Err(e) => self.set_status_notice(format!("Failed to open link: {}", e)),
         }
         true
+    }
+
+    /// Row the chat viewport top currently resolves to, read from the frame the
+    /// renderer last drew. While following the tail that is the bottom row.
+    pub(super) fn chat_top_row(&self) -> usize {
+        match self.follow {
+            Some(pos) => super::super::ui::last_chat_frame()
+                .and_then(|frame| {
+                    jcode_tui_messages::resolve_content_pos(
+                        &pos,
+                        &frame,
+                        super::super::ui::last_max_scroll(),
+                    )
+                })
+                .unwrap_or_else(super::super::ui::last_resolved_chat_scroll),
+            None => super::super::ui::last_max_scroll(),
+        }
+    }
+
+    /// Anchor the chat viewport top at `row`, minting a content position from the
+    /// frame the renderer last drew. A row that belongs to no message (a blank
+    /// separator, or no frame yet) leaves the follow target unchanged.
+    pub(super) fn anchor_chat_at_row(&mut self, row: usize) {
+        let Some(frame) = super::super::ui::last_chat_frame() else {
+            return;
+        };
+        if let Some(pos) = jcode_tui_messages::content_pos_at_row(&frame, row) {
+            self.follow = Some(pos);
+        }
+    }
+
+    /// Follow the live tail again: the viewport pins to the bottom.
+    pub(super) fn follow_chat_tail(&mut self) {
+        self.follow = None;
+    }
+
+    /// Anchor the viewport at the first row of transcript item `idx`. Used when
+    /// the transcript is replaced wholesale (a freshly loaded history window),
+    /// where the frame that would answer `anchor_chat_at_row` has not been built
+    /// yet, but the item id already exists.
+    pub(super) fn anchor_chat_at_item(&mut self, idx: usize) {
+        if let Some(item_id) = self.display_messages.id_at(idx) {
+            self.follow = Some(jcode_tui_messages::ContentPos::Message(
+                jcode_tui_messages::Anchor {
+                    item_id,
+                    row_within_item: 0,
+                },
+            ));
+        }
     }
 
     pub(super) fn scroll_max_estimate(&self) -> usize {
@@ -1761,8 +1810,6 @@ impl App {
     /// (e.g. the mouse-wheel queue) rely on this to avoid accumulating
     /// "phantom" scroll once the viewport is already pinned to the top.
     pub(super) fn scroll_up(&mut self, amount: usize) -> bool {
-        // A user scroll supersedes a pending resize anchor.
-        self.pending_resize_anchor = None;
         // Scrolling up cancels any pending overscroll rebound line immediately
         // Leaving the collapsed terminal-clear screen: drop the trailing Ctrl+L
         // spacer so scrolling up reveals the transcript immediately instead of
@@ -1777,47 +1824,22 @@ impl App {
         self.chat_overscroll_last = None;
         self.chat_scroll_down_last = None;
         self.chat_scroll_gesture_from_bottom = false;
-        // While older compacted history is still settling on screen, the renderer
-        // is anchored to a distance-from-bottom rather than `scroll_offset`. Keep
-        // scrolling continuous by moving the anchor itself instead of a stale
-        // offset the renderer is currently ignoring.
-        if let Some(mut anchor) = self.pending_history_anchor {
-            let total = super::super::ui::last_total_wrapped_lines();
-            anchor.lines_from_bottom = anchor
-                .lines_from_bottom
-                .saturating_add(amount)
-                .min(total.max(anchor.lines_from_bottom));
-            self.pending_history_anchor = Some(anchor);
-            self.auto_scroll_paused = true;
-            self.maybe_queue_compacted_history_load();
-            // Force a full repaint: ratatui's diff does not re-emit the trailing
-            // cell after a wide grapheme (emoji/CJK) when the symbol is unchanged,
-            // so terminals like kitty/foot leave a stale "ghost" char from the
-            // previous frame. See ratatui issue #2357. Buffer invalidation re-emits
-            // every cell without the ED2 clear escape that made images flicker
-            // during scroll (issue #404).
-            self.request_full_repaint();
-            return true;
-        }
-        let before = (self.scroll_offset, self.auto_scroll_paused);
+        let before = self.chat_top_row();
+        let was_tail = self.follow.is_none();
         let max = self.scroll_max_estimate();
-        if !self.auto_scroll_paused {
-            let rendered_max = super::super::ui::last_max_scroll();
-            let current_abs = max.saturating_sub(self.scroll_offset);
-            self.scroll_offset = current_abs.saturating_sub(amount);
+        let rendered_max = super::super::ui::last_max_scroll();
+        let target = if was_tail {
+            let mut target = max.saturating_sub(amount);
             if rendered_max > 0 {
-                self.scroll_offset = self.scroll_offset.min(rendered_max.saturating_sub(amount));
+                target = target.min(rendered_max.saturating_sub(amount));
             }
+            target
         } else {
-            self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-        }
-        self.auto_scroll_paused = true;
-        // If the upward scroll bottomed out against the top of the currently
-        // loaded content, fold the unsatisfied intent into the prefetch as
-        // overshoot so the newly loaded history scrolls into view smoothly.
-        let overshoot = if self.scroll_offset == 0 { amount } else { 0 };
-        self.maybe_queue_compacted_history_load_with_overshoot(overshoot);
-        let changed = before != (self.scroll_offset, self.auto_scroll_paused);
+            before.saturating_sub(amount)
+        };
+        self.anchor_chat_at_row(target);
+        self.maybe_queue_compacted_history_load();
+        let changed = was_tail || self.chat_top_row() != before;
         if changed {
             // See note above (ratatui #2357): force a clean repaint on scroll so
             // wide-grapheme trailing cells cannot leave a ghost character.
@@ -1827,16 +1849,11 @@ impl App {
     }
 
     pub(super) fn pause_chat_auto_scroll(&mut self) {
-        // A user scroll supersedes a pending resize anchor.
-        self.pending_resize_anchor = None;
-        if self.auto_scroll_paused {
+        if self.follow.is_some() {
             return;
         }
-
-        let max = self.scroll_max_estimate();
-
-        self.scroll_offset = max.saturating_sub(self.scroll_offset.min(max));
-        self.auto_scroll_paused = true;
+        let row = self.chat_top_row();
+        self.anchor_chat_at_row(row);
     }
 
     /// Scroll the chat transcript down by `amount` lines.
@@ -1846,8 +1863,6 @@ impl App {
     /// `false`, so the mouse-wheel queue does not accumulate phantom scroll
     /// that would later have to be undone before scrolling up moves the view.
     pub(super) fn scroll_down(&mut self, amount: usize) -> bool {
-        // A user scroll supersedes a pending resize anchor.
-        self.pending_resize_anchor = None;
         // Segment downward motion into gestures: a pause longer than
         // `OVERSCROLL_GESTURE_GAP` starts a new gesture. Record whether this
         // gesture began while already pinned to the bottom; only such gestures
@@ -1861,23 +1876,7 @@ impl App {
         if new_gesture {
             self.chat_scroll_gesture_from_bottom = self.chat_pinned_to_bottom();
         }
-        // Mirror `scroll_up`: while an older-history prepend is still settling,
-        // the renderer is anchored to distance-from-bottom, so move the anchor
-        // toward the bottom instead of a stale `scroll_offset`.
-        if let Some(mut anchor) = self.pending_history_anchor {
-            if anchor.lines_from_bottom == 0 {
-                if self.chat_scroll_gesture_from_bottom {
-                    self.register_chat_overscroll();
-                }
-                return false;
-            }
-            anchor.lines_from_bottom = anchor.lines_from_bottom.saturating_sub(amount);
-            self.pending_history_anchor = Some(anchor);
-            // ratatui #2357: clean repaint on scroll to avoid wide-grapheme ghosts.
-            self.request_full_repaint();
-            return true;
-        }
-        if !self.auto_scroll_paused {
+        if self.follow.is_none() {
             // Already pinned to the bottom: a further downward scroll is an
             // "overscroll". Only reveal the elastic status line when the whole
             // gesture started here at the bottom; momentum left over from a
@@ -1887,7 +1886,7 @@ impl App {
             }
             return false;
         }
-        let before = self.scroll_offset;
+        let before = self.chat_top_row();
         let max = self.scroll_max_estimate();
         let rendered_max = super::super::ui::last_max_scroll();
         // The renderer's exact extent is the authoritative ceiling. Only fall
@@ -1901,17 +1900,17 @@ impl App {
             // Not streaming and nothing to scroll: we are already at the bottom.
             0
         };
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
-        let changed = if self.scroll_offset >= bottom_threshold {
+        let target = before.saturating_add(amount);
+        let changed = if target >= bottom_threshold {
             self.follow_chat_bottom();
             true
         } else {
-            // Never let the stored offset grow past the largest offset that
-            // still moves the rendered viewport. Otherwise scrolling down at
-            // (or near) the bottom silently accumulates "phantom" offset that
-            // later has to be undone before scrolling up moves the view again.
-            self.scroll_offset = self.scroll_offset.min(bottom_threshold);
-            self.scroll_offset != before
+            // Never let the position grow past the largest offset that still
+            // moves the rendered viewport. Otherwise scrolling down at (or near)
+            // the bottom silently accumulates "phantom" offset that later has to
+            // be undone before scrolling up moves the view again.
+            self.anchor_chat_at_row(target.min(bottom_threshold));
+            self.chat_top_row() != before
         };
         if changed {
             // ratatui #2357: clean repaint on scroll to avoid wide-grapheme ghosts.
@@ -1923,19 +1922,11 @@ impl App {
     /// Whether the chat viewport is currently pinned to (following) the
     /// bottom of the transcript.
     fn chat_pinned_to_bottom(&self) -> bool {
-        if let Some(anchor) = self.pending_history_anchor {
-            anchor.lines_from_bottom == 0
-        } else {
-            !self.auto_scroll_paused
-        }
+        self.follow.is_none()
     }
 
     pub(super) fn follow_chat_bottom(&mut self) {
-        self.pending_history_anchor = None;
-        // Resuming the tail drops any reading position captured for a resize.
-        self.pending_resize_anchor = None;
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = false;
+        self.follow_chat_tail();
         super::super::ui::request_tail_follow_snap();
     }
 
@@ -2005,8 +1996,7 @@ impl App {
     }
 
     pub(super) fn debug_scroll_top(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = true;
+        self.anchor_chat_at_row(0);
     }
 
     pub(super) fn debug_scroll_bottom(&mut self) {

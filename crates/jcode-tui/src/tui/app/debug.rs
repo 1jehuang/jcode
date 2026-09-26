@@ -455,8 +455,7 @@ pub(super) struct ScrollTestState {
     display_messages: Vec<DisplayMessage>,
     display_messages_version: u64,
     side_panel: crate::side_panel::SidePanelSnapshot,
-    scroll_offset: usize,
-    auto_scroll_paused: bool,
+    follow: Option<jcode_tui_messages::ContentPos>,
     diff_mode: crate::config::DiffDisplayMode,
     diff_pane_scroll: usize,
     diff_pane_scroll_x: i32,
@@ -493,8 +492,7 @@ impl ScrollTestState {
             display_messages: app.display_messages.to_vec(),
             display_messages_version: app.display_messages_version,
             side_panel: app.side_panel.clone(),
-            scroll_offset: app.scroll_offset,
-            auto_scroll_paused: app.auto_scroll_paused,
+            follow: app.follow,
             diff_mode: app.diff_mode,
             diff_pane_scroll: app.diff_pane_scroll,
             diff_pane_scroll_x: app.diff_pane_scroll_x,
@@ -530,8 +528,7 @@ impl ScrollTestState {
         app.display_messages.replace(self.display_messages);
         app.display_messages_version = self.display_messages_version;
         app.apply_side_panel_snapshot(self.side_panel);
-        app.scroll_offset = self.scroll_offset;
-        app.auto_scroll_paused = self.auto_scroll_paused;
+        app.follow = self.follow;
         app.diff_mode = self.diff_mode;
         app.diff_pane_scroll = self.diff_pane_scroll;
         app.diff_pane_scroll_x = self.diff_pane_scroll_x;

@@ -646,22 +646,18 @@ impl App {
             });
             match row {
                 Some(row) => {
-                    self.scroll_offset = row;
-                    self.auto_scroll_paused = true;
+                    self.anchor_chat_at_row(row);
                     self.set_status_notice("📌 Returned to bookmark");
                 }
                 // The bookmarked message is gone (pruned or compacted away):
                 // keep the reader where they are instead of guessing.
                 None => self.set_status_notice("📌 Bookmark is no longer in the transcript"),
             }
-        } else if self.auto_scroll_paused && self.scroll_offset > 0 {
+        } else if self.follow.is_some() {
             // We're scrolled up - save position and jump to bottom
-            let Some(anchor) = crate::tui::ui::last_chat_frame().and_then(|frame| {
-                jcode_tui_messages::anchor_at_row(
-                    &frame,
-                    crate::tui::ui::last_resolved_chat_scroll(),
-                )
-            }) else {
+            let Some(anchor) = crate::tui::ui::last_chat_frame()
+                .and_then(|frame| jcode_tui_messages::anchor_at_row(&frame, self.chat_top_row()))
+            else {
                 return;
             };
             self.scroll_bookmark = Some(anchor);
@@ -898,7 +894,7 @@ impl App {
             input: self.input.clone(),
             cursor_pos: self.cursor_pos,
             is_processing: self.is_processing,
-            scroll_offset: self.scroll_offset,
+            scroll_offset: self.chat_top_row(),
             status: format!("{:?}", self.status),
             provider_name: self.provider.name().to_string(),
             provider_model: self.provider.model().to_string(),

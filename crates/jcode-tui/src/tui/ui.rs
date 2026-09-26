@@ -80,8 +80,6 @@ pub(crate) mod panel_image_preview;
 mod pinned_ui;
 #[path = "ui_prepare.rs"]
 pub(crate) mod prepare;
-#[path = "ui_smoothness.rs"]
-mod smoothness;
 #[path = "ui_todo_changes.rs"]
 mod todo_changes;
 #[path = "ui_tools.rs"]
@@ -1385,9 +1383,6 @@ pub(crate) use frame_metrics::{
     debug_draw_call_history, debug_flicker_frame_history, debug_slow_frame_history,
     recent_flicker_copy_target_for_key, recent_flicker_ui_notice,
 };
-#[cfg(test)]
-pub(crate) use smoothness::frame_from_buffer as smoothness_frame_from_buffer;
-pub(crate) use smoothness::{report_json as smoothness_report_json, reset as smoothness_reset};
 
 #[cfg(test)]
 pub(crate) use frame_metrics::{
@@ -3600,15 +3595,6 @@ fn draw_inner(frame: &mut Frame, app: &dyn TuiState) {
     // Ctrl+R reverse prompt-history search overlay (drawn after the command
     // palette so it wins when both could be visible).
     input_ui::draw_prompt_history_search_overlay(frame, app, chunks[7]);
-
-    // Observe the rendered messages area for the anchor-stability (smoothness)
-    // report. Runs on the final buffer so it sees exactly what the user sees.
-    smoothness::observe_frame(
-        frame.buffer_mut(),
-        messages_area,
-        app.scroll_offset(),
-        !app.auto_scroll_paused(),
-    );
 
     let frame_elapsed = total_start.elapsed();
     if frame_elapsed >= Duration::from_millis(250) {

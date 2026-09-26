@@ -15,8 +15,8 @@ fn selection_test_app() -> crate::tui::app::App {
             .collect(),
     );
     app.bump_display_messages_version();
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.anchor_chat_at_row(0);
+    app.follow_chat_tail();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
     app
@@ -170,8 +170,7 @@ fn transcript_selection_on_a_wrapped_list_keeps_its_text_across_a_resize() {
         "- TARGET001 {filler}TARGET002\n- TARGET003 {filler}TARGET004\n- TARGET005 {filler}TARGET006"
     ))]);
     app.bump_display_messages_version();
-    app.scroll_offset = 0;
-    app.auto_scroll_paused = false;
+    app.follow_chat_tail();
     app.status = ProcessingStatus::Idle;
     app.session.short_name = Some("test".to_string());
 

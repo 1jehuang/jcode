@@ -545,8 +545,7 @@ impl App {
     /// prompt sits at the top of the screen like a terminal after `clear`.
     /// Any new message, stream, or scroll-up immediately ends it.
     pub(crate) fn terminal_clear_collapsed(&self) -> bool {
-        !self.auto_scroll_paused
-            && self.pending_history_anchor.is_none()
+        self.follow.is_none()
             && !self.is_processing
             && self.streaming.streaming_text.is_empty()
             && self
@@ -567,8 +566,7 @@ impl App {
         // as reset_current_session; partial-retention paths like /rewind must
         // NOT do this).
         crate::tui::mermaid::clear_active_diagrams();
-        self.scroll_offset = 0;
-        self.auto_scroll_paused = false;
+        self.follow_chat_tail();
         self.set_status_notice("View cleared (context kept)");
     }
 
@@ -592,14 +590,12 @@ impl App {
             hidden_user_prompts,
             pending_request_visible: None,
         };
-        self.auto_scroll_paused = true;
-        // Older messages are prepended above the current view. If the reader had
-        // an anchor captured (they scrolled up to trigger this load), leave the
-        // scroll position for the next render to resolve so the content under
-        // them stays put instead of teleporting to the new absolute top. Only
-        // fall back to the top when there is no anchor to honor.
-        if self.pending_history_anchor.is_none() {
-            self.scroll_offset = 0;
+        // Older messages are prepended above the current view. A content anchor
+        // names an item id, so a reader parked in history keeps the same row with
+        // nothing to capture; only a tail-following reader snaps to the top of
+        // the newly loaded window.
+        if self.follow.is_none() {
+            self.anchor_chat_at_item(0);
         }
         self.bump_display_messages_version();
         self.note_runtime_memory_event_force(
@@ -629,138 +625,11 @@ impl App {
         viewport.max(COMPACTED_HISTORY_LOAD_SCROLL_THRESHOLD)
     }
 
-    /// Capture a viewport anchor describing the reader's current distance from
-    /// the bottom of the transcript, plus any leftover upward scroll intent that
-    /// could not be satisfied because the view was already at the top of the
-    /// currently-loaded content. The next render that includes the newly loaded
-    /// (prepended) history resolves this back into an absolute `scroll_offset`,
-    /// keeping the content under the reader stable across the load.
-    pub(super) fn capture_history_anchor(&mut self, overshoot: usize) {
-        // Don't clobber an anchor that is still waiting to be resolved; the
-        // original distance-from-bottom remains correct across further prepends.
-        if self.pending_history_anchor.is_some() {
-            return;
-        }
-        let total = crate::tui::ui::last_total_wrapped_lines();
-        if total == 0 {
-            return;
-        }
-        // The top of the viewport currently sits at absolute line `scroll_offset`
-        // within the pre-prepend transcript (length `total`). Its distance from
-        // the bottom is invariant when older lines are prepended, so capture it
-        // (plus any unsatisfied upward intent as `overshoot`) and let the next
-        // render map it back to an absolute offset against the larger total.
-        let scroll = self.scroll_offset.min(total);
-        let lines_from_bottom = total.saturating_sub(scroll).saturating_add(overshoot);
-        // A prepend shifts content ordinals, so a resize anchor captured against
-        // the pre-prepend frame can no longer be trusted to name the same
-        // message. Drop it; this prepend anchor is authoritative.
-        self.pending_resize_anchor = None;
-        self.pending_history_anchor = Some(super::HistoryScrollAnchor {
-            lines_from_bottom,
-            base_total: total,
-            base_msg_count: self.display_messages.len(),
-        });
-    }
-
-    /// Adopt a resolved history anchor once a frame containing the newly loaded
-    /// content has rendered. Returns true when the scroll position changed.
-    pub(super) fn reconcile_history_anchor(&mut self) -> bool {
-        let Some(anchor) = self.pending_history_anchor else {
-            return false;
-        };
-        let total = crate::tui::ui::last_total_wrapped_lines();
-        // Wait until a frame with the prepended content has actually rendered:
-        // the wrapped total must differ from the captured base *and* the
-        // transcript must have grown. A resize alone changes the total without
-        // adding messages, and must not resolve (and drop) this anchor before
-        // the requested history arrives.
-        if total == 0
-            || total == anchor.base_total
-            || self.display_messages.len() == anchor.base_msg_count
-        {
-            return false;
-        }
-        let resolved = crate::tui::ui::last_resolved_chat_scroll();
-        self.pending_history_anchor = None;
-        let changed = self.scroll_offset != resolved || !self.auto_scroll_paused;
-        self.scroll_offset = resolved;
-        self.auto_scroll_paused = true;
-        changed
-    }
-
-    /// Capture the reader's position in content coordinates before a resize
-    /// rewraps the transcript. Only meaningful while parked in history; while
-    /// following the tail the resize snaps to the new bottom instead.
-    pub(super) fn capture_resize_anchor(&mut self) {
-        if !self.auto_scroll_paused {
-            return;
-        }
-        // A prepend anchor may be pending here, and this capture is still the
-        // right one: a content position is width-independent, while the prepend
-        // anchor's row distance is only meaningful at the width it was captured
-        // at. So this anchor takes precedence while it exists, and the prepend
-        // anchor adopts the resolved row afterwards. The prepend anchor still
-        // wins when it is captured *after* this one (see
-        // `capture_history_anchor`), which is what stops a prepended duplicate
-        // from being misnamed.
-        //
-        // ponytail: if the prepended history is still in flight (a remote load)
-        // and contains a message identical to the anchored one, this ordinal can
-        // name the older copy until messages get a stable identity.
-        let Some(frame) = crate::tui::ui::last_chat_frame() else {
-            return;
-        };
-        // The row actually on screen, not the stored index (which may exceed
-        // the scrollable range after an earlier widen).
-        let row = crate::tui::ui::last_resolved_chat_scroll();
-        let Some(target) = jcode_tui_messages::content_pos_at_row(&frame, row) else {
-            return;
-        };
-        let captured_width = crate::tui::ui::last_layout_snapshot()
-            .map(|layout| layout.messages_area.width)
-            .unwrap_or(0);
-        self.pending_resize_anchor = Some(super::PendingResizeAnchor {
-            target,
-            captured_width,
-            captured_scroll: row,
-        });
-    }
-
-    /// Adopt the row the renderer resolved from a pending resize anchor, once a
-    /// frame laid out against the new geometry has rendered. Returns true when
-    /// the scroll position changed.
-    pub(super) fn reconcile_resize_anchor(&mut self) -> bool {
-        let Some(pending) = self.pending_resize_anchor else {
-            return false;
-        };
-        let width = crate::tui::ui::last_layout_snapshot()
-            .map(|layout| layout.messages_area.width)
-            .unwrap_or(0);
-        let resolved = crate::tui::ui::last_resolved_chat_scroll();
-        // Wait until a frame has been laid out against the new geometry: either
-        // the viewport width moved off the captured one, or the resolved row
-        // already differs from the row captured. Both readings are stale until
-        // that frame exists, so resolving early would adopt the old position.
-        if width == pending.captured_width && resolved == pending.captured_scroll {
-            return false;
-        }
-        self.pending_resize_anchor = None;
-        let changed = self.scroll_offset != resolved;
-        self.scroll_offset = resolved;
-        self.auto_scroll_paused = true;
-        changed
-    }
-
     pub(super) fn maybe_queue_compacted_history_load(&mut self) {
-        self.maybe_queue_compacted_history_load_with_overshoot(0);
-    }
-
-    pub(super) fn maybe_queue_compacted_history_load_with_overshoot(&mut self, overshoot: usize) {
-        if !self.auto_scroll_paused {
+        if self.follow.is_none() {
             return;
         }
-        if self.scroll_offset > self.compacted_history_prefetch_threshold() {
+        if self.chat_top_row() > self.compacted_history_prefetch_threshold() {
             return;
         }
         if self.compacted_history_lazy.remaining_messages == 0 {
@@ -773,12 +642,6 @@ impl App {
         {
             return;
         }
-        // Throttle to one chunk per settled frame: while an anchor is still
-        // waiting to resolve on screen, hold off so prepends never compound into
-        // a visible jump.
-        if self.pending_history_anchor.is_some() {
-            return;
-        }
 
         let next_visible = self
             .compacted_history_lazy
@@ -789,8 +652,9 @@ impl App {
             return;
         }
 
-        // Anchor the viewport before mutating so the prepend stays seamless.
-        self.capture_history_anchor(overshoot);
+        // ponytail: the upward overshoot past the top row is dropped with the
+        // prepend anchor. The content anchor already keeps the view steady; add a
+        // one-field pending_up_intent if a load ever feels inert.
 
         if self.is_remote {
             self.compacted_history_lazy.pending_request_visible = Some(next_visible);

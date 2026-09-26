@@ -23,7 +23,7 @@ impl App {
                 "display_messages": self.display_messages.len(),
                 "input": self.input,
                 "cursor_pos": self.cursor_pos,
-                "scroll_offset": self.scroll_offset,
+                "scroll_offset": self.chat_top_row(),
                 "queued_messages": self.queued_messages.len(),
                 "provider_session_id": self.provider_session_id,
                 "model": self.provider.name(),
@@ -433,11 +433,11 @@ impl App {
             return match dir {
                 "up" => {
                     self.debug_scroll_up(5);
-                    format!("scroll: up to {}", self.scroll_offset)
+                    format!("scroll: up to {}", self.chat_top_row())
                 }
                 "down" => {
                     self.debug_scroll_down(5);
-                    format!("scroll: down to {}", self.scroll_offset)
+                    format!("scroll: down to {}", self.chat_top_row())
                 }
                 "top" => {
                     self.debug_scroll_top();
