@@ -2133,7 +2133,18 @@ async fn stream_response(
     if !response.status().is_success() {
         let status = response.status();
         let retry_after = jcode_provider_core::retry_after::retry_after(response.headers());
+        // Anthropic's 429 body is generic ("This request would exceed your
+        // account's rate limit"), so the body alone cannot tell a transient
+        // burst apart from an exhausted multi-day quota window. The scope lives
+        // in the unified rate-limit headers and `retry-after`. Capture that
+        // verdict here, while the headers are still in hand, and append it to
+        // the error text so the retry/fallback classifiers can act on it.
+        let quota_verdict = exhausted_quota_window_note(response.headers());
         let error_text = jcode_base::util::http_error_body(response, "HTTP error").await;
+        let error_text = match quota_verdict {
+            Some(note) => format!("{} [{}]", error_text, note),
+            None => error_text,
+        };
         return Err(jcode_provider_core::retry_after::error_with_retry_after(
             format!("Anthropic API error ({}): {}", status, error_text),
             retry_after,
@@ -2217,6 +2228,13 @@ async fn stream_response(
 
 /// Check if an error is transient and should be retried
 fn is_retryable_error(error_str: &str) -> bool {
+    // An exhausted long quota window is terminal for this model: the reset is
+    // hours or days out, so every retry is guaranteed to fail. Observed
+    // 2026-09-25 burning ~2 minutes per turn (3 attempts x the 60s
+    // `MAX_RETRY_AFTER` clamp) against a window with 65.7 hours left.
+    if is_exhausted_quota_window_error(error_str) {
+        return false;
+    }
     jcode_provider_core::is_transient_transport_error(error_str)
         // Server errors (5xx)
         || error_str.contains("500 internal server error")
@@ -2233,6 +2251,85 @@ fn is_retryable_error(error_str: &str) -> bool {
         || error_str.contains("internal server error")
 }
 
+/// Marker appended to a 429 error when the unified rate-limit headers show an
+/// exhausted long quota window rather than a transient burst.
+///
+/// Kept as a stable lowercase string because the classifiers below match on
+/// error text (the only channel that survives the `anyhow` chain to the retry
+/// loop and the model-fallback ladder).
+const EXHAUSTED_QUOTA_WINDOW_MARKER: &str = "jcode-quota-window-exhausted";
+
+/// Shortest `retry-after` that counts as an exhausted quota window rather than
+/// a burst limiter. Anthropic's burst 429s ask for seconds; quota-window 429s
+/// ask for the time until the window resets, which is hours to days.
+const QUOTA_WINDOW_RETRY_AFTER_SECS: u64 = 300;
+
+/// Describe an exhausted quota window from Anthropic's unified rate-limit
+/// headers, or `None` when the 429 looks like a transient burst.
+///
+/// Observed live 2026-09-25 on a `default_claude_max_20x` OAuth account where
+/// Fable 429ed while Opus and Haiku answered normally:
+///
+/// ```text
+/// anthropic-ratelimit-unified-representative-claim: seven_day_overage_included
+/// anthropic-ratelimit-unified-7d_oi-utilization:    1.0
+/// anthropic-ratelimit-unified-7d_oi-status:         rejected
+/// anthropic-ratelimit-unified-overage-status:       rejected
+/// anthropic-ratelimit-unified-overage-disabled-reason: out_of_credits
+/// retry-after: 236495
+/// ```
+///
+/// The body said only "This request would exceed your account's rate limit",
+/// so without these headers the request looks retryable and jcode burned the
+/// full retry budget on a window that does not reset for days.
+fn exhausted_quota_window_note(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase)
+    };
+
+    let retry_after_secs =
+        jcode_provider_core::retry_after::retry_after_seconds_uncapped(headers).unwrap_or(0);
+    let long_wait = retry_after_secs >= QUOTA_WINDOW_RETRY_AFTER_SECS;
+
+    // A rejected unified status plus an exhausted representative claim is the
+    // authoritative signal. Fall back to the long `retry-after` alone, since a
+    // multi-hour wait is never a burst limiter regardless of which claim it is.
+    let unified_rejected = header("anthropic-ratelimit-unified-status")
+        .is_some_and(|status| status.contains("rejected"));
+    if !unified_rejected && !long_wait {
+        return None;
+    }
+
+    let claim = header("anthropic-ratelimit-unified-representative-claim")
+        .unwrap_or_else(|| "unknown".to_string());
+    // A rejected five-hour claim still resets soon enough for normal retries.
+    if unified_rejected && !long_wait && claim.contains("five_hour") {
+        return None;
+    }
+
+    let mut note = format!("{EXHAUSTED_QUOTA_WINDOW_MARKER} claim={claim}");
+    if retry_after_secs > 0 {
+        note.push_str(&format!(" reset_in_s={retry_after_secs}"));
+    }
+    if let Some(reason) = header("anthropic-ratelimit-unified-overage-disabled-reason") {
+        note.push_str(&format!(" overage_disabled={reason}"));
+    }
+    Some(note)
+}
+
+/// True when a 429 carries the exhausted-quota-window marker, meaning retrying
+/// the same model cannot succeed until the window resets.
+fn is_exhausted_quota_window_error(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains(EXHAUSTED_QUOTA_WINDOW_MARKER)
+}
+
 fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
     let model = strip_1m_suffix(model).to_ascii_lowercase();
     if !model.contains("fable") {
@@ -2243,7 +2340,13 @@ fn is_fable_scoped_limit_error(model: &str, error: &str) -> bool {
         || error.contains("rate limit")
         || error.contains("usage_limit")
         || error.contains("usage limit");
-    let is_scoped = error.contains("fable")
+    // Anthropic's quota 429 body is generic, so the scope has to come from the
+    // unified rate-limit headers (captured as a marker at the HTTP boundary).
+    // Before that marker existed this guard required the body to name the
+    // window, which no real response did, so the Fable fallback never fired
+    // and every exhausted-quota turn burned the full retry budget instead.
+    let is_scoped = is_exhausted_quota_window_error(&error)
+        || error.contains("fable")
         || error.contains("weekly")
         || error.contains("week limit")
         || error.contains("7-day")

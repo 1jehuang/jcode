@@ -2301,3 +2301,111 @@ fn opus_55_empty_signed_thinking_is_replayed_unchanged() {
         );
     }
 }
+
+// ── exhausted quota window classification ──────────────────────────────
+
+/// The exact 429 headers Anthropic returned for Fable on 2026-09-25 while
+/// Opus and Haiku answered normally on the same OAuth token.
+fn fable_quota_429_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in [
+        ("retry-after", "236495"),
+        ("anthropic-ratelimit-unified-status", "rejected"),
+        (
+            "anthropic-ratelimit-unified-representative-claim",
+            "seven_day_overage_included",
+        ),
+        ("anthropic-ratelimit-unified-7d_oi-utilization", "1.0"),
+        ("anthropic-ratelimit-unified-7d_oi-status", "rejected"),
+        ("anthropic-ratelimit-unified-overage-status", "rejected"),
+        (
+            "anthropic-ratelimit-unified-overage-disabled-reason",
+            "out_of_credits",
+        ),
+        ("anthropic-ratelimit-unified-5h-status", "allowed"),
+    ] {
+        headers.insert(name, value.parse().expect("header value"));
+    }
+    headers
+}
+
+/// A transient burst 429: same rejected status, but the window resets in
+/// seconds and the representative claim is the five-hour bucket.
+fn burst_429_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in [
+        ("retry-after", "12"),
+        ("anthropic-ratelimit-unified-status", "rejected"),
+        (
+            "anthropic-ratelimit-unified-representative-claim",
+            "five_hour",
+        ),
+        ("anthropic-ratelimit-unified-5h-status", "rejected"),
+    ] {
+        headers.insert(name, value.parse().expect("header value"));
+    }
+    headers
+}
+
+#[test]
+fn exhausted_quota_window_is_detected_from_unified_headers() {
+    let note = exhausted_quota_window_note(&fable_quota_429_headers())
+        .expect("exhausted quota window should be detected");
+    assert!(note.contains(EXHAUSTED_QUOTA_WINDOW_MARKER));
+    assert!(note.contains("claim=seven_day_overage_included"));
+    assert!(note.contains("reset_in_s=236495"));
+    assert!(note.contains("overage_disabled=out_of_credits"));
+}
+
+#[test]
+fn transient_burst_429_is_not_treated_as_an_exhausted_window() {
+    assert!(
+        exhausted_quota_window_note(&burst_429_headers()).is_none(),
+        "a 12s five-hour burst limit must stay retryable"
+    );
+    // A 429 with no unified headers at all is also just a burst.
+    assert!(exhausted_quota_window_note(&reqwest::header::HeaderMap::new()).is_none());
+}
+
+/// Regression: this is the bug that let Fable burn the full retry budget.
+/// Anthropic's 429 body never names the window, so the old text-only guard
+/// (`weekly`/`7-day`/`fable` in the body) never matched a real response.
+#[test]
+fn fable_fallback_fires_on_the_real_generic_quota_body() {
+    let body = "Anthropic API error (429 Too Many Requests): \
+        {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\
+        \"This request would exceed your account's rate limit. Please try again later.\"}}";
+
+    // Without the header-derived marker the body alone is not classifiable.
+    assert!(
+        !is_fable_scoped_limit_error("claude-fable-5-1", body),
+        "the generic body carries no window scope on its own"
+    );
+
+    // With the marker appended at the HTTP boundary, the fallback fires.
+    let note = exhausted_quota_window_note(&fable_quota_429_headers()).expect("note");
+    let annotated = format!("{body} [{note}]");
+    assert!(is_fable_scoped_limit_error("claude-fable-5-1", &annotated));
+
+    // And the retry loop must stop retrying it.
+    assert!(
+        !is_retryable_error(&annotated.to_ascii_lowercase()),
+        "an exhausted multi-day window is terminal, not retryable"
+    );
+
+    // A burst 429 stays retryable so short limits still self-heal.
+    assert!(
+        is_retryable_error(&body.to_ascii_lowercase()),
+        "a generic burst 429 must remain retryable"
+    );
+}
+
+/// The marker must not hijack non-Fable models into the Fable ladder, and must
+/// not fire for models whose quota is fine.
+#[test]
+fn exhausted_window_marker_is_scoped_to_fable_for_the_fable_ladder() {
+    let note = exhausted_quota_window_note(&fable_quota_429_headers()).expect("note");
+    let annotated = format!("rate_limit_error [{note}]");
+    assert!(!is_fable_scoped_limit_error("claude-opus-4-6", &annotated));
+    assert!(is_fable_scoped_limit_error("claude-fable-5", &annotated));
+}
