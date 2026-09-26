@@ -40,8 +40,10 @@ pub fn is_cache_ttl_1h() -> bool {
     }
 }
 
-/// User-Agent for OAuth requests, matching the official Claude Code CLI.
-pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.280 (external, sdk-cli)";
+/// User-Agent for OAuth requests, matching the official Claude Code CLI. The
+/// version is shared with the billing header and preflight identity, and can be
+/// overridden with `JCODE_CLAUDE_CODE_VERSION`.
+pub use jcode_provider_core::claude_cli_user_agent;
 
 pub const OAUTH_BETA_HEADERS: &str = ANTHROPIC_OAUTH_BETA_HEADERS;
 

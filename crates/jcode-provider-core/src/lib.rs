@@ -20,10 +20,12 @@ pub use transport::is_transient_transport_error;
 
 pub use anthropic::{
     ANTHROPIC_OAUTH_BETA_HEADERS, ANTHROPIC_OAUTH_BETA_HEADERS_1M, AnthropicContextMode,
-    AnthropicReasoningCaps, anthropic_context_mode, anthropic_effectively_1m,
-    anthropic_is_1m_model, anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
+    AnthropicReasoningCaps, CLAUDE_CODE_VERSION_DEFAULT, CLAUDE_CODE_VERSION_ENV,
+    anthropic_context_mode, anthropic_effectively_1m, anthropic_is_1m_model,
+    anthropic_map_tool_name_for_oauth, anthropic_map_tool_name_from_oauth,
     anthropic_oauth_beta_headers, anthropic_reasoning_caps, anthropic_stainless_arch,
-    anthropic_stainless_os, anthropic_strip_1m_suffix,
+    anthropic_stainless_os, anthropic_strip_1m_suffix, claude_cli_user_agent,
+    claude_code_billing_header, claude_code_version, resolve_claude_code_version,
 };
 pub use auth_mode::{
     AuthMode, AuthRoute, DualAuthProvider, pinned_mode_for, runtime_env_auth_route,
