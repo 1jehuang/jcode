@@ -174,7 +174,9 @@ fn test_harness_home() -> Option<&'static Path> {
         if !is_test_harness_exe(&exe) {
             return None;
         }
-        Some(create_private_test_home())
+        let home = create_private_test_home();
+        register_test_home_cleanup(&home);
+        Some(home)
     })
     .as_deref()
 }
@@ -184,7 +186,8 @@ fn test_harness_home() -> Option<&'static Path> {
 /// `create_dir` (not `create_dir_all`) refuses any pre-existing entry,
 /// including a symlink planted by another local user in a shared temp dir,
 /// and the random suffix keeps a reused PID from inheriting an earlier run's
-/// sessions. The directory is `0o700` on Unix and removed at process exit.
+/// sessions. The directory is `0o700` on Unix. Callers own its cleanup:
+/// `test_harness_home` registers the process-wide home for removal at exit.
 fn create_private_test_home() -> PathBuf {
     let temp = std::env::temp_dir();
     for _ in 0..16 {
@@ -200,10 +203,7 @@ fn create_private_test_home() -> PathBuf {
             builder.mode(0o700);
         }
         match builder.create(&path) {
-            Ok(()) => {
-                register_test_home_cleanup(&path);
-                return path;
-            }
+            Ok(()) => return path,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             // Falling back to the real `~/.jcode` is exactly what this guards
             // against, so a test binary that cannot sandbox itself stops here.
@@ -219,25 +219,25 @@ fn create_private_test_home() -> PathBuf {
     );
 }
 
-#[cfg(unix)]
+/// The process-wide test home removed at exit. Only `test_harness_home`
+/// registers, so a throwaway home can never take the single slot.
+static TEST_HOME_CLEANUP: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 fn register_test_home_cleanup(path: &Path) {
-    static CLEANUP_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     extern "C" fn remove_test_home() {
-        if let Some(path) = CLEANUP_PATH.get() {
+        if let Some(path) = TEST_HOME_CLEANUP.get() {
             let _ = std::fs::remove_dir_all(path);
         }
     }
-    if CLEANUP_PATH.set(path.to_path_buf()).is_ok() {
+    if TEST_HOME_CLEANUP.set(path.to_path_buf()).is_ok() {
         // SAFETY: `remove_test_home` is a plain `extern "C"` fn with no
-        // arguments that only touches an initialised static.
+        // arguments that only touches an initialised static. `atexit` is the
+        // C runtime's, available on Unix and on the Windows CRT alike.
         unsafe {
             libc::atexit(remove_test_home);
         }
     }
 }
-
-#[cfg(not(unix))]
-fn register_test_home_cleanup(_path: &Path) {}
 
 fn is_test_harness_exe(exe: &Path) -> bool {
     // Match on the parent directory, not a `/target/` component, so a custom
@@ -894,6 +894,12 @@ mod test_harness_home_tests {
         let a = create_private_test_home();
         let b = create_private_test_home();
         assert_ne!(a, b, "a reused PID must not share an earlier home");
+        let shared = test_harness_home().expect("cargo test binary is a test harness");
+        assert_eq!(
+            TEST_HOME_CLEANUP.get().map(PathBuf::as_path),
+            Some(shared),
+            "exit cleanup must target the process-wide home, not a throwaway one"
+        );
         let meta = std::fs::symlink_metadata(&a).unwrap();
         assert!(meta.is_dir() && !meta.file_type().is_symlink());
         #[cfg(unix)]
