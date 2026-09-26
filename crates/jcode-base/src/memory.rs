@@ -31,8 +31,9 @@ mod pending;
 mod prompt_support;
 
 pub use crate::memory_types::{
-    MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement, TrustLevel,
-    format_relevant_display_prompt, format_relevant_prompt,
+    CitationStatus, MemoryCategory, MemoryEntry, MemoryScope, MemoryStore, Reinforcement,
+    SourceCitation, TrustLevel, citation_stale_mark, format_relevant_display_prompt,
+    format_relevant_prompt, format_relevant_prompt_verified,
 };
 use crate::memory_types::{
     collect_skill_query_terms, format_entries_for_prompt, memory_matches_search,
@@ -1188,7 +1189,16 @@ impl MemoryManager {
                 StepStatus::Pending
             };
         });
-        let prompt = format_relevant_prompt(&relevant, 5);
+        // Citation verification rides here (not in the agent): the Jev
+        // refactor builds the prompt inside the manager, so the repo root
+        // comes from the manager's own project dir. Unverifiable entries
+        // (no root, legacy) fall back to the unverified prompt — recall
+        // never withholds a memory.
+        let prompt = match self.get_project_dir() {
+            Some(root) => format_relevant_prompt_verified(&relevant, 5, &root)
+                .or_else(|| format_relevant_prompt(&relevant, 5)),
+            None => format_relevant_prompt(&relevant, 5),
+        };
         let display = format_relevant_display_prompt(&relevant, 5);
         set_state(if count == 0 {
             MemoryState::Idle
