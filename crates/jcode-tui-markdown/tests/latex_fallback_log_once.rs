@@ -44,8 +44,11 @@ fn a_missing_toolchain_and_empty_math_log_at_most_once_across_redraws() {
     while render().iter().any(|line| {
         line.to_string()
             .contains(jcode_tui_markdown::MATH_PENDING_PLACEHOLDER_TEXT)
-    }) && Instant::now() < deadline
-    {
+    }) {
+        assert!(
+            Instant::now() < deadline,
+            "LaTeX renders still pending after 30s; the fallback was never exercised"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
     for _ in 0..20 {
@@ -53,8 +56,8 @@ fn a_missing_toolchain_and_empty_math_log_at_most_once_across_redraws() {
     }
 
     let logged = LOGGED.load(Ordering::SeqCst);
-    assert!(
-        logged <= 1,
+    assert_eq!(
+        logged, 1,
         "LaTeX fallback logged {logged} lines for 100 math blocks; each distinct error must be \
          logged once per process and empty math must not reach the renderer"
     );

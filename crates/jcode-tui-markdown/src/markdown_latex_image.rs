@@ -229,13 +229,12 @@ pub(crate) fn set_log_hook(hook: fn(&str)) {
 
 /// Log each distinct fallback reason once per process. Redraws re-read cached
 /// failures, and alternating reasons defeated a last-error-only check.
+/// Once the set is full, new reasons are dropped rather than evicting old
+/// ones, so cached failures can never be logged again on redraw.
 pub(crate) fn report_error(error: &str) {
-    let should_report = REPORTED_ERRORS.lock().is_ok_and(|mut seen| {
-        if seen.len() >= REPORTED_ERROR_LIMIT && !seen.contains(error) {
-            seen.clear();
-        }
-        seen.insert(error.to_string())
-    });
+    let should_report = REPORTED_ERRORS
+        .lock()
+        .is_ok_and(|mut seen| seen.len() < REPORTED_ERROR_LIMIT && seen.insert(error.to_string()));
     if should_report && let Ok(hook) = LOG_HOOK.lock() {
         hook(error);
     }
