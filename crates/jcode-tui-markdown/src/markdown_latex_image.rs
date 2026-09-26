@@ -22,7 +22,8 @@ const DPI_PER_CELL_PIXEL: u16 = 9;
 const DPI_QUANTUM: u16 = 12;
 
 static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
-static LAST_REPORTED_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+static REPORTED_ERRORS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+const REPORTED_ERROR_LIMIT: usize = 256;
 const COPY_SOURCE_CACHE_LIMIT: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,18 +227,15 @@ pub(crate) fn set_log_hook(hook: fn(&str)) {
     }
 }
 
+/// Log each distinct fallback reason once per process. Redraws re-read cached
+/// failures, and alternating reasons defeated a last-error-only check.
 pub(crate) fn report_error(error: &str) {
-    let should_report = LAST_REPORTED_ERROR
-        .lock()
-        .map(|mut last| {
-            if last.as_deref() == Some(error) {
-                false
-            } else {
-                *last = Some(error.to_string());
-                true
-            }
-        })
-        .unwrap_or(false);
+    let should_report = REPORTED_ERRORS.lock().is_ok_and(|mut seen| {
+        if seen.len() >= REPORTED_ERROR_LIMIT && !seen.contains(error) {
+            seen.clear();
+        }
+        seen.insert(error.to_string())
+    });
     if should_report && let Ok(hook) = LOG_HOOK.lock() {
         hook(error);
     }
