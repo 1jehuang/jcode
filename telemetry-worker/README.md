@@ -80,9 +80,9 @@ for explicit deletion requests.
 ### D1 size self-defense
 
 D1 hard-caps databases at 10 GB on Workers Paid (500 MB on Free). The first
-5 GB of account-wide paid storage is included. The worker therefore uses a
-4.5 GB soft limit, leaving room for other databases and for pruning to catch
-up before the 10 GB hard cap. At the old free-plan cap every insert failed and
+5 GB of account-wide paid storage is included, and storage beyond that is
+billed pay-as-you-go. The worker uses an 8 GB soft limit, leaving 2 GB of
+headroom for pruning to catch up before the 10 GB hard cap. At the old free-plan cap every insert failed and
 telemetry silently stopped (June 2026: ~3 days lost). Defenses, in order:
 
 - The worker observes `meta.size_after` on every D1 write. Past the soft

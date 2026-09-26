@@ -86,11 +86,11 @@ const WEB_ALLOWED_ORIGINS = new Set([
 // Emergency prunes use halved retention windows and are rate-limited per
 // isolate.
 // ---------------------------------------------------------------------------
-// Keep the database below the paid plan's first 5 GB of included account-wide
-// storage, leaving 500 MB for the account's other D1 databases and growth while
-// an emergency prune catches up. This is a budget guardrail, not D1's 10 GB
-// per-database hard cap.
-const D1_SOFT_LIMIT_BYTES = 4_500_000_000;
+// Paid D1 storage beyond the included 5 GB is billed pay-as-you-go
+// (~$0.75/GB-month), so the guardrail sits at 8 GB: well below D1's 10 GB
+// per-database hard cap, leaving 2 GB of headroom for an emergency prune to
+// catch up before inserts would start failing.
+const D1_SOFT_LIMIT_BYTES = 8_000_000_000;
 const EMERGENCY_PRUNE_COOLDOWN_MS = 10 * 60 * 1000;
 // Best-effort per-isolate state (resets on isolate recycle, which is fine:
 // the next request re-observes the size from its own insert result).
