@@ -15,7 +15,7 @@ pub struct ToolCall {
 }
 
 /// Tool definition advertised to model providers.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     /// Prompt-visible text sent to the model by provider adapters.

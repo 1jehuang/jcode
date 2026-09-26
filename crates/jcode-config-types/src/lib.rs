@@ -953,6 +953,16 @@ pub struct HooksConfig {
     /// Max milliseconds to wait for the pre_tool gate before failing open
     /// (default: 5000). Env override: JCODE_HOOK_PRE_TOOL_TIMEOUT_MS.
     pub pre_tool_timeout_ms: u64,
+    /// Transform hook before each provider request. Receives the full request
+    /// (messages, tools, system_static, system_dynamic) as JSON on stdin;
+    /// stdout may carry a rewritten request in the same shape. Exit 0 applies
+    /// stdout (empty stdout = unchanged); any other outcome (non-zero exit,
+    /// invalid JSON, timeout, spawn failure) fails open with the original
+    /// request. Env override: JCODE_HOOK_PRE_REQUEST.
+    pub pre_request: Option<HookCommands>,
+    /// Max milliseconds to wait for pre_request before failing open
+    /// (default: 5000). Env override: JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS.
+    pub pre_request_timeout_ms: u64,
 }
 
 impl Default for HooksConfig {
@@ -967,6 +977,8 @@ impl Default for HooksConfig {
             pre_tool: None,
             post_tool: None,
             pre_tool_timeout_ms: 5000,
+            pre_request: None,
+            pre_request_timeout_ms: 5000,
         }
     }
 }

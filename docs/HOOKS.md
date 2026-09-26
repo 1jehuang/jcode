@@ -16,11 +16,14 @@ session_end   = ""                            # observer
 pre_tool      = "~/bin/jcode-tool-policy"     # gate
 post_tool     = ""                            # observer
 pre_tool_timeout_ms = 5000
+pre_request   = ""                            # transform (see below)
+pre_request_timeout_ms = 5000
 ```
 
 Env overrides (always win; empty value disables a config hook):
 `JCODE_HOOK_TURN_END`, `JCODE_HOOK_SESSION_START`, `JCODE_HOOK_SESSION_END`,
-`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`.
+`JCODE_HOOK_PRE_TOOL`, `JCODE_HOOK_POST_TOOL`, `JCODE_HOOK_PRE_TOOL_TIMEOUT_MS`,
+`JCODE_HOOK_PRE_REQUEST`, `JCODE_HOOK_PRE_REQUEST_TIMEOUT_MS`.
 
 ## Common contract
 
@@ -32,7 +35,7 @@ Env overrides (always win; empty value disables a config hook):
 
 | Variable | Meaning |
 | --- | --- |
-| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool` |
+| `JCODE_HOOK_EVENT` | `turn_end`, `session_start`, `session_end`, `pre_tool`, `post_tool`, `pre_request` |
 | `JCODE_HOOK_SESSION_ID` | Session the event belongs to |
 | `JCODE_HOOK_CWD` | Session working directory |
 | `JCODE_HOOK_PAYLOAD` | JSON object mirroring all fields (capped at 16 KB) |
@@ -127,6 +130,39 @@ case "$JCODE_HOOK_TOOL_NAME" in
     ;;
 esac
 exit 0
+```
+
+## Transform hook: `pre_request`
+
+`pre_request` runs **synchronously before every provider request** (both the
+blocking and streaming turn paths) and may rewrite the request:
+
+- The hook receives the full request as JSON on **stdin**:
+  `{event, session_id, messages, tools, system_static, system_dynamic}`.
+- **Exit 0 with a request-shaped JSON object on stdout**: applied as the new
+  request. Keys may be omitted to keep their original value (`messages`
+  should stay an array; `tools` must decode as tool definitions).
+- **Exit 0 with empty stdout**: request unchanged.
+- **Anything else fails open** with a logged warning: non-zero exit,
+  invalid JSON, oversize stdout (>64 MB), timeout
+  (`pre_request_timeout_ms`, default 5s), missing binary, spawn errors.
+- Multiple commands chain in order: each sees the previous command's output.
+- When the wire array changes, the client-side cache tracker is re-seeded
+  with what the provider actually receives, so transforms don't trip false
+  cache-violation warnings.
+
+### Example tagging script
+
+```python
+#!/usr/bin/env python3
+# ~/bin/jcode-tag-request: append a marker message to every request.
+import json, sys
+req = json.load(sys.stdin)
+req["messages"].append({
+    "role": "user",
+    "content": [{"type": "text", "text": "[marker: tagged]"}],
+})
+json.dump(req, sys.stdout)
 ```
 
 ## Example: tmux status + desktop notification on turn end
